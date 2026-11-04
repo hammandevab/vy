@@ -2,13 +2,16 @@
 //!
 //! `conformance/cases.toml` lists cases; each renders a module at a size and
 //! scale and compares the pixels with `conformance/golden/<name>.png`. A case
-//! may also name a semantic tree under `conformance/semantic/`.
+//! may also name a semantic tree under `conformance/semantic/`, grant
+//! capabilities to the headless host and replay input events before the
+//! final frame, so focus, hover and scroll states are testable.
 
-use crate::{render, RenderRequest};
+use crate::{render, RenderRequest, ScriptedEvent};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use vy_render::{diff_ratio, RgbaImage};
+use vy_runtime::{Capabilities, SemNode};
 
 /// Largest accepted fraction of differing pixels (0.1 %, SPEC-12.2.2).
 pub const MAX_DIFF_RATIO: f64 = 0.001;
@@ -18,7 +21,7 @@ pub const CASES_FILE: &str = "conformance/cases.toml";
 /// One conformance case.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Case {
-    /// Golden image name, `<module>-<WxH>@<scale>`.
+    /// Golden image name, `<module>-<WxH>@<scale>[-<state>]`.
     pub name: String,
     /// Module name under `target/wasm/`.
     pub module: String,
@@ -32,6 +35,10 @@ pub struct Case {
     pub frames: u32,
     /// Name under `conformance/semantic/` to compare the tree with, if any.
     pub semantic: Option<String>,
+    /// Capabilities the headless host grants (SPEC-8.2.1).
+    pub capabilities: Capabilities,
+    /// Events replayed after the first frame.
+    pub events: Vec<ScriptedEvent>,
 }
 
 impl Case {
@@ -46,8 +53,211 @@ impl Case {
     }
 }
 
+/// A value in the restricted TOML of `cases.toml`.
+#[derive(Clone, Debug, PartialEq)]
+enum Scalar {
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl Scalar {
+    fn parse(v: &str, line: usize) -> Result<Self> {
+        let v = v.trim();
+        if let Some(inner) = v.strip_prefix('"') {
+            let inner = inner
+                .strip_suffix('"')
+                .ok_or_else(|| anyhow!("line {line}: unterminated string"))?;
+            if inner.contains('"') || inner.contains('\\') {
+                bail!("line {line}: escapes are not supported");
+            }
+            return Ok(Self::Str(inner.to_string()));
+        }
+        match v {
+            "true" => return Ok(Self::Bool(true)),
+            "false" => return Ok(Self::Bool(false)),
+            _ => {}
+        }
+        if let Ok(i) = v.parse::<i64>() {
+            return Ok(Self::Int(i));
+        }
+        if let Ok(f) = v.parse::<f64>() {
+            return Ok(Self::Float(f));
+        }
+        bail!("line {line}: cannot parse value {v:?}")
+    }
+
+    fn str(&self, key: &str, line: usize) -> Result<&str> {
+        match self {
+            Self::Str(s) => Ok(s),
+            _ => bail!("line {line}: {key} must be a quoted string"),
+        }
+    }
+
+    fn num(&self, key: &str, line: usize) -> Result<f64> {
+        match self {
+            Self::Int(i) => Ok(*i as f64),
+            Self::Float(f) => Ok(*f),
+            _ => bail!("line {line}: {key} must be a number"),
+        }
+    }
+
+    fn int(&self, key: &str, line: usize) -> Result<i64> {
+        match self {
+            Self::Int(i) => Ok(*i),
+            _ => bail!("line {line}: {key} must be an integer"),
+        }
+    }
+
+    fn bool(&self, key: &str, line: usize) -> Result<bool> {
+        match self {
+            Self::Bool(b) => Ok(*b),
+            _ => bail!("line {line}: {key} must be true or false"),
+        }
+    }
+}
+
+/// Split `s` on `sep` at bracket depth 0 and outside quotes.
+fn split_top(s: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut quoted, mut start) = (0i32, false, 0usize);
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '[' | '{' if !quoted => depth += 1,
+            ']' | '}' if !quoted => depth -= 1,
+            c if c == sep && !quoted && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Net bracket depth of `s` outside quotes.
+fn depth(s: &str) -> i32 {
+    let (mut depth, mut quoted) = (0i32, false);
+    for c in s.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '[' | '{' if !quoted => depth += 1,
+            ']' | '}' if !quoted => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// Parse `[ a, b, ... ]` into its top-level elements.
+fn parse_array(v: &str, line: usize) -> Result<Vec<&str>> {
+    let inner = v
+        .trim()
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .ok_or_else(|| anyhow!("line {line}: expected an array [...]"))?;
+    Ok(split_top(inner, ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .collect())
+}
+
+/// Parse `{ key = value, ... }` into pairs.
+fn parse_table(v: &str, line: usize) -> Result<Vec<(String, Scalar)>> {
+    let inner = v
+        .trim()
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| anyhow!("line {line}: expected an inline table {{...}}"))?;
+    split_top(inner, ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|pair| {
+            let (k, v) = pair
+                .split_once('=')
+                .ok_or_else(|| anyhow!("line {line}: expected key = value in table"))?;
+            Ok((k.trim().to_string(), Scalar::parse(v, line)?))
+        })
+        .collect()
+}
+
+/// One event from its inline table: `kind` plus the arguments of that kind.
+fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
+    let pairs = parse_table(table, line)?;
+    let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let num = |key: &str, default: f64| -> Result<f32> {
+        Ok(get(key).map_or(Ok(default), |v| v.num(key, line))? as f32)
+    };
+    let int = |key: &str, default: i64| -> Result<i32> {
+        let v = get(key).map_or(Ok(default), |v| v.int(key, line))?;
+        i32::try_from(v).with_context(|| format!("line {line}: {key} out of range"))
+    };
+    let flag = |key: &str| -> Result<bool> { get(key).map_or(Ok(false), |v| v.bool(key, line)) };
+    let need = |key: &str| -> Result<&Scalar> {
+        get(key).ok_or_else(|| anyhow!("line {line}: event needs {key}"))
+    };
+    let kind = need("kind")?.str("kind", line)?;
+    let known: &[&str] = match kind {
+        "pointer_move" => &["kind", "x", "y", "buttons", "modifiers"],
+        "pointer_down" | "pointer_up" => &["kind", "x", "y", "button", "modifiers"],
+        "scroll" => &["kind", "dx", "dy", "lines", "modifiers"],
+        "key_down" => &["kind", "code", "modifiers", "repeat"],
+        "key_up" => &["kind", "code", "modifiers"],
+        "text_input" => &["kind", "text"],
+        other => bail!("line {line}: unknown event kind {other:?}"),
+    };
+    for (k, _) in &pairs {
+        if !known.contains(&k.as_str()) {
+            bail!("line {line}: event {kind} has no key {k:?}");
+        }
+    }
+    Ok(match kind {
+        "pointer_move" => ScriptedEvent::PointerMove {
+            x: need("x")?.num("x", line)? as f32,
+            y: need("y")?.num("y", line)? as f32,
+            buttons: int("buttons", 0)?,
+            modifiers: int("modifiers", 0)?,
+        },
+        "pointer_down" => ScriptedEvent::PointerDown {
+            x: need("x")?.num("x", line)? as f32,
+            y: need("y")?.num("y", line)? as f32,
+            button: int("button", 1)?,
+            modifiers: int("modifiers", 0)?,
+        },
+        "pointer_up" => ScriptedEvent::PointerUp {
+            x: need("x")?.num("x", line)? as f32,
+            y: need("y")?.num("y", line)? as f32,
+            button: int("button", 1)?,
+            modifiers: int("modifiers", 0)?,
+        },
+        "scroll" => ScriptedEvent::Scroll {
+            dx: num("dx", 0.0)?,
+            dy: need("dy")?.num("dy", line)? as f32,
+            lines: flag("lines")?,
+            modifiers: int("modifiers", 0)?,
+        },
+        "key_down" => ScriptedEvent::KeyDown {
+            code: need("code")?.int("code", line)? as i32,
+            modifiers: int("modifiers", 0)?,
+            repeat: flag("repeat")?,
+        },
+        "key_up" => ScriptedEvent::KeyUp {
+            code: need("code")?.int("code", line)? as i32,
+            modifiers: int("modifiers", 0)?,
+        },
+        _ => ScriptedEvent::TextInput(need("text")?.str("text", line)?.to_string()),
+    })
+}
+
 /// Parse the restricted TOML used by `cases.toml`: `[[case]]` tables holding
-/// `key = value` lines with quoted strings, integers or floats; `#` comments.
+/// `key = value` lines with quoted strings, numbers, booleans, arrays of
+/// strings (`capabilities`) and arrays of inline tables (`events`, which
+/// may span lines); `#` comments.
 ///
 /// This is deliberately not a TOML parser (CLAUDE.md: no dependency for what
 /// fits in 200 lines); anything outside the subset is an error.
@@ -61,6 +271,8 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         scale: Option<f32>,
         frames: Option<u32>,
         semantic: Option<String>,
+        capabilities: Capabilities,
+        events: Vec<ScriptedEvent>,
     }
     fn finish(d: Draft, line: usize) -> Result<Case> {
         let name = d
@@ -77,27 +289,21 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                 .height
                 .ok_or_else(|| anyhow!("case {name}: missing height"))?,
             scale: d.scale.unwrap_or(1.0),
-            frames: d.frames.unwrap_or(1),
+            // One frame after init, then one per event that asks for it.
+            frames: d.frames.unwrap_or(1 + d.events.len() as u32),
             semantic: d.semantic,
+            capabilities: d.capabilities,
+            events: d.events,
             name,
         })
-    }
-    fn unquote(v: &str, line: usize) -> Result<String> {
-        let inner = v
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .ok_or_else(|| anyhow!("line {line}: expected a quoted string"))?;
-        if inner.contains('"') || inner.contains('\\') {
-            bail!("line {line}: escapes are not supported");
-        }
-        Ok(inner.to_string())
     }
 
     let mut cases = Vec::new();
     let mut current: Option<Draft> = None;
-    for (i, raw) in text.lines().enumerate() {
+    let mut lines = text.lines().enumerate().peekable();
+    while let Some((i, raw)) = lines.next() {
         let line = i + 1;
-        let content = raw.split('#').next().unwrap_or("").trim();
+        let content = split_top(raw, '#')[0].trim();
         if content.is_empty() {
             continue;
         }
@@ -114,27 +320,51 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         let (key, value) = content
             .split_once('=')
             .ok_or_else(|| anyhow!("line {line}: expected key = value"))?;
-        let (key, value) = (key.trim(), value.trim());
+        let key = key.trim();
+        // An array may continue on following lines until its brackets balance.
+        let mut value = value.trim().to_string();
+        while depth(&value) > 0 {
+            let Some((_, more)) = lines.next() else {
+                bail!("line {line}: unterminated array");
+            };
+            value.push(' ');
+            value.push_str(split_top(more, '#')[0].trim());
+        }
+        let value = value.as_str();
         match key {
-            "name" => d.name = Some(unquote(value, line)?),
-            "module" => d.module = Some(unquote(value, line)?),
-            "semantic" => d.semantic = Some(unquote(value, line)?),
+            "name" => d.name = Some(Scalar::parse(value, line)?.str(key, line)?.to_string()),
+            "module" => d.module = Some(Scalar::parse(value, line)?.str(key, line)?.to_string()),
+            "semantic" => {
+                d.semantic = Some(Scalar::parse(value, line)?.str(key, line)?.to_string())
+            }
             "width" | "height" | "frames" => {
-                let n: u32 = value
-                    .parse()
-                    .with_context(|| format!("line {line}: {key} must be an integer"))?;
+                let n = Scalar::parse(value, line)?.int(key, line)?;
+                let n = u32::try_from(n).with_context(|| {
+                    format!("line {line}: {key} must be a non-negative integer")
+                })?;
                 match key {
                     "width" => d.width = Some(n),
                     "height" => d.height = Some(n),
                     _ => d.frames = Some(n),
                 }
             }
-            "scale" => {
-                d.scale = Some(
-                    value
-                        .parse()
-                        .with_context(|| format!("line {line}: scale must be a number"))?,
-                )
+            "scale" => d.scale = Some(Scalar::parse(value, line)?.num(key, line)? as f32),
+            "capabilities" => {
+                let mut caps = Capabilities::default();
+                for e in parse_array(value, line)? {
+                    let name = Scalar::parse(e, line)?;
+                    let name = name.str(key, line)?;
+                    if !caps.grant(name) {
+                        bail!("line {line}: unknown capability {name:?} (SPEC-8.2.1)");
+                    }
+                }
+                d.capabilities = caps;
+            }
+            "events" => {
+                d.events = parse_array(value, line)?
+                    .into_iter()
+                    .map(|e| parse_event(e, line))
+                    .collect::<Result<_>>()?;
             }
             other => bail!("line {line}: unknown key {other:?}"),
         }
@@ -155,6 +385,21 @@ pub fn load_cases(root: &Path) -> Result<Vec<Case>> {
     let path = root.join(CASES_FILE);
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     parse_cases(&text)
+}
+
+/// SPEC-10.4.2: a page with input fields (`textbox` nodes) that was not
+/// granted `ime` is rejected. Returns the problem, if any.
+pub fn ime_requirement(semantic: &[SemNode], caps: Capabilities) -> Option<String> {
+    let textboxes = semantic
+        .iter()
+        .filter(|n| n.role == vy_abi::role::TEXTBOX)
+        .count();
+    if textboxes > 0 && !caps.ime {
+        return Some(format!(
+            "{textboxes} textbox node(s) but capability `ime` is not granted (SPEC-10.4.2)"
+        ));
+    }
+    None
 }
 
 /// Outcome of one case.
@@ -222,10 +467,14 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         scale: case.scale,
         frames: case.frames,
         memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
-        capabilities: vy_runtime::Capabilities::default(),
+        capabilities: case.capabilities,
         resources: &[],
+        events: &case.events,
     };
     let out = render(&req)?;
+    if let Some(problem) = ime_requirement(&out.semantic, case.capabilities) {
+        bail!("{problem}");
+    }
     let golden_path = case.golden(root);
 
     if update {
@@ -333,6 +582,8 @@ mod tests {
         let c = cases.iter().find(|c| c.name == "hello-800x600@2").unwrap();
         assert_eq!((c.width, c.height, c.scale), (800, 600, 2.0));
         assert_eq!(c.module, "hello");
+        assert_eq!(c.capabilities, Capabilities::default());
+        assert!(c.events.is_empty());
 
         let parsed = parse_cases(
             "# comment\n[[case]]\nname = \"a\"\nmodule = \"m\"\nwidth = 1\nheight = 2\n\n[[case]]\nname = \"b\" # x\nmodule = \"m\"\nwidth = 3\nheight = 4\nscale = 1.5\nframes = 2\nsemantic = \"m\"\n",
@@ -348,5 +599,117 @@ mod tests {
         )
         .is_err());
         assert!(parse_cases("[[case]]\nname = \"x\"\nmodule = \"m\"\nwidth = 1\nheight = 1\n[[case]]\nname = \"x\"\nmodule = \"m\"\nwidth = 1\nheight = 1").is_err());
+    }
+
+    /// SPEC-5.1.3, SPEC-A.2.1, SPEC-8.2.1: a case may grant capabilities by
+    /// name and script events of the supported kinds, across lines, with
+    /// `#` and `,` inside strings left alone; `frames` defaults to one plus
+    /// one per event; unknown kinds, keys and capabilities are errors.
+    #[test]
+    fn spec_5_1_3_cases_with_events_and_capabilities() {
+        let text = r#"
+[[case]]
+name = "form-800x600@1-filled"
+module = "form"
+width = 800
+height = 600
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 100, y = 200.5},   # click
+  {kind = "pointer_up", x = 100, y = 200.5, button = 1, modifiers = 2},
+  {kind = "text_input", text = "Anna, #1"},
+  {kind = "key_down", code = 43, repeat = true}, {kind = "key_up", code = 43},
+  {kind = "pointer_move", x = 1, y = 2, buttons = 1},
+  {kind = "scroll", dy = -120, lines = false},
+]
+"#;
+        let cases = parse_cases(text).unwrap();
+        assert_eq!(cases.len(), 1);
+        let c = &cases[0];
+        assert!(c.capabilities.ime && c.capabilities.storage && !c.capabilities.net);
+        assert_eq!(c.frames, 8, "1 + 7 events");
+        assert_eq!(
+            c.events,
+            vec![
+                ScriptedEvent::PointerDown {
+                    x: 100.0,
+                    y: 200.5,
+                    button: 1,
+                    modifiers: 0
+                },
+                ScriptedEvent::PointerUp {
+                    x: 100.0,
+                    y: 200.5,
+                    button: 1,
+                    modifiers: 2
+                },
+                ScriptedEvent::TextInput("Anna, #1".into()),
+                ScriptedEvent::KeyDown {
+                    code: 43,
+                    modifiers: 0,
+                    repeat: true
+                },
+                ScriptedEvent::KeyUp {
+                    code: 43,
+                    modifiers: 0
+                },
+                ScriptedEvent::PointerMove {
+                    x: 1.0,
+                    y: 2.0,
+                    buttons: 1,
+                    modifiers: 0
+                },
+                ScriptedEvent::Scroll {
+                    dx: 0.0,
+                    dy: -120.0,
+                    lines: false,
+                    modifiers: 0
+                },
+            ]
+        );
+        let base = "[[case]]\nname = \"x\"\nmodule = \"m\"\nwidth = 1\nheight = 1\n";
+        for bad in [
+            "capabilities = [\"file\"]",
+            "capabilities = \"ime\"",
+            "events = [{kind = \"tap\", x = 1, y = 1}]",
+            "events = [{kind = \"pointer_down\", x = 1}]",
+            "events = [{kind = \"pointer_down\", x = 1, y = 1, z = 1}]",
+            "events = [{kind = \"text_input\"}]",
+            "events = [{kind = \"key_down\", code = \"a\"}]",
+            "events = [{kind = \"scroll\", dy = 1, lines = 1}]",
+            "events = [{kind = \"scroll\", dy = 1}",
+        ] {
+            assert!(parse_cases(&format!("{base}{bad}\n")).is_err(), "{bad}");
+        }
+        let explicit = parse_cases(&format!(
+            "{base}frames = 1\nevents = [{{kind = \"key_down\", code = 1}}]\n"
+        ))
+        .unwrap();
+        assert_eq!(explicit[0].frames, 1, "explicit frames wins");
+    }
+
+    /// SPEC-10.4.2: a page with input fields but no `ime` capability fails
+    /// conformance; with `ime` granted, or without input fields, it passes.
+    #[test]
+    fn spec_10_4_2_ime_required_for_input() {
+        let node = |role: i32| SemNode {
+            id: 1,
+            parent_id: 0,
+            role,
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            text: String::new(),
+        };
+        let textbox = [node(vy_abi::role::TEXTBOX)];
+        let button = [node(vy_abi::role::BUTTON)];
+        let ime = Capabilities::from_names(["ime"]).unwrap();
+        assert!(ime_requirement(&textbox, Capabilities::default())
+            .unwrap()
+            .contains("SPEC-10.4.2"));
+        assert_eq!(ime_requirement(&textbox, ime), None);
+        assert_eq!(ime_requirement(&button, Capabilities::default()), None);
+        assert_eq!(ime_requirement(&[], Capabilities::default()), None);
     }
 }

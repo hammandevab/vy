@@ -8,13 +8,129 @@ pub mod conformance;
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::Path;
+use vy_abi::event as kind;
 use vy_render::RgbaImage;
-use vy_runtime::{Capabilities, LogEntry, Options, Runtime};
+use vy_runtime::{Capabilities, LogEntry, Options, Runtime, SemNode};
 
 pub use vy_runtime::{check_abi_bytes, AbiReport};
 
 /// Milliseconds passed as `dt_ms` to every headless frame.
 pub const HEADLESS_DT_MS: i32 = 16;
+
+/// An input event replayed before the final frame (SPEC-5.1.3, SPEC-A.2.1),
+/// in logical pixels. The minimal subset a conformance case needs to reach a
+/// focus, hover or scroll state; the shell delivers the rest in M3.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScriptedEvent {
+    /// `POINTER_MOVE`.
+    PointerMove {
+        /// X.
+        x: f32,
+        /// Y.
+        y: f32,
+        /// Buttons held.
+        buttons: i32,
+        /// Modifier bits (`vy_abi::modifier`).
+        modifiers: i32,
+    },
+    /// `POINTER_DOWN`.
+    PointerDown {
+        /// X.
+        x: f32,
+        /// Y.
+        y: f32,
+        /// The button.
+        button: i32,
+        /// Modifier bits.
+        modifiers: i32,
+    },
+    /// `POINTER_UP`.
+    PointerUp {
+        /// X.
+        x: f32,
+        /// Y.
+        y: f32,
+        /// The button.
+        button: i32,
+        /// Modifier bits.
+        modifiers: i32,
+    },
+    /// `SCROLL`.
+    Scroll {
+        /// Horizontal delta.
+        dx: f32,
+        /// Vertical delta.
+        dy: f32,
+        /// Deltas are lines, not pixels.
+        lines: bool,
+        /// Modifier bits.
+        modifiers: i32,
+    },
+    /// `KEY_DOWN`.
+    KeyDown {
+        /// USB HID code.
+        code: i32,
+        /// Modifier bits.
+        modifiers: i32,
+        /// Auto-repeat.
+        repeat: bool,
+    },
+    /// `KEY_UP`.
+    KeyUp {
+        /// USB HID code.
+        code: i32,
+        /// Modifier bits.
+        modifiers: i32,
+    },
+    /// `TEXT_INPUT` through `vy_alloc` (SPEC-5.1.6).
+    TextInput(String),
+}
+
+impl ScriptedEvent {
+    /// Deliver to the runtime; true when the module asked for a redraw.
+    fn deliver(&self, rt: &mut Runtime) -> Result<bool, vy_runtime::Error> {
+        let x100 = |v: f32| (v * 100.0).round() as i32;
+        match self {
+            Self::PointerMove {
+                x,
+                y,
+                buttons,
+                modifiers,
+            } => rt.event(kind::POINTER_MOVE, x100(*x), x100(*y), *buttons, *modifiers),
+            Self::PointerDown {
+                x,
+                y,
+                button,
+                modifiers,
+            } => rt.event(kind::POINTER_DOWN, x100(*x), x100(*y), *button, *modifiers),
+            Self::PointerUp {
+                x,
+                y,
+                button,
+                modifiers,
+            } => rt.event(kind::POINTER_UP, x100(*x), x100(*y), *button, *modifiers),
+            Self::Scroll {
+                dx,
+                dy,
+                lines,
+                modifiers,
+            } => rt.event(
+                kind::SCROLL,
+                x100(*dx),
+                x100(*dy),
+                i32::from(*lines),
+                *modifiers,
+            ),
+            Self::KeyDown {
+                code,
+                modifiers,
+                repeat,
+            } => rt.event(kind::KEY_DOWN, *code, *modifiers, i32::from(*repeat), 0),
+            Self::KeyUp { code, modifiers } => rt.event(kind::KEY_UP, *code, *modifiers, 0, 0),
+            Self::TextInput(text) => rt.text_input(text),
+        }
+    }
+}
 
 /// Validate a module file against the Vy ABI.
 pub fn check_abi(path: &str) -> Result<AbiReport> {
@@ -56,6 +172,9 @@ pub struct RenderRequest<'a> {
     pub capabilities: Capabilities,
     /// Package resources, `resources[i]` being resource id `i + 1` (SPEC-4.5.1).
     pub resources: &'a [Vec<u8>],
+    /// Events delivered after the first frame, in order; each one the module
+    /// answers with a redraw gets a frame while `frames` allows (SPEC-6.2.1).
+    pub events: &'a [ScriptedEvent],
 }
 
 impl<'a> RenderRequest<'a> {
@@ -71,6 +190,7 @@ impl<'a> RenderRequest<'a> {
             memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
             capabilities: Capabilities::default(),
             resources: &[],
+            events: &[],
         }
     }
 }
@@ -84,6 +204,8 @@ pub struct RenderOutput {
     pub display_list: Vec<u8>,
     /// Semantic tree of the last frame as JSON (SPEC-10.2.3).
     pub semantic_json: String,
+    /// Semantic tree of the last frame.
+    pub semantic: Vec<SemNode>,
     /// Module and host log lines.
     pub logs: Vec<LogEntry>,
     /// Frames actually run: 1 to `RenderRequest::frames` (SPEC-6.2.1).
@@ -102,7 +224,9 @@ pub fn physical(width: u32, height: u32, scale: f32) -> (u32, u32) {
 /// last one (SPEC-11.3.1). No window, no wall clock, no system fonts.
 ///
 /// `vy_frame` is called only while the runtime wants a frame (SPEC-6.2.1):
-/// once after init, then after each frame that called `request_frame`.
+/// once after init, after each scripted event the module answered with a
+/// redraw, and after each frame that called `request_frame`, up to `frames`
+/// in all.
 pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     if req.frames == 0 {
         bail!("frames must be at least 1");
@@ -121,12 +245,21 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         .map_err(|e| anyhow!("{e}"))?;
     let mut display_list = Vec::new();
     let mut frames_run = 0;
-    while frames_run < req.frames && rt.wants_frame() {
-        display_list = rt
-            .frame(HEADLESS_DT_MS)
-            .map_err(|e| anyhow!("frame {}: {e}", frames_run + 1))?
-            .to_vec();
-        frames_run += 1;
+    let mut run_frames = |rt: &mut Runtime, display_list: &mut Vec<u8>| -> Result<()> {
+        while frames_run < req.frames && rt.wants_frame() {
+            *display_list = rt
+                .frame(HEADLESS_DT_MS)
+                .map_err(|e| anyhow!("frame {}: {e}", frames_run + 1))?
+                .to_vec();
+            frames_run += 1;
+        }
+        Ok(())
+    };
+    run_frames(&mut rt, &mut display_list)?;
+    for (i, ev) in req.events.iter().enumerate() {
+        ev.deliver(&mut rt)
+            .map_err(|e| anyhow!("event {}: {e}", i + 1))?;
+        run_frames(&mut rt, &mut display_list)?;
     }
     debug_assert!(frames_run >= 1, "init wants the first frame");
     let (pw, ph) = physical(req.width, req.height, req.scale);
@@ -137,6 +270,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         image,
         display_list,
         semantic_json: rt.semantic_tree_json(),
+        semantic: rt.semantic_tree().to_vec(),
         logs: rt.logs().to_vec(),
         frames_run,
     })
@@ -329,6 +463,88 @@ mod tests {
             ..RenderRequest::new(&wasm, 8, 8)
         })
         .is_err());
+    }
+
+    /// A module that counts pointer downs and committed text bytes in
+    /// `vy_event` (returning 1 for both) and draws one rectangle per count.
+    fn event_module() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+                (import "vy" "dl_begin" (func $dl_begin))
+                (import "vy" "dl_end" (func $dl_end))
+                (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32)))
+                (memory (export "memory") 1)
+                (global $n (mut i32) (i32.const 0))
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32)
+                    (local $i i32)
+                    (call $dl_begin)
+                    (block (loop
+                        (br_if 1 (i32.ge_u (local.get $i) (global.get $n)))
+                        (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (f32.const 0) (i32.const 0))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br 0)))
+                    (call $dl_end)
+                    global.get $n)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 2)) (then
+                        (global.set $n (i32.add (global.get $n) (i32.const 1)))
+                        (return (i32.const 1))))
+                    (if (i32.eq (local.get 0) (i32.const 7)) (then
+                        (global.set $n (i32.add (global.get $n) (local.get 2)))
+                        (return (i32.const 1))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 1024))"#,
+        )
+        .unwrap()
+    }
+
+    /// SPEC-5.1.3, SPEC-6.2.1: scripted events are delivered in order after
+    /// the first frame; each one answered with 1 gets a frame while the
+    /// ceiling allows; the last frame run is what gets rasterized.
+    #[test]
+    fn spec_5_1_3_render_replays_events() {
+        let wasm = event_module();
+        let events = [
+            ScriptedEvent::PointerMove {
+                x: 1.0,
+                y: 1.0,
+                buttons: 0,
+                modifiers: 0,
+            },
+            ScriptedEvent::PointerDown {
+                x: 1.0,
+                y: 1.0,
+                button: 1,
+                modifiers: 0,
+            },
+            ScriptedEvent::TextInput("abc".into()),
+            ScriptedEvent::PointerDown {
+                x: 1.0,
+                y: 1.0,
+                button: 1,
+                modifiers: 0,
+            },
+        ];
+        let rects = |out: &RenderOutput| vy_dl::decode(&out.display_list).unwrap().len();
+        let mut req = RenderRequest::new(&wasm, 8, 8);
+        req.events = &events;
+        req.frames = 10;
+        let out = render(&req).unwrap();
+        assert_eq!(
+            out.frames_run, 4,
+            "init plus the three events answered with 1"
+        );
+        assert_eq!(rects(&out), 1 + 3 + 1);
+        req.frames = 2;
+        let out = render(&req).unwrap();
+        assert_eq!(out.frames_run, 2, "the ceiling stops at the first redraw");
+        assert_eq!(rects(&out), 1, "later events were delivered but not drawn");
+        req.events = &[];
+        req.frames = 10;
+        assert_eq!(render(&req).unwrap().frames_run, 1);
     }
 
     /// SPEC-13.1.4: compiling a 300 KB module takes at most 60 ms, P95 over

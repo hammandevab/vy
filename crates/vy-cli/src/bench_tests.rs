@@ -36,13 +36,6 @@ fn spec_13_4_1_sdk_refuses_slow_module() {
     todo!()
 }
 
-/// SPEC-10.4.2: a page with input fields but no `ime` capability fails conformance.
-#[test]
-#[ignore = "M2: conformance"]
-fn spec_10_4_2_ime_required_for_input() {
-    todo!()
-}
-
 /// SPEC-12.1.2: a client passing the conformance suite is a Vy client.
 #[test]
 #[ignore = "M2: conformance"]
