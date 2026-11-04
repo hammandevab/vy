@@ -1,0 +1,7 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 24, "y": 24, "w": 752, "h": 127, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 44, "y": 44, "w": 712, "h": 35, "text": "Hej från Vy"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 44, "y": 91, "w": 712, "h": 40, "text": "Den här sidan är en WebAssembly-modul. Den ritar sig själv via sex importer och äger inte en enda pixel."}
+  ]
+}
