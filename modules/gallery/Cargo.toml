@@ -1,0 +1,25 @@
+[package]
+name = "gallery"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Vy reference module 4: a grid of PNG resources in the three fit modes with a lightbox"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vy-sdk = { path = "../../crates/vy-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

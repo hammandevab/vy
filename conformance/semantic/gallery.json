@@ -1,0 +1,24 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 24, "y": 18, "w": 200, "h": 27.5, "text": "Galleri"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 293.97, "y": 25, "w": 482.03, "h": 16.25, "text": "8 bilder · cover, contain och stretch i tur och ordning · klicka för att öppna"},
+    {"id": 4, "parent_id": 1, "role": 16, "role_name": "region", "x": 0, "y": 64, "w": 800, "h": 536, "text": "Bilder"},
+    {"id": 5, "parent_id": 4, "role": 10, "role_name": "image", "x": 24, "y": 88, "w": 240, "h": 160, "text": "Koncentriska ringar i mörkblått, vitt och ljusblått"},
+    {"id": 6, "parent_id": 4, "role": 1, "role_name": "text", "x": 36, "y": 256, "w": 216, "h": 38, "text": "Ringar, cover · 320 × 200 px"},
+    {"id": 7, "parent_id": 4, "role": 10, "role_name": "image", "x": 280, "y": 88, "w": 240, "h": 160, "text": "Schackrutor i gult och mörkgrått med enstaka ljusa rutor"},
+    {"id": 8, "parent_id": 4, "role": 1, "role_name": "text", "x": 292, "y": 256, "w": 216, "h": 38, "text": "Rutor, contain · 240 × 240 px"},
+    {"id": 9, "parent_id": 4, "role": 10, "role_name": "image", "x": 536, "y": 88, "w": 240, "h": 160, "text": "Vågräta vågband i tre turkosa nyanser"},
+    {"id": 10, "parent_id": 4, "role": 1, "role_name": "text", "x": 548, "y": 256, "w": 216, "h": 38, "text": "Vågor, stretch · 200 × 300 px"},
+    {"id": 11, "parent_id": 4, "role": 10, "role_name": "image", "x": 24, "y": 310, "w": 240, "h": 160, "text": "Diagonala band i rost och orange med tunna ljusa linjer"},
+    {"id": 12, "parent_id": 4, "role": 1, "role_name": "text", "x": 36, "y": 478, "w": 216, "h": 38, "text": "Diagonal, cover · 320 × 180 px"},
+    {"id": 13, "parent_id": 4, "role": 10, "role_name": "image", "x": 280, "y": 310, "w": 240, "h": 160, "text": "Rosa prickar i tre storlekar på ljus botten"},
+    {"id": 14, "parent_id": 4, "role": 1, "role_name": "text", "x": 292, "y": 478, "w": 216, "h": 38, "text": "Prickar, contain · 256 × 256 px"},
+    {"id": 15, "parent_id": 4, "role": 10, "role_name": "image", "x": 536, "y": 310, "w": 240, "h": 160, "text": "En spiral i tre gröna nyanser"},
+    {"id": 16, "parent_id": 4, "role": 1, "role_name": "text", "x": 548, "y": 478, "w": 216, "h": 38, "text": "Spiral, stretch · 300 × 200 px"},
+    {"id": 17, "parent_id": 4, "role": 10, "role_name": "image", "x": 24, "y": 532, "w": 240, "h": 160, "text": "Ett tunt rutnät med en diagonal av grå rutor"},
+    {"id": 18, "parent_id": 4, "role": 1, "role_name": "text", "x": 36, "y": 700, "w": 216, "h": 38, "text": "Rutnät, cover · 180 × 320 px"},
+    {"id": 19, "parent_id": 4, "role": 10, "role_name": "image", "x": 280, "y": 532, "w": 240, "h": 160, "text": "Stiliserad solnedgång: tre band himmel, en sol och mörkt hav"},
+    {"id": 20, "parent_id": 4, "role": 1, "role_name": "text", "x": 292, "y": 700, "w": 216, "h": 38, "text": "Solnedgång, contain · 320 × 200 px"}
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 18, "w": 200, "h": 27.5, "text": "Fakturor"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 667.27, "y": 25, "w": 116.73, "h": 16.25, "text": "200 poster · rad 1"},
+    {"id": 4, "parent_id": 1, "role": 8, "role_name": "list", "x": 0, "y": 64, "w": 800, "h": 536, "text": "Fakturor"},
+    {"id": 5, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 64, "w": 800, "h": 56, "text": "Nordlund Bygg, Faktura 1001 · Betald · 2026-01-01, 500 kr"},
+    {"id": 6, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 120, "w": 800, "h": 56, "text": "Fjällvind Design, Påminnelse 1002 · Förfallen · 2026-01-14, 16 378 kr"},
+    {"id": 7, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 176, "w": 800, "h": 56, "text": "Ekdalens Trä, Kreditnota 1003 · Skickad · 2026-01-27, 15 424 kr"},
+    {"id": 8, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 232, "w": 800, "h": 56, "text": "Holmgrens Glas, Avtal 1004 · Utkast · 2026-01-12, 7 593 kr"},
+    {"id": 9, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 288, "w": 800, "h": 56, "text": "Berglunds Rör, Offert 1005 · Förfallen · 2026-01-25, 6 349 kr"},
+    {"id": 10, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 344, "w": 800, "h": 56, "text": "Örnbergs Plåt, Faktura 1006 · Skickad · 2026-01-10, 19 284 kr"},
+    {"id": 11, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 400, "w": 800, "h": 56, "text": "Åkerlunds Åkeri, Påminnelse 1007 · Utkast · 2026-01-23, 21 854 kr"},
+    {"id": 12, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 456, "w": 800, "h": 56, "text": "Sjöberg & Söner, Kreditnota 1008 · Betald · 2026-01-08, 16 263 kr"},
+    {"id": 13, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 512, "w": 800, "h": 56, "text": "Granits Grus, Avtal 1009 · Skickad · 2026-01-21, 12 199 kr"},
+    {"id": 14, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 568, "w": 800, "h": 56, "text": "Lindqvist Måleri, Offert 1010 · Utkast · 2026-01-06, 23 038 kr"}
+  ]
+}

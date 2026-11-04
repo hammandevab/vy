@@ -1,0 +1,25 @@
+[package]
+name = "dashboard"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Vy reference module 6: stat tiles, a line chart and a bar chart from a fixed table, with a hover tooltip"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vy-sdk = { path = "../../crates/vy-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"
+
+[workspace]
