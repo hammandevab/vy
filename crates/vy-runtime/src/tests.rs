@@ -47,7 +47,10 @@ fn spec_5_2_all_imports_linked() {
     let mut linker: Linker<Host> = Linker::new(engine());
     host::link_imports(&mut linker).unwrap();
     let limits = StoreLimitsBuilder::new().build();
-    let mut store = Store::new(engine(), Host::new(limits, Capabilities::default()));
+    let mut store = Store::new(
+        engine(),
+        Host::new(limits, Capabilities::default(), Vec::new()),
+    );
     let mut linked = 0;
     for sig in vy_abi::IMPORTS {
         let ext = linker
@@ -446,7 +449,8 @@ fn spec_2_1_5_determinism() {
         for _ in 0..3 {
             dls.push(rt.frame(16).unwrap().to_vec());
         }
-        let img = vy_render::render(&dls[2], 120, 60, 1.0, rt.text_engine_mut()).unwrap();
+        let images = vy_render::ImageCache::new(Vec::new());
+        let img = vy_render::render(&dls[2], 120, 60, 1.0, rt.text_engine_mut(), &images).unwrap();
         (dls, img.encode_png().unwrap())
     };
     let (a_dls, a_png) = run();
@@ -583,7 +587,7 @@ fn spec_4_2_4_memory_cap() {
         memory_max_pages: 4,
         ..Options::default()
     };
-    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts.clone()).unwrap();
     rt.init(10, 10, 1.0).unwrap();
     assert_eq!(rt.memory_pages(), 1);
     rt.frame(2).unwrap();
@@ -1113,6 +1117,174 @@ fn spec_5_1_6_text_input_via_alloc() {
     assert!(rt.text_input("Hej från Vy").unwrap());
     assert_eq!(module_logs(&rt), vec!["Hej från Vy"]);
     assert!(rt.wants_frame());
+}
+
+/// A module whose frame draws one `IMAGE` with `resource_id = dt_ms / 10`
+/// and `fit = dt_ms % 10`.
+fn image_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "dl_begin" (func $dl_begin))
+            (import "vy" "dl_end" (func $dl_end))
+            (import "vy" "dl_image" (func $dl_image (param f32 f32 f32 f32 i32 i32)))
+            (memory (export "memory") 1)
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (call $dl_begin)
+                (call $dl_image (f32.const 0) (f32.const 0) (f32.const 4) (f32.const 2)
+                    (i32.div_s (local.get 0) (i32.const 10))
+                    (i32.rem_s (local.get 0) (i32.const 10)))
+                (call $dl_end)
+                i32.const 1)
+            {STUBS})"#
+    ))
+}
+
+fn png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let mut img = vy_render::RgbaImage::new(w, h);
+    for p in img.data.chunks_exact_mut(4) {
+        p.copy_from_slice(&rgba);
+    }
+    img.encode_png().unwrap()
+}
+
+/// SPEC-5.2.3, SPEC-6.5.1, SPEC-4.5.1: `dl_image` takes `fit` 0..=2 (else
+/// `E_ARG`, nothing written); the resource is decoded at the first call that
+/// names it and the bytes read are charged as host work (SPEC-5.3.3); id 0,
+/// an unknown id and an image over 8192 px are `E_RESOURCE`; the decoded
+/// image reaches the pixels through the runtime's cache.
+#[test]
+fn spec_5_2_3_dl_image_fit_and_resources() {
+    let red = png(2, 1, [255, 0, 0, 255]);
+    let huge = png(limits::MAX_IMAGE_SIDE_PX + 1, 1, [0, 255, 0, 255]);
+    let bad = b"not an image".to_vec();
+    let red_len = red.len();
+    let opts = Options {
+        resources: vec![red, huge, bad],
+        ..Options::default()
+    };
+    let bytes = image_module();
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(4, 2, 1.0).unwrap();
+    assert_eq!(rt.image_cache().decodes(), 0, "nothing decoded before use");
+
+    // fit 3 with resource 1: E_ARG, no decode, no op.
+    let dl = rt.frame(13).unwrap().to_vec();
+    assert_eq!(vy_dl::decode(&dl).unwrap().len(), 0);
+    assert_eq!(host_logs(&rt), vec!["dl_image: E_ARG"]);
+    assert_eq!(rt.image_cache().decodes(), 0);
+
+    // fit 0..=2 with resource 1: decoded once, on the first call.
+    for (i, fit_mode) in [0, 1, 2].into_iter().enumerate() {
+        let dl = rt.frame(10 + fit_mode).unwrap().to_vec();
+        let ops = vy_dl::decode(&dl).unwrap();
+        assert!(
+            matches!(ops[0], vy_dl::Op::Image { resource_id: 1, fit, .. } if fit == fit_mode as u8),
+            "{ops:?}"
+        );
+        assert_eq!(rt.image_cache().decodes(), 1);
+        let expect_fuel = if i == 0 { red_len as u64 } else { 0 } + 20 + 1;
+        assert_eq!(
+            rt.last_frame().host_fuel,
+            expect_fuel * FUEL_PER_HOST_BYTE,
+            "resource bytes charged once, IMAGE op and END every frame"
+        );
+    }
+    let images = rt.image_cache();
+    let img =
+        vy_render::render(rt.display_list(), 4, 2, 1.0, &mut TextEngine::new(), images).unwrap();
+    assert_eq!(
+        img.pixel(3, 1).unwrap(),
+        [255, 0, 0, 255],
+        "stretched over 4x2"
+    );
+
+    // Refusals: id 0 (the module), id 4 (none), id 2 (too large), id 3 (not a PNG).
+    for (dt, log) in [
+        (0, "dl_image: E_RESOURCE"),
+        (40, "dl_image: E_RESOURCE"),
+        (
+            20,
+            "dl_image: resource 2: 8193x1 px exceeds 8192 px per side (SPEC-6.5.1)",
+        ),
+        (30, "dl_image: resource 3: cannot decode image: "),
+    ] {
+        let before = rt.logs().len();
+        let dl = rt.frame(dt).unwrap().to_vec();
+        assert_eq!(
+            vy_dl::decode(&dl).unwrap().len(),
+            0,
+            "dt {dt}: nothing written"
+        );
+        let new = host_logs(&rt)[before..].to_vec();
+        assert!(new[0].starts_with(log), "dt {dt}: {new:?}");
+        assert_eq!(
+            new.last().unwrap(),
+            "dl_image: E_RESOURCE",
+            "dt {dt}: {new:?}"
+        );
+    }
+    assert_eq!(
+        rt.image_cache().decodes(),
+        3,
+        "each resource decoded at most once"
+    );
+    assert!(!rt.is_suspended());
+}
+
+/// SPEC-8.2.1, SPEC-8.2.2: the headless host grants capabilities by their
+/// six canonical names and nothing else; a granted `ime` makes `ime_begin`
+/// succeed where it was `E_DENIED` (SPEC-5.2.6, SPEC-5.3.1).
+#[test]
+fn spec_8_2_1_capabilities_from_names() {
+    let caps = Capabilities::from_names(["ime", "storage"]).unwrap();
+    assert!(caps.ime && caps.storage && !caps.net && !caps.clipboard);
+    assert!(caps.has(vy_abi::cap::IME) && !caps.has(vy_abi::cap::NET));
+    assert!(!caps.has(0) && !caps.has(7));
+    assert_eq!(
+        Capabilities::from_names(["ime", "file"]),
+        Err("file".into())
+    );
+    assert_eq!(
+        Capabilities::from_names(vy_abi::cap::NAMES).unwrap(),
+        Capabilities {
+            net: true,
+            storage: true,
+            clipboard: true,
+            hires_time: true,
+            ime: true,
+            persist_frame: true,
+        }
+    );
+    assert_eq!(
+        Capabilities::from_names([]).unwrap(),
+        Capabilities::default()
+    );
+
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "ime_begin" (func $ime_begin (param f32 f32 f32 f32)))
+            (import "vy" "ime_end" (func $ime_end))
+            (memory (export "memory") 1)
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (call $ime_begin (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1))
+                (call $ime_end)
+                i32.const 0)
+            {STUBS})"#
+    ));
+    for (names, denied) in [(vec![], 2), (vec!["ime"], 0)] {
+        let opts = Options {
+            capabilities: Capabilities::from_names(names).unwrap(),
+            ..Options::default()
+        };
+        let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+        rt.init(10, 10, 1.0).unwrap();
+        rt.frame(0).unwrap();
+        let logs = host_logs(&rt);
+        assert_eq!(logs.len(), denied, "{logs:?}");
+        assert!(logs.iter().all(|l| l.contains("E_DENIED")));
+    }
 }
 
 /// SPEC-5.2.1: exit stops the module; later calls report the code.

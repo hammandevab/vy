@@ -20,9 +20,9 @@
 //!   (SPEC-5.3.3).
 
 use crate::FUEL_PER_HOST_BYTE;
-use vy_abi::{err, limits, ABI_VERSION};
+use vy_abi::{cap, err, fit, limits, ABI_VERSION};
 use vy_dl::DisplayList;
-use vy_render::{height_x100, pack_x100, TextEngine};
+use vy_render::{height_x100, pack_x100, ImageCache, TextEngine};
 use wasmtime::{Caller, Linker, Memory, StoreLimits, Trap};
 
 /// Milliseconds the headless clock advances per completed frame.
@@ -34,7 +34,9 @@ pub const MAX_LOG_ENTRIES: usize = 10_000;
 /// Upper bound on registered links.
 pub const MAX_LINKS: usize = 4_096;
 
-/// Capabilities granted to the instance (SPEC-8.2.1). All false in headless M1.
+/// Capabilities granted to the instance (SPEC-8.2.1). All false by default:
+/// the headless host grants only what the caller names (`vy-cli render
+/// --grant`, `capabilities` in a conformance case).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     /// `fetch_*` to listed origins.
@@ -49,6 +51,49 @@ pub struct Capabilities {
     pub ime: bool,
     /// Frames while hidden.
     pub persist_frame: bool,
+}
+
+impl Capabilities {
+    /// Grant the capability with this canonical name (`vy_abi::cap::NAMES`);
+    /// `false` for a name 1.0 does not define, which grants nothing
+    /// (SPEC-8.2.1, SPEC-8.2.2).
+    pub fn grant(&mut self, name: &str) -> bool {
+        match cap::id(name) {
+            Some(cap::NET) => self.net = true,
+            Some(cap::STORAGE) => self.storage = true,
+            Some(cap::CLIPBOARD) => self.clipboard = true,
+            Some(cap::HIRES_TIME) => self.hires_time = true,
+            Some(cap::IME) => self.ime = true,
+            Some(cap::PERSIST_FRAME) => self.persist_frame = true,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Capabilities from a list of canonical names; `Err` names the first
+    /// unknown one.
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
+        let mut caps = Self::default();
+        for name in names {
+            if !caps.grant(name) {
+                return Err(name.to_string());
+            }
+        }
+        Ok(caps)
+    }
+
+    /// True when the capability with this id (`vy_abi::cap`) is granted.
+    pub fn has(&self, id: i32) -> bool {
+        match id {
+            cap::NET => self.net,
+            cap::STORAGE => self.storage,
+            cap::CLIPBOARD => self.clipboard,
+            cap::HIRES_TIME => self.hires_time,
+            cap::IME => self.ime,
+            cap::PERSIST_FRAME => self.persist_frame,
+            _ => false,
+        }
+    }
 }
 
 /// Who wrote a log entry.
@@ -116,6 +161,7 @@ pub struct Host {
     pub(crate) caps: Capabilities,
     pub(crate) dl: DisplayList,
     pub(crate) text: TextEngine,
+    pub(crate) images: ImageCache,
     pub(crate) sem: Vec<SemNode>,
     pub(crate) sem_text_bytes: usize,
     pub(crate) links: Vec<Link>,
@@ -136,13 +182,14 @@ pub struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(limits: StoreLimits, caps: Capabilities) -> Self {
+    pub(crate) fn new(limits: StoreLimits, caps: Capabilities, resources: Vec<Vec<u8>>) -> Self {
         Self {
             memory: None,
             limits,
             caps,
             dl: DisplayList::new(),
             text: TextEngine::new(),
+            images: ImageCache::new(resources),
             sem: Vec::new(),
             sem_text_bytes: 0,
             links: Vec::new(),
@@ -493,17 +540,43 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          y: f32,
          w: f32,
          h: f32,
-         resource_id: i32|
+         resource_id: i32,
+         fit_mode: i32|
          -> wasmtime::Result<()> {
             with_host(&mut c, |host| {
                 let before = host.dl.bytes().len();
-                // Index 0 is the module itself (SPEC-4.5.1); ids are u16 on the wire.
-                let result = match u16::try_from(resource_id) {
-                    Ok(id) if id > 0 => host.dl.image(x, y, w, h, id, vy_dl::Fit::Cover),
-                    _ => Err(err::E_RESOURCE),
-                };
-                if let Err(code) = result {
-                    host.report("dl_image", &code.into());
+                let result = (|| {
+                    if !host.dl.is_open() {
+                        return Err(Fault::Code(err::E_DL_STATE));
+                    }
+                    if host.dl.op_count() >= limits::MAX_OPS_PER_FRAME {
+                        return Err(Fault::Code(err::E_DL_FULL));
+                    }
+                    let fit_mode = match fit_mode {
+                        fit::COVER => vy_dl::Fit::Cover,
+                        fit::CONTAIN => vy_dl::Fit::Contain,
+                        fit::STRETCH => vy_dl::Fit::Stretch,
+                        _ => return Err(Fault::Code(err::E_ARG)),
+                    };
+                    // Index 0 is the module itself (SPEC-4.5.1); ids are u16 on the wire.
+                    let id = match u16::try_from(resource_id) {
+                        Ok(id) if id > 0 && usize::from(id) <= host.images.resource_count() => id,
+                        _ => return Err(Fault::Code(err::E_RESOURCE)),
+                    };
+                    // Decoded at first use (SPEC-6.5.1); the resource bytes
+                    // the host reads for it are charged like any host work
+                    // (SPEC-5.3.3). A cache hit reads nothing.
+                    let read = host.images.ensure(id);
+                    host.charge(read);
+                    if let Err(e) = host.images.get(id) {
+                        host.host_log(format!("dl_image: resource {id}: {e}"));
+                        return Err(Fault::Code(e.code()));
+                    }
+                    host.dl.image(x, y, w, h, id, fit_mode)?;
+                    Ok(())
+                })();
+                if let Err(fault) = result {
+                    host.report("dl_image", &fault);
                 }
                 host.charge(host.dl.bytes().len().saturating_sub(before));
             })

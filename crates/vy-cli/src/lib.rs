@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::Path;
 use vy_render::RgbaImage;
-use vy_runtime::{LogEntry, Options, Runtime};
+use vy_runtime::{Capabilities, LogEntry, Options, Runtime};
 
 pub use vy_runtime::{check_abi_bytes, AbiReport};
 
@@ -52,10 +52,15 @@ pub struct RenderRequest<'a> {
     pub frames: u32,
     /// `memory_max` in pages (SPEC-4.2.4).
     pub memory_max_pages: u32,
+    /// Capabilities the headless host grants (SPEC-8.2.1); none by default.
+    pub capabilities: Capabilities,
+    /// Package resources, `resources[i]` being resource id `i + 1` (SPEC-4.5.1).
+    pub resources: &'a [Vec<u8>],
 }
 
 impl<'a> RenderRequest<'a> {
-    /// One frame at scale 1 with the default memory cap.
+    /// One frame at scale 1 with the default memory cap, no capabilities and
+    /// no resources.
     pub fn new(wasm: &'a [u8], width: u32, height: u32) -> Self {
         Self {
             wasm,
@@ -64,6 +69,8 @@ impl<'a> RenderRequest<'a> {
             scale: 1.0,
             frames: 1,
             memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
+            capabilities: Capabilities::default(),
+            resources: &[],
         }
     }
 }
@@ -106,7 +113,8 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     let hash = vy_runtime::sha256(req.wasm);
     let options = Options {
         memory_max_pages: req.memory_max_pages,
-        ..Options::default()
+        capabilities: req.capabilities,
+        resources: req.resources.to_vec(),
     };
     let mut rt = Runtime::load(req.wasm, &hash, options).map_err(|e| anyhow!("{e}"))?;
     rt.init(req.width, req.height, req.scale)
@@ -122,7 +130,8 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     }
     debug_assert!(frames_run >= 1, "init wants the first frame");
     let (pw, ph) = physical(req.width, req.height, req.scale);
-    let image = vy_render::render(&display_list, pw, ph, req.scale, rt.text_engine_mut())
+    let (text, images) = rt.raster_parts();
+    let image = vy_render::render(&display_list, pw, ph, req.scale, text, images)
         .map_err(|e| anyhow!("{e}"))?;
     Ok(RenderOutput {
         image,
@@ -134,6 +143,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
 }
 
 /// `render` for a module file; writes the PNG and optionally the semantic JSON.
+#[allow(clippy::too_many_arguments)]
 pub fn render_to_files(
     module: &str,
     out: &Path,
@@ -141,6 +151,7 @@ pub fn render_to_files(
     height: u32,
     scale: f32,
     frames: u32,
+    capabilities: Capabilities,
     dump_semantic: Option<&Path>,
 ) -> Result<RenderOutput> {
     if module.starts_with("vy://") {
@@ -150,6 +161,7 @@ pub fn render_to_files(
     let mut req = RenderRequest::new(&wasm, width, height);
     req.scale = scale;
     req.frames = frames;
+    req.capabilities = capabilities;
     let output = render(&req)?;
     fs::write(out, output.image.encode_png()?)
         .with_context(|| format!("writing {}", out.display()))?;
@@ -237,6 +249,7 @@ mod tests {
             600,
             1.0,
             1,
+            Capabilities::default(),
             Some(&json),
         )
         .unwrap();

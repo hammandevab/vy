@@ -4,13 +4,14 @@
 //! are logical pixels scaled by `scale` to physical pixels (SPEC-6.3.1).
 //! Headless and windowed rendering share this function (SPEC-11.3.2).
 
-use crate::image::RgbaImage;
+use crate::image::{ImageCache, RgbaImage};
 use crate::text::{Glyph, TextEngine};
 use cosmic_text::SwashContent;
 use tiny_skia::{
     Color, FillRule, IntSize, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke,
     Transform,
 };
+use vy_abi::fit;
 use vy_dl::{DecodeError, Op, PathCmd};
 
 /// Number of nested rectangles used to approximate a blurred shadow (M1).
@@ -19,7 +20,9 @@ use vy_dl::{DecodeError, Op, PathCmd};
 /// is `SHADOW_STEPS` concentric rounded rectangles, each with `alpha /
 /// SHADOW_STEPS`, spread linearly from `-blur` to `+blur` around the edge.
 pub const SHADOW_STEPS: u32 = 8;
-/// Colour of the placeholder drawn for `IMAGE` until image decoding lands (M1.5).
+/// Colour of the placeholder drawn for an `IMAGE` whose resource is not in
+/// the cache: never decoded (a display list rendered outside a runtime) or
+/// refused (`E_RESOURCE` was logged when `dl_image` ran).
 pub const IMAGE_PLACEHOLDER_COLOR: u32 = 0x8080_80FF;
 /// Largest magnitude accepted for a coordinate, size, radius, blur or stroke
 /// width, in logical pixels. The canvas is at most 16384 physical pixels, so a
@@ -177,6 +180,120 @@ struct Canvas<'a> {
     scale: f32,
     clip: Clip,
     text: &'a mut TextEngine,
+    images: &'a ImageCache,
+}
+
+/// Where an image lands on the canvas, in physical pixels: the drawn region
+/// (the whole scaled image, which may overflow the destination under
+/// `cover` or underfill it under `contain`) and the destination rectangle
+/// that clips it.
+struct Placement {
+    /// Left of the scaled image.
+    rx: f32,
+    /// Top of the scaled image.
+    ry: f32,
+    /// Physical pixels per source pixel, horizontally.
+    kx: f32,
+    /// Physical pixels per source pixel, vertically.
+    ky: f32,
+    /// Pixel columns to fill: `px0..px1`.
+    px0: i32,
+    /// See `px0`.
+    px1: i32,
+    /// Pixel rows to fill: `py0..py1`.
+    py0: i32,
+    /// See `py0`.
+    py1: i32,
+}
+
+/// Fit a `iw` × `ih` image into the physical rectangle `(dx, dy, dw, dh)`
+/// (SPEC-5.2.3: 0 cover, 1 contain, 2 stretch), limited to a `cw` × `ch`
+/// canvas. `None` when nothing is visible or `fit` is unknown.
+#[allow(clippy::too_many_arguments)]
+fn place(
+    fit_mode: u8,
+    iw: u32,
+    ih: u32,
+    dx: f32,
+    dy: f32,
+    dw: f32,
+    dh: f32,
+    cw: u32,
+    ch: u32,
+) -> Option<Placement> {
+    if iw == 0 || ih == 0 || !(dw > 0.0 && dh > 0.0) {
+        return None;
+    }
+    let (iw, ih) = (iw as f32, ih as f32);
+    let (kx, ky) = match i32::from(fit_mode) {
+        fit::COVER => {
+            let k = (dw / iw).max(dh / ih);
+            (k, k)
+        }
+        fit::CONTAIN => {
+            let k = (dw / iw).min(dh / ih);
+            (k, k)
+        }
+        fit::STRETCH => (dw / iw, dh / ih),
+        _ => return None,
+    };
+    let (rw, rh) = (iw * kx, ih * ky);
+    let (rx, ry) = (dx + (dw - rw) / 2.0, dy + (dh - rh) / 2.0);
+    // Visible span: destination ∩ drawn region ∩ canvas. A pixel is filled
+    // when its centre lies in the half-open span.
+    let x0 = dx.max(rx).max(0.0);
+    let y0 = dy.max(ry).max(0.0);
+    let x1 = (dx + dw).min(rx + rw).min(cw as f32);
+    let y1 = (dy + dh).min(ry + rh).min(ch as f32);
+    if !(x1 > x0 && y1 > y0) {
+        return None;
+    }
+    let px0 = (x0 - 0.5).ceil() as i32;
+    let py0 = (y0 - 0.5).ceil() as i32;
+    let px1 = (x1 - 0.5).ceil() as i32;
+    let py1 = (y1 - 0.5).ceil() as i32;
+    if px1 <= px0 || py1 <= py0 {
+        return None;
+    }
+    Some(Placement {
+        rx,
+        ry,
+        kx,
+        ky,
+        px0,
+        px1,
+        py0,
+        py1,
+    })
+}
+
+/// Resample `img` over a placement with nearest-neighbour sampling into a
+/// premultiplied RGBA8 pixmap. Integer and IEEE-754 arithmetic only, so the
+/// same display list gives the same pixels on every machine (SPEC-2.1.5).
+/// Bilinear and mipmapped sampling arrive with the GPU path (M3).
+fn resample(img: &RgbaImage, p: &Placement) -> Option<Pixmap> {
+    let (w, h) = ((p.px1 - p.px0) as u32, (p.py1 - p.py0) as u32);
+    let size = IntSize::from_wh(w, h)?;
+    let (iw, ih) = (img.width as i64, img.height as i64);
+    let mut out = Vec::with_capacity((w as usize) * (h as usize) * 4);
+    for py in p.py0..p.py1 {
+        let sy = ((py as f32 + 0.5 - p.ry) / p.ky).floor() as i64;
+        let sy = sy.clamp(0, ih - 1) as usize;
+        let row = &img.data[sy * img.width as usize * 4..][..img.width as usize * 4];
+        for px in p.px0..p.px1 {
+            let sx = ((px as f32 + 0.5 - p.rx) / p.kx).floor() as i64;
+            let sx = sx.clamp(0, iw - 1) as usize;
+            let s = &row[sx * 4..sx * 4 + 4];
+            let a = u32::from(s[3]);
+            out.extend_from_slice(&[
+                ((u32::from(s[0]) * a + 127) / 255) as u8,
+                ((u32::from(s[1]) * a + 127) / 255) as u8,
+                ((u32::from(s[2]) * a + 127) / 255) as u8,
+                s[3],
+            ]);
+        }
+    }
+    Pixmap::from_vec(out, size)
 }
 
 impl Canvas<'_> {
@@ -258,6 +375,38 @@ impl Canvas<'_> {
         } else {
             self.fill(&path, rgba);
         }
+    }
+
+    fn image(&mut self, x: f32, y: f32, w: f32, h: f32, resource_id: u16, fit_mode: u8) {
+        let Ok(img) = self.images.get(resource_id) else {
+            self.rect(x, y, w, h, 0.0, IMAGE_PLACEHOLDER_COLOR);
+            return;
+        };
+        let s = self.scale;
+        let Some(placement) = place(
+            fit_mode,
+            img.width,
+            img.height,
+            x * s,
+            y * s,
+            w * s,
+            h * s,
+            self.pixmap.width(),
+            self.pixmap.height(),
+        ) else {
+            return;
+        };
+        let Some(sampled) = resample(img, &placement) else {
+            return;
+        };
+        self.pixmap.draw_pixmap(
+            placement.px0,
+            placement.py0,
+            sampled.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            self.clip.mask(),
+        );
     }
 
     fn clip_push(&mut self, x: f32, y: f32, w: f32, h: f32) {
@@ -362,13 +511,17 @@ fn blit_glyph(pixmap: &mut Pixmap, mask: Option<&Mask>, g: &Glyph<'_>, rgba: u32
 /// Rasterize a display list into a `width` × `height` physical-pixel image.
 ///
 /// `width` and `height` are physical pixels; `scale` is the logical-to-physical
-/// ratio (SPEC-6.3.1). The canvas starts opaque white.
+/// ratio (SPEC-6.3.1). The canvas starts opaque white. `images` holds the
+/// package's resources, decoded by the runtime when `dl_image` ran
+/// (SPEC-6.5.1); an `IMAGE` op naming a resource that is not decoded draws
+/// [`IMAGE_PLACEHOLDER_COLOR`].
 pub fn render(
     display_list: &[u8],
     width: u32,
     height: u32,
     scale: f32,
     text: &mut TextEngine,
+    images: &ImageCache,
 ) -> Result<RgbaImage, RenderError> {
     let ops = vy_dl::decode(display_list).map_err(RenderError::Decode)?;
     let scale_ok = scale.is_finite() && scale > 0.0;
@@ -382,6 +535,7 @@ pub fn render(
         scale,
         clip: Clip::new(width, height),
         text,
+        images,
     };
     // Ops with non-finite or absurd values are skipped (`MAX_MAGNITUDE`);
     // `CLIP_PUSH` is the exception and always pushes, see `Canvas::clip_push`.
@@ -402,9 +556,14 @@ pub fn render(
                 style_id,
                 text,
             } if sane(&[*x, *y]) => canvas.text(*x, *y, *max_w, *style_id, text),
-            Op::Image { x, y, w, h, .. } if sane(&[*x, *y, *w, *h]) => {
-                canvas.rect(*x, *y, *w, *h, 0.0, IMAGE_PLACEHOLDER_COLOR);
-            }
+            Op::Image {
+                x,
+                y,
+                w,
+                h,
+                resource_id,
+                fit,
+            } if sane(&[*x, *y, *w, *h]) => canvas.image(*x, *y, *w, *h, *resource_id, *fit),
             Op::Path {
                 color,
                 stroke_w,

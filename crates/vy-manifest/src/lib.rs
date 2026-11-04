@@ -3,15 +3,8 @@
 //! M1 implements parsing and validation; M4 adds signatures (SPEC-7.4.*).
 #![deny(missing_docs)]
 
-/// Capabilities defined in 1.0 (SPEC-8.2.1).
-pub const CAPABILITIES: &[&str] = &[
-    "net",
-    "storage",
-    "clipboard",
-    "hires_time",
-    "ime",
-    "persist_frame",
-];
+/// Capabilities defined in 1.0 (SPEC-8.2.1), in id order (`vy_abi::cap`).
+pub const CAPABILITIES: &[&str] = &vy_abi::cap::NAMES;
 
 /// Maximum manifest size in bytes (SPEC-4.1.3).
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;

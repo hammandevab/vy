@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::OnceLock;
 use vy_abi::{event, limits, ABI_MINOR};
-use vy_render::TextEngine;
+use vy_render::{ImageCache, TextEngine};
 use wasmtime::{
     Config, Engine, Instance, Linker, Module, Store, StoreLimitsBuilder, Trap, TypedFunc,
 };
@@ -135,12 +135,17 @@ pub fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// Per-instance settings that come from the manifest and the policy.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// Largest linear memory in wasm pages (SPEC-4.2.4, SPEC-8.1.3).
     pub memory_max_pages: u32,
     /// Granted capabilities (SPEC-8.2.*).
     pub capabilities: Capabilities,
+    /// Package resources by index: `resources[i]` is resource id `i + 1`;
+    /// id 0 is the module itself (SPEC-4.5.1). Images among them are decoded
+    /// at their first `dl_image` (SPEC-6.5.1). Until the manifest parser
+    /// (M3) the caller supplies them directly.
+    pub resources: Vec<Vec<u8>>,
 }
 
 impl Default for Options {
@@ -148,6 +153,7 @@ impl Default for Options {
         Self {
             memory_max_pages: DEFAULT_MEMORY_MAX_PAGES,
             capabilities: Capabilities::default(),
+            resources: Vec::new(),
         }
     }
 }
@@ -237,7 +243,10 @@ impl Runtime {
             .tables(1)
             .instances(1)
             .build();
-        let mut store = Store::new(engine, Host::new(limits, options.capabilities));
+        let mut store = Store::new(
+            engine,
+            Host::new(limits, options.capabilities, options.resources),
+        );
         store.limiter(|host| &mut host.limits);
         store
             .set_fuel(CALL_HARD_LIMIT_FUEL)
@@ -566,6 +575,19 @@ impl Runtime {
     /// The text engine holding the module's styles; the rasterizer needs it.
     pub fn text_engine_mut(&mut self) -> &mut TextEngine {
         &mut self.host_mut().text
+    }
+
+    /// The package's image resources, decoded as `dl_image` named them
+    /// (SPEC-6.5.1); the rasterizer needs it.
+    pub fn image_cache(&self) -> &ImageCache {
+        &self.host().images
+    }
+
+    /// Both halves the rasterizer needs, borrowed together: the text engine
+    /// with the module's styles and the image cache.
+    pub fn raster_parts(&mut self) -> (&mut TextEngine, &ImageCache) {
+        let host = self.host_mut();
+        (&mut host.text, &host.images)
     }
 
     /// The semantic tree as JSON (SPEC-10.2.3): `{"nodes":[{id, parent_id, role,

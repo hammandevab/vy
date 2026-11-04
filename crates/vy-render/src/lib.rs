@@ -8,20 +8,43 @@ pub mod image;
 pub mod raster;
 pub mod text;
 
-pub use image::{diff_ratio, RgbaImage};
+pub use image::{diff_ratio, ImageCache, ImageError, RgbaImage, MAX_IMAGE_CACHE_BYTES};
 pub use raster::{render, RenderError};
 pub use text::{height_x100, pack_x100, Size, TextEngine};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vy_abi::err;
-    use vy_dl::DisplayList;
+    use vy_abi::{err, limits};
+    use vy_dl::{DisplayList, Fit};
 
     fn sans(engine: &mut TextEngine, size: f32) -> u16 {
         engine
             .style(text::role::SANS, size, 400, 0x0000_00FF)
             .unwrap()
+    }
+
+    /// `render` with no image resources.
+    fn render(
+        dl: &[u8],
+        w: u32,
+        h: u32,
+        scale: f32,
+        t: &mut TextEngine,
+    ) -> Result<RgbaImage, RenderError> {
+        raster::render(dl, w, h, scale, t, &ImageCache::new(Vec::new()))
+    }
+
+    /// PNG of a `w` × `h` image whose pixel `(x, y)` is `f(x, y)`.
+    fn png(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                img.data[i..i + 4].copy_from_slice(&f(x, y));
+            }
+        }
+        img.encode_png().unwrap()
     }
 
     /// SPEC-5.2.4, SPEC-6.4.3: text wraps at max_w and the height grows as the width shrinks;
@@ -168,8 +191,7 @@ mod tests {
         .unwrap();
         dl.shadow(50.0, 50.0, 20.0, 20.0, 0.0, 4.0, 0x0000_00FF)
             .unwrap();
-        dl.image(80.0, 80.0, 10.0, 10.0, 1, vy_dl::Fit::Contain)
-            .unwrap();
+        dl.image(80.0, 80.0, 10.0, 10.0, 1, Fit::Contain).unwrap();
         dl.end().unwrap();
         let img = render(dl.bytes(), 100, 100, 1.0, &mut t).unwrap();
         assert_eq!(img.pixel(5, 5).unwrap(), [0, 0, 0, 255], "filled triangle");
@@ -189,8 +211,180 @@ mod tests {
         assert_eq!(
             img.pixel(85, 85).unwrap(),
             [128, 128, 128, 255],
-            "image placeholder"
+            "image placeholder when the resource is not decoded"
         );
+    }
+
+    /// SPEC-6.5.1: an image resource is decoded at its first use and cached
+    /// for the package; a side above 8192 px is refused from the header alone;
+    /// bytes that are not a PNG, id 0 (SPEC-4.5.1) and unknown ids are
+    /// `E_RESOURCE`; the refusal is cached as well.
+    #[test]
+    fn spec_6_5_1_image_decode_limits() {
+        let max = limits::MAX_IMAGE_SIDE_PX;
+        let small = png(2, 1, |x, _| {
+            if x == 0 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            }
+        });
+        let wide = png(max, 1, |_, _| [0, 255, 0, 255]);
+        let too_wide = png(max + 1, 1, |_, _| [0, 255, 0, 255]);
+        let too_tall = png(1, max + 1, |_, _| [0, 255, 0, 255]);
+        let garbage = b"RIFF....WEBPVP8 ".to_vec();
+        let mut cache = ImageCache::new(vec![small, wide, too_wide, too_tall, garbage.clone()]);
+        assert_eq!(cache.resource_count(), 5);
+        assert_eq!(cache.decodes(), 0, "nothing decoded before first use");
+        assert_eq!(
+            cache.get(1),
+            Err(ImageError::Unknown),
+            "lazy: not yet decoded"
+        );
+
+        let img = cache.decode(1).unwrap();
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.pixel(1, 0).unwrap(), [0, 0, 255, 255]);
+        assert_eq!(cache.decodes(), 1);
+        cache.decode(1).unwrap();
+        assert_eq!(cache.decodes(), 1, "second use is a cache hit");
+        assert_eq!(cache.ensure(1), 0, "a cache hit reads no resource bytes");
+        assert_eq!(cache.decoded_bytes(), 8);
+
+        assert_eq!(cache.decode(2).unwrap().width, max, "8192 is allowed");
+        assert_eq!(
+            cache.decode(3),
+            Err(ImageError::TooLarge {
+                width: max + 1,
+                height: 1
+            })
+        );
+        assert_eq!(
+            cache.decode(4),
+            Err(ImageError::TooLarge {
+                width: 1,
+                height: max + 1
+            })
+        );
+        assert_eq!(
+            cache.decoded_bytes(),
+            8 + max as usize * 4,
+            "refused images hold no pixels"
+        );
+        assert!(matches!(cache.decode(5), Err(ImageError::Decode(_))));
+        let decodes = cache.decodes();
+        assert!(matches!(cache.decode(5), Err(ImageError::Decode(_))));
+        assert_eq!(cache.decodes(), decodes, "a failure is cached too");
+        assert_eq!(
+            cache.decode(0),
+            Err(ImageError::Unknown),
+            "id 0 is the module"
+        );
+        assert_eq!(cache.decode(6), Err(ImageError::Unknown));
+        assert_eq!(cache.decode(u16::MAX), Err(ImageError::Unknown));
+
+        // Every refusal is one ABI code: E_RESOURCE.
+        for e in [
+            ImageError::Unknown,
+            ImageError::TooLarge {
+                width: 1,
+                height: 1,
+            },
+            ImageError::Decode(String::new()),
+            ImageError::CacheFull,
+        ] {
+            assert_eq!(e.code(), err::E_RESOURCE);
+        }
+
+        // The decoded cache is bounded (SPEC-9.3.1): with a full cache a new
+        // decode is refused and nothing is held for it.
+        let one = png(1, 1, |_, _| [1, 2, 3, 4]);
+        let mut cache = ImageCache::new(vec![one.clone(), one]);
+        cache.decoded_bytes = MAX_IMAGE_CACHE_BYTES - 4;
+        cache.decode(1).unwrap();
+        assert_eq!(cache.decode(2), Err(ImageError::CacheFull));
+        assert_eq!(cache.decoded_bytes(), MAX_IMAGE_CACHE_BYTES);
+    }
+
+    /// SPEC-5.2.3, SPEC-C.1.1: `fit` 0 covers the rectangle and crops, 1 fits
+    /// inside and letterboxes, 2 stretches; the image draws through the clip
+    /// stack and scales with the DPI (SPEC-6.3.1); the same bytes give the
+    /// same pixels twice (SPEC-2.1.5).
+    #[test]
+    fn spec_5_2_3_image_fit_modes() {
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let white = [255, 255, 255, 255];
+        // 2 x 1: red | blue
+        let two = png(2, 1, |x, _| if x == 0 { red } else { blue });
+        let mut cache = ImageCache::new(vec![two]);
+        cache.decode(1).unwrap();
+        let mut t = TextEngine::new();
+        let mut dl = DisplayList::new();
+        dl.begin();
+        // cover into 2x2 at (0,0): scaled 4x2, centred, cropped to columns 1..3 of the image
+        dl.image(0.0, 0.0, 2.0, 2.0, 1, Fit::Cover).unwrap();
+        // contain into 2x2 at (4,0): scaled 2x1, centred vertically
+        dl.image(4.0, 0.0, 2.0, 2.0, 1, Fit::Contain).unwrap();
+        // stretch into 4x2 at (8,0)
+        dl.image(8.0, 0.0, 4.0, 2.0, 1, Fit::Stretch).unwrap();
+        // clipped: only the left pixel column of a stretch survives
+        dl.clip_push(14.0, 0.0, 1.0, 2.0).unwrap();
+        dl.image(14.0, 0.0, 4.0, 2.0, 1, Fit::Stretch).unwrap();
+        dl.clip_pop().unwrap();
+        dl.end().unwrap();
+        let img = raster::render(dl.bytes(), 20, 2, 1.0, &mut t, &cache).unwrap();
+        let px = |x, y| img.pixel(x, y).unwrap();
+        // cover: both rows filled, left half red, right half blue
+        assert_eq!(
+            [px(0, 0), px(1, 0), px(0, 1), px(1, 1)],
+            [red, blue, red, blue]
+        );
+        // contain: top row image, bottom row untouched
+        assert_eq!(
+            [px(4, 0), px(5, 0), px(4, 1), px(5, 1)],
+            [red, blue, white, white]
+        );
+        // stretch: two columns per source pixel
+        assert_eq!(
+            [px(8, 0), px(9, 0), px(10, 0), px(11, 0), px(11, 1)],
+            [red, red, blue, blue, blue]
+        );
+        assert_eq!(px(12, 0), white, "nothing outside the rectangle");
+        assert_eq!([px(14, 0), px(15, 0)], [red, white], "clipped");
+        assert_eq!(px(19, 1), white);
+
+        // DPI: the same list at scale 2 covers twice the physical pixels.
+        let big = raster::render(dl.bytes(), 40, 4, 2.0, &mut t, &cache).unwrap();
+        assert_eq!(big.pixel(0, 0).unwrap(), red);
+        assert_eq!(big.pixel(3, 3).unwrap(), blue);
+        assert_eq!(big.pixel(9, 0).unwrap(), white, "letterbox scales too");
+        assert_eq!(big.pixel(9, 1).unwrap(), red);
+        assert_eq!(big.pixel(9, 2).unwrap(), red);
+        assert_eq!(big.pixel(9, 3).unwrap(), white);
+        assert_eq!(
+            raster::render(dl.bytes(), 20, 2, 1.0, &mut t, &cache).unwrap(),
+            img
+        );
+
+        // An unknown fit value on the wire draws nothing; a resource that was
+        // refused draws the placeholder, like one never decoded.
+        let mut cache = ImageCache::new(vec![b"not a png".to_vec()]);
+        assert!(cache.decode(1).is_err());
+        let mut dl = DisplayList::new();
+        dl.begin();
+        dl.image(0.0, 0.0, 2.0, 2.0, 1, Fit::Cover).unwrap();
+        dl.end().unwrap();
+        let mut bytes = dl.bytes().to_vec();
+        let img = raster::render(&bytes, 4, 2, 1.0, &mut t, &cache).unwrap();
+        assert_eq!(img.pixel(0, 0).unwrap(), [128, 128, 128, 255]);
+        let fit_at = bytes.len() - 2;
+        assert_eq!(bytes[fit_at], 0);
+        bytes[fit_at] = 3;
+        let mut good = ImageCache::new(vec![png(1, 1, |_, _| red)]);
+        good.decode(1).unwrap();
+        let img = raster::render(&bytes, 4, 2, 1.0, &mut t, &good).unwrap();
+        assert_eq!(img.pixel(0, 0).unwrap(), white);
     }
 
     /// SPEC-6.1.1, SPEC-6.4.1: the host rasterizes whatever the module describes;
@@ -356,13 +550,6 @@ mod tests {
         other.data[0] = 9;
         assert!((diff_ratio(&img, &other) - 1.0 / 6.0).abs() < 1e-9);
         assert_eq!(diff_ratio(&img, &img), 0.0);
-    }
-
-    /// SPEC-6.5.1: images decoded lazily, cached per package, max 8192x8192.
-    #[test]
-    #[ignore = "M1.5: images"]
-    fn spec_6_5_1_image_decode_limits() {
-        todo!()
     }
 
     /// SPEC-13.2.1: 2 000 ops rasterize in <= 2 ms on the reference machine.

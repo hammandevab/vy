@@ -222,6 +222,8 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         scale: case.scale,
         frames: case.frames,
         memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
+        capabilities: vy_runtime::Capabilities::default(),
+        resources: &[],
     };
     let out = render(&req)?;
     let golden_path = case.golden(root);

@@ -78,6 +78,63 @@ pub mod event {
     pub const CAPABILITY: i32 = 32;
 }
 
+/// `fit` argument of `dl_image` (SPEC-5.2.3) and the `fit` field of the
+/// `IMAGE` opcode (SPEC-C.1.1). Any other value is `E_ARG`.
+pub mod fit {
+    /// Scale uniformly so the image covers the rectangle; crop the overflow.
+    pub const COVER: i32 = 0;
+    /// Scale uniformly so the whole image fits inside the rectangle; letterbox.
+    pub const CONTAIN: i32 = 1;
+    /// Scale each axis independently to the rectangle.
+    pub const STRETCH: i32 = 2;
+    /// Highest valid fit.
+    pub const MAX: i32 = 2;
+}
+
+/// Capability ids as delivered in `KIND_CAPABILITY` events (SPEC-A.2.1,
+/// SPEC-8.2.1). SPEC 1.0 names the six capabilities but not their numbers;
+/// these follow the order of SPEC-8.2.1 (see `docs/BUILD-NOTES.md`).
+pub mod cap {
+    /// `net` {origins}.
+    pub const NET: i32 = 1;
+    /// `storage` {quota_kb}.
+    pub const STORAGE: i32 = 2;
+    /// `clipboard`.
+    pub const CLIPBOARD: i32 = 3;
+    /// `hires_time`.
+    pub const HIRES_TIME: i32 = 4;
+    /// `ime`.
+    pub const IME: i32 = 5;
+    /// `persist_frame`.
+    pub const PERSIST_FRAME: i32 = 6;
+    /// Highest valid capability id.
+    pub const MAX: i32 = 6;
+
+    /// Canonical names in id order (SPEC-8.2.1).
+    pub const NAMES: [&str; 6] = [
+        "net",
+        "storage",
+        "clipboard",
+        "hires_time",
+        "ime",
+        "persist_frame",
+    ];
+
+    /// Canonical name of a capability id, or `None` outside 1..=6.
+    pub fn name(id: i32) -> Option<&'static str> {
+        if (1..=MAX).contains(&id) {
+            Some(NAMES[(id - 1) as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Id of a capability name, or `None` for an unknown name.
+    pub fn id(name: &str) -> Option<i32> {
+        NAMES.iter().position(|n| *n == name).map(|i| i as i32 + 1)
+    }
+}
+
 /// Semantic roles for `sem_node` (SPEC-A.3.1).
 pub mod role {
     /// Plain text run.
@@ -210,6 +267,8 @@ pub mod limits {
     pub const FRAME_BUDGET_MS: u32 = 8;
     /// Maximum `memory_max` in wasm pages (SPEC-8.1.3).
     pub const MAX_MEMORY_PAGES: u32 = 4096;
+    /// Largest width or height of an image resource in pixels (SPEC-6.5.1).
+    pub const MAX_IMAGE_SIDE_PX: u32 = 8192;
 
     /// Largest `len` accepted by `log` (SPEC-5.2.1): 4 KB (SPEC-9.3.1).
     pub const MAX_LOG_BYTES: u32 = 4096;
@@ -349,7 +408,7 @@ pub const IMPORTS: &[Sig] = &[
     },
     Sig {
         name: "dl_image",
-        params: &[F32, F32, F32, F32, I32],
+        params: &[F32, F32, F32, F32, I32, I32],
         result: None,
     },
     Sig {
@@ -585,6 +644,7 @@ mod tests {
         let expect: &[(&str, usize)] = &[
             ("dl_rect", 6),
             ("dl_text", 6),
+            ("dl_image", 6),
             ("text_style", 4),
             ("pointer_get", 0),
             ("fetch_begin", 5),
@@ -620,6 +680,20 @@ mod tests {
         assert_eq!(err::E_GESTURE, -40);
     }
 
+    /// SPEC-5.2.3, SPEC-C.1.1: `dl_image` takes `fit` as its last argument and
+    /// the three fit modes are 0 cover, 1 contain, 2 stretch.
+    #[test]
+    fn spec_5_2_3_image_fit_modes() {
+        let s = import("dl_image").unwrap();
+        assert_eq!(s.params, &[F32, F32, F32, F32, I32, I32]);
+        assert_eq!(s.result, None);
+        assert_eq!(fit::COVER, 0);
+        assert_eq!(fit::CONTAIN, 1);
+        assert_eq!(fit::STRETCH, 2);
+        assert_eq!(fit::MAX, 2);
+        assert_eq!(limits::MAX_IMAGE_SIDE_PX, 8192, "SPEC-6.5.1");
+    }
+
     /// SPEC-A.2.1: event kinds are fixed.
     #[test]
     fn spec_a_2_1_event_kinds_fixed() {
@@ -630,6 +704,24 @@ mod tests {
         assert_eq!(event::VISIBILITY, 30);
         assert_eq!(event::BUDGET, 31);
         assert_eq!(event::CAPABILITY, 32);
+    }
+
+    /// SPEC-8.2.1, SPEC-A.2.1: the six capabilities of 1.0 have one id each,
+    /// in the order the spec lists them, and names round-trip.
+    #[test]
+    fn spec_8_2_1_capability_ids() {
+        assert_eq!(cap::NAMES.len(), 6);
+        assert_eq!(cap::MAX, 6);
+        assert_eq!(cap::name(cap::NET), Some("net"));
+        assert_eq!(cap::name(cap::IME), Some("ime"));
+        assert_eq!(cap::name(cap::PERSIST_FRAME), Some("persist_frame"));
+        assert_eq!(cap::name(0), None);
+        assert_eq!(cap::name(7), None);
+        for (i, n) in cap::NAMES.iter().enumerate() {
+            assert_eq!(cap::id(n), Some(i as i32 + 1));
+            assert_eq!(cap::name(i as i32 + 1), Some(*n));
+        }
+        assert_eq!(cap::id("file"), None, "1.1 capabilities are not in 1.0");
     }
 
     /// SPEC-A.3.1, SPEC-10.1.2: roles 1..24 are the only roles and each has one name.

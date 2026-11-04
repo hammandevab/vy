@@ -10,7 +10,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
          vy-cli check-abi <module.wasm>\n  \
-         vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--dump-semantic <json>]\n  \
+         vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--grant cap,..] [--dump-semantic <json>]\n  \
          vy-cli conformance [--update] [--root <dir>]\n  \
          vy-cli bench         (M3)"
     );
@@ -95,7 +95,7 @@ fn check_abi(args: &[String]) -> Result<ExitCode> {
 fn render(args: &[String]) -> Result<ExitCode> {
     let a = Args::parse(
         args,
-        &["out", "size", "scale", "frames", "dump-semantic"],
+        &["out", "size", "scale", "frames", "grant", "dump-semantic"],
         &[],
     )?;
     let (Some(module), Some(out), Some(size)) =
@@ -106,6 +106,17 @@ fn render(args: &[String]) -> Result<ExitCode> {
     let (width, height) = vy_cli::parse_size(size)?;
     let scale: f32 = a.value("scale").unwrap_or("1").parse()?;
     let frames: u32 = a.value("frames").unwrap_or("1").parse()?;
+    let names: Vec<&str> = a
+        .value("grant")
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let capabilities = vy_runtime::Capabilities::from_names(names)
+        .map_err(|n| anyhow!("--grant: unknown capability {n:?} (SPEC-8.2.1)"))?;
     let dump = a.value("dump-semantic").map(PathBuf::from);
     let output = vy_cli::render_to_files(
         module,
@@ -114,6 +125,7 @@ fn render(args: &[String]) -> Result<ExitCode> {
         height,
         scale,
         frames,
+        capabilities,
         dump.as_deref(),
     )?;
     for log in &output.logs {
