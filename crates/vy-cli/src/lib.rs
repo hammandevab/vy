@@ -84,6 +84,16 @@ pub enum ScriptedEvent {
     },
     /// `TEXT_INPUT` through `vy_alloc` (SPEC-5.1.6).
     TextInput(String),
+    /// `FOCUS` as the host's focus order would deliver it (SPEC-10.3.1); the
+    /// headless host keeps no focus order, so a case names the node itself.
+    Focus {
+        /// Semantic node id.
+        node: i32,
+        /// True when the node gains focus.
+        gained: bool,
+        /// True when the change came from the keyboard.
+        keyboard: bool,
+    },
 }
 
 impl ScriptedEvent {
@@ -128,6 +138,17 @@ impl ScriptedEvent {
             } => rt.event(kind::KEY_DOWN, *code, *modifiers, i32::from(*repeat), 0),
             Self::KeyUp { code, modifiers } => rt.event(kind::KEY_UP, *code, *modifiers, 0, 0),
             Self::TextInput(text) => rt.text_input(text),
+            Self::Focus {
+                node,
+                gained,
+                keyboard,
+            } => rt.event(
+                kind::FOCUS,
+                *node,
+                i32::from(*gained),
+                i32::from(*keyboard),
+                0,
+            ),
         }
     }
 }
