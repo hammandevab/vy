@@ -8,17 +8,23 @@ CSS, ingen JavaScript-motor.
 - `CLAUDE.md` – arbetsbeskrivning för agenterna som bygger klienten.
 - `crates/` – klienten i Rust. `modules/` – referensmoduler. `conformance/` – guldbilder.
 
-## Status: M0
+## Status: M1
 
-Specen är numrerad, testskalen finns, CI kör grindarna, och referensmodulen `hello` bygger till
-wasm och passerar ABI-kontrollen. Nästa steg är M1: `vy-cli render` till PNG.
+`vy-cli render` kör en modul headless i wasmtime, rasteriserar display listen i mjukvara och
+skriver en deterministisk PNG; `conformance` jämför mot guldbilderna i `conformance/golden/`.
+Nästa steg är M2: Rust-SDK och tio referenssidor.
 
 ```sh
+tools/build_modules.sh                 # modules/* -> target/wasm/*.wasm (före cargo test)
 cargo test --workspace                 # gröna tester
 cargo test --workspace -- --ignored    # backloggen
 python3 tools/spec_trace.py            # spårning spec -> test
-tools/build_modules.sh                 # modules/* -> target/wasm/*.wasm
 cargo run -p vy-cli -- check-abi target/wasm/hello.wasm
+cargo run -p vy-cli -- render target/wasm/hello.wasm --out hello.png --size 800x600 --scale 1 \
+    --dump-semantic hello.json
+cargo run -p vy-cli -- conformance     # pixeldiff <= 0,1 % mot guldbilderna
 ```
+
+Byggnoteringar för M1 (beroenden, approximationer, spec-frågor): `docs/BUILD-NOTES.md`.
 
 Licens: MIT.
