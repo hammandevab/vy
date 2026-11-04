@@ -1,0 +1,28 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 24, "y": 0, "w": 752, "h": 556, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 24, "y": 24, "w": 752, "h": 32.5, "text": "Inställningar"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 24, "y": 60.5, "w": 752, "h": 16.25, "text": "Lagring otillgänglig (E_DENIED): standardvärden visas. Ändringen kunde inte sparas (E_DENIED)."},
+    {"id": 4, "parent_id": 1, "role": 16, "role_name": "region", "x": 24, "y": 88, "w": 368, "h": 170, "text": "Utseende"},
+    {"id": 5, "parent_id": 4, "role": 2, "role_name": "heading", "x": 40, "y": 104, "w": 336, "h": 18.75, "text": "Utseende"},
+    {"id": 6, "parent_id": 4, "role": 6, "role_name": "checkbox", "x": 40, "y": 134, "w": 336, "h": 36, "text": "Mörkt tema: på"},
+    {"id": 7, "parent_id": 4, "role": 6, "role_name": "checkbox", "x": 40, "y": 170, "w": 336, "h": 36, "text": "Kompakt läge: på"},
+    {"id": 8, "parent_id": 4, "role": 6, "role_name": "checkbox", "x": 40, "y": 206, "w": 336, "h": 36, "text": "Animationer: på"},
+    {"id": 9, "parent_id": 1, "role": 16, "role_name": "region", "x": 408, "y": 88, "w": 368, "h": 231, "text": "Text"},
+    {"id": 10, "parent_id": 9, "role": 2, "role_name": "heading", "x": 424, "y": 104, "w": 336, "h": 18.75, "text": "Text"},
+    {"id": 11, "parent_id": 9, "role": 7, "role_name": "radio", "x": 424, "y": 134, "w": 336, "h": 36, "text": "Liten"},
+    {"id": 12, "parent_id": 9, "role": 7, "role_name": "radio", "x": 424, "y": 170, "w": 336, "h": 36, "text": "Normal (vald)"},
+    {"id": 13, "parent_id": 9, "role": 7, "role_name": "radio", "x": 424, "y": 206, "w": 336, "h": 36, "text": "Stor"},
+    {"id": 14, "parent_id": 9, "role": 1, "role_name": "text", "x": 424, "y": 248, "w": 336, "h": 40, "text": "Så här ser brödtexten ut med den valda storleken."},
+    {"id": 15, "parent_id": 1, "role": 16, "role_name": "region", "x": 24, "y": 274, "w": 368, "h": 170, "text": "Startsida"},
+    {"id": 16, "parent_id": 15, "role": 2, "role_name": "heading", "x": 40, "y": 290, "w": 336, "h": 18.75, "text": "Startsida"},
+    {"id": 17, "parent_id": 15, "role": 7, "role_name": "radio", "x": 40, "y": 320, "w": 336, "h": 36, "text": "Senaste flikarna (vald)"},
+    {"id": 18, "parent_id": 15, "role": 7, "role_name": "radio", "x": 40, "y": 356, "w": 336, "h": 36, "text": "Tom sida"},
+    {"id": 19, "parent_id": 15, "role": 7, "role_name": "radio", "x": 40, "y": 392, "w": 336, "h": 36, "text": "Bokmärken"},
+    {"id": 20, "parent_id": 1, "role": 16, "role_name": "region", "x": 408, "y": 335, "w": 368, "h": 108, "text": "Ljud"},
+    {"id": 21, "parent_id": 20, "role": 2, "role_name": "heading", "x": 424, "y": 351, "w": 336, "h": 18.75, "text": "Ljud"},
+    {"id": 22, "parent_id": 20, "role": 23, "role_name": "slider", "x": 414, "y": 387, "w": 300, "h": 34, "text": "Volym: 80"},
+    {"id": 23, "parent_id": 1, "role": 4, "role_name": "button", "x": 24, "y": 460, "w": 752, "h": 40, "text": "Återställ standard"},
+    {"id": 24, "parent_id": 1, "role": 1, "role_name": "text", "x": 24, "y": 512, "w": 752, "h": 16.25, "text": "Ändringar sparas direkt via state_put; vy_suspend sparar en gång till."}
+  ]
+}

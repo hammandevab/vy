@@ -355,3 +355,61 @@ events = [
   {kind = "focus", node = 93, gained = true, keyboard = true},   # värden: sista notlänken
   {kind = "key_down", code = 43, modifiers = 1},                 # Skift+Tab: länken före
 ]
+
+# settings: vippknappar, radiogrupper, en slider som dras med pekaren och
+# persistens via state_get/state_put (modules/settings). Headless har ingen lagring:
+# state_get och state_put svarar E_DENIED även med `storage` beviljad, så sidan visar
+# standardvärden och en statusrad om det (SPEC-5.3.1). Persistens bevisas av modulens
+# nativa test mot SDK-mocken (`cd modules/settings && cargo test`).
+
+[[case]]
+name = "settings-800x600@1"
+module = "settings"
+width = 800
+height = 600
+scale = 1
+semantic = "settings"
+capabilities = ["storage"]
+
+[[case]]
+name = "settings-800x600@1-changed"
+module = "settings"
+width = 800
+height = 600
+scale = 1
+semantic = "settings-changed"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 354, y = 156},        # Mörkt tema: på (paletten byts)
+  {kind = "pointer_up", x = 354, y = 156},
+  {kind = "pointer_down", x = 354, y = 200},        # Kompakt läge: på (raderna krymper)
+  {kind = "pointer_up", x = 354, y = 200},
+  {kind = "pointer_down", x = 500, y = 395},        # tar tag i slidern
+  {kind = "pointer_move", x = 560, y = 395, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 390, buttons = 1},
+  {kind = "pointer_up", x = 648, y = 390},          # släpps: 80, sparas (nekas headless)
+]
+
+[[case]]
+name = "settings-400x700@2"
+module = "settings"
+width = 400
+height = 700
+scale = 2
+capabilities = ["storage"]
+events = [                                         # enbart tangentbord (SPEC-10.3.1)
+  {kind = "key_down", code = 43},                   # Tab ×6: Stor
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 44},                   # mellanslag: välj Stor
+  {kind = "key_down", code = 43},                   # Tab ×4: Volym, rullas i bild
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 79},                   # pil höger ×3: 55
+  {kind = "key_down", code = 79},
+  {kind = "key_down", code = 79},
+]
