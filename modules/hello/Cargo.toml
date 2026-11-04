@@ -10,7 +10,7 @@ description = "Vy reference module 0: a title, a paragraph and a rectangle"
 crate-type = ["cdylib"]
 
 [dependencies]
-vy-abi = { path = "../../crates/vy-abi" }
+vy-sdk = { path = "../../crates/vy-sdk" }
 
 [profile.release]
 opt-level = "s"

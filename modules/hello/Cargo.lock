@@ -6,9 +6,16 @@ version = 4
 name = "hello"
 version = "0.1.0"
 dependencies = [
- "vy-abi",
+ "vy-sdk",
 ]
 
 [[package]]
 name = "vy-abi"
 version = "0.1.0"
+
+[[package]]
+name = "vy-sdk"
+version = "0.1.0"
+dependencies = [
+ "vy-abi",
+]
