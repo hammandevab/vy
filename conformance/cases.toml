@@ -7,8 +7,10 @@
 # Formatet är en delmängd av TOML: [[case]]-tabeller med name, module, width, height,
 # scale (standard 1), frames (standard 1 + antal events; ett tak – vy_frame anropas bara så
 # länge modulen begär en ny frame, SPEC-6.2.1), semantic, capabilities (lista med namn ur
-# SPEC-8.2.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
-# key_down/up med code (USB HID); text_input med text; scroll med dx, dy, lines).
+# SPEC-8.2.1), resources (lista med filer relativt repots rot; resources[i] blir resurs-id
+# i + 1, SPEC-4.5.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
+# key_down/up med code (USB HID); text_input med text; scroll med dx, dy, lines; focus med
+# node, gained, keyboard – det värden skulle skicka ur sin fokusordning, SPEC-10.3.1).
 
 [[case]]
 name = "hello-800x600@1"
@@ -159,4 +161,54 @@ events = [                                         # enbart tangentbord (SPEC-10
   {kind = "key_down", code = 44},                   # mellanslag: kryssa i
   {kind = "key_down", code = 43},                   # Tab: Skicka
   {kind = "key_down", code = 40},                   # Enter
+]
+
+# chat: meddelandetråd med bubblor, tidsstämplar från now_ms, kompositör med IME och
+# sändning via fetch_begin (modules/chat). Headless nekar fetch_begin (E_DENIED även med
+# `net`), så fallet efter Enter visar det lokala meddelandet som "ej skickat" och en
+# offline-banner (SPEC-5.3.1). Kräver `ime` (SPEC-10.4.2).
+
+[[case]]
+name = "chat-800x600@1"
+module = "chat"
+width = 800
+height = 600
+scale = 1
+semantic = "chat"
+capabilities = ["ime", "net"]
+
+[[case]]
+name = "chat-800x600@1-sent"
+module = "chat"
+width = 800
+height = 600
+scale = 1
+semantic = "chat-sent"
+capabilities = ["ime", "net"]
+events = [
+  {kind = "text_input", text = "Ja, de ligger i conformance/golden nu."},
+  {kind = "key_down", code = 40},                   # Enter: läggs till lokalt, fetch_begin nekas
+  {kind = "key_up", code = 40},
+  {kind = "text_input", text = "Säg till om"},      # kompositören är fortfarande fokuserad
+]
+
+[[case]]
+name = "chat-400x700@2"
+module = "chat"
+width = 400
+height = 700
+scale = 2
+capabilities = ["ime", "net"]
+
+[[case]]
+name = "chat-400x700@2-scrolled"
+module = "chat"
+width = 400
+height = 700
+scale = 2
+capabilities = ["ime", "net"]
+events = [
+  {kind = "pointer_down", x = 200, y = 300},        # utanför fältet: fokus lämnar, ime_end
+  {kind = "scroll", dy = -200},                     # bakåt i tråden
+  {kind = "scroll", dy = -3, lines = true},
 ]
