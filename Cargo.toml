@@ -18,14 +18,26 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/hammandevab/vy"
-rust-version = "1.80"
+rust-version = "1.97"
 
 [workspace.dependencies]
 vy-abi = { path = "crates/vy-abi" }
 vy-dl = { path = "crates/vy-dl" }
 vy-manifest = { path = "crates/vy-manifest" }
+vy-render = { path = "crates/vy-render" }
+vy-runtime = { path = "crates/vy-runtime" }
 anyhow = "1"
 wasmparser = "0.220"
+# wasmtime without default features: no component model, no async, no GC, no
+# threads (SPEC-4.2.3), no cache, no parallel compilation, no profiling.
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std"] }
+sha2 = { version = "0.11", default-features = false }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
+# Only to name `Script` in cosmic-text's `Fallback` trait; same version cosmic-text uses.
+unicode-script = "0.5"
+png = "0.18"
+wat = "1"
 
 [profile.release]
 lto = "thin"

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Software rasterizer and text engine for Vy display lists"
 
 [dependencies]
 vy-abi.workspace = true
+vy-dl.workspace = true
+tiny-skia.workspace = true
+cosmic-text.workspace = true
+unicode-script.workspace = true
+png.workspace = true
