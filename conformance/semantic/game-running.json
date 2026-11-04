@@ -1,0 +1,7 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 14, "w": 200, "h": 22.5, "text": "Studs"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 576.29, "y": 15, "w": 207.71, "h": 18.75, "text": "Poäng 0  Bästa 0  0,9 s"}
+  ]
+}

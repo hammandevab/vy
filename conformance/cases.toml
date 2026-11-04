@@ -265,3 +265,40 @@ events = [
   {kind = "scroll", dy = 500},                      # en kolumn: rullning i pixlar
   {kind = "key_down", code = 77},                   # End: klampas mot sista raden
 ]
+
+# game: paddel och boll (modules/game). Sidan begär en frame per frame bara medan bollen
+# är i spel, så `frames` är ett tak som nås först efter serven (mellanslag). En nedtryckt
+# pil utan key_up hålls kvar i värden och pollas via key_down-importen varje frame.
+
+[[case]]
+name = "game-800x600@1"
+module = "game"
+width = 800
+height = 600
+scale = 1
+semantic = "game"
+
+[[case]]
+name = "game-800x600@1-running"
+module = "game"
+width = 800
+height = 600
+scale = 1
+semantic = "game-running"
+frames = 60
+events = [
+  {kind = "key_down", code = 80},                   # pil vänster: ett steg, hålls sedan
+  {kind = "key_down", code = 44},                   # mellanslag: serve, 58 frames à 16 ms
+]
+
+[[case]]
+name = "game-400x700@1"
+module = "game"
+width = 400
+height = 700
+scale = 1
+frames = 40
+events = [
+  {kind = "key_down", code = 44},                   # serve
+  {kind = "key_down", code = 79},                   # pil höger efter taket: ingen frame
+]
