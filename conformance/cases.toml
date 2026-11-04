@@ -160,3 +160,41 @@ events = [                                         # enbart tangentbord (SPEC-10
   {kind = "key_down", code = 43},                   # Tab: Skicka
   {kind = "key_down", code = 40},                   # Enter
 ]
+
+# list: 200 rader med markering, tangentbordsnavigering och detaljdialog (modules/list).
+
+[[case]]
+name = "list-800x600@1"
+module = "list"
+width = 800
+height = 600
+scale = 1
+semantic = "list"
+
+[[case]]
+name = "list-800x600@1-opened"
+module = "list"
+width = 800
+height = 600
+scale = 1
+semantic = "list-opened"
+events = [                                         # pil ned x12 rullar rad 13 in i bild, Enter öppnar
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 40},                   # Enter
+]
+
+[[case]]
+name = "list-400x700@2"
+module = "list"
+width = 400
+height = 700
+scale = 2
+events = [
+  {kind = "scroll", dy = 300},                      # pixlar
+  {kind = "scroll", dy = 2, lines = true},          # 2 rader à 56 px
+  {kind = "pointer_down", x = 200, y = 300},       # markerar raden under pekaren
+  {kind = "pointer_up", x = 200, y = 300},
+]

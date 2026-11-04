@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 18, "w": 200, "h": 27.5, "text": "Fakturor"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 659, "y": 25, "w": 125, "h": 16.25, "text": "200 poster · rad 13"},
+    {"id": 4, "parent_id": 1, "role": 8, "role_name": "list", "x": 0, "y": 64, "w": 800, "h": 536, "text": "Fakturor"},
+    {"id": 5, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 40, "w": 800, "h": 56, "text": "Holmgrens Glas, Avtal 1004 · Utkast · 2026-01-12, 7 593 kr"},
+    {"id": 6, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 96, "w": 800, "h": 56, "text": "Berglunds Rör, Offert 1005 · Förfallen · 2026-01-25, 6 349 kr"},
+    {"id": 7, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 152, "w": 800, "h": 56, "text": "Örnbergs Plåt, Faktura 1006 · Skickad · 2026-01-10, 19 284 kr"},
+    {"id": 8, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 208, "w": 800, "h": 56, "text": "Åkerlunds Åkeri, Påminnelse 1007 · Utkast · 2026-01-23, 21 854 kr"},
+    {"id": 9, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 264, "w": 800, "h": 56, "text": "Sjöberg & Söner, Kreditnota 1008 · Betald · 2026-01-08, 16 263 kr"},
+    {"id": 10, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 320, "w": 800, "h": 56, "text": "Granits Grus, Avtal 1009 · Skickad · 2026-01-21, 12 199 kr"},
+    {"id": 11, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 376, "w": 800, "h": 56, "text": "Lindqvist Måleri, Offert 1010 · Utkast · 2026-01-06, 23 038 kr"},
+    {"id": 12, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 432, "w": 800, "h": 56, "text": "Vikens Varv, Faktura 1011 · Betald · 2026-01-19, 14 068 kr"},
+    {"id": 13, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 488, "w": 800, "h": 56, "text": "Hagström El, Påminnelse 1012 · Förfallen · 2026-01-04, 14 317 kr"},
+    {"id": 14, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 544, "w": 800, "h": 56, "text": "Nordlund Bygg, Kreditnota 1013 · Utkast · 2026-01-17, 13 449 kr"},
+    {"id": 15, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 0, "y": 600, "w": 800, "h": 56, "text": "Fjällvind Design, Avtal 1014 · Betald · 2026-01-02, 12 768 kr"},
+    {"id": 16, "parent_id": 1, "role": 17, "role_name": "dialog", "x": 160, "y": 143.375, "w": 480, "h": 313.25, "text": "Kreditnota 1013"},
+    {"id": 17, "parent_id": 16, "role": 2, "role_name": "heading", "x": 184, "y": 167.375, "w": 432, "h": 25, "text": "Kreditnota 1013"},
+    {"id": 18, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 208.375, "w": 432, "h": 24, "text": "Kund: Nordlund Bygg"},
+    {"id": 19, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 232.375, "w": 432, "h": 24, "text": "Status: Utkast"},
+    {"id": 20, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 256.375, "w": 432, "h": 24, "text": "Datum: 2026-01-17"},
+    {"id": 21, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 280.375, "w": 432, "h": 24, "text": "Belopp: 13 449 kr"},
+    {"id": 22, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 316.375, "w": 432, "h": 56.25, "text": "Raden öppnades med Enter eller ett klick på en redan markerad rad. Escape, Enter eller ett klick utanför kortet stänger."},
+    {"id": 900, "parent_id": 16, "role": 4, "role_name": "button", "x": 496, "y": 392.625, "w": 120, "h": 40, "text": "Stäng"}
+  ]
+}
