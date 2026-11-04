@@ -361,6 +361,66 @@ fn spec_2_1_5_determinism() {
     assert_ne!(a_dls[0], a_dls[1], "the clock and random source do advance");
 }
 
+/// SPEC-2.1.5: a module cannot observe which CPU it runs on through floating
+/// point. `inf - inf` yields the default NaN, whose sign bit differs between
+/// x86_64 (0xFFC00000) and AArch64 (0x7FC00000); the engine canonicalises it.
+/// The operands come from `dt_ms` so the compiler cannot fold the expression.
+#[test]
+fn spec_2_1_5_nan_is_canonical() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (memory (export "memory") 1)
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (local $inf f32)
+                (local.set $inf (f32.div (f32.convert_i32_s (local.get 0)) (f32.const 0)))
+                (i32.reinterpret_f32 (f32.sub (local.get $inf) (local.get $inf))))
+            {STUBS})"#
+    ));
+    let mut rt = load(&bytes);
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame(1).unwrap();
+    assert_eq!(
+        rt.last_frame().ops_reported as u32,
+        0x7FC0_0000,
+        "NaN must be canonical regardless of host CPU"
+    );
+}
+
+/// SPEC-2.1.5: relaxed SIMD instructions may give different results on
+/// different CPUs, so a module using them is refused before it runs; the ABI
+/// check and the engine agree.
+#[test]
+fn spec_2_1_5_relaxed_simd_refused() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (memory (export "memory") 1)
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (drop (f32x4.relaxed_madd (v128.const i32x4 0 0 0 0) (v128.const i32x4 0 0 0 0) (v128.const i32x4 0 0 0 0)))
+                i32.const 0)
+            {STUBS})"#
+    ));
+    assert!(matches!(check_abi_bytes(&bytes), Err(Error::Invalid(_))));
+    assert!(matches!(
+        Runtime::load(&bytes, &sha256(&bytes), Options::default()),
+        Err(Error::Invalid(_))
+    ));
+    // Plain SIMD is still fine: its semantics are fixed by the spec.
+    let plain = wasm(&format!(
+        r#"(module
+            (memory (export "memory") 1)
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (i32x4.extract_lane 0 (i32x4.add (v128.const i32x4 1 0 0 0) (v128.const i32x4 2 0 0 0))))
+            {STUBS})"#
+    ));
+    let mut rt = load(&plain);
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame(0).unwrap();
+    assert_eq!(rt.last_frame().ops_reported, 3);
+}
+
 /// SPEC-5.2.4, SPEC-6.4.3: dl_text returns the layout height times 100, and text_measure
 /// packs width and height the same way (SPEC-5.2.5).
 #[test]

@@ -166,6 +166,14 @@ fn engine() -> &'static Engine {
         // No threads (SPEC-4.2.3): the `threads` cargo feature is off, so the
         // proposal cannot even be enabled; a module using shared memory fails
         // validation and the ABI check before that.
+        //
+        // Determinism (SPEC-2.1.5): relaxed SIMD instructions are allowed to
+        // give different results on x86_64 and AArch64, so the proposal is
+        // off (the ABI check refuses such modules with the same feature set,
+        // see `abi_check::features`). NaN bit patterns are canonicalised so a
+        // module cannot observe which CPU produced a NaN.
+        config.wasm_relaxed_simd(false);
+        config.cranelift_nan_canonicalization(true);
         Engine::new(&config).expect("wasmtime engine")
     })
 }

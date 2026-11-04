@@ -9,6 +9,13 @@ use std::collections::BTreeMap;
 /// `(ptr, len)` arguments. See `docs/BUILD-NOTES.md` on SPEC-4.2.1.
 pub const MEMORY_EXPORT: &str = "memory";
 
+/// WebAssembly proposals a module may use: wasmparser's defaults without
+/// relaxed SIMD, whose instructions may differ between CPUs (SPEC-2.1.5).
+/// Mirrors the engine configuration in `crate::engine`.
+fn features() -> wasmparser::WasmFeatures {
+    wasmparser::WasmFeatures::default() & !wasmparser::WasmFeatures::RELAXED_SIMD
+}
+
 /// Result of validating a module against SPEC §4.2 and §5.
 #[derive(Debug, Default)]
 pub struct AbiReport {
@@ -84,7 +91,9 @@ fn invalid(e: wasmparser::BinaryReaderError) -> Error {
 pub fn check_abi_bytes(bytes: &[u8]) -> Result<AbiReport, Error> {
     use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
-    wasmparser::validate(bytes).map_err(invalid)?;
+    wasmparser::Validator::new_with_features(features())
+        .validate_all(bytes)
+        .map_err(invalid)?;
 
     let mut report = AbiReport::default();
     let mut types: Vec<wasmparser::FuncType> = Vec::new();
