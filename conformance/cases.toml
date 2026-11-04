@@ -282,3 +282,76 @@ resources = [
   "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
 ]
 events = [{kind = "key_down", code = 77}]            # End: sista kortet
+
+# document: rapport med byline, tvåspaltig brödtext som blir enspaltig under 640 px,
+# datatabell (sem.table/row/cell), noter och tangentbordsfokus över länkar
+# (modules/document). Hela trädet registreras varje frame så nod-id är stabila;
+# `focus`-fallet skickar KIND_FOCUS som värdens fokusordning skulle (SPEC-10.3.1).
+
+[[case]]
+name = "document-1280x800@1"
+module = "document"
+width = 1280
+height = 800
+scale = 1
+semantic = "document"
+
+[[case]]
+name = "document-400x700@1"
+module = "document"
+width = 400
+height = 700
+scale = 1
+semantic = "document-narrow"
+
+[[case]]
+name = "document-400x700@1-table"
+module = "document"
+width = 400
+height = 700
+scale = 1
+events = [
+  {kind = "key_down", code = 78},                   # Page Down (652 px)
+  {kind = "key_down", code = 78},
+  {kind = "scroll", dy = 14, lines = true},         # 14 rader à 24 px: tabellen i enspaltsläge
+]
+
+[[case]]
+name = "document-1280x800@1-tab3"
+module = "document"
+width = 1280
+height = 800
+scale = 1
+semantic = "document-tab3"
+events = [
+  {kind = "key_down", code = 43},                   # Tab: Maja Ek
+  {kind = "key_up", code = 43},
+  {kind = "key_down", code = 43},                   # Tab: Bakgrund
+  {kind = "key_up", code = 43},
+  {kind = "key_down", code = 43},                   # Tab: Metod (tredje länken) får fokusring
+]
+
+[[case]]
+name = "document-800x600@1-tab5"
+module = "document"
+width = 800
+height = 600
+scale = 1
+events = [                                         # femte länken (CSV) rullas in i bild
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+]
+
+[[case]]
+name = "document-1024x768@1-focus"
+module = "document"
+width = 1024
+height = 768
+scale = 1
+events = [
+  {kind = "focus", node = 93, gained = true, keyboard = true},   # värden: sista notlänken
+  {kind = "key_down", code = 43, modifiers = 1},                 # Skift+Tab: länken före
+]
