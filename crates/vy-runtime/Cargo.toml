@@ -10,7 +10,6 @@ description = "wasmtime instance per tab: ABI imports, fuel budget, memory cap, 
 vy-abi.workspace = true
 vy-dl.workspace = true
 vy-render.workspace = true
-anyhow.workspace = true
 wasmparser.workspace = true
 wasmtime.workspace = true
 sha2.workspace = true

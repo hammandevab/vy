@@ -318,18 +318,32 @@ mod tests {
         .is_err());
     }
 
-    /// SPEC-13.1.4: compiling the reference module is fast. The 60 ms figure is a
-    /// release-mode budget on the reference machine (`vy-cli bench`, M3); here a
-    /// debug build must stay under 2 s so the gate never flakes.
+    /// SPEC-13.1.4: compiling a 300 KB module takes at most 60 ms, P95 over
+    /// 100 runs on the reference machine (SPEC §13), and 0 ms on a
+    /// compilation-cache hit. A release-mode measurement for `vy-cli bench`
+    /// (M3); `hello` stands in until a reference page of that size exists
+    /// (M2), and no compilation cache is configured yet, so the 0 ms half
+    /// stays open. Meaningless in a debug build, hence the guard.
     #[test]
+    #[ignore = "M3: bench"]
     fn spec_13_1_4_compile_time() {
+        if cfg!(debug_assertions) {
+            panic!("SPEC-13.1.4 is a release-mode budget; run with --release");
+        }
         let wasm = hello();
         let hash = vy_runtime::sha256(&wasm);
-        let t = Instant::now();
-        let rt = Runtime::load(&wasm, &hash, Options::default()).unwrap();
-        let elapsed = t.elapsed();
-        drop(rt);
-        assert!(elapsed.as_millis() < 2000, "compile took {elapsed:?}");
+        let mut samples: Vec<_> = (0..100)
+            .map(|_| {
+                let t = Instant::now();
+                let rt = Runtime::load(&wasm, &hash, Options::default()).unwrap();
+                let elapsed = t.elapsed();
+                drop(rt);
+                elapsed
+            })
+            .collect();
+        samples.sort();
+        let p95 = samples[94];
+        assert!(p95.as_millis() <= 60, "P95 compile time {p95:?} > 60 ms");
     }
 
     /// SPEC-11.3.1: `--size` parsing.
