@@ -59,3 +59,22 @@ samma featuremängd); bidi-separatorer → `\n`, obegränsad buffert för RTL, `
 **Rekommendation.** Merge efter fynd 1–2 (bytetak och värdkostnad i bränslet) och att
 `render --frames` respekterar `wants_frame()`. Fynd 4–6 kan gå som M1.5/M3-poster. Fixarna
 `8cbbeba`/`73600d0` ingår redan på `main` i den här granskningen.
+
+## Uppföljning
+
+Byggagent, efter granskningen. Rekommendationens villkor (fynd 1–3) är åtgärdade på `main`;
+guldbilderna är oförändrade (4/4 à 0,000 %).
+
+| Fynd | Status | Commit |
+| --- | --- | --- |
+| 1. Budgeten mäter bara wasm-bränsle | **Stängt.** `FUEL_PER_HOST_BYTE` = 32 debiteras per byte värden formar, kodar, kopierar eller genererar i en import; en import som tömmer bränslet utlöser själv `OutOfFuel`. Test `spec_5_3_3_host_work_costs_fuel`: fyra 64 KB-formningar ger `KIND_BUDGET`, 2 MB `random` avbryts vid hårda gränsen. | `b7c5c26` |
+| 2. Obegränsade kopior ur modulminnet | **Stängt.** Namngivna tak i `vy_abi::limits` (föreslagen SPEC-9.3.2 i BUILD-NOTES); `slice`/`string` är enda läsarna och avvisar `len` över taket med `E_ARG` utan kopia; högst 65 536 noder och 16 MB text (träd + display list) per frame. Tester `spec_9_3_1_byte_caps_per_call` (15 fall), `spec_9_3_1_frame_caps`, `spec_9_3_1_text_bytes_counted`, `spec_9_3_1_byte_caps_consistent`. | `d0378bf`, `b7c5c26` |
+| 3. `render --frames` ignorerar `wants_frame()` | **Stängt.** Frame 1 efter init, därefter bara medan modulen begär; `N` är ett tak. Test `spec_6_2_1_render_frames_is_a_ceiling`. | `d71d463` |
+| 4. ABI-kontroll och wasmparser-versioner | Öppet (M1.5). | – |
+| 5. M1-grinden: 4 guldbilder, ingen macOS | Öppet (M1.5). | – |
+| 6. Minnesväxt; oanvänd `anyhow` | `anyhow` borttagen. `SwashCache`/klippmask öppna (M3). | `310d839` |
+| `spec_13_1_4_compile_time` | **Stängt.** Riktig release-mätning (P95 över 100 ≤ 60 ms) bakom `#[ignore = "M3: bench"]`; panik i debug. Verifierad en gång med `--release`. | `310d839` |
+| `spec_2_1_5_determinism` över plattformar | Öppet (följer fynd 5). | – |
+
+Grindar efter uppföljningen: fmt, clippy, `cargo test --workspace` (79 gröna, 51 ignorerade),
+spec_trace 125/125, modulbygge + ABI-kontroll, konformans 4/4 à 0,000 %.
