@@ -1,0 +1,25 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Vy reference module 0: a title, a paragraph and a rectangle"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vy-abi = { path = "../../crates/vy-abi" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

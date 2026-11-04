@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vy-abi",
+    "crates/vy-manifest",
+    "crates/vy-proto",
+    "crates/vy-dl",
+    "crates/vy-runtime",
+    "crates/vy-render",
+    "crates/vy-shell",
+    "crates/vy-cli",
+]
+# modules/* byggs separat för wasm32 (tools/build_modules.sh)
+exclude = ["modules"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/hammandevab/vy"
+rust-version = "1.80"
+
+[workspace.dependencies]
+vy-abi = { path = "crates/vy-abi" }
+vy-dl = { path = "crates/vy-dl" }
+vy-manifest = { path = "crates/vy-manifest" }
+anyhow = "1"
+wasmparser = "0.220"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

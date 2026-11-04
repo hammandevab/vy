@@ -1,0 +1,9 @@
+[package]
+name = "vy-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vy-abi.workspace = true

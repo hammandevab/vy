@@ -1,0 +1,37 @@
+# Grindar enligt SPEC-12.2.1: fmt, clippy, test, spec-spårning, modulbygge + ABI-kontroll.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Backlog (informational)
+        run: cargo test --workspace -- --ignored --list | grep -c ': test' || true
+      - name: Spec trace
+        run: python3 tools/spec_trace.py
+      - name: Build modules
+        run: tools/build_modules.sh
+      - name: ABI check
+        run: cargo run -p vy-cli -- check-abi target/wasm/hello.wasm
+      - name: Module lint
+        run: cd modules/hello && cargo clippy --target wasm32-unknown-unknown -- -D warnings

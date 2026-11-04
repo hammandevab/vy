@@ -1,0 +1,20 @@
+[package]
+name = "vy-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless tools: check-abi, render, conformance, bench"
+
+[[bin]]
+name = "vy-cli"
+path = "src/main.rs"
+
+[dependencies]
+vy-abi.workspace = true
+vy-dl.workspace = true
+anyhow.workspace = true
+wasmparser.workspace = true
+
+[dev-dependencies]
+wat = "1"

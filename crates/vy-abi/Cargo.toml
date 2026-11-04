@@ -1,0 +1,9 @@
+[package]
+name = "vy-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ABI constants shared by the Vy host and Vy modules (no_std)"
+
+[dependencies]

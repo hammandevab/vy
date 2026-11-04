@@ -1,0 +1,10 @@
+[package]
+name = "vy-dl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Display list buffer: encoding, validation and decoding (SPEC appendix C)"
+
+[dependencies]
+vy-abi.workspace = true
