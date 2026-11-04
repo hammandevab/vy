@@ -3,8 +3,9 @@
 //! `conformance/cases.toml` lists cases; each renders a module at a size and
 //! scale and compares the pixels with `conformance/golden/<name>.png`. A case
 //! may also name a semantic tree under `conformance/semantic/`, grant
-//! capabilities to the headless host and replay input events before the
-//! final frame, so focus, hover and scroll states are testable.
+//! capabilities to the headless host, hand the module package resources
+//! (files relative to the repository root) and replay input events before
+//! the final frame, so focus, hover and scroll states are testable.
 
 use crate::{render, RenderRequest, ScriptedEvent};
 use anyhow::{anyhow, bail, Context, Result};
@@ -37,6 +38,9 @@ pub struct Case {
     pub semantic: Option<String>,
     /// Capabilities the headless host grants (SPEC-8.2.1).
     pub capabilities: Capabilities,
+    /// Package resources as paths relative to the repository root;
+    /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1).
+    pub resources: Vec<String>,
     /// Events replayed after the first frame.
     pub events: Vec<ScriptedEvent>,
 }
@@ -269,8 +273,8 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
 
 /// Parse the restricted TOML used by `cases.toml`: `[[case]]` tables holding
 /// `key = value` lines with quoted strings, numbers, booleans, arrays of
-/// strings (`capabilities`) and arrays of inline tables (`events`, which
-/// may span lines); `#` comments.
+/// strings (`capabilities`, `resources`) and arrays of inline tables
+/// (`events`, which may span lines); `#` comments.
 ///
 /// This is deliberately not a TOML parser (CLAUDE.md: no dependency for what
 /// fits in 200 lines); anything outside the subset is an error.
@@ -285,6 +289,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         frames: Option<u32>,
         semantic: Option<String>,
         capabilities: Capabilities,
+        resources: Vec<String>,
         events: Vec<ScriptedEvent>,
     }
     fn finish(d: Draft, line: usize) -> Result<Case> {
@@ -306,6 +311,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             frames: d.frames.unwrap_or(1 + d.events.len() as u32),
             semantic: d.semantic,
             capabilities: d.capabilities,
+            resources: d.resources,
             events: d.events,
             name,
         })
@@ -372,6 +378,12 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                     }
                 }
                 d.capabilities = caps;
+            }
+            "resources" => {
+                d.resources = parse_array(value, line)?
+                    .into_iter()
+                    .map(|e| Ok(Scalar::parse(e, line)?.str(key, line)?.to_string()))
+                    .collect::<Result<_>>()?;
             }
             "events" => {
                 d.events = parse_array(value, line)?
@@ -473,6 +485,14 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
             module_path.display()
         )
     })?;
+    let resources = case
+        .resources
+        .iter()
+        .map(|r| {
+            let path = root.join(r);
+            fs::read(&path).with_context(|| format!("reading resource {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let req = RenderRequest {
         wasm: &wasm,
         width: case.width,
@@ -481,7 +501,7 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         frames: case.frames,
         memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
         capabilities: case.capabilities,
-        resources: &[],
+        resources: &resources,
         events: &case.events,
     };
     let out = render(&req)?;
@@ -652,6 +672,7 @@ mod tests {
         assert_eq!(c.module, "hello");
         assert_eq!(c.capabilities, Capabilities::default());
         assert!(c.events.is_empty());
+        assert!(c.resources.is_empty());
 
         let parsed = parse_cases(
             "# comment\n[[case]]\nname = \"a\"\nmodule = \"m\"\nwidth = 1\nheight = 2\n\n[[case]]\nname = \"b\" # x\nmodule = \"m\"\nwidth = 3\nheight = 4\nscale = 1.5\nframes = 2\nsemantic = \"m\"\n",
@@ -682,6 +703,7 @@ module = "form"
 width = 800
 height = 600
 capabilities = ["ime", "storage"]
+resources = ["modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png"]
 events = [                                      # comment after the bracket
   {kind = "pointer_down", x = 100, y = 200.5},   # click
   {kind = "pointer_up", x = 100, y = 200.5, button = 1, modifiers = 2},
@@ -695,6 +717,14 @@ events = [                                      # comment after the bracket
         assert_eq!(cases.len(), 1);
         let c = &cases[0];
         assert!(c.capabilities.ime && c.capabilities.storage && !c.capabilities.net);
+        assert_eq!(
+            c.resources,
+            vec![
+                "modules/gallery/res/01-ringar.png".to_string(),
+                "modules/gallery/res/02-rutor.png".to_string()
+            ],
+            "resource paths are kept in order: index i is resource id i + 1"
+        );
         assert_eq!(c.frames, 8, "1 + 7 events");
         assert_eq!(
             c.events,
@@ -746,6 +776,8 @@ events = [                                      # comment after the bracket
             "events = [{kind = \"key_down\", code = \"a\"}]",
             "events = [{kind = \"scroll\", dy = 1, lines = 1}]",
             "events = [{kind = \"scroll\", dy = 1}",
+            "resources = [1]",
+            "resources = \"a.png\"",
         ] {
             assert!(parse_cases(&format!("{base}{bad}\n")).is_err(), "{bad}");
         }
