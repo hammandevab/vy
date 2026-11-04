@@ -7,7 +7,8 @@
 # Formatet är en delmängd av TOML: [[case]]-tabeller med name, module, width, height,
 # scale (standard 1), frames (standard 1 + antal events; ett tak – vy_frame anropas bara så
 # länge modulen begär en ny frame, SPEC-6.2.1), semantic, capabilities (lista med namn ur
-# SPEC-8.2.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
+# SPEC-8.2.1), resources (lista med filer relativt repots rot; resources[i] blir resurs-id
+# i + 1, SPEC-4.5.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
 # key_down/up med code (USB HID); text_input med text; scroll med dx, dy, lines).
 
 [[case]]
@@ -197,4 +198,70 @@ events = [
   {kind = "scroll", dy = 2, lines = true},          # 2 rader à 56 px
   {kind = "pointer_down", x = 200, y = 300},       # markerar raden under pekaren
   {kind = "pointer_up", x = 200, y = 300},
+]
+
+# gallery: åtta PNG-resurser i rutnät med cover/contain/stretch och en ljuslåda
+# (modules/gallery). Resurserna ges i ordning: resources[i] är resurs-id i + 1.
+
+[[case]]
+name = "gallery-800x600@1"
+module = "gallery"
+width = 800
+height = 600
+scale = 1
+semantic = "gallery"
+resources = [
+  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
+  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
+  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
+  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+]
+
+[[case]]
+name = "gallery-800x600@1-opened"
+module = "gallery"
+width = 800
+height = 600
+scale = 1
+semantic = "gallery-opened"
+resources = [
+  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
+  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
+  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
+  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+]
+events = [
+  {kind = "pointer_down", x = 400, y = 170},       # andra bilden (Rutor, contain)
+  {kind = "pointer_up", x = 400, y = 170},
+  {kind = "key_down", code = 79},                   # pil höger: tredje bilden (Vågor)
+]
+
+[[case]]
+name = "gallery-1024x768@1.5"
+module = "gallery"
+width = 1024
+height = 768
+scale = 1.5
+resources = [
+  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
+  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
+  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
+  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+]
+
+[[case]]
+name = "gallery-400x700@1-end"
+module = "gallery"
+width = 400
+height = 700
+scale = 1
+resources = [
+  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
+  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
+  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
+  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+]
+events = [
+  {kind = "scroll", dy = 500},                      # en kolumn: rullning i pixlar
+  {kind = "key_down", code = 77},                   # End: klampas mot sista raden
 ]
