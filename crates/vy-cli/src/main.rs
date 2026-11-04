@@ -1,379 +1,183 @@
 //! `vy-cli`: headless tools for the Vy client.
 //!
-//! M0 ships `check-abi`. `render`, `conformance` and `bench` arrive with M1–M3.
+//! M0 shipped `check-abi`; M1 adds `render` and `conformance`; `bench` arrives with M3.
 
-use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
-use std::fs;
+use anyhow::{anyhow, bail, Result};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  vy-cli check-abi <module.wasm>\n  vy-cli render <addr|file> --out <png> --size WxH [--scale S]   (M1)\n  vy-cli conformance   (M1)\n  vy-cli bench         (M3)"
+        "usage:\n  \
+         vy-cli check-abi <module.wasm>\n  \
+         vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames N] [--dump-semantic <json>]\n  \
+         vy-cli conformance [--update] [--root <dir>]\n  \
+         vy-cli bench         (M3)"
     );
     ExitCode::from(2)
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("check-abi") => match args.get(1) {
-            Some(path) => match check_abi(path) {
-                Ok(report) => {
-                    print!("{report}");
-                    if report.ok() {
-                        ExitCode::SUCCESS
-                    } else {
-                        ExitCode::FAILURE
-                    }
-                }
-                Err(e) => {
-                    eprintln!("error: {e:#}");
-                    ExitCode::FAILURE
-                }
-            },
-            None => usage(),
-        },
-        Some("render") | Some("conformance") | Some("bench") => {
-            eprintln!("{}: not implemented before M1 (see CLAUDE.md)", args[0]);
-            ExitCode::from(2)
+    let result = match args.first().map(String::as_str) {
+        Some("check-abi") => check_abi(&args[1..]),
+        Some("render") => render(&args[1..]),
+        Some("conformance") => conformance(&args[1..]),
+        Some("bench") => {
+            eprintln!("bench: not implemented before M3 (see CLAUDE.md)");
+            return ExitCode::from(2);
         }
-        _ => usage(),
-    }
-}
-
-/// Result of validating a module against SPEC §4.2 and §5.
-#[derive(Debug, Default)]
-pub struct AbiReport {
-    /// Human-readable problems; empty means the module conforms.
-    pub problems: Vec<String>,
-    /// Imports found, by name.
-    pub imports: Vec<String>,
-    /// Function exports found, by name.
-    pub exports: Vec<String>,
-    /// Declared memory limits in pages (min, max).
-    pub memory: Option<(u64, Option<u64>)>,
-}
-
-impl AbiReport {
-    /// True when no problems were found.
-    pub fn ok(&self) -> bool {
-        self.problems.is_empty()
-    }
-}
-
-impl std::fmt::Display for AbiReport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "exports: {}", self.exports.join(", "))?;
-        writeln!(f, "imports: {}", self.imports.join(", "))?;
-        match self.memory {
-            Some((min, Some(max))) => writeln!(f, "memory: {min}..{max} pages")?,
-            Some((min, None)) => writeln!(f, "memory: {min}.. pages (no max)")?,
-            None => writeln!(f, "memory: none")?,
-        }
-        if self.problems.is_empty() {
-            writeln!(f, "ABI 1.0: OK")
-        } else {
-            writeln!(f, "ABI 1.0: {} problem(s)", self.problems.len())?;
-            for p in &self.problems {
-                writeln!(f, "  - {p}")?;
-            }
-            Ok(())
+        _ => return usage(),
+    };
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
         }
     }
 }
 
-fn ty(v: wasmparser::ValType) -> Option<vy_abi::Ty> {
-    use wasmparser::ValType as V;
-    match v {
-        V::I32 => Some(vy_abi::Ty::I32),
-        V::I64 => Some(vy_abi::Ty::I64),
-        V::F32 => Some(vy_abi::Ty::F32),
-        _ => None,
+/// Minimal `--flag value` parsing: positionals and a map of flags.
+struct Args {
+    positional: Vec<String>,
+    flags: Vec<(String, Option<String>)>,
+}
+
+impl Args {
+    fn parse(args: &[String], value_flags: &[&str], bool_flags: &[&str]) -> Result<Self> {
+        let mut positional = Vec::new();
+        let mut flags = Vec::new();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if let Some(name) = a.strip_prefix("--") {
+                if value_flags.contains(&name) {
+                    let v = it.next().ok_or_else(|| anyhow!("--{name} needs a value"))?;
+                    flags.push((name.to_string(), Some(v.clone())));
+                } else if bool_flags.contains(&name) {
+                    flags.push((name.to_string(), None));
+                } else {
+                    bail!("unknown flag --{name}");
+                }
+            } else {
+                positional.push(a.clone());
+            }
+        }
+        Ok(Self { positional, flags })
+    }
+
+    fn value(&self, name: &str) -> Option<&str> {
+        self.flags
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, v)| v.as_deref())
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.flags.iter().any(|(n, _)| n == name)
     }
 }
 
-fn sig_matches(ft: &wasmparser::FuncType, sig: &vy_abi::Sig) -> bool {
-    let params: Option<Vec<_>> = ft.params().iter().map(|v| ty(*v)).collect();
-    let results: Option<Vec<_>> = ft.results().iter().map(|v| ty(*v)).collect();
-    match (params, results) {
-        (Some(p), Some(r)) => p == sig.params && r.as_slice() == sig.result.as_slice(),
-        _ => false,
+fn check_abi(args: &[String]) -> Result<ExitCode> {
+    let Some(path) = args.first() else {
+        return Ok(usage());
+    };
+    let report = vy_cli::check_abi(path)?;
+    print!("{report}");
+    Ok(if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn render(args: &[String]) -> Result<ExitCode> {
+    let a = Args::parse(
+        args,
+        &["out", "size", "scale", "frames", "dump-semantic"],
+        &[],
+    )?;
+    let (Some(module), Some(out), Some(size)) =
+        (a.positional.first(), a.value("out"), a.value("size"))
+    else {
+        return Ok(usage());
+    };
+    let (width, height) = vy_cli::parse_size(size)?;
+    let scale: f32 = a.value("scale").unwrap_or("1").parse()?;
+    let frames: u32 = a.value("frames").unwrap_or("1").parse()?;
+    let dump = a.value("dump-semantic").map(PathBuf::from);
+    let output = vy_cli::render_to_files(
+        module,
+        Path::new(out),
+        width,
+        height,
+        scale,
+        frames,
+        dump.as_deref(),
+    )?;
+    for log in &output.logs {
+        eprintln!("[{:?} {}] {}", log.source, log.level, log.message);
     }
+    println!(
+        "{out}: {}x{} px, {} display list bytes",
+        output.image.width,
+        output.image.height,
+        output.display_list.len()
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
-fn describe(ft: &wasmparser::FuncType) -> String {
-    format!("{:?} -> {:?}", ft.params(), ft.results())
-}
-
-/// Validate a wasm module against the Vy ABI.
-pub fn check_abi(path: &str) -> Result<AbiReport> {
-    let bytes = fs::read(path).with_context(|| format!("reading {path}"))?;
-    check_abi_bytes(&bytes)
-}
-
-/// Validate wasm bytes against the Vy ABI (SPEC-4.2.1, SPEC-4.2.2, SPEC-4.2.3, SPEC-5.1.*, SPEC-5.2.*).
-pub fn check_abi_bytes(bytes: &[u8]) -> Result<AbiReport> {
-    use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
-
-    wasmparser::validate(bytes).context("module does not validate as WebAssembly")?;
-
-    let mut report = AbiReport::default();
-    let mut types: Vec<wasmparser::FuncType> = Vec::new();
-    // function index space: imported functions first, then defined
-    let mut func_types: Vec<u32> = Vec::new();
-    let mut exports: BTreeMap<String, u32> = BTreeMap::new();
-
-    for payload in Parser::new(0).parse_all(bytes) {
-        match payload? {
-            Payload::TypeSection(reader) => {
-                for t in reader.into_iter_err_on_gc_types() {
-                    types.push(t?);
-                }
-            }
-            Payload::ImportSection(reader) => {
-                for imp in reader {
-                    let imp = imp?;
-                    match imp.ty {
-                        TypeRef::Func(tidx) => {
-                            func_types.push(tidx);
-                            report.imports.push(imp.name.to_string());
-                            if imp.module != vy_abi::IMPORT_MODULE {
-                                let what = if imp.module.starts_with("wasi") {
-                                    "WASI import (SPEC-4.2.3)"
-                                } else {
-                                    "import outside namespace `vy` (SPEC-4.2.2)"
-                                };
-                                report
-                                    .problems
-                                    .push(format!("{what}: {}::{}", imp.module, imp.name));
-                                continue;
-                            }
-                            match vy_abi::import(imp.name) {
-                                None => report
-                                    .problems
-                                    .push(format!("unknown import vy::{} (SPEC-5.2)", imp.name)),
-                                Some(sig) => {
-                                    let ft = &types[tidx as usize];
-                                    if !sig_matches(ft, sig) {
-                                        report.problems.push(format!(
-                                            "import vy::{} has signature {} but SPEC-5.2 says {:?} -> {:?}",
-                                            imp.name,
-                                            describe(ft),
-                                            sig.params,
-                                            sig.result
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        other => report.problems.push(format!(
-                            "non-function import {}::{} ({other:?})",
-                            imp.module, imp.name
-                        )),
-                    }
-                }
-            }
-            Payload::FunctionSection(reader) => {
-                for t in reader {
-                    func_types.push(t?);
-                }
-            }
-            Payload::MemorySection(reader) => {
-                for m in reader {
-                    let m = m?;
-                    report.memory = Some((m.initial, m.maximum));
-                    if let Some(max) = m.maximum {
-                        if max > u64::from(vy_abi::limits::MAX_MEMORY_PAGES) {
-                            report.problems.push(format!(
-                                "memory max {max} pages exceeds {} (SPEC-8.1.3)",
-                                vy_abi::limits::MAX_MEMORY_PAGES
-                            ));
-                        }
-                    }
-                }
-            }
-            Payload::ExportSection(reader) => {
-                for e in reader {
-                    let e = e?;
-                    if e.kind == ExternalKind::Func {
-                        exports.insert(e.name.to_string(), e.index);
-                    }
-                }
-            }
-            _ => {}
+/// Repository root: `--root`, else the first ancestor of the working directory
+/// holding `conformance/cases.toml`.
+fn find_root(explicit: Option<&str>) -> Result<PathBuf> {
+    if let Some(r) = explicit {
+        return Ok(PathBuf::from(r));
+    }
+    let mut dir = std::env::current_dir()?;
+    loop {
+        if dir.join(vy_cli::conformance::CASES_FILE).is_file() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            bail!(
+                "{} not found in the working directory or its parents; pass --root",
+                vy_cli::conformance::CASES_FILE
+            );
         }
     }
+}
 
-    if report.memory.is_none() {
-        report
-            .problems
-            .push("module defines no linear memory".into());
-    }
-
-    for sig in vy_abi::EXPORTS {
-        match exports.get(sig.name) {
-            None => report
-                .problems
-                .push(format!("missing export {} (SPEC-4.2.1)", sig.name)),
-            Some(&idx) => {
-                let tidx = func_types
-                    .get(idx as usize)
-                    .copied()
-                    .ok_or_else(|| anyhow::anyhow!("export {} has bad function index", sig.name))?;
-                let ft = &types[tidx as usize];
-                if !sig_matches(ft, sig) {
-                    report.problems.push(format!(
-                        "export {} has signature {} but SPEC-5.1 says {:?} -> {:?}",
-                        sig.name,
-                        describe(ft),
-                        sig.params,
-                        sig.result
-                    ));
-                }
+fn conformance(args: &[String]) -> Result<ExitCode> {
+    let a = Args::parse(args, &["root"], &["update"])?;
+    let root = find_root(a.value("root"))?;
+    let results = vy_cli::conformance::run(&root, a.has("update"))?;
+    let mut failed = 0;
+    for r in &results {
+        let diff = r
+            .diff
+            .map(|d| format!("{:.3} %", d * 100.0))
+            .unwrap_or_else(|| "-".into());
+        let sem = match r.semantic_ok {
+            Some(true) => " semantic ok",
+            Some(false) => " semantic DIFFERS",
+            None => "",
+        };
+        match &r.problem {
+            None => println!("ok    {:<24} diff {diff}{sem}", r.name),
+            Some(p) => {
+                failed += 1;
+                println!("FAIL  {:<24} {p}", r.name);
             }
         }
     }
-    for name in exports.keys() {
-        if vy_abi::export(name).is_none() {
-            report
-                .problems
-                .push(format!("extra function export {name} (SPEC-4.2.1)"));
-        }
+    if a.has("update") {
+        println!("{} golden image(s) written", results.len());
     }
-    report.exports = exports.keys().cloned().collect();
-    if report.exports.is_empty() && report.imports.is_empty() {
-        bail!("module has neither imports nor exports");
-    }
-    Ok(report)
+    Ok(if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        println!("{failed} of {} case(s) failed (SPEC-12.2.2)", results.len());
+        ExitCode::FAILURE
+    })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const GOOD: &str = r#"
-        (module
-          (import "vy" "dl_begin" (func))
-          (import "vy" "dl_rect" (func (param f32 f32 f32 f32 f32 i32)))
-          (memory (export "memory") 1 16)
-          (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
-          (func (export "vy_frame") (param i32) (result i32) i32.const 0)
-          (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
-          (func (export "vy_resize") (param i32 i32 f32))
-          (func (export "vy_suspend") (result i32) i32.const 0)
-          (func (export "vy_alloc") (param i32) (result i32) i32.const 0))
-    "#;
-
-    fn wasm(wat: &str) -> Vec<u8> {
-        wat::parse_str(wat).unwrap()
-    }
-
-    /// SPEC-4.2.1, SPEC-5.1.1..5.1.6: a module with exactly the six exports passes.
-    #[test]
-    fn spec_4_2_1_conforming_module_passes() {
-        let r = check_abi_bytes(&wasm(GOOD)).unwrap();
-        assert!(r.ok(), "{r}");
-        assert_eq!(r.exports.len(), 6);
-    }
-
-    /// SPEC-4.2.1: a missing export is reported.
-    #[test]
-    fn spec_4_2_1_missing_export_fails() {
-        let wat = GOOD.replace(
-            r#"(func (export "vy_alloc") (param i32) (result i32) i32.const 0)"#,
-            "",
-        );
-        let r = check_abi_bytes(&wasm(&wat)).unwrap();
-        assert!(
-            r.problems
-                .iter()
-                .any(|p| p.contains("missing export vy_alloc")),
-            "{r}"
-        );
-    }
-
-    /// SPEC-4.2.1: an extra function export is reported.
-    #[test]
-    fn spec_4_2_1_extra_export_fails() {
-        let wat = GOOD.replace("(memory", r#"(func (export "extra")) (memory"#);
-        let r = check_abi_bytes(&wasm(&wat)).unwrap();
-        assert!(
-            r.problems
-                .iter()
-                .any(|p| p.contains("extra function export extra")),
-            "{r}"
-        );
-    }
-
-    /// SPEC-5.1.2: a wrong export signature is reported.
-    #[test]
-    fn spec_5_1_2_wrong_signature_fails() {
-        let wat = GOOD.replace(
-            r#"(func (export "vy_frame") (param i32) (result i32) i32.const 0)"#,
-            r#"(func (export "vy_frame") (param i64) (result i32) i32.const 0)"#,
-        );
-        let r = check_abi_bytes(&wasm(&wat)).unwrap();
-        assert!(
-            r.problems
-                .iter()
-                .any(|p| p.starts_with("export vy_frame has signature")),
-            "{r}"
-        );
-    }
-
-    /// SPEC-4.2.2: imports outside namespace `vy` are reported.
-    #[test]
-    fn spec_4_2_2_foreign_namespace_fails() {
-        let wat = GOOD.replace(
-            r#"(import "vy" "dl_begin" (func))"#,
-            r#"(import "env" "dl_begin" (func))"#,
-        );
-        let r = check_abi_bytes(&wasm(&wat)).unwrap();
-        assert!(
-            r.problems.iter().any(|p| p.contains("outside namespace")),
-            "{r}"
-        );
-    }
-
-    /// SPEC-4.2.3: WASI imports are reported.
-    #[test]
-    fn spec_4_2_3_wasi_import_fails() {
-        let wat = GOOD.replace(
-            r#"(import "vy" "dl_begin" (func))"#,
-            r#"(import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32)))"#,
-        );
-        let r = check_abi_bytes(&wasm(&wat)).unwrap();
-        assert!(r.problems.iter().any(|p| p.contains("WASI import")), "{r}");
-    }
-
-    /// SPEC-5.2.3: an import with the wrong signature is reported.
-    #[test]
-    fn spec_5_2_3_wrong_import_signature_fails() {
-        let wat = GOOD.replace(
-            r#"(import "vy" "dl_rect" (func (param f32 f32 f32 f32 f32 i32)))"#,
-            r#"(import "vy" "dl_rect" (func (param f32 f32 f32 f32 i32)))"#,
-        );
-        let r = check_abi_bytes(&wasm(&wat)).unwrap();
-        assert!(
-            r.problems
-                .iter()
-                .any(|p| p.starts_with("import vy::dl_rect has signature")),
-            "{r}"
-        );
-    }
-
-    /// SPEC-8.1.3: memory max above 4096 pages is reported.
-    #[test]
-    fn spec_8_1_3_memory_max_limit() {
-        let wat = GOOD.replace(
-            "(memory (export \"memory\") 1 16)",
-            "(memory (export \"memory\") 1 5000)",
-        );
-        let r = check_abi_bytes(&wasm(&wat)).unwrap();
-        assert!(r.problems.iter().any(|p| p.contains("exceeds 4096")), "{r}");
-    }
-}
-
-#[cfg(test)]
-mod bench_tests;

@@ -1,0 +1,37 @@
+# Konformansfall (SPEC-12.2.2). Varje fall renderar target/wasm/<module>.wasm
+# headless och jämförs med golden/<name>.png; högst 0,1 % pixlar får avvika.
+# Ett fall med `semantic` jämför även det semantiska trädet med semantic/<semantic>.json
+# (SPEC-10.2.3). Guldbyte: `cargo run -p vy-cli -- conformance --update` i ett eget
+# commit med prefixet `golden:`.
+#
+# Formatet är en delmängd av TOML: [[case]]-tabeller med name, module, width, height,
+# scale (standard 1), frames (standard 1) och semantic.
+
+[[case]]
+name = "hello-800x600@1"
+module = "hello"
+width = 800
+height = 600
+scale = 1
+semantic = "hello"
+
+[[case]]
+name = "hello-1280x800@1"
+module = "hello"
+width = 1280
+height = 800
+scale = 1
+
+[[case]]
+name = "hello-400x700@1"
+module = "hello"
+width = 400
+height = 700
+scale = 1
+
+[[case]]
+name = "hello-800x600@2"
+module = "hello"
+width = 800
+height = 600
+scale = 2

@@ -1,4 +1,5 @@
-//! Performance budget tests (SPEC §13). Enabled milestone by milestone.
+//! Performance budget tests (SPEC §13) and later conformance gates. Enabled milestone by milestone.
+//! M1 tests live in `lib.rs` and `conformance.rs`.
 
 /// SPEC-1.1.3, SPEC-13.1.2: Enter to first frame on cache hit <= 100 ms.
 #[test]
@@ -11,13 +12,6 @@ fn spec_13_1_2_first_frame_cache_hit() {
 #[test]
 #[ignore = "M3: bench"]
 fn spec_13_1_3_first_frame_cold() {
-    todo!()
-}
-
-/// SPEC-13.1.4: compile 300 KB module <= 60 ms; 0 ms on compile-cache hit.
-#[test]
-#[ignore = "M1: bench"]
-fn spec_13_1_4_compile_time() {
     todo!()
 }
 
@@ -42,20 +36,6 @@ fn spec_13_4_1_sdk_refuses_slow_module() {
     todo!()
 }
 
-/// SPEC-11.3.1, SPEC-11.3.2: `vy-cli render` produces a deterministic PNG via the shared render path.
-#[test]
-#[ignore = "M1: render"]
-fn spec_11_3_1_headless_render() {
-    todo!()
-}
-
-/// SPEC-10.2.3: `--dump-semantic` writes the tree as JSON.
-#[test]
-#[ignore = "M1: render"]
-fn spec_10_2_3_dump_semantic() {
-    todo!()
-}
-
 /// SPEC-10.4.2: a page with input fields but no `ime` capability fails conformance.
 #[test]
 #[ignore = "M2: conformance"]
@@ -67,13 +47,6 @@ fn spec_10_4_2_ime_required_for_input() {
 #[test]
 #[ignore = "M2: conformance"]
 fn spec_12_1_2_conformance_defines_client() {
-    todo!()
-}
-
-/// SPEC-12.2.2: pixel diff <= 0.1 % against golden images.
-#[test]
-#[ignore = "M1: conformance"]
-fn spec_12_2_2_pixel_diff_gate() {
     todo!()
 }
 

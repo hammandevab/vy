@@ -2,4 +2,5 @@
 /modules/*/target
 /target/wasm
 *.png.new
+*.json.new
 .DS_Store
