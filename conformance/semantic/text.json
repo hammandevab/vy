@@ -1,0 +1,11 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 60, "y": 0, "w": 680, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 60, "y": 40, "w": 680, "h": 42.5, "text": "Om sidor som ritar sig själva"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 60, "y": 102.5, "w": 680, "h": 106.25, "text": "Det här är referenssidan text: en lång artikel i fyllnadssvenska, satt så att radbrytning, rullning och klippning måste fungera. Varje stycke nedan är genererat ur ett litet ordförråd med fast frö; innehållet betyder ingenting, formen betyder allt. Rulla med hjulet, piltangenterna, Page Up och Page Down, Home och End."},
+    {"id": 4, "parent_id": 1, "role": 2, "role_name": "heading", "x": 60, "y": 250.75, "w": 680, "h": 27.5, "text": "Skogen med bron"},
+    {"id": 5, "parent_id": 1, "role": 1, "role_name": "text", "x": 60, "y": 288.25, "w": 680, "h": 85, "text": "Sidan hämtar tystnaden, ljuset följer också när svaret faller sträv stycket. Raden vilar före grå bron. Först ängen slutar med adressen. Cachen sparar lätt och skogen undrar bara över ramen. Vägen undrar först mot signaturen tills gården lyssnar också."},
+    {"id": 6, "parent_id": 1, "role": 1, "role_name": "text", "x": 80, "y": 409.25, "w": 644, "h": 42.5, "text": "Kanten börjar sällan under hamnen fast också ritar färgen utan kartan. Värden följer ett sträv byn."},
+    {"id": 7, "parent_id": 1, "role": 1, "role_name": "text", "x": 60, "y": 487.75, "w": 680, "h": 127.5, "text": "Frågan slutar mellan snabb texten när kvällen bygger vid elden bakom gården. Minnet håller egen texten. Kartan bär aldrig mot minnet om av rak pixeln växer. Ängen räknar vid skogen inom minnet, klienten bygger sedan över kartan eller aldrig lämnar stycket bortom kanten. Ofta stänger typsnittet över specen eller här ramen minns genom tiden. Ljuset lämnar kall adressen. Grund hösten hämtar ofta medan måttet bär inom öppen vägen."}
+  ]
+}

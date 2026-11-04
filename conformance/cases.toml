@@ -36,3 +36,52 @@ module = "hello"
 width = 800
 height = 600
 scale = 2
+
+# text: lång artikel med rubriker, citat och rullning (modules/text). Händelser
+# (`events`) spelas upp efter första framen; `frames` är då 1 + antal händelser.
+
+[[case]]
+name = "text-800x600@1"
+module = "text"
+width = 800
+height = 600
+scale = 1
+semantic = "text"
+
+[[case]]
+name = "text-800x600@1-scrolled"
+module = "text"
+width = 800
+height = 600
+scale = 1
+semantic = "text-scrolled"
+events = [
+  {kind = "scroll", dy = 120},
+  {kind = "scroll", dy = 120},
+  {kind = "scroll", dy = 5, lines = true},   # 5 rader à 24 px
+  {kind = "key_down", code = 78},            # Page Down
+  {kind = "key_up", code = 78},
+  {kind = "key_down", code = 81},            # pil ned
+]
+
+[[case]]
+name = "text-400x700@1"
+module = "text"
+width = 400
+height = 700
+scale = 1
+
+[[case]]
+name = "text-400x700@1-end"
+module = "text"
+width = 400
+height = 700
+scale = 1
+events = [{kind = "key_down", code = 77}]    # End: klampas mot artikelns slut
+
+[[case]]
+name = "text-1024x768@1.5"
+module = "text"
+width = 1024
+height = 768
+scale = 1.5
