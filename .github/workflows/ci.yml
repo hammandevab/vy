@@ -1,4 +1,5 @@
-# Grindar enligt SPEC-12.2.1: fmt, clippy, test, spec-spårning, modulbygge + ABI-kontroll.
+# Grindar enligt SPEC-12.2.1: fmt, clippy, test, spec-spårning, modulbygge + ABI-kontroll,
+# och från M1 headless-rendering samt pixeldiff mot guldbilder (SPEC-12.2.2).
 name: ci
 on:
   push:
@@ -23,15 +24,22 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Modules first: the M1 tests in vy-cli render target/wasm/hello.wasm.
+      - name: Build modules
+        run: tools/build_modules.sh
       - name: Test
         run: cargo test --workspace
       - name: Backlog (informational)
         run: "cargo test --workspace -- --ignored --list 2>/dev/null | grep -c 'test$' || true"
       - name: Spec trace
         run: python3 tools/spec_trace.py
-      - name: Build modules
-        run: tools/build_modules.sh
       - name: ABI check
         run: cargo run -p vy-cli -- check-abi target/wasm/hello.wasm
       - name: Module lint
         run: cd modules/hello && cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      # SPEC-11.3.1: headless render without a window.
+      - name: Headless render
+        run: cargo run -p vy-cli -- render target/wasm/hello.wasm --out /tmp/hello.png --size 800x600
+      # SPEC-12.2.2: pixel diff at most 0.1 % against conformance/golden/.
+      - name: Conformance
+        run: cargo run -p vy-cli -- conformance
