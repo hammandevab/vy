@@ -265,7 +265,13 @@ impl GalleryPage {
         let cy = thumb.bottom() + 8.0;
         f.text(cell.x + 12.0, cy, cell.w - 24.0, self.caption, p.name)?;
         let detail = format!("{} · {} × {} px", Picture::fit_name(i), p.w, p.h);
-        f.text(cell.x + 12.0, cy + 20.0, cell.w - 24.0, self.detail, &detail)?;
+        f.text(
+            cell.x + 12.0,
+            cy + 20.0,
+            cell.w - 24.0,
+            self.detail,
+            &detail,
+        )?;
         let caption = format!("{}, {}", p.name, detail);
         f.sem.text(
             Rect::new(cell.x + 12.0, cy, cell.w - 24.0, CAPTION_H - 8.0),
@@ -299,7 +305,8 @@ impl GalleryPage {
                 self.button,
                 "Stäng",
             )?;
-            f.sem.node_with_id(ID_CLOSE, Role::Button, button, "Stäng")?;
+            f.sem
+                .node_with_id(ID_CLOSE, Role::Button, button, "Stäng")?;
             Ok(())
         })
     }
@@ -328,12 +335,21 @@ impl App for GalleryPage {
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
         let window = Rect::new(0.0, 0.0, self.window.width, self.window.height);
-        let below = Rect::new(0.0, HEADER_H, self.window.width, self.window.height - HEADER_H);
+        let below = Rect::new(
+            0.0,
+            HEADER_H,
+            self.window.width,
+            self.window.height - HEADER_H,
+        );
         f.rect(window, 0.0, PAPER)?;
         f.group(Role::Main, window, "", |f| {
             let header = Rect::new(0.0, 0.0, self.window.width, HEADER_H);
             f.rect(header, 0.0, WHITE)?;
-            f.rect(Rect::new(0.0, HEADER_H - 1.0, self.window.width, 1.0), 0.0, LINE)?;
+            f.rect(
+                Rect::new(0.0, HEADER_H - 1.0, self.window.width, 1.0),
+                0.0,
+                LINE,
+            )?;
             let h = f.text(MARGIN, 18.0, 200.0, self.header, TITLE)?;
             f.sem.heading(Rect::new(MARGIN, 18.0, 200.0, h), TITLE)?;
             let sub = format!(
@@ -460,7 +476,11 @@ mod tests {
                 .collect();
             assert_eq!(fits.len(), PICTURES.len());
             assert_eq!(&fits[..3], &[0, 1, 2]);
-            let images = h.sem.iter().filter(|n| n.role == Role::Image as i32).count();
+            let images = h
+                .sem
+                .iter()
+                .filter(|n| n.role == Role::Image as i32)
+                .count();
             assert_eq!(images, PICTURES.len(), "one image node per thumbnail");
             assert!(h.refusals.is_empty(), "{:?}", h.refusals);
         });

@@ -316,7 +316,11 @@ impl App for Game {
                     for (i, &(x, y)) in self.trail[..self.trail_len].iter().enumerate() {
                         let a = (20 + i * 10) as u8;
                         let r = BALL_R * (0.4 + 0.5 * i as f32 / TRAIL as f32);
-                        f.rect(Rect::new(x - r, y - r, 2.0 * r, 2.0 * r), r, BALL.with_alpha(a))?;
+                        f.rect(
+                            Rect::new(x - r, y - r, 2.0 * r, 2.0 * r),
+                            r,
+                            BALL.with_alpha(a),
+                        )?;
                     }
                 }
                 let paddle = self.paddle();
@@ -340,7 +344,12 @@ impl App for Game {
                 let hh = f.text(court.x + (court.w - hw) / 2.0, hy, 0.0, self.hint, hint)?;
                 let status = format!("{title}. {hint}");
                 f.sem.text(
-                    Rect::new(court.x + (court.w - tw.max(hw)) / 2.0, ty, tw.max(hw), th + 8.0 + hh),
+                    Rect::new(
+                        court.x + (court.w - tw.max(hw)) / 2.0,
+                        ty,
+                        tw.max(hw),
+                        th + 8.0 + hh,
+                    ),
                     &status,
                 )?;
             }
@@ -502,7 +511,10 @@ mod tests {
     fn visibility_and_suspend_pause_budget_reduces_work() {
         let mut g = game();
         press(&mut g, key::SPACE);
-        assert!(!g.event(Event::Visibility { visible: false }), "no redraw hidden");
+        assert!(
+            !g.event(Event::Visibility { visible: false }),
+            "no redraw hidden"
+        );
         assert_eq!(g.phase, Phase::Paused);
         assert!(g.event(Event::Visibility { visible: true }), "overlay");
         let ops_paused = run_frame(&mut g);

@@ -95,7 +95,10 @@ impl Row {
     }
 
     fn subtitle(&self) -> String {
-        format!("{} {} · {} · {}", self.kind, self.number, self.status, self.date)
+        format!(
+            "{} {} · {} · {}",
+            self.kind, self.number, self.status, self.date
+        )
     }
 
     fn value(&self) -> String {
@@ -233,7 +236,8 @@ impl ListPage {
         let title_h = text_measure(self.dialog_title, inner, &heading).map_or(25.0, |s| s.h);
         let desc_h = text_measure(self.body, inner, DESCRIPTION).map_or(38.0, |s| s.h);
         // Title, four label/value lines, description, button.
-        let h = DIALOG_PAD + title_h + 16.0 + 4.0 * 24.0 + 12.0 + desc_h + 20.0 + BUTTON_H + DIALOG_PAD;
+        let h =
+            DIALOG_PAD + title_h + 16.0 + 4.0 * 24.0 + 12.0 + desc_h + 20.0 + BUTTON_H + DIALOG_PAD;
         let x = (self.window.width - w) / 2.0;
         let y = ((self.window.height - h) / 2.0).max(16.0);
         let card = Rect::new(x, y, w, h);
@@ -272,7 +276,11 @@ impl ListPage {
             Ok(())
         })?;
         f.text(value_x, r.y + 18.0, 0.0, self.value, &value)?;
-        f.rect(Rect::new(r.x + PAD, r.bottom() - 1.0, r.w - 2.0 * PAD, 1.0), 0.0, LINE)?;
+        f.rect(
+            Rect::new(r.x + PAD, r.bottom() - 1.0, r.w - 2.0 * PAD, 1.0),
+            0.0,
+            LINE,
+        )?;
         let name = format!("{}, {}, {}", row.title(), subtitle, value);
         f.sem.node(Role::ListItem, r, &name)?;
         Ok(())
@@ -318,7 +326,8 @@ impl ListPage {
                 self.button,
                 "Stäng",
             )?;
-            f.sem.node_with_id(ID_CLOSE, Role::Button, button, "Stäng")?;
+            f.sem
+                .node_with_id(ID_CLOSE, Role::Button, button, "Stäng")?;
             Ok(())
         })
     }
@@ -354,8 +363,18 @@ impl App for ListPage {
             // Header with the title and the position of the selection.
             let header = Rect::new(0.0, 0.0, self.window.width, HEADER_H);
             f.rect(header, 0.0, WHITE)?;
-            f.rect(Rect::new(0.0, HEADER_H - 1.0, self.window.width, 1.0), 0.0, LINE)?;
-            let h = f.text(PAD, 18.0, self.window.width - 2.0 * PAD, self.header, "Fakturor")?;
+            f.rect(
+                Rect::new(0.0, HEADER_H - 1.0, self.window.width, 1.0),
+                0.0,
+                LINE,
+            )?;
+            let h = f.text(
+                PAD,
+                18.0,
+                self.window.width - 2.0 * PAD,
+                self.header,
+                "Fakturor",
+            )?;
             f.sem.heading(Rect::new(PAD, 18.0, 200.0, h), "Fakturor")?;
             let count = format!("{ROWS} poster · rad {}", self.selected + 1);
             let cw = text_measure(self.count, 0.0, &count)?.w;
@@ -398,10 +417,11 @@ impl App for ListPage {
                 let px = if lines { dy * LINE_PX } else { dy };
                 self.scroll_by(px)
             }
-            Event::KeyDown { code, .. } if self.open => match code {
-                key::ESCAPE | key::ENTER => self.set_open(false),
-                _ => false,
-            },
+            Event::KeyDown {
+                code: key::ESCAPE | key::ENTER,
+                ..
+            } if self.open => self.set_open(false),
+            Event::KeyDown { .. } if self.open => false,
             Event::KeyDown { code, .. } => match code {
                 key::DOWN => self.select_by(1),
                 key::UP => self.select_by(-1),
