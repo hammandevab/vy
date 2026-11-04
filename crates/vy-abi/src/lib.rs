@@ -646,6 +646,7 @@ mod tests {
     }
 
     /// SPEC-9.3.1: the host's byte caps agree with the wire format they feed
+    /// SPEC-9.3.2: the per-call byte caps are the normative values.
     /// (SPEC-C.1.1, SPEC-C.1.2) and with each other.
     #[test]
     fn spec_9_3_1_byte_caps_consistent() {

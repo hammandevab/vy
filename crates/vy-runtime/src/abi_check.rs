@@ -304,7 +304,7 @@ mod tests {
         );
     }
 
-    /// SPEC-5.3.4: a start function is an entry point outside the six exports.
+    /// SPEC-4.2.5, SPEC-5.3.4: a start function is an entry point outside the six exports.
     #[test]
     fn spec_5_3_4_start_function_rejected() {
         let wat = GOOD.replace("(memory", "(func $s) (start $s) (memory");

@@ -1,6 +1,6 @@
 # Vy – specifikation 1.0 (utkast, M0)
 
-Version 0.1 · 2026-11-04 · Status: utkast under granskning
+Version 0.2 · 2026-11-04 · Status: utkast; M1-frågor avgjorda
 
 Varje normativ mening har ett id på formen `SPEC-<avsnitt>.<del>.<löpnummer>`. Ett id ändras aldrig;
 en mening som utgår behåller sitt id med texten *utgått*. Varje id ska refereras av minst ett test
@@ -46,10 +46,11 @@ kontraktet: ABI 1.0, manifestet, capabilities och konformanssviten.
 - **[SPEC-4.1.3]** Manifestet är CBOR i kanonisk kodning enligt RFC 8949 §4.2 och högst 64 KB.
 - **[SPEC-4.1.4]** Modulen är WebAssembly core; komponentmodellen krävs inte i 1.0; okomprimerad storlek högst 8 MB.
 - **[SPEC-4.1.5]** Resurser får vara PNG, WebP, AVIF, WOFF2 eller rådata; totalt högst 32 MB.
-- **[SPEC-4.2.1]** Modulen exporterar exakt de sex funktionerna i §5.1 med angivna signaturer och inget annat.
+- **[SPEC-4.2.1]** Modulen exporterar exakt de sex funktionerna i §5.1 med angivna signaturer, samt sitt linjära minne under namnet `memory`; inga andra funktionsexporter.
 - **[SPEC-4.2.2]** Modulen importerar endast funktioner ur namnrymden `vy`.
 - **[SPEC-4.2.3]** Modulen importerar inte WASI och använder inte trådar i 1.0.
 - **[SPEC-4.2.4]** Modulens linjära minne får inte växa över manifestets `memory_max`.
+- **[SPEC-4.2.5]** Modulen har ingen wasm-startfunktion; en modul med `start` avvisas av ABI-kontrollen eftersom den vore en ingång utanför de sex exporterna.
 - **[SPEC-4.3.1]** Manifestet anger ABI-version som `"MAJOR.MINOR"`; en modul med okänd major-version avvisas före laddning.
 - **[SPEC-4.3.2]** Minor-versioner är bakåtkompatibla: en 1.x-klient kör varje 1.y-modul där y ≤ x.
 - **[SPEC-4.4.1]** Paketet levereras som zstd-komprimerad tar-ström med medietypen `application/vy-package+zstd`.
@@ -73,15 +74,15 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 
 - **[SPEC-5.2.1]** Livscykel: `abi_version() -> i32` (MAJOR × 100 + MINOR), `log(level: i32, ptr: i32, len: i32)`, `request_frame()`, `exit(code: i32)`.
 - **[SPEC-5.2.2]** `request_frame()` är det enda sättet för modulen att begära ett `vy_frame`-anrop utanför händelser och fönsterändringar.
-- **[SPEC-5.2.3]** Display list: `dl_begin()`, `dl_end()`, `dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32)`, `dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: i32, len: i32) -> i32`, `dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32)`, `dl_path(ptr: i32, len: i32, color: i32, stroke_w: f32)`, `dl_clip_push(x: f32, y: f32, w: f32, h: f32)`, `dl_clip_pop()`.
+- **[SPEC-5.2.3]** Display list: `dl_begin()`, `dl_end()`, `dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32)`, `dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: i32, len: i32) -> i32`, `dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32)` (0 cover, 1 contain, 2 stretch), `dl_path(ptr: i32, len: i32, color: i32, stroke_w: f32)`, `dl_clip_push(x: f32, y: f32, w: f32, h: f32)`, `dl_clip_pop()`.
 - **[SPEC-5.2.4]** `dl_text` returnerar layoutens höjd i logiska pixlar × 100.
 - **[SPEC-5.2.5]** Text: `text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32`, `text_measure(style_id: i32, max_w: f32, ptr: i32, len: i32) -> i64` (bredd × 100 i de höga 32 bitarna, höjd × 100 i de låga), `text_caret(style_id: i32, ptr: i32, len: i32, byte_offset: i32) -> i64` (x × 100 i de höga, y × 100 i de låga).
-- **[SPEC-5.2.6]** Input: `pointer_get() -> i64`, `key_down(code: i32) -> i32`, `ime_begin(x: f32, y: f32, w: f32, h: f32)`, `ime_end()`.
+- **[SPEC-5.2.6]** Input: `pointer_get() -> i64` (x × 100 i de höga 32 bitarna, y × 100 i de låga; knappar och modifierare levereras enbart via events), `key_down(code: i32) -> i32`, `ime_begin(x: f32, y: f32, w: f32, h: f32)` och `ime_end()` (kräver capability `ime`).
 - **[SPEC-5.2.7]** Nätverk (capability `net`): `fetch_begin(method: i32, url_ptr: i32, url_len: i32, body_ptr: i32, body_len: i32) -> i32`, `fetch_poll(req_id: i32) -> i32`, `fetch_read(req_id: i32, dst_ptr: i32, max: i32) -> i32`, `fetch_cancel(req_id: i32)`.
 - **[SPEC-5.2.8]** `fetch_begin` mot en origin som inte står i manifestets `net`-lista returnerar `E_ORIGIN` utan nätverksanrop.
 - **[SPEC-5.2.9]** Lagring (capability `storage`): `state_put(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32`, `state_get(key_ptr: i32, key_len: i32, dst_ptr: i32, max: i32) -> i32`, `state_delete(key_ptr: i32, key_len: i32)`; nyckelrymd per origin, högst 16 MB.
-- **[SPEC-5.2.10]** Navigering: `navigate(url_ptr: i32, url_len: i32, replace: i32)` accepterar endast `vy://` och `https://`; `link_register(id: i32, x: f32, y: f32, w: f32, h: f32, url_ptr: i32, url_len: i32)`.
-- **[SPEC-5.2.11]** Tid och slump: `now_ms() -> i64` är monoton med 1 ms upplösning utan capability `hires_time` och 10 µs med; `random(dst_ptr: i32, len: i32)` fylls av värdens CSPRNG.
+- **[SPEC-5.2.10]** Navigering: `navigate(url_ptr: i32, url_len: i32, replace: i32)` accepterar endast `vy://` och `https://` och returnerar `E_DENIED` i en värd utan navigering (headless); `link_register(id: i32, x: f32, y: f32, w: f32, h: f32, url_ptr: i32, url_len: i32)`.
+- **[SPEC-5.2.11]** Tid och slump: `now_ms() -> i64` är monoton med 1 ms upplösning utan capability `hires_time` och 10 µs med; `random(dst_ptr: i32, len: i32)` fylls av värdens CSPRNG i klienten och av en seedad deterministisk PRNG i headless- och konformansläge.
 - **[SPEC-5.2.12]** Urklipp (capability `clipboard`): `clipboard_read(dst_ptr: i32, max: i32) -> i32` kräver användargest inom 1 s; `clipboard_write(ptr: i32, len: i32)`.
 - **[SPEC-5.2.13]** Semantik: `sem_node(id: i32, parent_id: i32, role: i32, x: f32, y: f32, w: f32, h: f32, ptr: i32, len: i32)` med roller enligt bilaga A.
 
@@ -89,7 +90,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 
 - **[SPEC-5.3.1]** Ett anrop till en import utan beviljad capability returnerar `E_DENIED`, loggas, och avslutar inte modulen.
 - **[SPEC-5.3.2]** `dl_*`-anrop utanför `dl_begin`/`dl_end` returnerar `E_DL_STATE` och ignoreras.
-- **[SPEC-5.3.3]** `vy_frame` har en budget på 8 ms logisk tid; överskrids den två gånger i rad får modulen `KIND_BUDGET` och därefter ett tvingande `vy_suspend`.
+- **[SPEC-5.3.3]** `vy_frame` har en budget på 8 ms logisk tid; första överskridandet ger `KIND_BUDGET` med `c = 0` (varning), det andra i rad ger `KIND_BUDGET` med `c = 1` och därefter ett tvingande `vy_suspend`. Värdens eget arbete i importer (textformning, kopiering) debiteras samma budget.
 - **[SPEC-5.3.4]** Värden anropar aldrig modulen utanför de sex exporterna; asynkrona svar levereras genom `vy_event`.
 - **[SPEC-5.3.5]** ABI 1.0 fryses vid release; befintliga signaturer ändras aldrig inom 1.x.
 
@@ -101,7 +102,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-6.1.4]** Klippstacken har högst djup 32; `dl_clip_pop` utan matchande push returnerar `E_DL_CLIP`.
 - **[SPEC-6.1.5]** Färg är `i32` tolkad som `0xRRGGBBAA` i sRGB.
 - **[SPEC-6.1.6]** Högst 65 536 opkoder per frame; överskott ignoreras och loggas med `E_DL_FULL`.
-- **[SPEC-6.2.1]** Värden anropar `vy_frame` endast efter `request_frame`, efter ett `vy_event` som returnerade 1, eller efter fönsterändring.
+- **[SPEC-6.2.1]** Värden anropar `vy_frame` endast efter `vy_init`, efter `request_frame`, efter ett `vy_event` som returnerade 1, eller efter fönsterändring.
 - **[SPEC-6.2.2]** En stillastående sida förbrukar 0 CPU-tid i modulen.
 - **[SPEC-6.3.1]** Alla koordinater är logiska pixlar; `scale` anger förhållandet till fysiska pixlar.
 - **[SPEC-6.4.1]** Textformning och typsnittsrendering sker i värden; modulen ser aldrig glyfer.
@@ -140,6 +141,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-9.1.2]** Rasterisering och GPU-kontext finns endast i huvudprocessen; sandboxad kod delar aldrig GPU-kontext.
 - **[SPEC-9.2.1]** Beviljade capabilities visas i adressfältet och kan återkallas var för sig av användaren.
 - **[SPEC-9.3.1]** Resursgränser per flik verkställs av värden: minne enligt `memory_max`, 8 ms CPU per frame, 0 CPU i bakgrund utan `persist_frame`, 64 samtidiga nätverksanrop, 256 MB/min nätverk, `quota_kb` lagring.
+- **[SPEC-9.3.2]** Värden kopierar högst dessa byte ur modulminnet per anrop: `log` 4 KB; `dl_text`, `text_measure`, `text_caret` 65 535; `dl_path` 65 535 × 9; `sem_node` 4 KB; `navigate`, `link_register` och `fetch_begin`-URL 2 KB; `fetch_begin`-kropp 1 MB; `state_*`-nyckel 256 byte; `state_put`-värde 1 MB; `clipboard_write` 1 MB. Ett `len` över taket ger `E_ARG` utan kopia. Per frame håller värden högst 65 536 semantiska noder och högst 16 MB text i semantiskt träd och display list tillsammans; överskott ger `E_DL_FULL`.
 - **[SPEC-9.4.1]** En modul vars hash inte matchar manifestet körs aldrig.
 - **[SPEC-9.5.1]** Origin är schema + värd + port; lagring, capabilities och cache-beslut är per origin.
 - **[SPEC-9.5.2]** Ingen mekanism låter en origin läsa en annan origins lagring eller tillstånd.
@@ -209,6 +211,15 @@ Capabilities och mekanismer som återskapar det webben har: `file`, `autofill`, 
 `print`, `capture`, `geo`, `notify`, `embed`, `native_ui`, `worker`, `compute`, `rtc`; `skeleton` och
 strömmad kompilering; `chunks`; `prefs_get`/`PREFS`; `vy_state_get`/`vy_state_set`; textindex vid
 publicering; komponentregister. Specificeras med egna id:n när respektive version påbörjas.
+
+## 17. Produktform: klient, Studio och serversida
+
+Icke-normativt. Vy är tre lager som delar ett kontrakt: en tunn klient (`vy-shell`), ett skaparverktyg
+som själv är en Vy-sida (Studio, 1.1, med capabilities `file`, `net`, `storage`) och en serversida utan
+kärna: `vy-serve` (statisk server för paket, nycklar, textindex och HTML-fallback, M3), en transparenslogg
+för utgivarnycklar (M4) och ett komponentregister med sökindex (1.3). Allt förtroende sitter i signaturen,
+aldrig i en server. Ordning: `vy-serve` först, Studio efter SDK och `file`, loggen med signering,
+registret sist.
 
 ---
 
