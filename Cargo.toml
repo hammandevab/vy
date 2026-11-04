@@ -7,6 +7,7 @@ members = [
     "crates/vy-dl",
     "crates/vy-runtime",
     "crates/vy-render",
+    "crates/vy-sdk",
     "crates/vy-shell",
     "crates/vy-cli",
 ]
@@ -26,6 +27,7 @@ vy-dl = { path = "crates/vy-dl" }
 vy-manifest = { path = "crates/vy-manifest" }
 vy-render = { path = "crates/vy-render" }
 vy-runtime = { path = "crates/vy-runtime" }
+vy-sdk = { path = "crates/vy-sdk" }
 anyhow = "1"
 wasmparser = "0.220"
 # wasmtime without default features: no component model, no async, no GC, no

@@ -1,0 +1,14 @@
+[package]
+name = "vy-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Module-side SDK for Vy pages: typed ABI bindings, frame builder, layout, events, exports"
+
+[dependencies]
+vy-abi.workspace = true
+
+[lints.clippy]
+# The SDK is linked into every module; a missing doc is a missing contract.
+missing_safety_doc = "deny"

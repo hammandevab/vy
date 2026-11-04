@@ -135,6 +135,20 @@ pub mod cap {
     }
 }
 
+/// Modifier bits in the `modifierare` argument of pointer, scroll and key
+/// events (SPEC-A.2.1). SPEC 1.0 names the argument but not its bits; these
+/// are the host's convention (see `docs/BUILD-NOTES.md`).
+pub mod modifier {
+    /// Either Shift key.
+    pub const SHIFT: i32 = 1;
+    /// Either Control key.
+    pub const CTRL: i32 = 2;
+    /// Either Alt/Option key.
+    pub const ALT: i32 = 4;
+    /// Command (macOS) or Windows key.
+    pub const META: i32 = 8;
+}
+
 /// Semantic roles for `sem_node` (SPEC-A.3.1).
 pub mod role {
     /// Plain text run.

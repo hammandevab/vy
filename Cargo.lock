@@ -1283,6 +1283,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vy-sdk"
+version = "0.1.0"
+dependencies = [
+ "vy-abi",
+]
+
+[[package]]
 name = "vy-shell"
 version = "0.1.0"
 dependencies = [
