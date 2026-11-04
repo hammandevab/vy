@@ -138,6 +138,19 @@ fn split_top(s: &str, sep: char) -> Vec<&str> {
     parts
 }
 
+/// `s` without a trailing `#` comment; a `#` inside quotes is text.
+fn strip_comment(s: &str) -> &str {
+    let mut quoted = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '#' if !quoted => return &s[..i],
+            _ => {}
+        }
+    }
+    s
+}
+
 /// Net bracket depth of `s` outside quotes.
 fn depth(s: &str) -> i32 {
     let (mut depth, mut quoted) = (0i32, false);
@@ -303,7 +316,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
     let mut lines = text.lines().enumerate().peekable();
     while let Some((i, raw)) = lines.next() {
         let line = i + 1;
-        let content = split_top(raw, '#')[0].trim();
+        let content = strip_comment(raw).trim();
         if content.is_empty() {
             continue;
         }
@@ -328,7 +341,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                 bail!("line {line}: unterminated array");
             };
             value.push(' ');
-            value.push_str(split_top(more, '#')[0].trim());
+            value.push_str(strip_comment(more).trim());
         }
         let value = value.as_str();
         match key {
@@ -614,7 +627,7 @@ module = "form"
 width = 800
 height = 600
 capabilities = ["ime", "storage"]
-events = [
+events = [                                      # comment after the bracket
   {kind = "pointer_down", x = 100, y = 200.5},   # click
   {kind = "pointer_up", x = 100, y = 200.5, button = 1, modifiers = 2},
   {kind = "text_input", text = "Anna, #1"},
@@ -711,5 +724,54 @@ events = [
         assert_eq!(ime_requirement(&textbox, ime), None);
         assert_eq!(ime_requirement(&button, Capabilities::default()), None);
         assert_eq!(ime_requirement(&[], Capabilities::default()), None);
+
+        // The real page: every form case grants ime, and the suite rejects
+        // the same page when a case does not. With ime granted the host
+        // accepts `ime_begin` on focus (SPEC-5.2.6); without it the call is
+        // denied and logged (SPEC-5.3.1), and the page runs on regardless.
+        let cases = load_cases(&root()).unwrap();
+        let form: Vec<_> = cases.iter().filter(|c| c.module == "form").collect();
+        assert!(!form.is_empty(), "the form page is in the suite");
+        assert!(form.iter().all(|c| c.capabilities.ime));
+        let filled = form
+            .iter()
+            .find(|c| c.name == "form-800x600@1-filled")
+            .unwrap();
+        let mut no_ime = (*filled).clone();
+        no_ime.name = "form-no-ime".into();
+        no_ime.capabilities = Capabilities::default();
+        let r = run_case(&root(), &no_ime, false);
+        assert!(
+            r.problem.as_deref().unwrap_or("").contains("SPEC-10.4.2"),
+            "{r:?}"
+        );
+        let wasm = fs::read(root().join("target/wasm/form.wasm")).unwrap();
+        let logs = |caps: Capabilities| {
+            let req = RenderRequest {
+                wasm: &wasm,
+                width: 800,
+                height: 600,
+                scale: 1.0,
+                frames: no_ime.frames,
+                memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
+                capabilities: caps,
+                resources: &[],
+                events: &no_ime.events,
+            };
+            let out = render(&req).unwrap();
+            assert_eq!(out.semantic[3].text, "Anna Lind", "the page still ran");
+            out.logs
+                .into_iter()
+                .filter(|l| l.message.contains("E_DENIED"))
+                .map(|l| l.message)
+                .collect::<Vec<_>>()
+        };
+        assert!(logs(filled.capabilities).is_empty());
+        let denied = logs(Capabilities::default());
+        assert!(
+            denied.iter().any(|m| m.starts_with("ime_begin: E_DENIED")),
+            "{denied:?}"
+        );
+        assert!(denied.iter().any(|m| m.starts_with("ime_end: E_DENIED")));
     }
 }
