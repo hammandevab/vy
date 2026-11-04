@@ -1,5 +1,7 @@
 # Grindar enligt SPEC-12.2.1: fmt, clippy, test, spec-spårning, modulbygge + ABI-kontroll,
 # och från M1 headless-rendering samt pixeldiff mot guldbilder (SPEC-12.2.2).
+# `gates` på Ubuntu är grinden för allt; `platform` bygger, testar och kör konformans
+# på macOS så att guldbilderna bevisas plattformsoberoende (SPEC-2.1.5, M1-grinden).
 name: ci
 on:
   push:
@@ -24,7 +26,9 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # Modules first: the M1 tests in vy-cli render target/wasm/hello.wasm.
+      - name: Lint SDK for wasm32
+        run: cargo clippy -p vy-sdk --target wasm32-unknown-unknown -- -D warnings
+      # Modules first: the vy-cli tests render target/wasm/*.wasm.
       - name: Build modules
         run: tools/build_modules.sh
       - name: Test
@@ -34,12 +38,42 @@ jobs:
       - name: Spec trace
         run: python3 tools/spec_trace.py
       - name: ABI check
-        run: cargo run -p vy-cli -- check-abi target/wasm/hello.wasm
+        run: for m in target/wasm/*.wasm; do cargo run -q -p vy-cli -- check-abi "$m"; done
       - name: Module lint
-        run: cd modules/hello && cargo clippy --target wasm32-unknown-unknown -- -D warnings
+        run: for d in modules/*/; do (cd "$d" && cargo clippy --target wasm32-unknown-unknown -- -D warnings); done
       # SPEC-11.3.1: headless render without a window.
       - name: Headless render
         run: cargo run -p vy-cli -- render target/wasm/hello.wasm --out /tmp/hello.png --size 800x600
       # SPEC-12.2.2: pixel diff at most 0.1 % against conformance/golden/.
       - name: Conformance
         run: cargo run -p vy-cli -- conformance
+
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build modules
+        run: tools/build_modules.sh
+      - name: Test
+        run: cargo test --workspace
+      # Same goldens as on Linux; a difference is reported, never papered over
+      # with a looser threshold (docs/BUILD-NOTES.md, spec-fråga).
+      - name: Conformance
+        run: cargo run -p vy-cli -- conformance
+      - name: Conformance diffs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-${{ matrix.os }}
+          path: |
+            conformance/golden/*.png.new
+            conformance/semantic/*.json.new
+          if-no-files-found: ignore
