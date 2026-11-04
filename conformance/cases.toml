@@ -85,3 +85,76 @@ module = "text"
 width = 1024
 height = 768
 scale = 1.5
+
+# form: textfält med fokus och IME, kryssruta och skicka-knapp (modules/form).
+# Sidan har textbox-noder och måste beviljas `ime` (SPEC-10.4.2).
+
+[[case]]
+name = "form-800x600@1"
+module = "form"
+width = 800
+height = 600
+scale = 1
+semantic = "form"
+capabilities = ["ime"]
+
+[[case]]
+name = "form-800x600@1-filled"
+module = "form"
+width = 800
+height = 600
+scale = 1
+semantic = "form-filled"
+capabilities = ["ime"]
+events = [
+  {kind = "pointer_down", x = 300, y = 183},       # namnfältet får fokus, ime_begin
+  {kind = "pointer_up", x = 300, y = 183},
+  {kind = "text_input", text = "Anna Lindd"},
+  {kind = "key_down", code = 42},                   # Backspace
+  {kind = "key_down", code = 43},                   # Tab: e-postfältet
+  {kind = "text_input", text = "anna@exempel.se"},
+  {kind = "pointer_down", x = 214, y = 313},       # kryssrutan
+]
+
+[[case]]
+name = "form-800x600@1-submitted"
+module = "form"
+width = 800
+height = 600
+scale = 1
+semantic = "form-submitted"
+capabilities = ["ime"]
+events = [
+  {kind = "pointer_down", x = 300, y = 183},
+  {kind = "text_input", text = "Anna Lind"},
+  {kind = "key_down", code = 43},
+  {kind = "text_input", text = "anna@exempel.se"},
+  {kind = "pointer_down", x = 400, y = 370},       # Skicka
+]
+
+[[case]]
+name = "form-800x600@1-error"
+module = "form"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime"]
+events = [{kind = "pointer_down", x = 400, y = 370}]   # Skicka utan namn: fel och fokus på namn
+
+[[case]]
+name = "form-400x700@2"
+module = "form"
+width = 400
+height = 700
+scale = 2
+capabilities = ["ime"]
+events = [                                         # enbart tangentbord (SPEC-10.3.1)
+  {kind = "key_down", code = 43},                   # Tab: namn
+  {kind = "text_input", text = "Åsa Öberg"},
+  {kind = "key_down", code = 43},                   # Tab: e-post
+  {kind = "text_input", text = "asa@exempel.se"},
+  {kind = "key_down", code = 43},                   # Tab: kryssruta
+  {kind = "key_down", code = 44},                   # mellanslag: kryssa i
+  {kind = "key_down", code = 43},                   # Tab: Skicka
+  {kind = "key_down", code = 40},                   # Enter
+]

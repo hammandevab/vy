@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 180, "y": 24, "w": 440, "h": 473, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 204, "y": 48, "w": 392, "h": 32.5, "text": "Anmälan"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 204, "y": 88.5, "w": 392, "h": 35, "text": "Fyll i namn och e-post. Tab flyttar fokus, Enter skickar. Textfälten öppnar inmatning via värden (ime)."},
+    {"id": 10, "parent_id": 1, "role": 5, "role_name": "textbox", "x": 204, "y": 163.5, "w": 392, "h": 40, "text": "Anna Lind"},
+    {"id": 11, "parent_id": 1, "role": 5, "role_name": "textbox", "x": 204, "y": 243.5, "w": 392, "h": 40, "text": "anna@exempel.se"},
+    {"id": 12, "parent_id": 1, "role": 6, "role_name": "checkbox", "x": 204, "y": 303.5, "w": 392, "h": 20, "text": "Jag vill ha nyhetsbrevet"},
+    {"id": 13, "parent_id": 1, "role": 4, "role_name": "button", "x": 204, "y": 347.5, "w": 392, "h": 44, "text": "Skicka"},
+    {"id": 14, "parent_id": 1, "role": 1, "role_name": "text", "x": 216, "y": 421.5, "w": 368, "h": 37.5, "text": "Tack, Anna Lind! Vi hör av oss till anna@exempel.se."}
+  ]
+}
