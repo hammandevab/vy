@@ -1,6 +1,123 @@
-# Byggnoteringar M1 – headless rendering
+# Byggnoteringar
 
-Skrivna av byggagenten för M1. Granskningssidan skrivs av en annan agent (`docs/reviews/`).
+Skrivna av byggagenten. Granskningssidorna skrivs av en annan agent (`docs/reviews/`).
+M2-delen står först; M1-delen därunder är oförändrad utom där M2 ändrat läget (markerat).
+
+# M2 (första halvan) – SDK, referenssidor, bilder
+
+## Nya beroenden
+
+Inga nya crates. `vy-sdk` beror bara på `vy-abi`; modulerna bara på `vy-sdk`. Bildavkodningen
+använder `png` som redan fanns (M1). Den begränsade TOML-läsaren i `vy-cli` fick arrayer och
+inline-tabeller i stället för ett TOML-beroende (fortfarande under 200 rader).
+
+## Vad som byggdes
+
+| Del | Innehåll |
+| --- | --- |
+| Spec v0.2-ikapp | `dl_image` tar `fit` (SPEC-5.2.3); IMAGE ritas från avkodade PNG-resurser (SPEC-6.5.1); `vy_abi::cap` (capability-id) och `vy_abi::modifier`; `Capabilities::from_names`. |
+| `crates/vy-sdk` | `no_std` + `alloc`; typade bindningar för alla 33 importer; `Frame` med lokal validering; `Sem`; `Column`/`Row`; `Event`; `App` + `export!`; `arena` (vy_alloc), `heap` (global allokator), `panic_handler`; `MockHost` nativt. README med exempel. |
+| `modules/hello` | Porterad till SDK:t, samma pixlar (0,000 %) och samma semantiska träd. |
+| `modules/text` | 3 277 ord fyllnadssvenska i 99 block; cachade blockhöjder, klipp, rullning via SCROLL och tangenter, bara synliga block i trädet. |
+| `modules/form` | Två textfält (fokus, `ime_begin`/`ime_end`, TEXT_INPUT, Backspace), kryssruta (bocken är en `dl_path`), knapp, validering, tackpanel med `format!` på SDK-heapen. |
+| `vy-cli` | `capabilities = [..]` och `events = [..]` i `cases.toml`; `render --grant`; SPEC-10.4.2-kontrollen; SPEC-12.1.2-täckningstest. |
+| CI | `platform`-jobb på macOS: bygge, test, konformans; artefakt med `.png.new` vid avvikelse. |
+
+Storlekar: `hello` 5 061 byte (var 1 147), `text` 30 561, `form` 16 365. Ökningen i `hello` är
+SDK-glue, allokator och den 64 KB stora `vy_alloc`-arenan (i bss, kostar inte bytes men en sida).
+
+## Bilder (SPEC-6.5.1)
+
+- Resurser kommer in via `Options.resources: Vec<Vec<u8>>` tills manifestläsaren finns (M3);
+  `resources[i]` är resurs-id `i + 1`, id 0 är modulen (SPEC-4.5.1).
+- Avkodning sker lat vid första `dl_image` som namnger resursen, i värdimporten, och cachas per
+  instans (`vy_render::ImageCache`). Även ett misslyckande cachas så en trasig resurs kostar ett
+  försök, inte ett per frame.
+- Sidor över 8 192 px avvisas på IHDR innan någon pixelbuffert allokeras; id 0, okänt id,
+  bytes som inte är PNG och en full cache är alla `E_RESOURCE` (loggat med orsak). Opkoden
+  skrivs inte, så rasteriseraren ser aldrig en okänd resurs från en runtime; en display list som
+  renderas utanför en runtime (tester) får grå platshållare som förr.
+- **WebP och AVIF** (SPEC-4.1.5) avkodas inte i M2 och ger `E_RESOURCE`; de kräver nya
+  beroenden (`image-webp`, en AVIF-avkodare) som får motiveras när en referenssida behöver dem.
+- **Cachetak**: `MAX_IMAGE_CACHE_BYTES` = 256 MB avkodat per instans (= en maximal bild) så ett
+  paket med 32 MB PNG (SPEC-4.1.5) inte kan få värden att hålla gigabyte (SPEC-9.3.1). Värdpolicy,
+  inte ABI.
+- **Bränsle**: resursbyte som läses vid avkodning debiteras `FUEL_PER_HOST_BYTE` (SPEC-5.3.3),
+  en gång. En PNG över 2 MB (64 M / 32) spränger därmed den hårda gränsen i den frame som först
+  ritar den – se specfråga 11.
+- **Sampling** är närmaste granne i heltals- och IEEE-754-aritmetik: `cover` skalar likformigt
+  och beskär, `contain` skalar likformigt och lämnar rest, `stretch` skalar per axel; destina-
+  tionspixlar vars centrum ligger i snittet av rektangel, ritad bild och duk fylls. Bilinjär och
+  mipmappad sampling kommer med GPU-vägen (M3).
+
+## SDK-beslut
+
+- **Ett sätt per sak**: `dl_*` finns bara via `Frame`, inte som fria funktioner; `Frame` finns
+  bara mellan `dl_begin` och `dl_end`, så SPEC-5.3.2 kan inte brytas från Rust.
+- **Lokal validering före värden**: opkodsräkning, klippdjup, text-/sökvägs-/url-/nyckeltak och
+  nodantal speglar `vy-dl` och `vy_abi::limits`. Ett nekat anrop når aldrig värden; värden förblir
+  auktoriteten (testet `spec_9_3_2_byte_caps_checked_locally` visar tom värdlogg).
+- **Semantik medan man ritar**: `Frame::sem` numrerar noder i anropsordning från 1; `node_with_id`
+  för fasta id (formulärets 10–13) så `KIND_FOCUS` kan peka på dem. `Frame::group` nästlar
+  föräldern och ger hela framen till closuren (en `Sem::group`-closure kan inte rita – lånet).
+- **`vy_alloc`** är en 64 KB bump-arena som börjar om när den är full; en buffert lever tills
+  arenan slagit runt, vilket aldrig sker inom den händelse som bär den. Nativt är "pekaren" ett
+  offset + 65 536 så ett lyckat anrop aldrig returnerar 0 (SPEC-5.1.6).
+- **Global allokator** (`heap`): första passning i en adresssorterad frilista över sidor från
+  `memory.grow`, sammanslagning vid frigöring, högst 16 bytes justering. Modulens initiala
+  minne rörs aldrig; vid `memory_max` (SPEC-4.2.4) returneras null och sidan trappar i stället
+  för att skriva vilt. Testad nativt över en arena.
+- **Mocken** formar text med fast modell (tecken = storlek × 0,6, rad = storlek × 1,25) och
+  nekar som värden; pixlar bara från `vy-cli`.
+- `Options.capabilities` var redan en `Capabilities`-struct med bool-fält; i stället för en
+  parallell `Vec<String>` fick den `from_names`/`grant` så att `cases.toml` och `--grant` talar
+  namn och runtimen en representation (princip 1).
+
+## Händelser i konformansfall
+
+`events = [{kind = "pointer_down", x = 300, y = 183}, …]` med `pointer_move/down/up`,
+`key_down/up`, `text_input`, `scroll`. `render` levererar dem efter första framen och kör en
+frame efter varje som svarar 1, inom taket `frames` (standard 1 + antal händelser). Klockan
+(`now_ms`) går 16 ms per frame som förr. Värdens egen fokusordning (SPEC-10.3.1, `KIND_FOCUS`)
+finns inte headless än; formuläret hanterar eventet men inget fall skickar det.
+
+## Approximationer och öppet i M2:s andra halva
+
+- Enbart DejaVu Sans har fet vikt; serif/mono med vikt ≥ 600 matchas av fontdb till Sans Bold.
+  `text` begär därför sans för titeln. Fet serif/mono: fler typsnittsfiler eller syntetisk
+  fetstil (M3).
+- `text_caret` layoutar utan radbrytning (M1); formulärets fält är enradiga så det räcker.
+- `spec_13_4_1_sdk_refuses_slow_module` (`vy publish --allow-slow`) väntar på publiceringsverktyget.
+- Återstående referenssidor (tio i M2) och ABI-frys (SPEC-5.3.5) är andra halvan.
+- Guldbilderna är tagna på Linux x86_64. macOS-jobbet rapporterar; se specfråga 13.
+
+## Spec-frågor (M2)
+
+11. **SPEC-6.5.1 / 5.3.3 – avkodning i framebudgeten.** Lat avkodning vid första `dl_image`
+    lägger värdarbetet i den frame som ritar bilden. Debiteras lästa byte som övrigt värdarbete
+    (32 enheter/byte) bryter varje PNG över 250 KB 8 ms-budgeten och varje över 2 MB den hårda
+    gränsen, fast specen tillåter 8192 × 8192 px och 32 MB resurser. Förslag: avkoda vid
+    paketladdning (före `vy_init`) eller asynkront med en `IMAGE_READY`-händelse; tills dess
+    gäller debiteringen ovan.
+12. **SPEC-A.2.1 – odefinierade tal.** `capability-id` i `KIND_CAPABILITY` och bitarna i
+    `modifierare` saknar värden i specen. Värden använder `vy_abi::cap` (1–6 i SPEC-8.2.1:s
+    ordning) och `vy_abi::modifier` (Shift 1, Ctrl 2, Alt 4, Meta 8). Bör in i bilaga A.
+13. **SPEC-2.1.5 / 12.2.2 – guldbilder över plattformar.** Rasteriseraren (tiny-skia med `simd`)
+    och textmotorn är flyttalsbaserade; macOS-jobbet avgör om samma guldbilder håller på ARM.
+    Avviker de rapporteras diffkvoten här och tröskeln lättas inte.
+14. **SPEC-C.1.1 / 5.2.3 – LINE och SHADOW utan import.** Display listen har opkoderna `LINE`
+    (0x07) och `SHADOW` (0x08) men §5.2 har inga `dl_line`/`dl_shadow`. En modul kan alltså inte
+    producera dem (linjer går via `dl_path` med strykning). Antingen tillkommer två importer
+    (ryms: 35 av 40) eller så utgår opkoderna.
+15. **SPEC-10.4.2 – vad "utan ime-capability" syftar på.** Manifestet läses inte förrän M3;
+    sviten kontrollerar i stället att ett fall med `textbox`-noder beviljar `ime`. När manifestet
+    finns bör kontrollen flyttas dit (begärd, inte beviljad).
+16. **SPEC-5.1.6 – buffertens livslängd.** Specen säger inte hur länge en `vy_alloc`-buffert
+    måste vara giltig. SDK:t antar "tills händelsen som bär den är levererad"; bör stå i specen.
+
+---
+
+# M1 – headless rendering
 
 ## Nya beroenden
 
@@ -45,9 +162,8 @@ Radhöjd är `size_px × 1.25` (`vy_render::text::LINE_HEIGHT_FACTOR`). Locale i
 - **SHADOW** ritas som 8 koncentriska rundade rektanglar (`SHADOW_STEPS`) med alfa valt så att
   ackumulerad täckning växer linjärt från `+blur` till `−blur` runt kanten. Riktig gaussisk oskärpa
   kommer med GPU-vägen i M3.
-- **IMAGE** ritas som en grå platshållare (`0x808080FF`). Bildavkodning (SPEC-6.5.1) är M1.5;
-  testet `spec_6_5_1_image_decode_limits` är fortfarande ignorerat. `dl_image` skriver alltid
-  `fit = 0` (cover) eftersom ABI-anropet saknar fit-parameter.
+- **IMAGE** ritades i M1 som en grå platshållare; sedan M2 avkodas PNG (se M2 ovan).
+  Platshållaren finns kvar för resurser som inte avkodats.
 - **PATH** med `stroke_w = 0` fylls med nonzero-regeln; `> 0` strukes med butt-ändar.
 - **Klippstacken** är rektanglar; masken byggs om när stacken ändras.
 - `dl_text` layoutar texten en gång för höjden och rasteriseraren en gång till; ingen glyfcache
@@ -125,8 +241,7 @@ Inga normativa meningar har ändrats. Följande tolkningar gjordes och bör avg�
    och nekas med `E_DENIED` i loggen annars.
 6. **SPEC-5.2.10 / `navigate` headless.** Ingen capability i specen, men en headless-värd kan inte
    navigera. Tolkning: loggas som nekad i headless-läge; `vy-shell` (M3) kopplar in den.
-7. **SPEC-5.2.3 / `dl_image` och `fit`.** Opkoden `IMAGE` har ett `fit`-fält som ABI-anropet inte kan
-   sätta. Värden skriver 0. Antingen bör `dl_image` få en `fit`-parameter eller fältet utgå.
+7. **SPEC-5.2.3 / `dl_image` och `fit`.** Avgjord i v0.2: `dl_image` har `fit` (M2).
 8. **SPEC-5.2.11 / CSPRNG headless.** Se ovan: headless använder seedad PRNG för determinism.
 9. **SPEC-5.2.6 / `pointer_get`.** Packningen är inte specificerad; tolkning som `text_measure`:
    x × 100 i höga 32 bitarna, y × 100 i låga.

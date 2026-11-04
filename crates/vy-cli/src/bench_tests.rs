@@ -36,13 +36,6 @@ fn spec_13_4_1_sdk_refuses_slow_module() {
     todo!()
 }
 
-/// SPEC-12.1.2: a client passing the conformance suite is a Vy client.
-#[test]
-#[ignore = "M2: conformance"]
-fn spec_12_1_2_conformance_defines_client() {
-    todo!()
-}
-
 /// SPEC-12.2.3: no performance regression over 5 %.
 #[test]
 #[ignore = "M3: bench"]

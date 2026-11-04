@@ -8,23 +8,28 @@ CSS, ingen JavaScript-motor.
 - `CLAUDE.md` – arbetsbeskrivning för agenterna som bygger klienten.
 - `crates/` – klienten i Rust. `modules/` – referensmoduler. `conformance/` – guldbilder.
 
-## Status: M1
+## Status: M2, första halvan
 
-`vy-cli render` kör en modul headless i wasmtime, rasteriserar display listen i mjukvara och
-skriver en deterministisk PNG; `conformance` jämför mot guldbilderna i `conformance/golden/`.
-Nästa steg är M2: Rust-SDK och tio referenssidor.
+`vy-cli render` kör en modul headless i wasmtime, rasteriserar display listen i mjukvara
+(text, rektanglar, banor, PNG-bilder) och skriver en deterministisk PNG; `conformance` jämför
+14 fall mot guldbilderna i `conformance/golden/`, med scriptade händelser och capabilities per
+fall. `crates/vy-sdk` är modulsidans SDK (`App` + `export!`, `Frame`, layout, `Event`, mock för
+nativa tester); referenssidorna `hello`, `text` (lång artikel med rullning) och `form`
+(textfält, IME, kryssruta, knapp) bygger på det. Andra halvan av M2: fler referenssidor och
+ABI-frys.
 
 ```sh
 tools/build_modules.sh                 # modules/* -> target/wasm/*.wasm (före cargo test)
 cargo test --workspace                 # gröna tester
 cargo test --workspace -- --ignored    # backloggen
 python3 tools/spec_trace.py            # spårning spec -> test
-cargo run -p vy-cli -- check-abi target/wasm/hello.wasm
-cargo run -p vy-cli -- render target/wasm/hello.wasm --out hello.png --size 800x600 --scale 1 \
-    --dump-semantic hello.json
+cargo run -p vy-cli -- check-abi target/wasm/form.wasm
+cargo run -p vy-cli -- render target/wasm/form.wasm --out form.png --size 800x600 --grant ime \
+    --dump-semantic form.json
 cargo run -p vy-cli -- conformance     # pixeldiff <= 0,1 % mot guldbilderna
 ```
 
-Byggnoteringar för M1 (beroenden, approximationer, spec-frågor): `docs/BUILD-NOTES.md`.
+Byggnoteringar (beroenden, approximationer, spec-frågor): `docs/BUILD-NOTES.md`.
+SDK-dokumentation med exempel: `crates/vy-sdk/README.md`.
 
 Licens: MIT.

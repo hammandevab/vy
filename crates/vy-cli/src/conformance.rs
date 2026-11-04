@@ -579,6 +579,61 @@ mod tests {
         assert!(diff_ratio(&a, &b) > MAX_DIFF_RATIO);
     }
 
+    /// SPEC-12.1.2, SPEC-12.1.1: the suite is what defines a client, so it
+    /// must cover what exists: every reference module under `modules/` has
+    /// at least two cases (sizes or states) and a semantic tree, every
+    /// case has its golden on disk, and no golden or tree is an orphan.
+    #[test]
+    fn spec_12_1_2_conformance_defines_client() {
+        let root = root();
+        let cases = load_cases(&root).unwrap();
+        let modules: Vec<String> = fs::read_dir(root.join("modules"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().join("Cargo.toml").is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(modules.len() >= 3, "{modules:?}");
+        for m in &modules {
+            let mine: Vec<_> = cases.iter().filter(|c| &c.module == m).collect();
+            assert!(mine.len() >= 2, "module {m} has {} case(s)", mine.len());
+            assert!(
+                mine.iter().any(|c| c.semantic.is_some()),
+                "module {m} has no semantic tree"
+            );
+        }
+        for c in &cases {
+            assert!(
+                modules.contains(&c.module),
+                "case {} names no module",
+                c.name
+            );
+            assert!(c.golden(&root).is_file(), "case {} has no golden", c.name);
+            if let Some(p) = c.semantic_path(&root) {
+                assert!(p.is_file(), "case {} has no semantic tree file", c.name);
+            }
+        }
+        let listed = |dir: &str, ext: &str| -> Vec<String> {
+            fs::read_dir(root.join(dir))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(ext))
+                .collect()
+        };
+        for g in listed("conformance/golden", ".png") {
+            let name = g.trim_end_matches(".png");
+            assert!(cases.iter().any(|c| c.name == name), "orphan golden {g}");
+        }
+        for t in listed("conformance/semantic", ".json") {
+            let name = t.trim_end_matches(".json");
+            assert!(
+                cases.iter().any(|c| c.semantic.as_deref() == Some(name)),
+                "orphan semantic tree {t}"
+            );
+        }
+    }
+
     /// SPEC-12.2.2: the case list parses and names the four hello cases.
     #[test]
     fn spec_12_2_2_cases_parse() {

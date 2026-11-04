@@ -1,0 +1,13 @@
+{
+  "abi": "1.0",
+  "name": "Anmälan",
+  "summary": "Referensmodul 2: två textfält med fokus och IME, en kryssruta och en skicka-knapp. Begär ime (SPEC-10.4.2).",
+  "lang": "sv",
+  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
+  "memory_max": 64,
+  "capabilities": ["ime"],
+  "fallback": "# Anmälan\n\nFormuläret kräver en Vy-klient.",
+  "published": "2026-11-04",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/form",
+  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+}

@@ -70,8 +70,8 @@ vy_sdk::mock::reset();
 let mut page = Page::init(Window { width: 800.0, height: 600.0, scale: 1.0 }, 0);
 let mut f = Frame::begin();
 page.frame(&mut f, 16).unwrap();
-assert_eq!(f.end(), Ok(3));
-vy_sdk::mock::with(|h| assert_eq!(h.sem.len(), 4));
+assert_eq!(f.end(), Ok(4), "bakgrund, två texter, knapp");
+vy_sdk::mock::with(|h| assert_eq!(h.sem.len(), 4, "main, heading, text, button"));
 ```
 
 Mockens textmodell är fast (varje tecken `storlek × 0,6` brett, rader `storlek × 1,25` höga); pixlar

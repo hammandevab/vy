@@ -5,8 +5,10 @@
 # commit med prefixet `golden:`.
 #
 # Formatet är en delmängd av TOML: [[case]]-tabeller med name, module, width, height,
-# scale (standard 1), frames (standard 1; ett tak – vy_frame anropas bara så länge modulen
-# begär en ny frame, SPEC-6.2.1) och semantic.
+# scale (standard 1), frames (standard 1 + antal events; ett tak – vy_frame anropas bara så
+# länge modulen begär en ny frame, SPEC-6.2.1), semantic, capabilities (lista med namn ur
+# SPEC-8.2.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
+# key_down/up med code (USB HID); text_input med text; scroll med dx, dy, lines).
 
 [[case]]
 name = "hello-800x600@1"
