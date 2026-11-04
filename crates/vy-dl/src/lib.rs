@@ -149,6 +149,7 @@ pub struct DisplayList {
     ops: u32,
     clip_depth: u32,
     shadows: u32,
+    text_bytes: usize,
     open: bool,
 }
 
@@ -164,6 +165,7 @@ impl DisplayList {
         self.ops = 0;
         self.clip_depth = 0;
         self.shadows = 0;
+        self.text_bytes = 0;
         self.open = true;
     }
 
@@ -196,6 +198,12 @@ impl DisplayList {
     /// Encoded bytes of the last completed or current list.
     pub fn bytes(&self) -> &[u8] {
         &self.buf
+    }
+
+    /// UTF-8 payload bytes of every `TEXT` op in the current list; the host
+    /// counts them against `vy_abi::limits::MAX_FRAME_TEXT_BYTES`.
+    pub fn text_bytes(&self) -> usize {
+        self.text_bytes
     }
 
     fn gate(&mut self) -> Result<(), i32> {
@@ -258,6 +266,7 @@ impl DisplayList {
         self.u16(style_id);
         self.u16(len);
         self.buf.extend_from_slice(text);
+        self.text_bytes += text.len();
         self.ops += 1;
         Ok(())
     }
@@ -756,6 +765,30 @@ mod tests {
         }
         assert_eq!(dl.op_count(), 65_536);
         assert_eq!(dl.rect(0.0, 0.0, 1.0, 1.0, 0.0, 0), Err(err::E_DL_FULL));
+    }
+
+    /// SPEC-9.3.1, SPEC-C.1.1: a text run longer than the `len: u16` field is
+    /// E_ARG and writes nothing; the list counts the text bytes it holds and
+    /// forgets them at the next `begin`.
+    #[test]
+    fn spec_9_3_1_text_bytes_counted() {
+        let mut dl = open();
+        assert_eq!(dl.text_bytes(), 0);
+        dl.text(0.0, 0.0, 1.0, 1, b"hej").unwrap();
+        dl.text(0.0, 0.0, 1.0, 1, b"och hopp").unwrap();
+        assert_eq!(dl.text_bytes(), 3 + 8);
+        let before = dl.bytes().len();
+        let too_long = vec![b'x'; usize::from(u16::MAX) + 1];
+        assert_eq!(dl.text(0.0, 0.0, 1.0, 1, &too_long), Err(err::E_ARG));
+        assert_eq!(dl.bytes().len(), before, "nothing written");
+        assert_eq!(dl.text_bytes(), 3 + 8);
+        assert_eq!(dl.op_count(), 2);
+        let max = vec![b'x'; usize::from(u16::MAX)];
+        dl.text(0.0, 0.0, 1.0, 1, &max).unwrap();
+        assert_eq!(dl.text_bytes(), 3 + 8 + usize::from(u16::MAX));
+        dl.end().unwrap();
+        dl.begin();
+        assert_eq!(dl.text_bytes(), 0);
     }
 
     /// SPEC-C.1.1: a truncated or unterminated buffer is rejected.

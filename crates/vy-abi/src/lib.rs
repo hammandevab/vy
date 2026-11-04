@@ -189,7 +189,16 @@ pub mod op {
     pub const END: u8 = 0xFF;
 }
 
-/// Hard limits enforced by the host (SPEC-6.1.4, SPEC-6.1.6, SPEC-C.1.3).
+/// Hard limits enforced by the host (SPEC-6.1.4, SPEC-6.1.6, SPEC-C.1.3, SPEC-9.3.1).
+///
+/// The byte caps (`MAX_*_BYTES`) bound every copy the host makes out of module
+/// memory on an import call. They are the host's own resource limits in the
+/// sense of SPEC-9.3.1 ("resursgränser per flik verkställs av värden"): a call
+/// whose `len` exceeds its cap returns `E_ARG`, is logged, and copies nothing,
+/// so a module cannot make the host allocate more than it would for a
+/// well-formed call. The per-frame caps bound what the host holds for one
+/// frame. SPEC 1.0 does not list the numbers; `docs/BUILD-NOTES.md` proposes
+/// them as a new normative sentence in §9.3.
 pub mod limits {
     /// Maximum opcodes per frame.
     pub const MAX_OPS_PER_FRAME: u32 = 65_536;
@@ -201,6 +210,39 @@ pub mod limits {
     pub const FRAME_BUDGET_MS: u32 = 8;
     /// Maximum `memory_max` in wasm pages (SPEC-8.1.3).
     pub const MAX_MEMORY_PAGES: u32 = 4096;
+
+    /// Largest `len` accepted by `log` (SPEC-5.2.1): 4 KB (SPEC-9.3.1).
+    pub const MAX_LOG_BYTES: u32 = 4096;
+    /// Largest text accepted by `dl_text`, `text_measure` and `text_caret`
+    /// (SPEC-5.2.3, SPEC-5.2.5): 64 KB less one byte, so that every string the
+    /// text imports accept also fits the `len: u16` field of a `TEXT` opcode
+    /// (SPEC-C.1.1) (SPEC-9.3.1).
+    pub const MAX_TEXT_BYTES: u32 = 65_535;
+    /// Largest path buffer accepted by `dl_path` (SPEC-5.2.3): 65 535 commands
+    /// of 9 bytes, the most the `n: u16` field of a `PATH` opcode can carry
+    /// (SPEC-C.1.1, SPEC-C.1.2) (SPEC-9.3.1).
+    pub const MAX_PATH_BYTES: u32 = 65_535 * 9;
+    /// Largest text accepted by `sem_node` (SPEC-5.2.13): 4 KB (SPEC-9.3.1).
+    pub const MAX_SEM_TEXT_BYTES: u32 = 4096;
+    /// Largest URL accepted by `navigate`, `link_register` and `fetch_begin`
+    /// (SPEC-5.2.7, SPEC-5.2.10): 2 KB (SPEC-9.3.1).
+    pub const MAX_URL_BYTES: u32 = 2048;
+    /// Largest request body accepted by `fetch_begin` (SPEC-5.2.7): 1 MB (SPEC-9.3.1).
+    pub const MAX_FETCH_BODY_BYTES: u32 = 1 << 20;
+    /// Largest key accepted by `state_put`, `state_get` and `state_delete`
+    /// (SPEC-5.2.9): 256 bytes (SPEC-9.3.1).
+    pub const MAX_STATE_KEY_BYTES: u32 = 256;
+    /// Largest value accepted by `state_put` (SPEC-5.2.9): 1 MB (SPEC-9.3.1).
+    pub const MAX_STATE_VALUE_BYTES: u32 = 1 << 20;
+    /// Largest text accepted by `clipboard_write` (SPEC-5.2.12): 1 MB (SPEC-9.3.1).
+    pub const MAX_CLIPBOARD_BYTES: u32 = 1 << 20;
+    /// Maximum semantic nodes per frame (SPEC-10.1.1); the 65 537th is
+    /// `E_DL_FULL`, like the 65 537th opcode (SPEC-6.1.6) (SPEC-9.3.1).
+    pub const MAX_SEM_NODES_PER_FRAME: u32 = 65_536;
+    /// Maximum text bytes held by the display list and the semantic tree
+    /// together for one frame: 16 MB; a `dl_text` or `sem_node` that would
+    /// exceed it is `E_DL_FULL` (SPEC-9.3.1).
+    pub const MAX_FRAME_TEXT_BYTES: u32 = 16 << 20;
 }
 
 /// Wasm value types used in ABI signatures.
@@ -601,6 +643,35 @@ mod tests {
         assert_eq!(role::name(role::TEXT), Some("text"));
         assert_eq!(role::name(role::MAIN), Some("main"));
         assert_eq!(role::name(role::SEPARATOR), Some("separator"));
+    }
+
+    /// SPEC-9.3.1: the host's byte caps agree with the wire format they feed
+    /// (SPEC-C.1.1, SPEC-C.1.2) and with each other.
+    #[test]
+    fn spec_9_3_1_byte_caps_consistent() {
+        assert_eq!(limits::MAX_TEXT_BYTES, u32::from(u16::MAX), "TEXT len: u16");
+        assert_eq!(
+            limits::MAX_PATH_BYTES,
+            u32::from(u16::MAX) * 9,
+            "PATH n: u16"
+        );
+        assert_eq!(limits::MAX_SEM_NODES_PER_FRAME, limits::MAX_OPS_PER_FRAME);
+        for cap in [
+            limits::MAX_LOG_BYTES,
+            limits::MAX_TEXT_BYTES,
+            limits::MAX_PATH_BYTES,
+            limits::MAX_SEM_TEXT_BYTES,
+            limits::MAX_URL_BYTES,
+            limits::MAX_FETCH_BODY_BYTES,
+            limits::MAX_STATE_KEY_BYTES,
+            limits::MAX_STATE_VALUE_BYTES,
+            limits::MAX_CLIPBOARD_BYTES,
+        ] {
+            assert!(cap > 0 && cap <= limits::MAX_FRAME_TEXT_BYTES, "{cap}");
+            assert!(i32::try_from(cap).is_ok(), "caps compare with i32 len");
+        }
+        const _: () = assert!(limits::MAX_SEM_TEXT_BYTES <= limits::MAX_TEXT_BYTES);
+        const _: () = assert!(limits::MAX_STATE_KEY_BYTES < limits::MAX_STATE_VALUE_BYTES);
     }
 
     /// SPEC-C.1.1: opcode values are fixed.
