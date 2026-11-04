@@ -212,3 +212,73 @@ events = [
   {kind = "scroll", dy = -200},                     # bakåt i tråden
   {kind = "scroll", dy = -3, lines = true},
 ]
+
+# shop: produktrutnät med bilder ur paketets resurser, link_register per kort,
+# lägg-i-varukorg-knappar och varukorg med summa (modules/shop). `resources`
+# ger resurs-id 1..8 (SPEC-4.5.1, SPEC-6.5.1).
+
+[[case]]
+name = "shop-1280x800@1"
+module = "shop"
+width = 1280
+height = 800
+scale = 1
+semantic = "shop"
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+
+[[case]]
+name = "shop-1280x800@1-cart"
+module = "shop"
+width = 1280
+height = 800
+scale = 1
+semantic = "shop-cart"
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+events = [
+  {kind = "pointer_down", x = 130, y = 325},        # Mugg Lund: lägg i varukorg
+  {kind = "pointer_up", x = 130, y = 325},
+  {kind = "pointer_down", x = 598, y = 325},        # Bordslampa Ask
+  {kind = "pointer_up", x = 598, y = 325},
+  {kind = "pointer_down", x = 130, y = 325},        # Mugg Lund igen: 2 i korgen
+]
+
+[[case]]
+name = "shop-800x600@1"
+module = "shop"
+width = 800
+height = 600
+scale = 1
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+events = [
+  {kind = "scroll", dy = 160},                      # ner en bit i rutnätet
+  {kind = "pointer_down", x = 400, y = 535},        # Hörlurar Ton: knappen på kortet i mitten
+]
+
+[[case]]
+name = "shop-400x700@2"
+module = "shop"
+width = 400
+height = 700
+scale = 2
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+events = [{kind = "key_down", code = 77}]            # End: sista kortet
