@@ -1,0 +1,25 @@
+[package]
+name = "settings"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Vy reference module 6: toggles, radio groups, a slider dragged with the pointer, and persistence through state_put/state_get"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vy-sdk = { path = "../../crates/vy-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

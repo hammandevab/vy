@@ -3,9 +3,8 @@
 //! `conformance/cases.toml` lists cases; each renders a module at a size and
 //! scale and compares the pixels with `conformance/golden/<name>.png`. A case
 //! may also name a semantic tree under `conformance/semantic/`, grant
-//! capabilities to the headless host, hand the module package resources
-//! (files relative to the repository root) and replay input events before
-//! the final frame, so focus, hover and scroll states are testable.
+//! capabilities to the headless host and replay input events before the
+//! final frame, so focus, hover and scroll states are testable.
 
 use crate::{render, RenderRequest, ScriptedEvent};
 use anyhow::{anyhow, bail, Context, Result};
@@ -38,11 +37,11 @@ pub struct Case {
     pub semantic: Option<String>,
     /// Capabilities the headless host grants (SPEC-8.2.1).
     pub capabilities: Capabilities,
+    /// Events replayed after the first frame.
+    pub events: Vec<ScriptedEvent>,
     /// Package resources as paths relative to the repository root;
     /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1).
     pub resources: Vec<String>,
-    /// Events replayed after the first frame.
-    pub events: Vec<ScriptedEvent>,
 }
 
 impl Case {
@@ -226,6 +225,7 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
         "key_down" => &["kind", "code", "modifiers", "repeat"],
         "key_up" => &["kind", "code", "modifiers"],
         "text_input" => &["kind", "text"],
+        "focus" => &["kind", "node", "gained", "keyboard"],
         other => bail!("line {line}: unknown event kind {other:?}"),
     };
     for (k, _) in &pairs {
@@ -267,7 +267,12 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
             code: need("code")?.int("code", line)? as i32,
             modifiers: int("modifiers", 0)?,
         },
-        _ => ScriptedEvent::TextInput(need("text")?.str("text", line)?.to_string()),
+        "text_input" => ScriptedEvent::TextInput(need("text")?.str("text", line)?.to_string()),
+        _ => ScriptedEvent::Focus {
+            node: need("node")?.int("node", line)? as i32,
+            gained: get("gained").map_or(Ok(true), |v| v.bool("gained", line))?,
+            keyboard: get("keyboard").map_or(Ok(true), |v| v.bool("keyboard", line))?,
+        },
     })
 }
 
@@ -289,8 +294,8 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         frames: Option<u32>,
         semantic: Option<String>,
         capabilities: Capabilities,
-        resources: Vec<String>,
         events: Vec<ScriptedEvent>,
+        resources: Vec<String>,
     }
     fn finish(d: Draft, line: usize) -> Result<Case> {
         let name = d
@@ -311,8 +316,8 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             frames: d.frames.unwrap_or(1 + d.events.len() as u32),
             semantic: d.semantic,
             capabilities: d.capabilities,
-            resources: d.resources,
             events: d.events,
+            resources: d.resources,
             name,
         })
     }
@@ -379,16 +384,16 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                 }
                 d.capabilities = caps;
             }
-            "resources" => {
-                d.resources = parse_array(value, line)?
-                    .into_iter()
-                    .map(|e| Ok(Scalar::parse(e, line)?.str(key, line)?.to_string()))
-                    .collect::<Result<_>>()?;
-            }
             "events" => {
                 d.events = parse_array(value, line)?
                     .into_iter()
                     .map(|e| parse_event(e, line))
+                    .collect::<Result<_>>()?;
+            }
+            "resources" => {
+                d.resources = parse_array(value, line)?
+                    .into_iter()
+                    .map(|e| Ok(Scalar::parse(e, line)?.str(key, line)?.to_string()))
                     .collect::<Result<_>>()?;
             }
             other => bail!("line {line}: unknown key {other:?}"),
@@ -488,8 +493,8 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
     let resources = case
         .resources
         .iter()
-        .map(|r| {
-            let path = root.join(r);
+        .map(|p| {
+            let path = root.join(p);
             fs::read(&path).with_context(|| format!("reading resource {}", path.display()))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -672,7 +677,6 @@ mod tests {
         assert_eq!(c.module, "hello");
         assert_eq!(c.capabilities, Capabilities::default());
         assert!(c.events.is_empty());
-        assert!(c.resources.is_empty());
 
         let parsed = parse_cases(
             "# comment\n[[case]]\nname = \"a\"\nmodule = \"m\"\nwidth = 1\nheight = 2\n\n[[case]]\nname = \"b\" # x\nmodule = \"m\"\nwidth = 3\nheight = 4\nscale = 1.5\nframes = 2\nsemantic = \"m\"\n",
@@ -703,7 +707,6 @@ module = "form"
 width = 800
 height = 600
 capabilities = ["ime", "storage"]
-resources = ["modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png"]
 events = [                                      # comment after the bracket
   {kind = "pointer_down", x = 100, y = 200.5},   # click
   {kind = "pointer_up", x = 100, y = 200.5, button = 1, modifiers = 2},
@@ -711,21 +714,23 @@ events = [                                      # comment after the bracket
   {kind = "key_down", code = 43, repeat = true}, {kind = "key_up", code = 43},
   {kind = "pointer_move", x = 1, y = 2, buttons = 1},
   {kind = "scroll", dy = -120, lines = false},
+  {kind = "focus", node = 12, gained = false, keyboard = false},
+  {kind = "focus", node = 13},
 ]
+resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
 "#;
         let cases = parse_cases(text).unwrap();
         assert_eq!(cases.len(), 1);
         let c = &cases[0];
         assert!(c.capabilities.ime && c.capabilities.storage && !c.capabilities.net);
+        assert_eq!(c.frames, 10, "1 + 9 events");
         assert_eq!(
             c.resources,
             vec![
-                "modules/gallery/res/01-ringar.png".to_string(),
-                "modules/gallery/res/02-rutor.png".to_string()
-            ],
-            "resource paths are kept in order: index i is resource id i + 1"
+                "modules/shop/assets/01.png".to_string(),
+                "modules/shop/assets/02.png".to_string()
+            ]
         );
-        assert_eq!(c.frames, 8, "1 + 7 events");
         assert_eq!(
             c.events,
             vec![
@@ -763,6 +768,16 @@ events = [                                      # comment after the bracket
                     lines: false,
                     modifiers: 0
                 },
+                ScriptedEvent::Focus {
+                    node: 12,
+                    gained: false,
+                    keyboard: false
+                },
+                ScriptedEvent::Focus {
+                    node: 13,
+                    gained: true,
+                    keyboard: true
+                },
             ]
         );
         let base = "[[case]]\nname = \"x\"\nmodule = \"m\"\nwidth = 1\nheight = 1\n";
@@ -776,8 +791,10 @@ events = [                                      # comment after the bracket
             "events = [{kind = \"key_down\", code = \"a\"}]",
             "events = [{kind = \"scroll\", dy = 1, lines = 1}]",
             "events = [{kind = \"scroll\", dy = 1}",
-            "resources = [1]",
+            "events = [{kind = \"focus\"}]",
+            "events = [{kind = \"focus\", node = 1, gained = 1}]",
             "resources = \"a.png\"",
+            "resources = [1]",
         ] {
             assert!(parse_cases(&format!("{base}{bad}\n")).is_err(), "{bad}");
         }

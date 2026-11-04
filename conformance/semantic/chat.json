@@ -1,0 +1,16 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 10, "w": 768, "h": 22.5, "text": "Teamkanalen"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 16, "y": 32.5, "w": 768, "h": 16.25, "text": "Maja, Olle och du · ansluten"},
+    {"id": 4, "parent_id": 1, "role": 8, "role_name": "list", "x": 0, "y": 56, "w": 800, "h": 480, "text": "Meddelanden"},
+    {"id": 5, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 16, "y": 15.25, "w": 768, "h": 69.75, "text": "Maja 08:46: Hej! Har ni hunnit läsa utkastet till specen?"},
+    {"id": 6, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 16, "y": 97, "w": 768, "h": 73.5, "text": "Du 08:48 · levererat: Ja, läste det i morse. Avsnitt 5 ser bra ut, bara bilaga A som behöver fler tal."},
+    {"id": 7, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 16, "y": 182.5, "w": 768, "h": 88.5, "text": "Maja 08:49: Toppen. Jag undrar över bränslebudgeten: räcker 8 ms på referensmaskinen?"},
+    {"id": 8, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 16, "y": 283, "w": 768, "h": 88.5, "text": "Olle 08:51: Vi mätte i går. 2 000 opkoder rasteriseras på under 2 ms, så det finns marginal."},
+    {"id": 9, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 16, "y": 383.5, "w": 768, "h": 54.75, "text": "Du 08:52 · levererat: Bra, då kör vi vidare med det."},
+    {"id": 10, "parent_id": 4, "role": 9, "role_name": "listitem", "x": 16, "y": 450.25, "w": 768, "h": 69.75, "text": "Maja 09:09: Kan du skicka guldbilderna när de är klara?"},
+    {"id": 1000, "parent_id": 1, "role": 5, "role_name": "textbox", "x": 16, "y": 548, "w": 674, "h": 40, "text": ""},
+    {"id": 1001, "parent_id": 1, "role": 4, "role_name": "button", "x": 700, "y": 548, "w": 84, "h": 40, "text": "Skicka"}
+  ]
+}

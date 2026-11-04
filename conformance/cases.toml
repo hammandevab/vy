@@ -9,7 +9,8 @@
 # länge modulen begär en ny frame, SPEC-6.2.1), semantic, capabilities (lista med namn ur
 # SPEC-8.2.1), resources (lista med filer relativt repots rot; resources[i] blir resurs-id
 # i + 1, SPEC-4.5.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
-# key_down/up med code (USB HID); text_input med text; scroll med dx, dy, lines).
+# key_down/up med code (USB HID); text_input med text; scroll med dx, dy, lines; focus med
+# node, gained, keyboard – det värden skulle skicka ur sin fokusordning, SPEC-10.3.1).
 
 [[case]]
 name = "hello-800x600@1"
@@ -333,3 +334,253 @@ width = 800
 height = 1000
 scale = 1.5
 events = [{kind = "pointer_move", x = 300, y = 500}]   # smal layout, månad i linjediagrammet
+# chat: meddelandetråd med bubblor, tidsstämplar från now_ms, kompositör med IME och
+# sändning via fetch_begin (modules/chat). Headless nekar fetch_begin (E_DENIED även med
+# `net`), så fallet efter Enter visar det lokala meddelandet som "ej skickat" och en
+# offline-banner (SPEC-5.3.1). Kräver `ime` (SPEC-10.4.2).
+
+[[case]]
+name = "chat-800x600@1"
+module = "chat"
+width = 800
+height = 600
+scale = 1
+semantic = "chat"
+capabilities = ["ime", "net"]
+
+[[case]]
+name = "chat-800x600@1-sent"
+module = "chat"
+width = 800
+height = 600
+scale = 1
+semantic = "chat-sent"
+capabilities = ["ime", "net"]
+events = [
+  {kind = "text_input", text = "Ja, de ligger i conformance/golden nu."},
+  {kind = "key_down", code = 40},                   # Enter: läggs till lokalt, fetch_begin nekas
+  {kind = "key_up", code = 40},
+  {kind = "text_input", text = "Säg till om"},      # kompositören är fortfarande fokuserad
+]
+
+[[case]]
+name = "chat-400x700@2"
+module = "chat"
+width = 400
+height = 700
+scale = 2
+capabilities = ["ime", "net"]
+
+[[case]]
+name = "chat-400x700@2-scrolled"
+module = "chat"
+width = 400
+height = 700
+scale = 2
+capabilities = ["ime", "net"]
+events = [
+  {kind = "pointer_down", x = 200, y = 300},        # utanför fältet: fokus lämnar, ime_end
+  {kind = "scroll", dy = -200},                     # bakåt i tråden
+  {kind = "scroll", dy = -3, lines = true},
+]
+
+# shop: produktrutnät med bilder ur paketets resurser, link_register per kort,
+# lägg-i-varukorg-knappar och varukorg med summa (modules/shop). `resources`
+# ger resurs-id 1..8 (SPEC-4.5.1, SPEC-6.5.1).
+
+[[case]]
+name = "shop-1280x800@1"
+module = "shop"
+width = 1280
+height = 800
+scale = 1
+semantic = "shop"
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+
+[[case]]
+name = "shop-1280x800@1-cart"
+module = "shop"
+width = 1280
+height = 800
+scale = 1
+semantic = "shop-cart"
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+events = [
+  {kind = "pointer_down", x = 130, y = 325},        # Mugg Lund: lägg i varukorg
+  {kind = "pointer_up", x = 130, y = 325},
+  {kind = "pointer_down", x = 598, y = 325},        # Bordslampa Ask
+  {kind = "pointer_up", x = 598, y = 325},
+  {kind = "pointer_down", x = 130, y = 325},        # Mugg Lund igen: 2 i korgen
+]
+
+[[case]]
+name = "shop-800x600@1"
+module = "shop"
+width = 800
+height = 600
+scale = 1
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+events = [
+  {kind = "scroll", dy = 160},                      # ner en bit i rutnätet
+  {kind = "pointer_down", x = 400, y = 535},        # Hörlurar Ton: knappen på kortet i mitten
+]
+
+[[case]]
+name = "shop-400x700@2"
+module = "shop"
+width = 400
+height = 700
+scale = 2
+resources = [
+  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
+  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
+  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
+  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+]
+events = [{kind = "key_down", code = 77}]            # End: sista kortet
+
+# document: rapport med byline, tvåspaltig brödtext som blir enspaltig under 640 px,
+# datatabell (sem.table/row/cell), noter och tangentbordsfokus över länkar
+# (modules/document). Hela trädet registreras varje frame så nod-id är stabila;
+# `focus`-fallet skickar KIND_FOCUS som värdens fokusordning skulle (SPEC-10.3.1).
+
+[[case]]
+name = "document-1280x800@1"
+module = "document"
+width = 1280
+height = 800
+scale = 1
+semantic = "document"
+
+[[case]]
+name = "document-400x700@1"
+module = "document"
+width = 400
+height = 700
+scale = 1
+semantic = "document-narrow"
+
+[[case]]
+name = "document-400x700@1-table"
+module = "document"
+width = 400
+height = 700
+scale = 1
+events = [
+  {kind = "key_down", code = 78},                   # Page Down (652 px)
+  {kind = "key_down", code = 78},
+  {kind = "scroll", dy = 14, lines = true},         # 14 rader à 24 px: tabellen i enspaltsläge
+]
+
+[[case]]
+name = "document-1280x800@1-tab3"
+module = "document"
+width = 1280
+height = 800
+scale = 1
+semantic = "document-tab3"
+events = [
+  {kind = "key_down", code = 43},                   # Tab: Maja Ek
+  {kind = "key_up", code = 43},
+  {kind = "key_down", code = 43},                   # Tab: Bakgrund
+  {kind = "key_up", code = 43},
+  {kind = "key_down", code = 43},                   # Tab: Metod (tredje länken) får fokusring
+]
+
+[[case]]
+name = "document-800x600@1-tab5"
+module = "document"
+width = 800
+height = 600
+scale = 1
+events = [                                         # femte länken (CSV) rullas in i bild
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+]
+
+[[case]]
+name = "document-1024x768@1-focus"
+module = "document"
+width = 1024
+height = 768
+scale = 1
+events = [
+  {kind = "focus", node = 93, gained = true, keyboard = true},   # värden: sista notlänken
+  {kind = "key_down", code = 43, modifiers = 1},                 # Skift+Tab: länken före
+]
+
+# settings: vippknappar, radiogrupper, en slider som dras med pekaren och
+# persistens via state_get/state_put (modules/settings). Headless har ingen lagring:
+# state_get och state_put svarar E_DENIED även med `storage` beviljad, så sidan visar
+# standardvärden och en statusrad om det (SPEC-5.3.1). Persistens bevisas av modulens
+# nativa test mot SDK-mocken (`cd modules/settings && cargo test`).
+
+[[case]]
+name = "settings-800x600@1"
+module = "settings"
+width = 800
+height = 600
+scale = 1
+semantic = "settings"
+capabilities = ["storage"]
+
+[[case]]
+name = "settings-800x600@1-changed"
+module = "settings"
+width = 800
+height = 600
+scale = 1
+semantic = "settings-changed"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 354, y = 156},        # Mörkt tema: på (paletten byts)
+  {kind = "pointer_up", x = 354, y = 156},
+  {kind = "pointer_down", x = 354, y = 200},        # Kompakt läge: på (raderna krymper)
+  {kind = "pointer_up", x = 354, y = 200},
+  {kind = "pointer_down", x = 500, y = 395},        # tar tag i slidern
+  {kind = "pointer_move", x = 560, y = 395, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 390, buttons = 1},
+  {kind = "pointer_up", x = 648, y = 390},          # släpps: 80, sparas (nekas headless)
+]
+
+[[case]]
+name = "settings-400x700@2"
+module = "settings"
+width = 400
+height = 700
+scale = 2
+capabilities = ["storage"]
+events = [                                         # enbart tangentbord (SPEC-10.3.1)
+  {kind = "key_down", code = 43},                   # Tab ×6: Stor
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 44},                   # mellanslag: välj Stor
+  {kind = "key_down", code = 43},                   # Tab ×4: Volym, rullas i bild
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 79},                   # pil höger ×3: 55
+  {kind = "key_down", code = 79},
+  {kind = "key_down", code = 79},
+]
