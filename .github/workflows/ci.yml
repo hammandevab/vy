@@ -26,7 +26,7 @@ jobs:
       - name: Test
         run: cargo test --workspace
       - name: Backlog (informational)
-        run: cargo test --workspace -- --ignored --list | grep -c ': test' || true
+        run: "cargo test --workspace -- --ignored --list 2>/dev/null | grep -c 'test$' || true"
       - name: Spec trace
         run: python3 tools/spec_trace.py
       - name: Build modules
