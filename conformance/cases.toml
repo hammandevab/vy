@@ -302,3 +302,34 @@ events = [
   {kind = "key_down", code = 44},                   # serve
   {kind = "key_down", code = 79},                   # pil höger efter taket: ingen frame
 ]
+
+# dashboard: fyra nyckeltal, linjediagram (dl_path) och stapeldiagram (dl_rect) ur en fast
+# tabell, förklaring och verktygstips vid POINTER_MOVE (modules/dashboard).
+
+[[case]]
+name = "dashboard-1280x800@1"
+module = "dashboard"
+width = 1280
+height = 800
+scale = 1
+semantic = "dashboard"
+
+[[case]]
+name = "dashboard-1280x800@1-hover"
+module = "dashboard"
+width = 1280
+height = 800
+scale = 1
+semantic = "dashboard-hover"
+events = [
+  {kind = "pointer_move", x = 521, y = 400},       # september i linjediagrammet
+  {kind = "pointer_move", x = 973, y = 526},       # onsdagsstapeln: verktygstips
+]
+
+[[case]]
+name = "dashboard-800x1000@1.5"
+module = "dashboard"
+width = 800
+height = 1000
+scale = 1.5
+events = [{kind = "pointer_move", x = 300, y = 500}]   # smal layout, månad i linjediagrammet
