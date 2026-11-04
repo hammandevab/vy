@@ -130,6 +130,41 @@ pub mod role {
     pub const SEPARATOR: i32 = 24;
     /// Highest valid role.
     pub const MAX: i32 = 24;
+
+    /// Canonical lower-case name of a role, or `None` outside 1..=24 (SPEC-10.1.2).
+    pub fn name(role: i32) -> Option<&'static str> {
+        const NAMES: [&str; 24] = [
+            "text",
+            "heading",
+            "link",
+            "button",
+            "textbox",
+            "checkbox",
+            "radio",
+            "list",
+            "listitem",
+            "image",
+            "table",
+            "row",
+            "cell",
+            "nav",
+            "main",
+            "region",
+            "dialog",
+            "menu",
+            "menuitem",
+            "tab",
+            "tabpanel",
+            "progress",
+            "slider",
+            "separator",
+        ];
+        if (1..=MAX).contains(&role) {
+            Some(NAMES[(role - 1) as usize])
+        } else {
+            None
+        }
+    }
 }
 
 /// Display list opcodes (SPEC appendix C, SPEC-C.1.1).
@@ -555,12 +590,17 @@ mod tests {
         assert_eq!(event::CAPABILITY, 32);
     }
 
-    /// SPEC-A.3.1: roles 1..24 are the only roles.
+    /// SPEC-A.3.1, SPEC-10.1.2: roles 1..24 are the only roles and each has one name.
     #[test]
     fn spec_a_3_1_roles_range() {
         assert_eq!(role::TEXT, 1);
         assert_eq!(role::SEPARATOR, 24);
         assert_eq!(role::MAX, 24);
+        assert_eq!(role::name(0), None);
+        assert_eq!(role::name(25), None);
+        assert_eq!(role::name(role::TEXT), Some("text"));
+        assert_eq!(role::name(role::MAIN), Some("main"));
+        assert_eq!(role::name(role::SEPARATOR), Some("separator"));
     }
 
     /// SPEC-C.1.1: opcode values are fixed.

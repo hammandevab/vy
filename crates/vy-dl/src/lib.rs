@@ -457,6 +457,45 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Size of one path command on the wire (SPEC-C.1.2).
+pub const PATH_CMD_BYTES: usize = 9;
+
+/// Decode a sequence of 9-byte path commands (SPEC-C.1.2): the payload of a
+/// `PATH` op and also the buffer a module hands to `dl_path`.
+///
+/// `UnknownOp(offset, byte)` reports a bad command type; `Truncated` a length
+/// that is not a multiple of 9 or a `quadTo` without its control point.
+pub fn decode_path_cmds(bytes: &[u8]) -> Result<Vec<PathCmd>, DecodeError> {
+    if !bytes.len().is_multiple_of(PATH_CMD_BYTES) {
+        return Err(DecodeError::Truncated);
+    }
+    let mut c = Cursor { b: bytes, i: 0 };
+    let mut cmds = Vec::with_capacity(bytes.len() / PATH_CMD_BYTES);
+    while c.i < bytes.len() {
+        let at = c.i;
+        let t = c.u8()?;
+        let a = c.f32()?;
+        let b = c.f32()?;
+        cmds.push(match t {
+            0 => PathCmd::MoveTo(a, b),
+            1 => PathCmd::LineTo(a, b),
+            2 => {
+                // control point follows as a second command
+                let _t2 = c.u8()?;
+                let cx = c.f32()?;
+                let cy = c.f32()?;
+                PathCmd::QuadTo {
+                    ctrl: (cx, cy),
+                    to: (a, b),
+                }
+            }
+            3 => PathCmd::Close,
+            other => return Err(DecodeError::UnknownOp(at, other)),
+        });
+    }
+    Ok(cmds)
+}
+
 /// Decode a buffer produced by [`DisplayList`] into opcodes, in order (SPEC-6.1.3).
 pub fn decode(bytes: &[u8]) -> Result<Vec<Op>, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
@@ -501,31 +540,13 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Op>, DecodeError> {
                 let color = c.u32()?;
                 let stroke_w = c.f32()?;
                 let n = c.u16()? as usize;
-                let mut cmds = Vec::with_capacity(n);
-                let mut k = 0;
-                while k < n {
-                    let t = c.u8()?;
-                    let a = c.f32()?;
-                    let b = c.f32()?;
-                    k += 1;
-                    cmds.push(match t {
-                        0 => PathCmd::MoveTo(a, b),
-                        1 => PathCmd::LineTo(a, b),
-                        2 => {
-                            // control point follows as a second command
-                            let _t2 = c.u8()?;
-                            let cx = c.f32()?;
-                            let cy = c.f32()?;
-                            k += 1;
-                            PathCmd::QuadTo {
-                                ctrl: (cx, cy),
-                                to: (a, b),
-                            }
-                        }
-                        3 => PathCmd::Close,
-                        other => return Err(DecodeError::UnknownOp(c.i - 9, other)),
-                    });
-                }
+                let raw = c.bytes(n * PATH_CMD_BYTES)?;
+                let cmds = decode_path_cmds(raw).map_err(|e| match e {
+                    DecodeError::UnknownOp(at, t) => {
+                        DecodeError::UnknownOp(at + c.i - raw.len(), t)
+                    }
+                    other => other,
+                })?;
                 out.push(Op::Path {
                     color,
                     stroke_w,
@@ -629,6 +650,13 @@ mod tests {
                 cmds: cmds.to_vec()
             }]
         );
+        // The same 9-byte encoding is what a module hands to dl_path.
+        let raw = &dl.bytes()[11..11 + 9 * 5];
+        assert_eq!(decode_path_cmds(raw).unwrap(), cmds.to_vec());
+        assert_eq!(decode_path_cmds(&raw[..10]), Err(DecodeError::Truncated));
+        let mut bad = raw.to_vec();
+        bad[0] = 7;
+        assert_eq!(decode_path_cmds(&bad), Err(DecodeError::UnknownOp(0, 7)));
     }
 
     /// SPEC-C.1.3: at most 64 shadows per frame.
