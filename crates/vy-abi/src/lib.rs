@@ -645,9 +645,8 @@ mod tests {
         assert_eq!(role::name(role::SEPARATOR), Some("separator"));
     }
 
-    /// SPEC-9.3.1: the host's byte caps agree with the wire format they feed
-    /// SPEC-9.3.2: the per-call byte caps are the normative values.
-    /// (SPEC-C.1.1, SPEC-C.1.2) and with each other.
+    /// SPEC-9.3.1, SPEC-9.3.2: the host's byte caps are the normative values and
+    /// agree with the wire format they feed (SPEC-C.1.1, SPEC-C.1.2) and with each other.
     #[test]
     fn spec_9_3_1_byte_caps_consistent() {
         assert_eq!(limits::MAX_TEXT_BYTES, u32::from(u16::MAX), "TEXT len: u16");
