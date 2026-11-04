@@ -68,6 +68,30 @@ och referensmaskinen (SPEC §13) klarar grovt 10⁹ enkla instruktioner per seku
   `c = 1` (sista varningen) följt av ett tvingande `vy_suspend`; därefter svarar `frame()` med
   `Error::Suspended`. En frame inom budget nollställer räknaren.
 
+### Värdarbete debiteras (granskning 0001, fynd 1)
+
+Bränslet mätte bara wasm-instruktioner: ett `text_measure` på 64 KB kostade några enheter men
+hundratals millisekunder värd-CPU, och 65 536 sådana per frame var tillåtna. Nu debiteras varje byte
+som värden formar, kodar, kopierar eller genererar åt modulen med `vy_runtime::FUEL_PER_HOST_BYTE`
+= 32 ur samma bränsle som instruktionerna:
+
+| Import | Debiteras |
+| --- | --- |
+| `dl_text` | textens byte (formning) + opkodens byte i display listen |
+| `text_measure`, `text_caret` | textens byte |
+| övriga `dl_*` | byte som skrevs till display listen (25 för `RECT`, 1 för `END`, …) |
+| `log`, `sem_node`, `link_register`, `navigate` | byte som kopierades |
+| `random` | byte som genererades |
+
+Ett nekat eller avvisat anrop kostar inget. Värdet är en konvention som `FUEL_PER_MS`: lågt nog att
+en full display list (65 536 × 25 byte ≈ 52 M enheter) ryms under den hårda gränsen (64 M), högt
+nog att fyra 64 KB-formningar (4 × 65 535 × 32 > 8 M) bryter 8 ms-budgeten. Det underskattar
+verklig formningskostnad; textcachen (SPEC-13.2.3, M3) gör räkningen rättvisare.
+
+wasmtime kontrollerar bränslet bara vid funktionsingång och loophuvud, så en import som tömmer det
+utlöser själv `Trap::OutOfFuel`; modulen avbryts då exakt som vid en wasm-instruktion utan bränsle
+och `frame()` svarar `Error::OverBudget`. `FrameStats::host_fuel` visar värdens andel.
+
 ## Headless-klocka och slump
 
 - `now_ms` returnerar `antal färdiga frames × 16` (`HEADLESS_FRAME_MS`); samma värde under hela
@@ -102,3 +126,34 @@ Inga normativa meningar har ändrats. Följande tolkningar gjordes och bör avg�
 8. **SPEC-5.2.11 / CSPRNG headless.** Se ovan: headless använder seedad PRNG för determinism.
 9. **SPEC-5.2.6 / `pointer_get`.** Packningen är inte specificerad; tolkning som `text_measure`:
    x × 100 i höga 32 bitarna, y × 100 i låga.
+10. **SPEC-9.3.1 / bytetak – föreslagen SPEC-9.3.2.** Meningen räknar upp minne, CPU, nätverk och
+    lagring men inte hur mycket värden får kopiera ur modulminnet per anrop; utan tak kunde en modul
+    få värden att allokera hela sitt minne per `sem_node` (65 536 × 16 MB per frame) och display
+    listen växa till 4 GB (granskning 0001, fynd 2). Värden sätter därför följande tak, namngivna i
+    `vy_abi::limits`. Ett `len` över taket ger `E_ARG`, loggas med taket och kopierar ingenting;
+    ett anrop som skulle fylla trädet eller frame-budgeten ger `E_DL_FULL`. Förslag till ny
+    normativ mening, icke-normativ tills specägaren tar in den:
+
+    > **[SPEC-9.3.2]** Värden kopierar högst dessa byte ur modulminnet per anrop: `log` 4 KB;
+    > `dl_text`, `text_measure`, `text_caret` 65 535; `dl_path` 65 535 × 9; `sem_node` 4 KB;
+    > `navigate`, `link_register` och `fetch_begin`-URL 2 KB; `fetch_begin`-kropp 1 MB;
+    > `state_*`-nyckel 256 byte; `state_put`-värde 1 MB; `clipboard_write` 1 MB. Ett `len` över
+    > taket ger `E_ARG` utan kopia. Per frame håller värden högst 65 536 semantiska noder och
+    > högst 16 MB text i semantiskt träd och display list tillsammans; överskott ger `E_DL_FULL`.
+
+    | Konstant | Värde | Varför just det |
+    | --- | --- | --- |
+    | `MAX_LOG_BYTES` | 4 096 | en loggrad |
+    | `MAX_TEXT_BYTES` | 65 535 | `TEXT`-opkodens `len: u16` (SPEC-C.1.1); samma tak för mätning så att allt som mäts kan ritas |
+    | `MAX_PATH_BYTES` | 65 535 × 9 | `PATH`-opkodens `n: u16` (SPEC-C.1.1, SPEC-C.1.2) |
+    | `MAX_SEM_TEXT_BYTES` | 4 096 | ett tillgängligt namn eller textstycke |
+    | `MAX_URL_BYTES` | 2 048 | vanlig URL-gräns |
+    | `MAX_FETCH_BODY_BYTES` | 1 MB | större kroppar strömmas i 1.x |
+    | `MAX_STATE_KEY_BYTES` / `MAX_STATE_VALUE_BYTES` | 256 / 1 MB | kvoten är högst 16 MB (SPEC-5.2.9) |
+    | `MAX_CLIPBOARD_BYTES` | 1 MB | |
+    | `MAX_SEM_NODES_PER_FRAME` | 65 536 | samma som opkoder (SPEC-6.1.6) |
+    | `MAX_FRAME_TEXT_BYTES` | 16 MB | träd + display list; trädet lever till nästa `vy_frame`, listan till nästa `dl_begin` |
+
+    Kapabilitetsgrinden (SPEC-5.3.1) kommer före taket: ett anrop utan `net`/`storage`/`clipboard`
+    får `E_DENIED` oavsett längd. Länkar (`link_register`) är dessutom högst 4 096 per instans och
+    loggen högst 10 000 rader (`vy_runtime::host`).

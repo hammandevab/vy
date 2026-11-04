@@ -263,6 +263,101 @@ fn spec_5_3_3_frame_budget() {
     );
 }
 
+/// A module whose frame does `dt_ms` text measurements of 64 KB each when
+/// `dt_ms > 0`, and asks `random` for `-dt_ms` bytes when `dt_ms < 0`. Both
+/// are a few wasm instructions; all the work is in the host.
+fn host_work_module() -> Vec<u8> {
+    let text = "a".repeat(limits::MAX_TEXT_BYTES as usize);
+    wasm(&format!(
+        r#"(module
+            (import "vy" "log" (func $log (param i32 i32 i32)))
+            (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
+            (import "vy" "text_measure" (func $text_measure (param i32 f32 i32 i32) (result i64)))
+            (import "vy" "random" (func $random (param i32 i32)))
+            ;; page 0: the text; page 1: the log message; pages 2..: random
+            (memory (export "memory") 34)
+            (global $style (mut i32) (i32.const 0))
+            (data (i32.const 0) "{text}")
+            (data (i32.const 65536) "budget")
+            (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
+                (global.set $style (call $text_style (i32.const -1) (f32.const 16) (i32.const 400) (i32.const 0)))
+                i32.const 0)
+            (func (export "vy_frame") (param i32) (result i32)
+                (local $i i32)
+                (if (i32.lt_s (local.get 0) (i32.const 0)) (then
+                    (call $random (i32.const 131072) (i32.sub (i32.const 0) (local.get 0)))
+                    (return (i32.const 0))))
+                (local.set $i (local.get 0))
+                (block (loop
+                    (br_if 1 (i32.eqz (local.get $i)))
+                    (drop (call $text_measure (global.get $style) (f32.const 0) (i32.const 0) (i32.const {len})))
+                    (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+                    (br 0)))
+                i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 31)) (then
+                    (call $log (i32.const 0) (i32.const 65536) (i32.const 6))))
+                i32.const 0)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        len = limits::MAX_TEXT_BYTES,
+    ))
+}
+
+/// SPEC-5.3.3, SPEC-9.3.1: host work inside imports is charged to the frame
+/// budget at FUEL_PER_HOST_BYTE, so a frame of a few wasm instructions that
+/// shapes four 64 KB runs breaches the 8 ms budget and gets KIND_BUDGET; a
+/// large enough charge exhausts the hard limit and aborts the frame.
+#[test]
+fn spec_5_3_3_host_work_costs_fuel() {
+    let per_measure = u64::from(limits::MAX_TEXT_BYTES) * FUEL_PER_HOST_BYTE;
+    let over = (FRAME_BUDGET_FUEL / per_measure + 1) as i32;
+    assert_eq!(over, 4, "the documented example: four 64 KB runs");
+
+    let mut rt = load(&host_work_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame(1).unwrap();
+    let one = rt.last_frame();
+    assert!(!one.over_budget, "{one:?}");
+    assert_eq!(
+        one.host_fuel, per_measure,
+        "exactly len * FUEL_PER_HOST_BYTE"
+    );
+    assert!(one.fuel >= one.host_fuel, "host fuel is part of the total");
+    assert!(
+        one.fuel - one.host_fuel < 10_000,
+        "the wasm side is cheap: {one:?}"
+    );
+
+    rt.frame(over).unwrap();
+    let four = rt.last_frame();
+    assert!(four.over_budget, "{four:?}");
+    assert_eq!(four.host_fuel, u64::from(over as u32) * per_measure);
+    assert_eq!(module_logs(&rt), vec!["budget"], "KIND_BUDGET delivered");
+    rt.frame(over).unwrap();
+    assert!(
+        rt.is_suspended(),
+        "second consecutive breach: forced suspend"
+    );
+
+    // The hard limit: 2 MB of random bytes is 64 M fuel, so the instruction
+    // after the import traps with OutOfFuel and the frame is aborted.
+    let bytes = (CALL_HARD_LIMIT_FUEL / FUEL_PER_HOST_BYTE) as i32;
+    let mut rt = load(&host_work_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame(-(bytes / 16)).unwrap();
+    assert!(!rt.last_frame().over_budget, "{:?}", rt.last_frame());
+    assert_eq!(rt.last_frame().host_fuel, CALL_HARD_LIMIT_FUEL / 16);
+    let r = rt.frame(-bytes).map(|_| ());
+    assert!(
+        matches!(r, Err(Error::OverBudget { .. })),
+        "{r:?} {:?}",
+        rt.last_frame()
+    );
+    assert_eq!(module_logs(&rt), vec!["budget"]);
+}
+
 /// SPEC-5.3.4, SPEC-4.2.1: the host never calls the module outside the six exports.
 /// Structurally: `Runtime` wraps exactly those six, a module exporting more is
 /// refused before it is compiled, and an import never re-enters the module.
@@ -533,6 +628,332 @@ fn spec_4_2_4_memory_cap() {
 #[ignore = "M3: limits"]
 fn spec_9_3_1_resource_limits() {
     todo!()
+}
+
+/// A module whose frame calls one import with a `len` one byte over its cap,
+/// selected by `dt_ms`, and returns the import's status code (0 for imports
+/// without one). Case 20 is the in-range control: a 64 KB `dl_text`.
+fn caps_module() -> Vec<u8> {
+    let text = "a".repeat(limits::MAX_TEXT_BYTES as usize + 1);
+    wasm(&format!(
+        r#"(module
+            (import "vy" "log" (func $log (param i32 i32 i32)))
+            (import "vy" "dl_begin" (func $dl_begin))
+            (import "vy" "dl_end" (func $dl_end))
+            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i32)))
+            (import "vy" "dl_path" (func $dl_path (param i32 i32 i32 f32)))
+            (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
+            (import "vy" "text_measure" (func $text_measure (param i32 f32 i32 i32) (result i64)))
+            (import "vy" "text_caret" (func $text_caret (param i32 i32 i32 i32) (result i64)))
+            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32)))
+            (import "vy" "link_register" (func $link_register (param i32 f32 f32 f32 f32 i32 i32)))
+            (import "vy" "navigate" (func $navigate (param i32 i32 i32)))
+            (import "vy" "fetch_begin" (func $fetch_begin (param i32 i32 i32 i32 i32) (result i32)))
+            (import "vy" "state_put" (func $state_put (param i32 i32 i32 i32) (result i32)))
+            (import "vy" "state_get" (func $state_get (param i32 i32 i32 i32) (result i32)))
+            (import "vy" "state_delete" (func $state_delete (param i32 i32)))
+            (import "vy" "clipboard_write" (func $clipboard_write (param i32 i32)))
+            ;; 17 pages: every oversized range below lies inside memory, so the
+            ;; only reason to refuse it is the cap.
+            (memory (export "memory") 17)
+            (global $style (mut i32) (i32.const 0))
+            (data (i32.const 0) "{text}")
+            (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
+                (global.set $style (call $text_style (i32.const -1) (f32.const 16) (i32.const 400) (i32.const 0)))
+                i32.const 0)
+            (func $case (param $n i32) (result i32)
+                (local $r i32)
+                (block $done
+                    (if (i32.eq (local.get $n) (i32.const 1)) (then
+                        (call $log (i32.const 0) (i32.const 0) (i32.const {log1}))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 2)) (then
+                        (call $dl_begin)
+                        (local.set $r (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (i32.const {text1})))
+                        (call $dl_end)
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 3)) (then
+                        (local.set $r (i32.wrap_i64 (call $text_measure (global.get $style) (f32.const 0) (i32.const 0) (i32.const {text1}))))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 4)) (then
+                        (local.set $r (i32.wrap_i64 (call $text_caret (global.get $style) (i32.const 0) (i32.const {text1}) (i32.const 0))))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 5)) (then
+                        (call $dl_begin)
+                        (call $dl_path (i32.const 0) (i32.const {path1}) (i32.const 0) (f32.const 0))
+                        (call $dl_end)
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 6)) (then
+                        (call $sem_node (i32.const 1) (i32.const 0) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const {sem1}))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 7)) (then
+                        (call $link_register (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const {url1}))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 8)) (then
+                        (call $navigate (i32.const 0) (i32.const {url1}) (i32.const 0))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 9)) (then
+                        (local.set $r (call $fetch_begin (i32.const 0) (i32.const 0) (i32.const {url1}) (i32.const 0) (i32.const 0)))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 10)) (then
+                        (local.set $r (call $fetch_begin (i32.const 0) (i32.const 0) (i32.const 10) (i32.const 0) (i32.const {body1})))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 11)) (then
+                        (local.set $r (call $state_put (i32.const 0) (i32.const {key1}) (i32.const 0) (i32.const 1)))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 12)) (then
+                        (local.set $r (call $state_put (i32.const 0) (i32.const 1) (i32.const 0) (i32.const {val1})))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 13)) (then
+                        (local.set $r (call $state_get (i32.const 0) (i32.const {key1}) (i32.const 0) (i32.const 0)))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 14)) (then
+                        (call $state_delete (i32.const 0) (i32.const {key1}))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 15)) (then
+                        (call $clipboard_write (i32.const 0) (i32.const {clip1}))
+                        (br $done)))
+                    (if (i32.eq (local.get $n) (i32.const 20)) (then
+                        (call $log (i32.const 0) (i32.const 0) (i32.const {log0}))
+                        (call $dl_begin)
+                        (local.set $r (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (i32.const {text0})))
+                        (call $dl_end)
+                        (br $done))))
+                local.get $r)
+            (func (export "vy_frame") (param i32) (result i32) (call $case (local.get 0)))
+            {STUBS})"#,
+        log0 = limits::MAX_LOG_BYTES,
+        log1 = limits::MAX_LOG_BYTES + 1,
+        text0 = limits::MAX_TEXT_BYTES,
+        text1 = limits::MAX_TEXT_BYTES + 1,
+        path1 = limits::MAX_PATH_BYTES + vy_dl::PATH_CMD_BYTES as u32,
+        sem1 = limits::MAX_SEM_TEXT_BYTES + 1,
+        url1 = limits::MAX_URL_BYTES + 1,
+        body1 = limits::MAX_FETCH_BODY_BYTES + 1,
+        key1 = limits::MAX_STATE_KEY_BYTES + 1,
+        val1 = limits::MAX_STATE_VALUE_BYTES + 1,
+        clip1 = limits::MAX_CLIPBOARD_BYTES + 1,
+    ))
+}
+
+/// SPEC-9.3.1: every copy out of module memory is capped per call. One byte
+/// over the cap is E_ARG, logged with the cap, and nothing is copied; the
+/// capability gate (SPEC-5.3.1) still comes first for net, storage and
+/// clipboard; the cap itself is accepted.
+#[test]
+fn spec_9_3_1_byte_caps_per_call() {
+    // (case, import, what, cap)
+    let cases: [(i32, &str, &str, u32); 15] = [
+        (1, "log", "message", limits::MAX_LOG_BYTES),
+        (2, "dl_text", "text", limits::MAX_TEXT_BYTES),
+        (3, "text_measure", "text", limits::MAX_TEXT_BYTES),
+        (4, "text_caret", "text", limits::MAX_TEXT_BYTES),
+        (5, "dl_path", "path", limits::MAX_PATH_BYTES),
+        (6, "sem_node", "text", limits::MAX_SEM_TEXT_BYTES),
+        (7, "link_register", "url", limits::MAX_URL_BYTES),
+        (8, "navigate", "url", limits::MAX_URL_BYTES),
+        (9, "fetch_begin", "url", limits::MAX_URL_BYTES),
+        (10, "fetch_begin", "body", limits::MAX_FETCH_BODY_BYTES),
+        (11, "state_put", "key", limits::MAX_STATE_KEY_BYTES),
+        (12, "state_put", "value", limits::MAX_STATE_VALUE_BYTES),
+        (13, "state_get", "key", limits::MAX_STATE_KEY_BYTES),
+        (14, "state_delete", "key", limits::MAX_STATE_KEY_BYTES),
+        (15, "clipboard_write", "text", limits::MAX_CLIPBOARD_BYTES),
+    ];
+    let returns_code = |case: i32| matches!(case, 2 | 3 | 4 | 9 | 10 | 11 | 12 | 13);
+    let gated = |case: i32| case >= 9;
+
+    let bytes = caps_module();
+    let all = Capabilities {
+        net: true,
+        storage: true,
+        clipboard: true,
+        hires_time: false,
+        ime: false,
+        persist_frame: false,
+    };
+    for caps in [Capabilities::default(), all] {
+        let opts = Options {
+            capabilities: caps,
+            ..Options::default()
+        };
+        let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+        rt.init(10, 10, 1.0).unwrap();
+        for (case, name, what, cap) in cases {
+            let before = rt.logs().len();
+            rt.frame(case).unwrap();
+            let stats = rt.last_frame();
+            let new: Vec<String> = rt.logs()[before..]
+                .iter()
+                .map(|l| format!("{:?} {}", l.source, l.message))
+                .collect();
+            let expect_cap = !gated(case) || caps == all;
+            if expect_cap {
+                // One byte over, or one whole command for the path buffer.
+                let over = if case == 5 {
+                    vy_dl::PATH_CMD_BYTES as u32
+                } else {
+                    1
+                };
+                let line = format!(
+                    "Host {name}: E_ARG ({what} is {} bytes, cap is {cap}; nothing copied)",
+                    cap + over
+                );
+                assert_eq!(new, vec![line], "case {case}");
+                if returns_code(case) {
+                    assert_eq!(stats.ops_reported, err::E_ARG, "case {case}");
+                }
+                // A refused call is free; cases 2 and 5 also pay for dl_end's END byte.
+                let end = u64::from(matches!(case, 2 | 5)) * FUEL_PER_HOST_BYTE;
+                assert_eq!(stats.host_fuel, end, "case {case}: a refused call is free");
+            } else {
+                assert_eq!(new.len(), 1, "case {case}: {new:?}");
+                assert!(
+                    new[0].starts_with(&format!("Host {name}: E_DENIED")),
+                    "case {case}: capability gate first (SPEC-5.3.1): {new:?}"
+                );
+                if returns_code(case) {
+                    assert_eq!(stats.ops_reported, err::E_DENIED, "case {case}");
+                }
+            }
+            assert!(rt.display_list().len() <= 1, "case {case}: nothing drawn");
+            assert!(rt.semantic_tree().is_empty(), "case {case}");
+            assert!(rt.links().is_empty(), "case {case}");
+            assert!(
+                rt.logs()
+                    .iter()
+                    .all(|l| l.source == LogSource::Host || l.message.is_empty()),
+                "nothing was copied out of the module"
+            );
+        }
+        assert!(!rt.is_suspended());
+    }
+
+    // The caps themselves pass: a 4 KB log line and a 64 KB text run.
+    let mut rt = load(&bytes);
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame(20).unwrap();
+    let stats = rt.last_frame();
+    assert!(
+        stats.ops_reported > 0,
+        "dl_text returned a height: {stats:?}"
+    );
+    assert!(host_logs(&rt).is_empty(), "{:?}", host_logs(&rt));
+    let logs = module_logs(&rt);
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].len(), limits::MAX_LOG_BYTES as usize);
+    let ops = vy_dl::decode(rt.display_list()).unwrap();
+    assert!(
+        matches!(&ops[0], vy_dl::Op::Text { text, .. } if text.len() == limits::MAX_TEXT_BYTES as usize)
+    );
+    assert_eq!(
+        stats.host_fuel,
+        FUEL_PER_HOST_BYTE
+            * (u64::from(limits::MAX_LOG_BYTES) + 2 * u64::from(limits::MAX_TEXT_BYTES) + 17 + 1),
+        "log bytes, shaped bytes, TEXT op bytes, END"
+    );
+}
+
+/// A module that builds the semantic tree and display list from `vy_event`:
+/// kind 0 adds `a` nodes with `b` bytes of text each, kind 1 draws two text
+/// runs of `a` and `b` bytes and returns the status of the first.
+fn frame_caps_module() -> Vec<u8> {
+    let text = "a".repeat(limits::MAX_SEM_TEXT_BYTES as usize);
+    wasm(&format!(
+        r#"(module
+            (import "vy" "dl_begin" (func $dl_begin))
+            (import "vy" "dl_end" (func $dl_end))
+            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i32)))
+            (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
+            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32)))
+            (memory (export "memory") 1)
+            (global $style (mut i32) (i32.const 0))
+            (data (i32.const 0) "{text}")
+            (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
+                (global.set $style (call $text_style (i32.const -1) (f32.const 16) (i32.const 400) (i32.const 0)))
+                i32.const 0)
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (local $i i32)
+                (local $r i32)
+                (if (i32.eq (local.get 0) (i32.const 0)) (then
+                    (block (loop
+                        (br_if 1 (i32.ge_s (local.get $i) (local.get 1)))
+                        (call $sem_node (local.get $i) (i32.const 0) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (local.get 2))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br 0)))))
+                (if (i32.eq (local.get 0) (i32.const 1)) (then
+                    (call $dl_begin)
+                    (local.set $r (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (local.get 1)))
+                    (drop (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (local.get 2)))
+                    (call $dl_end)))
+                local.get $r)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ))
+}
+
+/// SPEC-9.3.1, SPEC-10.1.1: per frame the semantic tree holds at most 65 536
+/// nodes, and the tree and the display list together hold at most 16 MB of
+/// text; the call that would exceed either is E_DL_FULL and copies nothing.
+/// The tree lives until the next `vy_frame`, so it is filled from events,
+/// each of which has its own fuel.
+#[test]
+fn spec_9_3_1_frame_caps() {
+    let nodes = limits::MAX_SEM_NODES_PER_FRAME as i32;
+    let mut rt = load(&frame_caps_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.event(0, nodes, 0, 0, 0).unwrap();
+    assert_eq!(rt.semantic_tree().len(), nodes as usize);
+    rt.event(0, 2, 0, 0, 0).unwrap();
+    assert_eq!(rt.semantic_tree().len(), nodes as usize, "65 537th dropped");
+    assert_eq!(host_logs(&rt), vec!["sem_node: E_DL_FULL"], "logged once");
+    rt.frame(0).unwrap();
+    assert!(rt.semantic_tree().is_empty(), "a frame starts a new tree");
+
+    // 16 MB of text in the tree, 256 nodes (1 MB) per event call.
+    let mut rt = load(&frame_caps_module());
+    rt.init(10, 10, 1.0).unwrap();
+    let sem_len = limits::MAX_SEM_TEXT_BYTES as i32;
+    let per_call = 256;
+    let calls = limits::MAX_FRAME_TEXT_BYTES / (per_call as u32 * sem_len as u32);
+    for _ in 0..calls {
+        rt.event(0, per_call, sem_len, 0, 0).unwrap();
+    }
+    let full = limits::MAX_FRAME_TEXT_BYTES as usize;
+    assert_eq!(
+        rt.semantic_tree().len() * sem_len as usize,
+        full,
+        "exactly 16 MB fits"
+    );
+    assert!(host_logs(&rt).is_empty());
+    rt.event(0, 1, 1, 0, 0).unwrap();
+    assert_eq!(host_logs(&rt), vec!["sem_node: E_DL_FULL"], "one more byte");
+    assert_eq!(rt.semantic_tree().len() * sem_len as usize, full);
+    rt.event(0, 1, 0, 0, 0).unwrap();
+    assert_eq!(
+        rt.semantic_tree().len(),
+        full / sem_len as usize + 1,
+        "an empty node adds no text and fits"
+    );
+
+    // The display list shares the budget: with 16 MB in the tree, a one-byte
+    // text run does not fit; an empty one does.
+    assert!(!rt.event(1, 1, 0, 0, 0).unwrap());
+    assert_eq!(
+        host_logs(&rt),
+        vec!["sem_node: E_DL_FULL", "dl_text: E_DL_FULL"]
+    );
+    let ops = vy_dl::decode(rt.display_list()).unwrap();
+    assert_eq!(ops.len(), 1, "only the empty run was written: {ops:?}");
+    assert!(matches!(&ops[0], vy_dl::Op::Text { text, .. } if text.is_empty()));
+
+    // After a frame the tree is empty and both fit again.
+    rt.frame(0).unwrap();
+    rt.event(1, 1, 1, 0, 0).unwrap();
+    assert_eq!(vy_dl::decode(rt.display_list()).unwrap().len(), 2);
+    assert_eq!(host_logs(&rt).len(), 2, "no new complaint");
 }
 
 /// SPEC-9.4.1, SPEC-2.1.2: a module whose hash mismatches is never run, or even parsed.
