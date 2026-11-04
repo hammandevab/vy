@@ -9,6 +9,7 @@ use cosmic_text::{
     fontdb, Attrs, Buffer, Fallback, Family, FontSystem, Metrics, Shaping, SwashCache, SwashImage,
     Weight, Wrap,
 };
+use std::borrow::Cow;
 use std::sync::Arc;
 use vy_abi::err;
 
@@ -19,6 +20,26 @@ pub const LINE_HEIGHT_FACTOR: f32 = 1.25;
 pub const MAX_FONT_SIZE_PX: f32 = 512.0;
 /// Largest number of styles per module instance (style ids are `u16` on the wire).
 pub const MAX_STYLES: usize = u16::MAX as usize;
+/// Largest magnitude of a text origin or wrap width, in pixels. The canvas is
+/// at most 16384 px, so anything beyond this is invisible; cosmic-text bins
+/// glyph positions into `i32` and overflows on larger values (a right-to-left
+/// line starts at the wrap width).
+pub const MAX_COORD_PX: f32 = 16_777_216.0;
+
+/// Unicode bidi paragraph separators (class B) that cosmic-text does not
+/// treat as line endings. In the same line as a right-to-left run they trip
+/// an assertion inside the shaper, so the host maps them to `\n`, which both
+/// cosmic-text and `caret` split lines on.
+const PARAGRAPH_SEPARATORS: [char; 5] = ['\u{1C}', '\u{1D}', '\u{1E}', '\u{85}', '\u{2029}'];
+
+/// Text as handed to the shaper: paragraph separators replaced by `\n`.
+fn sanitize(text: &str) -> Cow<'_, str> {
+    if text.contains(PARAGRAPH_SEPARATORS) {
+        Cow::Owned(text.replace(PARAGRAPH_SEPARATORS, "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
 
 /// Built-in font roles as resource ids (SPEC-6.4.2).
 pub mod role {
@@ -195,10 +216,12 @@ impl TextEngine {
         let buffer = &mut self.buffer;
         buffer.set_metrics(style.metrics());
         buffer.set_wrap(Wrap::WordOrGlyph);
-        // A non-positive width means no wrapping.
-        let width = max_w.filter(|w| *w > 0.0);
-        buffer.set_size(Some(width.unwrap_or(f32::MAX)), None);
-        buffer.set_text(text, &style.attrs(), Shaping::Advanced, None);
+        // A non-positive, non-finite or absurd width means no wrapping: the
+        // buffer is unbounded, so a right-to-left line starts at its own width,
+        // not at the far right of some huge placeholder width.
+        let width = max_w.filter(|w| *w > 0.0 && *w <= MAX_COORD_PX);
+        buffer.set_size(width, None);
+        buffer.set_text(&sanitize(text), &style.attrs(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
@@ -233,7 +256,23 @@ impl TextEngine {
     ) -> Result<(f32, f32), i32> {
         let style = self.get_style(style_id).ok_or(err::E_STYLE)?;
         let byte_offset = byte_offset.min(text.len());
-        self.prepare(style, None, text);
+        // The shaper sees `sanitize(text)`, where each paragraph separator has
+        // become one byte; move the offset the same way.
+        let mut mapped = 0usize;
+        for (i, ch) in text.char_indices() {
+            if i >= byte_offset {
+                break;
+            }
+            let taken = (byte_offset - i).min(ch.len_utf8());
+            mapped += if PARAGRAPH_SEPARATORS.contains(&ch) {
+                taken.min(1)
+            } else {
+                taken
+            };
+        }
+        let text = sanitize(text);
+        let byte_offset = mapped;
+        self.prepare(style, None, &text);
         // Buffer lines split on line endings; find the line holding the offset.
         let mut line = 0usize;
         let mut line_start = 0usize;
@@ -266,6 +305,13 @@ impl TextEngine {
         let style = self.get_style(style_id).ok_or(err::E_STYLE)?;
         self.prepare(style, Some(max_w), text);
         let size = self.measured(style);
+        // An origin that is not finite, or so far away that nothing can be
+        // visible, is measured but never positioned (see `MAX_COORD_PX`).
+        let (px, py) = (origin.0 * scale, origin.1 * scale);
+        if !(px.is_finite() && py.is_finite()) || px.abs() > MAX_COORD_PX || py.abs() > MAX_COORD_PX
+        {
+            return Ok(size);
+        }
         let mut keys = Vec::new();
         for run in self.buffer.layout_runs() {
             let offset = (origin.0 * scale, (origin.1 + run.line_y) * scale);

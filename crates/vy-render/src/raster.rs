@@ -21,6 +21,29 @@ use vy_dl::{DecodeError, Op, PathCmd};
 pub const SHADOW_STEPS: u32 = 8;
 /// Colour of the placeholder drawn for `IMAGE` until image decoding lands (M1.5).
 pub const IMAGE_PLACEHOLDER_COLOR: u32 = 0x8080_80FF;
+/// Largest magnitude accepted for a coordinate, size, radius, blur or stroke
+/// width, in logical pixels. The canvas is at most 16384 physical pixels, so a
+/// larger value cannot be visible; it only serves to overflow the fixed-point
+/// arithmetic in the rasterizer. An op carrying a non-finite or larger value
+/// is skipped; a `CLIP_PUSH` carrying one clips everything, so the clip stack
+/// stays balanced.
+pub const MAX_MAGNITUDE: f32 = 16_777_216.0;
+
+/// True when every value is finite and within [`MAX_MAGNITUDE`].
+fn sane(values: &[f32]) -> bool {
+    values
+        .iter()
+        .all(|v| v.is_finite() && v.abs() <= MAX_MAGNITUDE)
+}
+
+fn sane_path(cmds: &[PathCmd], stroke_w: f32) -> bool {
+    sane(&[stroke_w])
+        && cmds.iter().all(|c| match *c {
+            PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => sane(&[x, y]),
+            PathCmd::QuadTo { ctrl, to } => sane(&[ctrl.0, ctrl.1, to.0, to.1]),
+            PathCmd::Close => true,
+        })
+}
 
 /// Why rendering failed.
 #[derive(Debug, PartialEq, Eq)]
@@ -238,6 +261,10 @@ impl Canvas<'_> {
     }
 
     fn clip_push(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        if !sane(&[x, y, w, h]) {
+            self.clip.push(None);
+            return;
+        }
         let s = self.scale;
         self.clip.push(Rect::from_xywh(
             x * s,
@@ -356,6 +383,8 @@ pub fn render(
         clip: Clip::new(width, height),
         text,
     };
+    // Ops with non-finite or absurd values are skipped (`MAX_MAGNITUDE`);
+    // `CLIP_PUSH` is the exception and always pushes, see `Canvas::clip_push`.
     for op in &ops {
         match op {
             Op::Rect {
@@ -365,22 +394,22 @@ pub fn render(
                 h,
                 radius,
                 color,
-            } => canvas.rect(*x, *y, *w, *h, *radius, *color),
+            } if sane(&[*x, *y, *w, *h, *radius]) => canvas.rect(*x, *y, *w, *h, *radius, *color),
             Op::Text {
                 x,
                 y,
                 max_w,
                 style_id,
                 text,
-            } => canvas.text(*x, *y, *max_w, *style_id, text),
-            Op::Image { x, y, w, h, .. } => {
+            } if sane(&[*x, *y]) => canvas.text(*x, *y, *max_w, *style_id, text),
+            Op::Image { x, y, w, h, .. } if sane(&[*x, *y, *w, *h]) => {
                 canvas.rect(*x, *y, *w, *h, 0.0, IMAGE_PLACEHOLDER_COLOR);
             }
             Op::Path {
                 color,
                 stroke_w,
                 cmds,
-            } => canvas.path(cmds, *color, *stroke_w),
+            } if sane_path(cmds, *stroke_w) => canvas.path(cmds, *color, *stroke_w),
             Op::ClipPush { x, y, w, h } => canvas.clip_push(*x, *y, *w, *h),
             Op::ClipPop => canvas.clip.pop(),
             Op::Line {
@@ -390,7 +419,7 @@ pub fn render(
                 y2,
                 w,
                 color,
-            } => canvas.line(*x1, *y1, *x2, *y2, *w, *color),
+            } if sane(&[*x1, *y1, *x2, *y2, *w]) => canvas.line(*x1, *y1, *x2, *y2, *w, *color),
             Op::Shadow {
                 x,
                 y,
@@ -399,7 +428,15 @@ pub fn render(
                 radius,
                 blur,
                 color,
-            } => canvas.shadow(*x, *y, *w, *h, *radius, *blur, *color),
+            } if sane(&[*x, *y, *w, *h, *radius, *blur]) => {
+                canvas.shadow(*x, *y, *w, *h, *radius, *blur, *color)
+            }
+            Op::Rect { .. }
+            | Op::Text { .. }
+            | Op::Image { .. }
+            | Op::Path { .. }
+            | Op::Line { .. }
+            | Op::Shadow { .. } => {}
         }
     }
     Ok(RgbaImage {

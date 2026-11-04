@@ -193,6 +193,155 @@ mod tests {
         );
     }
 
+    /// SPEC-6.1.1, SPEC-6.4.1: the host rasterizes whatever the module describes;
+    /// text containing a bidi paragraph separator next to a right-to-left run
+    /// must lay out, not crash the shaper (found by fuzzing in the M1 review).
+    #[test]
+    fn spec_6_4_1_paragraph_separators_do_not_crash() {
+        let mut t = TextEngine::new();
+        let s = sans(&mut t, 16.0);
+        for sep in ['\u{1C}', '\u{1D}', '\u{1E}', '\u{85}', '\u{2029}'] {
+            let txt = format!("a{sep}\u{5D0}\u{639}");
+            let m = t.measure(s, 100.0, &txt).unwrap();
+            assert_eq!(
+                m.h,
+                2.0 * 16.0 * text::LINE_HEIGHT_FACTOR,
+                "{sep:?} is a line break"
+            );
+            // The caret after the separator sits at the start of the second line,
+            // whatever the separator's UTF-8 length (byte offsets are the module's).
+            let ltr = format!("a{sep}b");
+            let after = 1 + sep.len_utf8();
+            assert_eq!(t.caret(s, &ltr, after).unwrap(), (0.0, 20.0), "{sep:?}");
+            assert_eq!(t.caret(s, &ltr, 1).unwrap().1, 0.0, "{sep:?}");
+            assert!(t.caret(s, &ltr, after + 1).unwrap().0 > 0.0, "{sep:?}");
+            let mut dl = DisplayList::new();
+            dl.begin();
+            dl.text(0.0, 0.0, 100.0, s, txt.as_bytes()).unwrap();
+            dl.end().unwrap();
+            render(dl.bytes(), 100, 50, 1.0, &mut t).unwrap();
+        }
+    }
+
+    /// SPEC-6.4.1, SPEC-5.2.5: right-to-left text laid out without wrapping
+    /// (`max_w <= 0`, and every `text_caret`) stays within its own width
+    /// instead of starting at the right edge of an unbounded buffer (found by
+    /// fuzzing in the M1 review).
+    #[test]
+    fn spec_6_4_1_rtl_unwrapped_stays_in_bounds() {
+        let mut t = TextEngine::new();
+        let s = sans(&mut t, 16.0);
+        let rtl = "\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{639}\u{627}\u{644}\u{645}";
+        let m = t.measure(s, 0.0, rtl).unwrap();
+        assert!(m.w > 10.0 && m.w < 200.0, "{m:?}");
+        // A huge or non-finite wrap width is the same as no wrapping.
+        for w in [1e30, f32::INFINITY, f32::NAN, text::MAX_COORD_PX * 2.0] {
+            assert_eq!(t.measure(s, w, rtl).unwrap(), m, "max_w {w}");
+            let mut dl = DisplayList::new();
+            dl.begin();
+            dl.text(2.0, 2.0, w, s, rtl.as_bytes()).unwrap();
+            dl.end().unwrap();
+            render(dl.bytes(), 200, 30, 1.0, &mut t).unwrap();
+        }
+        for off in [0, 2, rtl.len()] {
+            let (x, y) = t.caret(s, rtl, off).unwrap();
+            assert!(x >= 0.0 && x <= m.w + 1.0, "caret x {x} outside 0..{}", m.w);
+            assert_eq!(y, 0.0);
+        }
+        let mut dl = DisplayList::new();
+        dl.begin();
+        dl.text(2.0, 2.0, 0.0, s, rtl.as_bytes()).unwrap();
+        dl.end().unwrap();
+        let img = render(dl.bytes(), 200, 30, 1.0, &mut t).unwrap();
+        let dark = img
+            .data
+            .chunks_exact(4)
+            .filter(|p| p[0] < 128 && p[3] == 255)
+            .count();
+        assert!(
+            dark > 50,
+            "unwrapped RTL text was drawn on the canvas ({dark})"
+        );
+    }
+
+    /// SPEC-6.1.1, SPEC-6.3.1: coordinates are logical pixels; a non-finite or
+    /// absurdly large value in any op is skipped instead of overflowing the
+    /// rasterizer, and a bad clip rectangle clips everything but keeps the
+    /// stack balanced (found by fuzzing in the M1 review).
+    #[test]
+    fn spec_6_3_1_bad_coordinates_are_skipped() {
+        use vy_dl::PathCmd;
+        let mut t = TextEngine::new();
+        let s = sans(&mut t, 16.0);
+        for v in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1e30,
+            -1e30,
+            f32::MAX,
+        ] {
+            let mut dl = DisplayList::new();
+            dl.begin();
+            dl.rect(v, 0.0, 10.0, 10.0, 0.0, 0xFF).unwrap();
+            dl.rect(0.0, 0.0, 10.0, 10.0, v, 0xFF).unwrap();
+            dl.text(v, 0.0, 100.0, s, b"hej").unwrap();
+            dl.text(0.0, v, 100.0, s, b"hej").unwrap();
+            dl.image(v, v, v, v, 1, vy_dl::Fit::Cover).unwrap();
+            dl.line(0.0, 0.0, v, 10.0, 1.0, 0xFF).unwrap();
+            dl.line(0.0, 0.0, 10.0, 10.0, v, 0xFF).unwrap();
+            dl.path(
+                0xFF,
+                0.0,
+                &[
+                    PathCmd::MoveTo(0.0, 0.0),
+                    PathCmd::LineTo(v, 10.0),
+                    PathCmd::Close,
+                ],
+            )
+            .unwrap();
+            dl.path(
+                0xFF,
+                v,
+                &[
+                    PathCmd::MoveTo(0.0, 0.0),
+                    PathCmd::QuadTo {
+                        ctrl: (v, 5.0),
+                        to: (10.0, 10.0),
+                    },
+                ],
+            )
+            .unwrap();
+            dl.shadow(0.0, 0.0, 10.0, 10.0, 0.0, v, 0xFF).unwrap();
+            dl.clip_push(v, 0.0, 10.0, 10.0).unwrap();
+            dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0xFF00_00FF).unwrap();
+            dl.clip_pop().unwrap();
+            dl.rect(0.0, 0.0, 10.0, 10.0, 0.0, 0x0000_FFFF).unwrap();
+            dl.end().unwrap();
+            let img = render(dl.bytes(), 40, 40, 1.0, &mut t).unwrap();
+            assert_eq!(img.pixel(5, 5).unwrap(), [0, 0, 255, 255], "{v}");
+            assert_eq!(
+                img.pixel(30, 30).unwrap(),
+                [255, 255, 255, 255],
+                "{v}: red rect was clipped away by the bad clip"
+            );
+        }
+        // The largest accepted magnitude, at the largest CLI scale, still renders.
+        let m = raster::MAX_MAGNITUDE;
+        let mut dl = DisplayList::new();
+        dl.begin();
+        dl.rect(-m, -m, 2.0 * m, 2.0 * m, m, 0xFF).unwrap();
+        dl.line(-m, -m, m, m, m, 0xFF).unwrap();
+        dl.shadow(-m, -m, m, m, m, m, 0xFF).unwrap();
+        dl.path(0xFF, m, &[PathCmd::MoveTo(-m, m), PathCmd::LineTo(m, -m)])
+            .unwrap();
+        dl.clip_push(-m, -m, 2.0 * m, 2.0 * m).unwrap();
+        dl.text(m, -m, m, s, b"hej").unwrap();
+        dl.clip_pop().unwrap();
+        dl.end().unwrap();
+        render(dl.bytes(), 64, 64, 8.0, &mut t).unwrap();
+    }
+
     /// SPEC-11.3.1: PNG round-trips losslessly and encodes identically.
     #[test]
     fn spec_11_3_1_png_roundtrip() {
