@@ -3,98 +3,591 @@
 //! M1 implements the display list and text imports headless; M3 adds network and storage.
 //! The client contains no interpreter for any language (SPEC-2.1.6): modules are
 //! precompiled WebAssembly (SPEC-4.1.4) executed by wasmtime.
+//!
+//! The host calls the module only through the six exports (SPEC-5.3.4); the
+//! only way to reach them is the methods on [`Runtime`], which wrap exactly
+//! those six and nothing else.
 #![deny(missing_docs)]
 
-#[cfg(test)]
-mod tests {
-    /// SPEC-5.2.2, SPEC-6.2.1: vy_frame runs only after request_frame, an event returning 1, or a resize.
-    #[test]
-    #[ignore = "M1: runtime"]
-    fn spec_6_2_1_frame_only_on_request() {
-        todo!()
-    }
+pub mod abi_check;
+pub mod host;
 
-    /// SPEC-6.2.2: an idle page consumes 0 module CPU.
-    #[test]
-    #[ignore = "M1: runtime"]
-    fn spec_6_2_2_idle_is_free() {
-        todo!()
-    }
+pub use abi_check::{check_abi_bytes, AbiReport};
+pub use host::{Capabilities, Link, LogEntry, LogSource, SemNode};
 
-    /// SPEC-5.3.1, SPEC-2.1.4: a call without its capability returns E_DENIED and does not kill the module.
-    #[test]
-    #[ignore = "M1: capability gating"]
-    fn spec_5_3_1_denied_call_is_harmless() {
-        todo!()
-    }
+use host::Host;
+use sha2::{Digest, Sha256};
+use std::fmt;
+use std::sync::OnceLock;
+use vy_abi::{event, limits, ABI_MINOR};
+use vy_render::TextEngine;
+use wasmtime::{
+    Config, Engine, Instance, Linker, Module, Store, StoreLimitsBuilder, Trap, TypedFunc,
+};
 
-    /// SPEC-5.2.8: fetch_begin to an unlisted origin returns E_ORIGIN with no network call.
-    #[test]
-    #[ignore = "M3: network"]
-    fn spec_5_2_8_origin_gate() {
-        todo!()
-    }
+/// Fuel units per millisecond of logical time (SPEC-5.3.3).
+///
+/// wasmtime charges about one unit per wasm instruction. The reference machine
+/// (SPEC §13: a 2020 laptop) retires roughly 1e9 simple instructions per
+/// second, so one logical millisecond is one million units. The mapping is a
+/// convention, not a measurement: it makes the budget deterministic across
+/// machines (SPEC-2.1.5) at the cost of being approximate on any one of them.
+pub const FUEL_PER_MS: u64 = 1_000_000;
+/// Soft budget for one `vy_frame`: 8 ms of logical time (SPEC-5.3.3).
+pub const FRAME_BUDGET_FUEL: u64 = limits::FRAME_BUDGET_MS as u64 * FUEL_PER_MS;
+/// Hard limit at which a call into the module is aborted: eight budgets.
+pub const CALL_HARD_LIMIT_FUEL: u64 = 8 * FRAME_BUDGET_FUEL;
+/// Default `memory_max` in pages when no manifest is present (16 MB).
+pub const DEFAULT_MEMORY_MAX_PAGES: u32 = 256;
+/// Bytes per wasm page.
+pub const WASM_PAGE_BYTES: u64 = 65_536;
 
-    /// SPEC-5.3.3: two frames over 8 ms in a row yield KIND_BUDGET then a forced suspend.
-    #[test]
-    #[ignore = "M1: fuel budget"]
-    fn spec_5_3_3_frame_budget() {
-        todo!()
-    }
+/// Why the runtime refused or stopped.
+#[derive(Debug)]
+pub enum Error {
+    /// Bytes are not valid WebAssembly.
+    Invalid(String),
+    /// SHA-256 of the module differs from what the manifest promised (SPEC-9.4.1).
+    HashMismatch {
+        /// Hash the caller expected.
+        expected: [u8; 32],
+        /// Hash of the bytes given.
+        actual: [u8; 32],
+    },
+    /// The module breaks the ABI contract (SPEC-4.2.*, SPEC-5.1.*, SPEC-5.2.*).
+    Abi(AbiReport),
+    /// `memory_max` is above the limit (SPEC-8.1.3) or zero.
+    MemoryMax(u32),
+    /// wasmtime could not compile or instantiate the module.
+    Instantiate(String),
+    /// `vy_init` returned a non-zero code.
+    InitFailed(i32),
+    /// An export was called before `init`.
+    NotInitialized,
+    /// A call into the module trapped (unreachable, out-of-bounds, ...).
+    Trap(String),
+    /// A call hit the hard fuel limit (SPEC-5.3.3).
+    OverBudget {
+        /// Logical milliseconds consumed before the abort.
+        used_ms: u32,
+    },
+    /// The module was force-suspended after two consecutive budget breaches (SPEC-5.3.3).
+    Suspended,
+    /// The module called `exit`.
+    Exited(i32),
+    /// `vy_alloc` returned 0 or a pointer outside memory.
+    Alloc,
+}
 
-    /// SPEC-5.3.4: the host never calls into the module outside the six exports.
-    #[test]
-    #[ignore = "M1: runtime"]
-    fn spec_5_3_4_no_callbacks() {
-        todo!()
-    }
-
-    /// SPEC-2.1.5: same module, same input, same window gives the same bytes.
-    #[test]
-    #[ignore = "M1: determinism"]
-    fn spec_2_1_5_determinism() {
-        todo!()
-    }
-
-    /// SPEC-4.2.4: memory may not grow past memory_max.
-    #[test]
-    #[ignore = "M1: memory cap"]
-    fn spec_4_2_4_memory_cap() {
-        todo!()
-    }
-
-    /// SPEC-9.3.1: resource limits enforced by the host.
-    #[test]
-    #[ignore = "M3: limits"]
-    fn spec_9_3_1_resource_limits() {
-        todo!()
-    }
-
-    /// SPEC-9.4.1: a module whose hash mismatches is never run.
-    #[test]
-    #[ignore = "M1: hash check"]
-    fn spec_9_4_1_hash_mismatch_never_runs() {
-        todo!()
-    }
-
-    /// SPEC-9.5.1, SPEC-9.5.2: storage and state are per origin and never shared.
-    #[test]
-    #[ignore = "M3: storage"]
-    fn spec_9_5_1_per_origin_isolation() {
-        todo!()
-    }
-
-    /// SPEC-10.1.1, SPEC-10.1.2: semantic tree built via sem_node with valid roles only.
-    #[test]
-    #[ignore = "M1: semantic tree"]
-    fn spec_10_1_1_semantic_tree() {
-        todo!()
-    }
-
-    /// SPEC-5.2.11: now_ms is monotonic with 1 ms resolution unless hires_time.
-    #[test]
-    #[ignore = "M1: time"]
-    fn spec_5_2_11_time_resolution() {
-        todo!()
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(s) => write!(f, "not a valid module: {s}"),
+            Self::HashMismatch { expected, actual } => write!(
+                f,
+                "module hash mismatch: expected {}, got {} (SPEC-9.4.1)",
+                hex(expected),
+                hex(actual)
+            ),
+            Self::Abi(r) => write!(f, "module violates ABI 1.0:\n{r}"),
+            Self::MemoryMax(p) => write!(f, "memory_max {p} pages is out of range (SPEC-8.1.3)"),
+            Self::Instantiate(s) => write!(f, "cannot instantiate module: {s}"),
+            Self::InitFailed(c) => write!(f, "vy_init returned {c}"),
+            Self::NotInitialized => f.write_str("init was not called"),
+            Self::Trap(s) => write!(f, "module trapped: {s}"),
+            Self::OverBudget { used_ms } => {
+                write!(
+                    f,
+                    "call aborted after {used_ms} ms of logical time (SPEC-5.3.3)"
+                )
+            }
+            Self::Suspended => f.write_str("module is suspended after repeated budget breaches"),
+            Self::Exited(c) => write!(f, "module exited with code {c}"),
+            Self::Alloc => f.write_str("vy_alloc failed"),
+        }
     }
 }
+
+impl std::error::Error for Error {}
+
+/// Lower-case hex of a hash.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA-256 of a byte string (module identity, SPEC-7.3.1).
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+/// Per-instance settings that come from the manifest and the policy.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Largest linear memory in wasm pages (SPEC-4.2.4, SPEC-8.1.3).
+    pub memory_max_pages: u32,
+    /// Granted capabilities (SPEC-8.2.*).
+    pub capabilities: Capabilities,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            memory_max_pages: DEFAULT_MEMORY_MAX_PAGES,
+            capabilities: Capabilities::default(),
+        }
+    }
+}
+
+/// What a frame did to the budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameStats {
+    /// Fuel consumed by `vy_frame`.
+    pub fuel: u64,
+    /// Opcodes the module reported writing.
+    pub ops_reported: i32,
+    /// True when the soft budget was exceeded.
+    pub over_budget: bool,
+}
+
+struct Exports {
+    init: TypedFunc<(i32, i32, i32, f32), i32>,
+    frame: TypedFunc<i32, i32>,
+    event: TypedFunc<(i32, i32, i32, i32, i32), i32>,
+    resize: TypedFunc<(i32, i32, f32), ()>,
+    suspend: TypedFunc<(), i32>,
+    alloc: TypedFunc<i32, i32>,
+}
+
+fn engine() -> &'static Engine {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        // No threads (SPEC-4.2.3): the `threads` cargo feature is off, so the
+        // proposal cannot even be enabled; a module using shared memory fails
+        // validation and the ABI check before that.
+        Engine::new(&config).expect("wasmtime engine")
+    })
+}
+
+/// One loaded, verified module instance.
+pub struct Runtime {
+    store: Store<Host>,
+    exports: Exports,
+    initialized: bool,
+    suspended: bool,
+    budget_streak: u32,
+    frames: u64,
+    last_frame: FrameStats,
+}
+
+impl Runtime {
+    /// Verify `wasm` against `expected_sha256` and the ABI, compile it and
+    /// instantiate it with every `vy` import linked. Nothing in the module runs
+    /// yet; call [`Runtime::init`].
+    ///
+    /// A hash mismatch is reported before the bytes are even parsed (SPEC-9.4.1).
+    pub fn load(wasm: &[u8], expected_sha256: &[u8; 32], options: Options) -> Result<Self, Error> {
+        let actual = sha256(wasm);
+        if &actual != expected_sha256 {
+            return Err(Error::HashMismatch {
+                expected: *expected_sha256,
+                actual,
+            });
+        }
+        let report = check_abi_bytes(wasm)?;
+        if !report.ok() {
+            return Err(Error::Abi(report));
+        }
+        let pages = options.memory_max_pages;
+        if pages == 0 || pages > limits::MAX_MEMORY_PAGES {
+            return Err(Error::MemoryMax(pages));
+        }
+
+        let engine = engine();
+        let module = Module::new(engine, wasm).map_err(|e| Error::Instantiate(e.to_string()))?;
+        let limits = StoreLimitsBuilder::new()
+            .memory_size((u64::from(pages) * WASM_PAGE_BYTES) as usize)
+            .memories(1)
+            .tables(1)
+            .instances(1)
+            .build();
+        let mut store = Store::new(engine, Host::new(limits, options.capabilities));
+        store.limiter(|host| &mut host.limits);
+        store
+            .set_fuel(CALL_HARD_LIMIT_FUEL)
+            .map_err(|e| Error::Instantiate(e.to_string()))?;
+
+        let mut linker: Linker<Host> = Linker::new(engine);
+        host::link_imports(&mut linker).map_err(|e| Error::Instantiate(e.to_string()))?;
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|e| Error::Instantiate(e.to_string()))?;
+        let memory = instance
+            .get_memory(&mut store, abi_check::MEMORY_EXPORT)
+            .ok_or_else(|| Error::Instantiate("no exported memory".into()))?;
+        store.data_mut().memory = Some(memory);
+
+        let exports = Self::exports(&instance, &mut store)?;
+        Ok(Self {
+            store,
+            exports,
+            initialized: false,
+            suspended: false,
+            budget_streak: 0,
+            frames: 0,
+            last_frame: FrameStats {
+                fuel: 0,
+                ops_reported: 0,
+                over_budget: false,
+            },
+        })
+    }
+
+    fn exports(instance: &Instance, store: &mut Store<Host>) -> Result<Exports, Error> {
+        fn get<P, R>(
+            instance: &Instance,
+            store: &mut Store<Host>,
+            name: &str,
+        ) -> Result<TypedFunc<P, R>, Error>
+        where
+            P: wasmtime::WasmParams,
+            R: wasmtime::WasmResults,
+        {
+            instance
+                .get_typed_func::<P, R>(&mut *store, name)
+                .map_err(|e| Error::Instantiate(format!("{name}: {e}")))
+        }
+        Ok(Exports {
+            init: get(instance, store, "vy_init")?,
+            frame: get(instance, store, "vy_frame")?,
+            event: get(instance, store, "vy_event")?,
+            resize: get(instance, store, "vy_resize")?,
+            suspend: get(instance, store, "vy_suspend")?,
+            alloc: get(instance, store, "vy_alloc")?,
+        })
+    }
+
+    fn host(&self) -> &Host {
+        self.store.data()
+    }
+
+    fn host_mut(&mut self) -> &mut Host {
+        self.store.data_mut()
+    }
+
+    /// Refuse to enter the module when it is suspended or has exited.
+    fn gate(&self) -> Result<(), Error> {
+        if !self.initialized {
+            return Err(Error::NotInitialized);
+        }
+        if self.suspended {
+            return Err(Error::Suspended);
+        }
+        if let Some(code) = self.host().exited {
+            return Err(Error::Exited(code));
+        }
+        Ok(())
+    }
+
+    /// Run one export with the hard fuel limit; returns the fuel it consumed.
+    fn call<P, R>(&mut self, func: &TypedFunc<P, R>, params: P) -> Result<(R, u64), (Error, u64)>
+    where
+        P: wasmtime::WasmParams,
+        R: wasmtime::WasmResults,
+    {
+        self.store
+            .set_fuel(CALL_HARD_LIMIT_FUEL)
+            .map_err(|e| (Error::Trap(e.to_string()), 0))?;
+        let result = func.call(&mut self.store, params);
+        let left = self.store.get_fuel().unwrap_or(0);
+        let used = CALL_HARD_LIMIT_FUEL - left;
+        match result {
+            Ok(r) => Ok((r, used)),
+            Err(e) => {
+                let err = match e.downcast_ref::<Trap>() {
+                    Some(Trap::OutOfFuel) => Error::OverBudget {
+                        used_ms: used.div_ceil(FUEL_PER_MS) as u32,
+                    },
+                    _ => Error::Trap(e.to_string()),
+                };
+                Err((err, used))
+            }
+        }
+    }
+
+    /// `vy_init(abi_minor, width, height, scale)` (SPEC-5.1.1). The first frame
+    /// after init is wanted: the window went from nothing to `width` × `height`.
+    pub fn init(&mut self, width: u32, height: u32, scale: f32) -> Result<(), Error> {
+        if self.initialized {
+            return Err(Error::Trap("vy_init called twice".into()));
+        }
+        let init = self.exports.init.clone();
+        let (code, _) = self
+            .call(
+                &init,
+                (ABI_MINOR as i32, width as i32, height as i32, scale),
+            )
+            .map_err(|(e, _)| e)?;
+        if code != 0 {
+            return Err(Error::InitFailed(code));
+        }
+        self.initialized = true;
+        self.host_mut().wants_frame = true;
+        Ok(())
+    }
+
+    /// `vy_frame(dt_ms)` (SPEC-5.1.2): rebuild the display list and semantic tree.
+    ///
+    /// Returns the display list bytes. Exceeding the 8 ms logical budget twice
+    /// in a row delivers `KIND_BUDGET` and then a forced `vy_suspend`
+    /// (SPEC-5.3.3); hitting the hard limit aborts the frame with
+    /// [`Error::OverBudget`].
+    pub fn frame(&mut self, dt_ms: i32) -> Result<&[u8], Error> {
+        self.gate()?;
+        {
+            let host = self.host_mut();
+            host.wants_frame = false;
+            host.sem.clear();
+            host.sem_overflow_logged = false;
+        }
+        let frame = self.exports.frame.clone();
+        let outcome = self.call(&frame, dt_ms);
+        self.frames += 1;
+        self.host_mut().clock_ms = self.frames as i64 * host::HEADLESS_FRAME_MS;
+
+        let (result, used) = match outcome {
+            Ok((ops, used)) => (Ok(ops), used),
+            Err((e, used)) => (Err(e), used),
+        };
+        let aborted = matches!(result, Err(Error::OverBudget { .. }));
+        let over = aborted || used > FRAME_BUDGET_FUEL;
+        self.last_frame = FrameStats {
+            fuel: used,
+            ops_reported: *result.as_ref().unwrap_or(&0),
+            over_budget: over,
+        };
+        if over {
+            self.budget_streak += 1;
+            let used_ms = used.div_ceil(FUEL_PER_MS) as i32;
+            let last = self.budget_streak >= 2;
+            // Delivered on the host's own fuel; a module that misbehaves here is simply stopped.
+            let ev = self.exports.event.clone();
+            let _ = self.call(
+                &ev,
+                (
+                    event::BUDGET,
+                    used_ms,
+                    limits::FRAME_BUDGET_MS as i32,
+                    i32::from(last),
+                    0,
+                ),
+            );
+            if last {
+                let suspend = self.exports.suspend.clone();
+                let _ = self.call(&suspend, ());
+                self.suspended = true;
+            }
+        } else {
+            self.budget_streak = 0;
+        }
+        match result {
+            Err(e) => Err(e),
+            Ok(_) => {
+                let host = self.host_mut();
+                if host.dl.is_open() {
+                    host.log(
+                        LogSource::Host,
+                        2,
+                        "vy_frame returned without dl_end; list closed by host".into(),
+                    );
+                    let _ = host.dl.end();
+                }
+                if let Some(code) = host.exited {
+                    return Err(Error::Exited(code));
+                }
+                Ok(host.dl.bytes())
+            }
+        }
+    }
+
+    /// `vy_event(kind, a, b, c, d)` (SPEC-5.1.3). Returns true when the module
+    /// asks for a redraw; the host then wants a frame (SPEC-6.2.1).
+    pub fn event(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) -> Result<bool, Error> {
+        self.gate()?;
+        {
+            let host = self.host_mut();
+            match kind {
+                event::POINTER_MOVE | event::POINTER_DOWN | event::POINTER_UP => {
+                    host.pointer = (a, b);
+                }
+                event::KEY_DOWN => {
+                    if !host.keys_down.contains(&a) {
+                        host.keys_down.push(a);
+                    }
+                }
+                event::KEY_UP => host.keys_down.retain(|k| *k != a),
+                _ => {}
+            }
+        }
+        let ev = self.exports.event.clone();
+        let (r, _) = self.call(&ev, (kind, a, b, c, d)).map_err(|(e, _)| e)?;
+        let redraw = r == 1;
+        if redraw {
+            self.host_mut().wants_frame = true;
+        }
+        Ok(redraw)
+    }
+
+    /// Deliver committed text as `TEXT_INPUT`: the bytes are written into
+    /// memory obtained from `vy_alloc` (SPEC-5.1.6) and passed as `(ptr, len)`.
+    pub fn text_input(&mut self, text: &str) -> Result<bool, Error> {
+        self.gate()?;
+        let len = i32::try_from(text.len()).map_err(|_| Error::Alloc)?;
+        let alloc = self.exports.alloc.clone();
+        let (ptr, _) = self.call(&alloc, len).map_err(|(e, _)| e)?;
+        if ptr <= 0 {
+            return Err(Error::Alloc);
+        }
+        let memory = self.host().memory.expect("memory");
+        let start = ptr as usize;
+        let end = start.checked_add(text.len()).ok_or(Error::Alloc)?;
+        let data = memory.data_mut(&mut self.store);
+        let dst = data.get_mut(start..end).ok_or(Error::Alloc)?;
+        dst.copy_from_slice(text.as_bytes());
+        self.event(event::TEXT_INPUT, ptr, len, 0, 0)
+    }
+
+    /// `vy_resize(width, height, scale)` (SPEC-5.1.4). A window change wants a frame (SPEC-6.2.1).
+    pub fn resize(&mut self, width: u32, height: u32, scale: f32) -> Result<(), Error> {
+        self.gate()?;
+        let resize = self.exports.resize.clone();
+        self.call(&resize, (width as i32, height as i32, scale))
+            .map_err(|(e, _)| e)?;
+        self.host_mut().wants_frame = true;
+        Ok(())
+    }
+
+    /// `vy_suspend()` (SPEC-5.1.5): the tab is being hidden.
+    pub fn suspend(&mut self) -> Result<i32, Error> {
+        self.gate()?;
+        let suspend = self.exports.suspend.clone();
+        let (r, _) = self.call(&suspend, ()).map_err(|(e, _)| e)?;
+        Ok(r)
+    }
+
+    /// True when the module asked for a frame (`request_frame`), an event
+    /// returned 1, the window changed, or `init` just ran (SPEC-6.2.1). The
+    /// host must not call [`Runtime::frame`] otherwise.
+    pub fn wants_frame(&self) -> bool {
+        self.host().wants_frame
+    }
+
+    /// True after a forced suspend (SPEC-5.3.3).
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    /// Code passed to `exit`, if the module called it.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.host().exited
+    }
+
+    /// Fuel and budget outcome of the last frame.
+    pub fn last_frame(&self) -> FrameStats {
+        self.last_frame
+    }
+
+    /// Number of `vy_frame` calls made so far.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Bytes of the last completed display list.
+    pub fn display_list(&self) -> &[u8] {
+        self.host().dl.bytes()
+    }
+
+    /// Semantic nodes of the last frame, in the order `sem_node` was called (SPEC-10.1.1).
+    pub fn semantic_tree(&self) -> &[SemNode] {
+        &self.host().sem
+    }
+
+    /// Links registered so far.
+    pub fn links(&self) -> &[Link] {
+        &self.host().links
+    }
+
+    /// Log lines from the module and about it.
+    pub fn logs(&self) -> &[LogEntry] {
+        &self.host().log
+    }
+
+    /// Headless clock as the module sees it through `now_ms`.
+    pub fn now_ms(&self) -> i64 {
+        self.host().clock_ms
+    }
+
+    /// Current size of the module's linear memory in pages.
+    pub fn memory_pages(&mut self) -> u64 {
+        let memory = self.host().memory.expect("memory");
+        memory.size(&self.store)
+    }
+
+    /// The text engine holding the module's styles; the rasterizer needs it.
+    pub fn text_engine_mut(&mut self) -> &mut TextEngine {
+        &mut self.host_mut().text
+    }
+
+    /// The semantic tree as JSON (SPEC-10.2.3): `{"nodes":[{id, parent_id, role,
+    /// role_name, x, y, w, h, text}, ...]}` with one object per line, so diffs
+    /// stay readable.
+    pub fn semantic_tree_json(&self) -> String {
+        let mut out = String::from("{\n  \"nodes\": [\n");
+        let nodes = self.semantic_tree();
+        for (i, n) in nodes.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{\"id\": {}, \"parent_id\": {}, \"role\": {}, \"role_name\": \"{}\", \"x\": {}, \"y\": {}, \"w\": {}, \"h\": {}, \"text\": \"{}\"}}",
+                n.id,
+                n.parent_id,
+                n.role,
+                vy_abi::role::name(n.role).unwrap_or(""),
+                json_num(n.x),
+                json_num(n.y),
+                json_num(n.w),
+                json_num(n.h),
+                json_escape(&n.text)
+            ));
+            out.push_str(if i + 1 < nodes.len() { ",\n" } else { "\n" });
+        }
+        out.push_str("  ]\n}\n");
+        out
+    }
+}
+
+fn json_num(v: f32) -> String {
+    if v.is_finite() {
+        format!("{v}")
+    } else {
+        "0".into()
+    }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests;
