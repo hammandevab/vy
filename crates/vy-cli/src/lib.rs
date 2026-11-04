@@ -46,7 +46,9 @@ pub struct RenderRequest<'a> {
     pub height: u32,
     /// Logical-to-physical ratio (SPEC-6.3.1).
     pub scale: f32,
-    /// Frames to run; the last one is rasterized.
+    /// Most frames to run; the last one run is rasterized. The first frame
+    /// always runs (init is a window change); each later one only while the
+    /// module wants a frame (SPEC-6.2.1), so a static page stops after one.
     pub frames: u32,
     /// `memory_max` in pages (SPEC-4.2.4).
     pub memory_max_pages: u32,
@@ -77,6 +79,8 @@ pub struct RenderOutput {
     pub semantic_json: String,
     /// Module and host log lines.
     pub logs: Vec<LogEntry>,
+    /// Frames actually run: 1 to `RenderRequest::frames` (SPEC-6.2.1).
+    pub frames_run: u32,
 }
 
 /// Physical pixel size of a logical size at `scale`.
@@ -87,8 +91,11 @@ pub fn physical(width: u32, height: u32, scale: f32) -> (u32, u32) {
     )
 }
 
-/// Load, init and run `frames` frames of a module, then rasterize the last one
-/// (SPEC-11.3.1). No window, no wall clock, no system fonts.
+/// Load, init and run up to `frames` frames of a module, then rasterize the
+/// last one (SPEC-11.3.1). No window, no wall clock, no system fonts.
+///
+/// `vy_frame` is called only while the runtime wants a frame (SPEC-6.2.1):
+/// once after init, then after each frame that called `request_frame`.
 pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     if req.frames == 0 {
         bail!("frames must be at least 1");
@@ -105,12 +112,15 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     rt.init(req.width, req.height, req.scale)
         .map_err(|e| anyhow!("{e}"))?;
     let mut display_list = Vec::new();
-    for i in 0..req.frames {
+    let mut frames_run = 0;
+    while frames_run < req.frames && rt.wants_frame() {
         display_list = rt
             .frame(HEADLESS_DT_MS)
-            .map_err(|e| anyhow!("frame {}: {e}", i + 1))?
+            .map_err(|e| anyhow!("frame {}: {e}", frames_run + 1))?
             .to_vec();
+        frames_run += 1;
     }
+    debug_assert!(frames_run >= 1, "init wants the first frame");
     let (pw, ph) = physical(req.width, req.height, req.scale);
     let image = vy_render::render(&display_list, pw, ph, req.scale, rt.text_engine_mut())
         .map_err(|e| anyhow!("{e}"))?;
@@ -119,6 +129,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         display_list,
         semantic_json: rt.semantic_tree_json(),
         logs: rt.logs().to_vec(),
+        frames_run,
     })
 }
 
@@ -235,6 +246,76 @@ mod tests {
             out.image
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A module whose frame draws one rectangle per frame run so far and calls
+    /// `request_frame` while fewer than `requests` frames have run.
+    fn counting_module(requests: u32) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(module
+                (import "vy" "request_frame" (func $request_frame))
+                (import "vy" "dl_begin" (func $dl_begin))
+                (import "vy" "dl_end" (func $dl_end))
+                (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32)))
+                (memory (export "memory") 1)
+                (global $n (mut i32) (i32.const 0))
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32)
+                    (local $i i32)
+                    (global.set $n (i32.add (global.get $n) (i32.const 1)))
+                    (call $dl_begin)
+                    (block (loop
+                        (br_if 1 (i32.ge_u (local.get $i) (global.get $n)))
+                        (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (f32.const 0) (i32.const 0))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br 0)))
+                    (call $dl_end)
+                    (if (i32.lt_u (global.get $n) (i32.const {requests})) (then (call $request_frame)))
+                    global.get $n)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+        ))
+        .unwrap()
+    }
+
+    /// SPEC-6.2.1, SPEC-5.2.2: `render --frames N` calls `vy_frame` once after
+    /// init and then only while the module asked for another frame; `N` is a
+    /// ceiling, not a count.
+    #[test]
+    fn spec_6_2_1_render_frames_is_a_ceiling() {
+        let rects = |out: &RenderOutput| vy_dl::decode(&out.display_list).unwrap().len();
+        for (requests, max, expect) in [(0, 5, 1), (0, 1, 1), (3, 5, 3), (3, 2, 2), (10, 5, 5)] {
+            let wasm = counting_module(requests);
+            let mut req = RenderRequest::new(&wasm, 8, 8);
+            req.frames = max;
+            let out = render(&req).unwrap();
+            assert_eq!(
+                out.frames_run, expect,
+                "requests {requests}, --frames {max}"
+            );
+            assert_eq!(
+                rects(&out),
+                expect as usize,
+                "the last frame run is rasterized"
+            );
+        }
+        // hello never calls request_frame: one frame however many are allowed.
+        let wasm = hello();
+        let mut req = RenderRequest::new(&wasm, 800, 600);
+        req.frames = 5;
+        let five = render(&req).unwrap();
+        assert_eq!(five.frames_run, 1);
+        assert_eq!(
+            five.image,
+            render(&RenderRequest::new(&wasm, 800, 600)).unwrap().image
+        );
+        assert!(render(&RenderRequest {
+            frames: 0,
+            ..RenderRequest::new(&wasm, 8, 8)
+        })
+        .is_err());
     }
 
     /// SPEC-13.1.4: compiling the reference module is fast. The 60 ms figure is a

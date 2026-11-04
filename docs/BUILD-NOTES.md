@@ -113,6 +113,9 @@ Inga normativa meningar har ändrats. Följande tolkningar gjordes och bör avg�
 3. **SPEC-6.2.1 / första framen.** Meningen listar `request_frame`, event som returnerar 1 och
    fönsterändring, men inte den första framen efter `vy_init`. Tolkning: initieringen räknas som
    fönsterändring (från inget till `width × height`), så `wants_frame()` är sann direkt efter `init`.
+   `vy-cli render --frames N` följer samma regel (granskning 0001, fynd 3): frame 1 körs alltid,
+   därefter bara så länge modulen begärt en ny; `N` är ett tak, inte ett antal, och utskriften
+   anger hur många som kördes.
 4. **SPEC-5.3.3 / varning vid första överskridandet.** Meningen nämner bara det andra; eventtabellen
    har "1 = sista varningen" vilket förutsätter en tidigare. Tolkning som ovan: varning (`c = 0`)
    vid första, sista varning (`c = 1`) plus suspend vid andra.

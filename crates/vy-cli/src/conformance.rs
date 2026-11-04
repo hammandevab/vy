@@ -28,7 +28,7 @@ pub struct Case {
     pub height: u32,
     /// DPI scale.
     pub scale: f32,
-    /// Frames to run before rasterizing.
+    /// Most frames to run before rasterizing (see `RenderRequest::frames`).
     pub frames: u32,
     /// Name under `conformance/semantic/` to compare the tree with, if any.
     pub semantic: Option<String>,

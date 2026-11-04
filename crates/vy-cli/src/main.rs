@@ -10,7 +10,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
          vy-cli check-abi <module.wasm>\n  \
-         vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames N] [--dump-semantic <json>]\n  \
+         vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--dump-semantic <json>]\n  \
          vy-cli conformance [--update] [--root <dir>]\n  \
          vy-cli bench         (M3)"
     );
@@ -120,10 +120,11 @@ fn render(args: &[String]) -> Result<ExitCode> {
         eprintln!("[{:?} {}] {}", log.source, log.level, log.message);
     }
     println!(
-        "{out}: {}x{} px, {} display list bytes",
+        "{out}: {}x{} px, {} display list bytes, {} of at most {frames} frame(s) run",
         output.image.width,
         output.image.height,
-        output.display_list.len()
+        output.display_list.len(),
+        output.frames_run
     );
     Ok(ExitCode::SUCCESS)
 }
