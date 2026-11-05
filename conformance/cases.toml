@@ -12,7 +12,14 @@
 # SPEC-8.1.2; resources[i] blir resurs-id i + 1, SPEC-4.5.1) och events (lista med
 # inline-tabeller: pointer_move/down/up med x, y;
 # pointer_leave utan argument; key_down/up med code (USB HID); text_input med text; scroll
-# med dx, dy, lines; focus med node, gained, keyboard). Värden äger fokus (SPEC-10.3.1):
+# med dx, dy, lines; focus med node, gained, keyboard; visibility med visible; budget utan
+# argument (nästa frame rapporteras över budget, SPEC-5.3.3); resize med width, height, scale
+# (sista storleken är bildens); suspend; reinit (ny instans med den gamlas lagring, SPEC-5.2.9);
+# fetch_done (FETCH_DONE för äldsta väntande begäran). Varje händelse kan ha after_frames = N:
+# högst N frames körs mellan föregående händelse och denna, så en sida kan nås mitt i en
+# animation. `fetch = [{url, status, body}]` är inspelade svar som fetch_begin besvaras med
+# när `net` beviljas (SPEC-5.2.7); manifestets net-origins gäller (SPEC-5.2.8) och dess
+# storage-kvot och memory_max tillämpas. Värden äger fokus (SPEC-10.3.1):
 # key_down 43 (Tab, med modifiers = 1 för Skift) når aldrig modulen utan flyttar värdens fokus
 # genom trädets fokuserbara noder och blir FOCUS-händelser; ett pointer_down flyttar fokus till
 # noden under pekaren först; ett scriptat focus sätter värdens fokus direkt. Modulen följer
@@ -328,6 +335,32 @@ events = [
   {kind = "key_down", code = 79},                   # pil höger efter taket: ingen frame
 ]
 
+[[case]]
+name = "game-800x600@1-paused"
+module = "game"
+width = 800
+height = 600
+scale = 1
+semantic = "game-paused"
+frames = 40
+events = [
+  {kind = "key_down", code = 44},                   # serve
+  {kind = "visibility", visible = false, after_frames = 20},   # gömd mitt i flykten: paus, inga frames
+  {kind = "visibility", visible = true},            # visas igen: pausöverlägget ritas (dt_ms = 0)
+]
+
+[[case]]
+name = "game-800x600@1-budget"
+module = "game"
+width = 800
+height = 600
+scale = 1
+frames = 30
+events = [
+  {kind = "key_down", code = 44},                   # serve
+  {kind = "budget", after_frames = 10},             # nästa frame rapporteras över budget: BUDGET
+]                                                   # sidan släpper stjärnfältet och svansen
+
 # dashboard: fyra nyckeltal, linjediagram (dl_path) och stapeldiagram (dl_rect) ur en fast
 # tabell, förklaring och verktygstips vid POINTER_MOVE (modules/dashboard).
 
@@ -398,6 +431,22 @@ events = [
   {kind = "key_down", code = 40},                   # Enter: läggs till lokalt, fetch_begin nekas
   {kind = "key_up", code = 40},
   {kind = "text_input", text = "Säg till om"},      # kompositören är fortfarande fokuserad
+]
+
+[[case]]
+name = "chat-800x600@1-delivered"
+module = "chat"
+width = 800
+height = 600
+scale = 1
+semantic = "chat-delivered"
+capabilities = ["ime", "net"]
+fetch = [{url = "https://chat.example/api/messages", status = 200, body = "ok"}]
+events = [
+  {kind = "key_down", code = 43},                   # Tab: kompositören
+  {kind = "text_input", text = "Ja, de ligger i conformance/golden nu."},
+  {kind = "key_down", code = 40},                   # Enter: fetch_begin besvaras ur fetch: "skickas"
+  {kind = "fetch_done"},                            # FETCH_DONE 200: "levererat", ansluten
 ]
 
 [[case]]
@@ -582,6 +631,15 @@ events = [
   {kind = "key_down", code = 43, modifiers = 1},                 # Skift+Tab: länken före
 ]
 
+[[case]]
+name = "document-1280x800@1-to-400x700"
+module = "document"
+width = 1280
+height = 800
+scale = 1
+semantic = "document-narrow"                       # samma träd som en instans startad i 400x700
+events = [{kind = "resize", width = 400, height = 700}]   # vy_resize: omflöde till en spalt
+
 # settings: vippknappar, radiogrupper, en slider som dras med pekaren och
 # persistens via state_get/state_put (modules/settings). Headless har lagring i minnet
 # när `storage` beviljas (kvoten ur manifestet): första starten ser ingen sparad nyckel
@@ -637,4 +695,21 @@ events = [                                         # enbart tangentbord (SPEC-10
   {kind = "key_down", code = 79},                   # pil höger ×3: 55
   {kind = "key_down", code = 79},
   {kind = "key_down", code = 79},
+]
+
+[[case]]
+name = "settings-800x600@1-reloaded"
+module = "settings"
+width = 800
+height = 600
+scale = 1
+semantic = "settings-reloaded"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 354, y = 156},        # Mörkt tema: på, sparas
+  {kind = "pointer_up", x = 354, y = 156},
+  {kind = "pointer_down", x = 354, y = 200},        # Kompakt läge: på, sparas
+  {kind = "pointer_up", x = 354, y = 200},
+  {kind = "suspend"},                               # vy_suspend: sparar en gång till
+  {kind = "reinit"},                                # ny instans med samma lagring: "Sparade inställningar laddade."
 ]
