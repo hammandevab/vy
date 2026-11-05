@@ -114,7 +114,7 @@ fn spec_7_2_1_end_to_end_localhost() {
         Form::Manifest,
         "both forms accepted: the server sends the manifest"
     );
-    assert!(first.trusted, "signature verifies with the published key");
+    assert!(first.trusted(), "signature verifies with the published key");
     assert_eq!(first.identity, package.identity());
     assert_eq!(first.package, package);
     // Manifest, module and key file.
@@ -125,7 +125,7 @@ fn spec_7_2_1_end_to_end_localhost() {
         second.requests, 0,
         "fresh manifest, cached module: no network"
     );
-    assert!(second.trusted);
+    assert!(second.trusted());
     assert_eq!(second.package, package);
 
     let stats = server.stats();

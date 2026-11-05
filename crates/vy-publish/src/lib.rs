@@ -183,7 +183,7 @@ pub fn inspect(bytes: &[u8], public_key: Option<&PublicKey>) -> Result<Inspectio
     let package = Package::unpack(bytes).map_err(BuildError::Package)?;
     let signature = match public_key {
         None => SignatureStatus::NotChecked,
-        Some(k) if package.manifest.verify(k) => SignatureStatus::Valid,
+        Some(k) if package.manifest.verify(k).is_some() => SignatureStatus::Valid,
         Some(_) => SignatureStatus::Invalid,
     };
     Ok(Inspection {
@@ -229,7 +229,7 @@ mod tests {
         let wasm = module();
         let p = build(&draft(), wasm.clone(), vec![], &key).unwrap();
         assert_eq!(p.manifest.module.hash, Hash::of(&wasm));
-        assert!(p.manifest.verify(&key.public()));
+        assert!(p.manifest.verify(&key.public()).is_some());
         let bytes = p.pack().unwrap();
         let i = inspect(&bytes, Some(&key.public())).unwrap();
         assert_eq!(i.signature, SignatureStatus::Valid);

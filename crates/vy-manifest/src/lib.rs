@@ -24,7 +24,7 @@ pub use package::{
     tar_read, tar_write, Package, PackageError, ENTRY_MANIFEST, ENTRY_MODULE,
     ENTRY_RESOURCE_PREFIX, MAX_PACKAGE_BYTES, MEDIA_MANIFEST, MEDIA_PACKAGE, ZSTD_LEVEL,
 };
-pub use policy::{default_grant, Grant, Requested};
+pub use policy::{Grant, Requested, Trust};
 pub use sign::{key_file, key_id, parse_key_file, PublicKey, SigningKey, KEY_ID_HEX_LEN};
 pub use validate::{
     is_bcp47, is_date, is_key_id, is_origin, module_initial_pages, png_dimensions, Problem,
@@ -869,7 +869,7 @@ mod tests {
         let encoded = m.encode().unwrap();
         assert_eq!(Manifest::decode(&encoded).unwrap(), m);
         assert_eq!(Manifest::from_json(&m.to_json()).unwrap(), m);
-        assert!(m.verify(&test_key().public()));
+        assert!(m.verify(&test_key().public()).is_some());
 
         // Unknown field in CBOR.
         let mut e = entries(&encoded);
@@ -1049,12 +1049,15 @@ mod tests {
         assert!(none.iter().next().is_none());
     }
 
-    /// SPEC-8.2.3: default grant policy per capability.
+    /// SPEC-8.2.3, SPEC-7.4.3: default grant policy per capability; the
+    /// grants of a manifest's requests exist only with the `Trust` that its
+    /// verification produced, and every request is `Denied` without one.
     #[test]
     fn spec_8_2_3_default_policy() {
         let net = NetRequest {
             origins: vec!["https://self.example".into()],
         };
+        use crate::policy::default_grant;
         assert_eq!(default_grant(&Requested::Net(&net), true), Grant::Auto);
         assert_eq!(default_grant(&Requested::Net(&net), false), Grant::Ask);
         let small = StorageRequest { quota_kb: 1024 };
@@ -1081,6 +1084,47 @@ mod tests {
         assert_eq!(ids, [1, 2, 3, 4, 5, 6]);
         let names: Vec<&str> = all.iter().map(|r| r.name()).collect();
         assert_eq!(names, vy_abi::cap::NAMES);
+
+        // The token comes from verification and nowhere else.
+        let (mut m, _) = hello();
+        m.capabilities = all.clone();
+        m.sign(&test_key());
+        let trust = m.verify(&test_key().public()).expect("signed by the key");
+        assert!(m
+            .verify(&SigningKey::from_seed(&[7u8; 32]).public())
+            .is_none());
+        let own = |n: &NetRequest| n.origins.iter().all(|o| o == "https://self.example");
+        assert_eq!(
+            all.default_grants(Some(&trust), own),
+            [
+                ("net", Grant::Auto),
+                ("storage", Grant::Auto),
+                ("clipboard", Grant::Ask),
+                ("hires_time", Grant::Denied),
+                ("ime", Grant::Auto),
+                ("persist_frame", Grant::Ask),
+            ]
+        );
+        assert_eq!(
+            all.default_grants(Some(&trust), |_| false),
+            [
+                ("net", Grant::Ask),
+                ("storage", Grant::Auto),
+                ("clipboard", Grant::Ask),
+                ("hires_time", Grant::Denied),
+                ("ime", Grant::Auto),
+                ("persist_frame", Grant::Ask),
+            ]
+        );
+        assert!(
+            all.default_grants(None, own)
+                .iter()
+                .all(|(_, g)| *g == Grant::Denied),
+            "no trust, no grant"
+        );
+        assert!(CapabilityRequests::default()
+            .default_grants(Some(&trust), own)
+            .is_empty());
     }
 
     /// SPEC-8.3.1: fallback is shown when the module is rejected or the window is under min_size.
@@ -1140,15 +1184,15 @@ mod tests {
         assert_eq!(key.public().key_id(), key_id(&key.public().to_bytes()));
         assert_eq!(TEST_PUBLIC_HEX.parse::<PublicKey>().unwrap(), key.public());
         let (m, _) = hello();
-        assert!(m.verify(&key.public()));
+        assert!(m.verify(&key.public()).is_some());
         assert_eq!(m.sig.as_ref().unwrap().key_id, key.public().key_id());
         let mut tampered = m.clone();
         tampered.memory_max += 1;
-        assert!(!tampered.verify(&key.public()));
+        assert!(tampered.verify(&key.public()).is_none());
         let other = SigningKey::from_seed(&[7u8; 32]);
-        assert!(!m.verify(&other.public()));
+        assert!(m.verify(&other.public()).is_none());
         let unsigned = Manifest { sig: None, ..m };
-        assert!(!unsigned.verify(&key.public()));
+        assert!(unsigned.verify(&key.public()).is_none());
         // The vy-key text form round-trips and rejects junk lines.
         let other_key = SigningKey::from_seed(&[7u8; 32]);
         let text = key_file(&[key.public(), other_key.public()]);

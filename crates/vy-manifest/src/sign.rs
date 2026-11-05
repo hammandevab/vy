@@ -1,6 +1,7 @@
 //! Ed25519 signatures over the manifest (SPEC-7.4.1).
 
 use crate::manifest::{from_hex, hex, Manifest, SigBytes, Signature};
+use crate::policy::Trust;
 use crate::Error;
 use ed25519_dalek::{Signer, SigningKey as DalekSigning, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -138,14 +139,19 @@ impl Manifest {
         });
     }
 
-    /// True when `sig` is present, names `key` and verifies over the
-    /// canonical encoding without `sig` (SPEC-7.4.1).
-    pub fn verify(&self, key: &PublicKey) -> bool {
+    /// A [`Trust`] when `sig` is present, names `key` and verifies over
+    /// the canonical encoding without `sig` (SPEC-7.4.1); `None` otherwise.
+    /// The token is the only way to a capability grant (SPEC-7.4.3,
+    /// [`crate::CapabilityRequests::default_grants`]).
+    pub fn verify(&self, key: &PublicKey) -> Option<Trust> {
         match &self.sig {
-            Some(sig) => {
-                sig.key_id == key.key_id() && key.verify_bytes(&self.signed_bytes(), &sig.bytes.0)
+            Some(sig)
+                if sig.key_id == key.key_id()
+                    && key.verify_bytes(&self.signed_bytes(), &sig.bytes.0) =>
+            {
+                Some(Trust(()))
             }
-            None => false,
+            _ => None,
         }
     }
 }

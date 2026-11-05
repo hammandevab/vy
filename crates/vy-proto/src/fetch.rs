@@ -15,7 +15,7 @@ use std::time::Duration;
 use ureq::config::Config;
 use ureq::Agent;
 use vy_manifest::{
-    default_grant, parse_key_file, Grant, Hash, Manifest, Package, PackageError, Problem,
+    parse_key_file, Grant, Hash, Manifest, Package, PackageError, Problem, Trust,
     MAX_MANIFEST_BYTES, MEDIA_MANIFEST, MEDIA_PACKAGE,
 };
 
@@ -187,13 +187,18 @@ pub enum Form {
 pub struct Fetched {
     /// The address asked for.
     pub address: Address,
-    /// Manifest, module and resources, hashes verified (SPEC-9.4.1).
+    /// Manifest, module and resources, hashes verified (SPEC-9.4.1). The
+    /// manifest's capability requests are readable here (the runtime needs
+    /// the `net` origins and the storage quota) but yield no grant: that
+    /// takes the trust token below, through [`Fetched::grants`].
     pub package: Package,
     /// Package identity (SPEC-4.1.2).
     pub identity: Hash,
-    /// True when the signature verifies with a key trusted for the origin;
-    /// false means restricted mode: no capabilities (SPEC-7.4.3).
-    pub trusted: bool,
+    /// The signature's verification under a key trusted for the origin
+    /// (SPEC-7.4.2); `None` means restricted mode: no capabilities
+    /// (SPEC-7.4.3). Private, so the only way from a page to a grant is
+    /// [`Fetched::grants`].
+    trust: Option<Trust>,
     /// Id of the key the manifest names.
     pub key_id: String,
     /// Response form.
@@ -208,8 +213,16 @@ impl Fetched {
         self.address.origin()
     }
 
+    /// True when the signature verifies with a key trusted for the origin;
+    /// false means restricted mode (SPEC-7.4.3).
+    pub fn trusted(&self) -> bool {
+        self.trust.is_some()
+    }
+
     /// Default grant per requested capability (SPEC-8.2.3); every one is
-    /// [`Grant::Denied`] when the page is not trusted (SPEC-7.4.3).
+    /// [`Grant::Denied`] when the page is not trusted (SPEC-7.4.3). The
+    /// only way to a grant for a fetched page: the trust token it needs is
+    /// private to this struct and produced by signature verification alone.
     pub fn grants(&self) -> Vec<(&'static str, Grant)> {
         let authority = &self.origin()["vy://".len()..];
         let own_origins = [
@@ -225,22 +238,9 @@ impl Fetched {
         self.package
             .manifest
             .capabilities
-            .iter()
-            .map(|r| {
-                let grant = if !self.trusted {
-                    Grant::Denied
-                } else {
-                    let own = match r {
-                        vy_manifest::Requested::Net(n) => {
-                            n.origins.iter().all(|o| own_origins.contains(o))
-                        }
-                        _ => true,
-                    };
-                    default_grant(&r, own)
-                };
-                (r.name(), grant)
+            .default_grants(self.trust.as_ref(), |n| {
+                n.origins.iter().all(|o| own_origins.contains(o))
             })
-            .collect()
     }
 }
 
@@ -388,12 +388,12 @@ impl Fetcher {
             .as_ref()
             .map(|s| s.key_id.clone())
             .unwrap_or_default();
-        let trusted = self.trust(address, &package.manifest, &mut requests);
+        let trust = self.trust(address, &package.manifest, &mut requests);
         Ok(Fetched {
             address: address.clone(),
             identity: package.identity(),
             package,
-            trusted,
+            trust,
             key_id,
             form,
             requests,
@@ -614,10 +614,16 @@ impl Fetcher {
 
     /// Decide trust for the manifest of `address` (SPEC-7.4.2, SPEC-7.4.3,
     /// SPEC-7.4.4): the key must be pinned for the origin, or be
-    /// discoverable on a first visit, or have been announced as successor.
-    fn trust(&mut self, address: &Address, manifest: &Manifest, requests: &mut u32) -> bool {
+    /// discoverable on a first visit, or have been announced as successor;
+    /// the token is the signature's verification under that key.
+    fn trust(
+        &mut self,
+        address: &Address,
+        manifest: &Manifest,
+        requests: &mut u32,
+    ) -> Option<Trust> {
         let Some(sig) = &manifest.sig else {
-            return false;
+            return None;
         };
         let origin = address.origin();
         let key = match self.keys.pinned(&origin, &sig.key_id) {
@@ -646,13 +652,13 @@ impl Fetcher {
                 }
             }
         };
-        let trusted = key.map(|k| manifest.verify(&k)).unwrap_or(false);
-        if trusted {
+        let trust = key.and_then(|k| manifest.verify(&k));
+        if trust.is_some() {
             if let Some(next) = &manifest.next_key_id {
                 let _ = self.keys.announce_successor(&origin, next);
             }
         }
-        trusted
+        trust
     }
 
     /// `GET /.well-known/vy-key` (SPEC-7.4.2). DNS TXT `_vy.<host>` is not

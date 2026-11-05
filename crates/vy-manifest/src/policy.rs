@@ -1,4 +1,12 @@
 //! Capability policy (SPEC-8.2.*).
+//!
+//! A [`Grant`] other than `Denied` exists only for a page whose signature
+//! verified under a key the client trusts (SPEC-7.4.3). The proof of that is
+//! a [`Trust`], which only [`crate::Manifest::verify`] produces, and
+//! [`CapabilityRequests::default_grants`] is the one function that turns
+//! requests into grants: without a `Trust` it answers `Denied` for every
+//! request. A shell that holds the manifest's requests therefore cannot
+//! compute grants past the trust decision, whatever it reads out of them.
 
 use crate::manifest::{CapabilityRequests, NetRequest, StorageRequest};
 use crate::validate::AUTO_STORAGE_QUOTA_KB;
@@ -14,6 +22,14 @@ pub enum Grant {
     /// Not granted unless the user turns it on explicitly.
     Denied,
 }
+
+/// Proof that a manifest's signature verified under a given key
+/// (SPEC-7.4.1): only [`crate::Manifest::verify`] makes one. Which key to
+/// believe for an origin is the protocol layer's decision (SPEC-7.4.2); it
+/// keeps the token for a page it trusts and drops it for one it does not,
+/// and only a kept token turns requests into grants (SPEC-7.4.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trust(pub(crate) ());
 
 /// One capability request as it stands in the manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +106,32 @@ impl CapabilityRequests {
             .map(|r| r.name())
             .collect()
     }
+
+    /// The default policy's verdict on every request (SPEC-8.2.3), in id
+    /// order: [`Grant::Denied`] for all of them without a [`Trust`]
+    /// (SPEC-7.4.3). `net_is_own` says whether a `net` request names only
+    /// the page's own origin (SPEC-9.5.1). This is the only way to a grant.
+    pub fn default_grants(
+        &self,
+        trust: Option<&Trust>,
+        mut net_is_own: impl FnMut(&NetRequest) -> bool,
+    ) -> Vec<(&'static str, Grant)> {
+        self.iter()
+            .map(|r| {
+                let grant = match trust {
+                    None => Grant::Denied,
+                    Some(_) => {
+                        let own = match r {
+                            Requested::Net(n) => net_is_own(n),
+                            _ => true,
+                        };
+                        default_grant(&r, own)
+                    }
+                };
+                (r.name(), grant)
+            })
+            .collect()
+    }
 }
 
 /// The default policy (SPEC-8.2.3): `net` for the page's own origin,
@@ -99,8 +141,10 @@ impl CapabilityRequests {
 /// the sentence and are treated as "ask".
 ///
 /// `origin_is_own` says whether every origin in a `net` request is the
-/// page's own (SPEC-9.5.1); it is ignored for other capabilities.
-pub fn default_grant(request: &Requested<'_>, origin_is_own: bool) -> Grant {
+/// page's own (SPEC-9.5.1); it is ignored for other capabilities. Crate
+/// private: callers go through [`CapabilityRequests::default_grants`],
+/// which asks for the [`Trust`] first.
+pub(crate) fn default_grant(request: &Requested<'_>, origin_is_own: bool) -> Grant {
     match request {
         Requested::Net(_) => {
             if origin_is_own {

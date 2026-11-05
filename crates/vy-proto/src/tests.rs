@@ -260,7 +260,7 @@ fn spec_7_2_1_media_types() {
     assert_eq!(whole.form, Form::Package);
     assert_eq!(whole.package, p);
     assert_eq!(whole.identity, p.identity());
-    assert!(whole.trusted);
+    assert!(whole.trusted());
     // Page plus key discovery.
     assert_eq!(whole.requests, 2);
 
@@ -310,7 +310,7 @@ fn spec_7_1_3_tls_required() {
     assert_eq!(server.requests().len(), 1);
     // 127.0.0.1 is loopback too.
     let a = Address::parse(&format!("vy://127.0.0.1:{}/hello", server.port())).unwrap();
-    assert!(f.fetch(&a).unwrap().trusted);
+    assert!(f.fetch(&a).unwrap().trusted());
 
     // The exception belongs to the page's own address, not to every hop:
     // a remote page must not be able to point a redirect or a blob URL at
@@ -478,7 +478,7 @@ fn spec_4_1_4_declared_sizes_bound_blob_downloads() {
     const _: () = assert!(MAX_BLOB_BYTES <= vy_manifest::MAX_PACKAGE_BYTES);
 
     // The honest manifest still works, and its blob is fetched once.
-    assert!(f.fetch(&addr(&server, "/hello")).unwrap().trusted);
+    assert!(f.fetch(&addr(&server, "/hello")).unwrap().trusted());
     assert_eq!(server.count(&module_path), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -552,7 +552,7 @@ fn spec_7_4_1_signature_scope() {
     let server = serve(&site);
     let (mut f, dir) = fetcher("scope");
     let fetched = f.fetch(&addr(&server, "/hello")).unwrap();
-    assert!(!fetched.trusted);
+    assert!(!fetched.trusted());
     assert_eq!(fetched.key_id, key(0).public().key_id());
     // Signing again with any key leaves the identity alone.
     let mut resigned = altered.clone();
@@ -574,7 +574,7 @@ fn spec_7_4_2_key_discovery() {
     let (mut f, dir) = fetcher("tofu");
     let a = addr(&server, "/hello");
     let first = f.fetch(&a).unwrap();
-    assert!(first.trusted);
+    assert!(first.trusted());
     assert_eq!(server.count(WELL_KNOWN_KEY_PATH), 1);
     let pinned = f.keys().origin(&a.origin()).unwrap();
     assert_eq!(pinned.pinned.len(), 2, "every published key is pinned");
@@ -589,13 +589,13 @@ fn spec_7_4_2_key_discovery() {
     site.lock().unwrap().keys = key_file(&[key(0).public(), key(7).public()]);
     site.lock().unwrap().packages.insert("/hello".into(), other);
     let later = f.fetch(&a).unwrap();
-    assert!(!later.trusted);
+    assert!(!later.trusted());
     assert_eq!(server.count(WELL_KNOWN_KEY_PATH), 1);
 
     // A first visit to an origin whose key file lacks the signing key.
     site.lock().unwrap().keys = key_file(&[key(0).public()]);
     let (mut g, dir2) = fetcher("tofu2");
-    assert!(!g.fetch(&a).unwrap().trusted);
+    assert!(!g.fetch(&a).unwrap().trusted());
     assert!(
         g.keys().has_pins(&a.origin()),
         "published keys are pinned anyway"
@@ -604,7 +604,7 @@ fn spec_7_4_2_key_discovery() {
     site.lock().unwrap().keys.clear();
     let (mut h, dir3) = fetcher("tofu3");
     let none = h.fetch(&a).unwrap();
-    assert!(!none.trusted);
+    assert!(!none.trusted());
     assert!(!h.keys().has_pins(&a.origin()));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);
@@ -620,7 +620,10 @@ fn spec_7_4_2_dns_txt_must_agree() {
 }
 
 /// SPEC-7.4.3: a page without a valid signature runs in restricted mode:
-/// no capability is granted, not even those granted automatically.
+/// no capability is granted, not even those granted automatically. The
+/// grants come from `Fetched::grants` alone: the trust token behind them is
+/// private to `Fetched` and made by signature verification, so a shell
+/// holding the manifest's requests cannot grant past the trust decision.
 #[test]
 fn spec_7_4_3_restricted_mode() {
     let mut d = draft();
@@ -643,14 +646,24 @@ fn spec_7_4_3_restricted_mode() {
     let (mut f, dir) = fetcher("restricted");
     let a = addr(&server, "/hello");
     let restricted = f.fetch(&a).unwrap();
-    assert!(!restricted.trusted);
+    assert!(!restricted.trusted());
     assert_eq!(
         restricted.grants(),
         [("storage", Grant::Denied), ("ime", Grant::Denied)]
     );
+    // The requests are readable, but without the token every request is
+    // denied whatever the caller claims about origins.
+    assert!(restricted.package.manifest.capabilities.requests("storage"));
+    assert!(restricted
+        .package
+        .manifest
+        .capabilities
+        .default_grants(None, |_| true)
+        .iter()
+        .all(|(_, g)| *g == Grant::Denied));
     site.lock().unwrap().packages.insert("/hello".into(), good);
     let trusted = f.fetch(&a).unwrap();
-    assert!(trusted.trusted);
+    assert!(trusted.trusted());
     assert_eq!(
         trusted.grants(),
         [("storage", Grant::Auto), ("ime", Grant::Auto)]
@@ -671,7 +684,7 @@ fn spec_7_4_4_key_rotation() {
     let server = serve(&site);
     let (mut f, dir) = fetcher("rotation");
     let a = addr(&server, "/hello");
-    assert!(f.fetch(&a).unwrap().trusted);
+    assert!(f.fetch(&a).unwrap().trusted());
     assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
 
     // The publisher rotates: new key signs, both keys published.
@@ -681,7 +694,7 @@ fn spec_7_4_4_key_rotation() {
         .packages
         .insert("/hello".into(), package(&new, None));
     let rotated = f.fetch(&a).unwrap();
-    assert!(rotated.trusted);
+    assert!(rotated.trusted());
     assert_eq!(rotated.key_id, new.public().key_id());
     assert!(f
         .keys()
@@ -694,7 +707,7 @@ fn spec_7_4_4_key_rotation() {
         .unwrap()
         .packages
         .insert("/hello".into(), package(&stranger, None));
-    assert!(!f.fetch(&a).unwrap().trusted);
+    assert!(!f.fetch(&a).unwrap().trusted());
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -764,7 +777,7 @@ fn spec_7_5_1_no_referer_max_redirects() {
     let (mut f, dir) = fetcher("redirects");
     // Three hops: allowed.
     let fetched = f.fetch(&addr(&server, "/r1")).unwrap();
-    assert!(fetched.trusted);
+    assert!(fetched.trusted());
     // Four hops: refused at the fourth redirect, before following it.
     match f.fetch(&addr(&server, "/r0")) {
         Err(Error::TooManyRedirects { url }) => assert!(url.ends_with("/r3")),
