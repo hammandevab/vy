@@ -278,6 +278,30 @@ registret sist.
 
 - **[SPEC-A.3.1]** Rollerna 1–24 ovan är de enda i 1.0.
 
+### Capability-id (`a` i `CAPABILITY`)
+
+| Id | Capability |
+| --- | --- |
+| 1 | `net` |
+| 2 | `storage` |
+| 3 | `clipboard` |
+| 4 | `hires_time` |
+| 5 | `ime` |
+| 6 | `persist_frame` |
+
+- **[SPEC-A.4.1]** Capability-id 1–6 ovan följer ordningen i SPEC-8.2.1 och ändras aldrig; en ny capability får ett nytt nummer.
+
+### Modifierarbitar (`modifierare` i pekar-, rullnings- och tangenthändelser)
+
+| Bit | Tangent |
+| --- | --- |
+| 1 | Skift |
+| 2 | Ctrl |
+| 4 | Alt / Option |
+| 8 | Meta (Cmd / Win) |
+
+- **[SPEC-A.5.1]** Modifierarbitarna ovan är de enda i 1.0; övriga bitar är 0 och nya tangenter får nya bitar.
+
 ## Bilaga B: manifestexempel
 
 Se `conformance/manifests/hello.json` (JSON-form av den kanoniska CBOR-kodningen).

@@ -94,9 +94,8 @@ pub mod fit {
     pub const MAX: i32 = 2;
 }
 
-/// Capability ids as delivered in `KIND_CAPABILITY` events (SPEC-A.2.1,
-/// SPEC-8.2.1). SPEC 1.0 names the six capabilities but not their numbers;
-/// these follow the order of SPEC-8.2.1 (see `docs/BUILD-NOTES.md`).
+/// Capability ids as delivered in `KIND_CAPABILITY` events (SPEC-A.4.1,
+/// SPEC-A.2.1), in the order of SPEC-8.2.1.
 pub mod cap {
     /// `net` {origins}.
     pub const NET: i32 = 1;
@@ -139,8 +138,7 @@ pub mod cap {
 }
 
 /// Modifier bits in the `modifierare` argument of pointer, scroll and key
-/// events (SPEC-A.2.1). SPEC 1.0 names the argument but not its bits; these
-/// are the host's convention (see `docs/BUILD-NOTES.md`).
+/// events (SPEC-A.5.1, SPEC-A.2.1).
 pub mod modifier {
     /// Either Shift key.
     pub const SHIFT: i32 = 1;
@@ -763,12 +761,24 @@ mod tests {
         assert_eq!(event::CAPABILITY, 32);
     }
 
-    /// SPEC-8.2.1, SPEC-A.2.1: the six capabilities of 1.0 have one id each,
-    /// in the order the spec lists them, and names round-trip.
+    /// SPEC-A.4.1, SPEC-8.2.1, SPEC-A.2.1: the six capabilities of 1.0 have
+    /// the ids 1..=6 of appendix A, in the order the spec lists them, and
+    /// names round-trip.
     #[test]
-    fn spec_8_2_1_capability_ids() {
+    fn spec_a_4_1_capability_ids() {
         assert_eq!(cap::NAMES.len(), 6);
         assert_eq!(cap::MAX, 6);
+        assert_eq!(
+            (
+                cap::NET,
+                cap::STORAGE,
+                cap::CLIPBOARD,
+                cap::HIRES_TIME,
+                cap::IME,
+                cap::PERSIST_FRAME
+            ),
+            (1, 2, 3, 4, 5, 6)
+        );
         assert_eq!(cap::name(cap::NET), Some("net"));
         assert_eq!(cap::name(cap::IME), Some("ime"));
         assert_eq!(cap::name(cap::PERSIST_FRAME), Some("persist_frame"));
@@ -802,6 +812,23 @@ mod tests {
         }
         assert!(!role::is_focusable(0) && !role::is_focusable(25));
         assert_eq!(role::FOCUSABLE.len(), 8);
+    }
+
+    /// SPEC-A.5.1, SPEC-A.2.1: the modifier bits are Shift 1, Ctrl 2, Alt 4,
+    /// Meta 8 and nothing else; they combine as a mask.
+    #[test]
+    fn spec_a_5_1_modifier_bits() {
+        assert_eq!(
+            (
+                modifier::SHIFT,
+                modifier::CTRL,
+                modifier::ALT,
+                modifier::META
+            ),
+            (1, 2, 4, 8)
+        );
+        let all = modifier::SHIFT | modifier::CTRL | modifier::ALT | modifier::META;
+        assert_eq!(all, 15, "four distinct bits, no overlap");
     }
 
     /// SPEC-A.3.1, SPEC-10.1.2: roles 1..24 are the only roles and each has one name.
