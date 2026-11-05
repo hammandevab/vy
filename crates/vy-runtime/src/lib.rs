@@ -751,6 +751,25 @@ impl Runtime {
         self.deliver(kind, a, b, c, d)
     }
 
+    /// Deliver an event that is a copy gesture the user made in the page
+    /// (Ctrl+C or Ctrl+X): `clipboard_write` succeeds without the
+    /// `clipboard` capability while this event is being handled, and
+    /// nothing else changes (SPEC-8.2.4). `clipboard_read` keeps requiring
+    /// the capability and its own gesture window (SPEC-5.2.12).
+    pub fn event_as_copy_gesture(
+        &mut self,
+        kind: i32,
+        a: i32,
+        b: i32,
+        c: i32,
+        d: i32,
+    ) -> Result<bool, Error> {
+        self.host_mut().copy_gesture = true;
+        let r = self.event(kind, a, b, c, d);
+        self.host_mut().copy_gesture = false;
+        r
+    }
+
     /// Call `vy_event` and note whether the module wants a frame: 1 asks
     /// for a redraw, 0 does not, and any other value is treated as 1 and
     /// noted once per instance at debug level (SPEC-5.1.3).
@@ -1102,6 +1121,14 @@ impl Runtime {
     /// Replace the clipboard the module reads (SPEC-5.2.12).
     pub fn set_clipboard(&mut self, clipboard: Option<Vec<u8>>) {
         self.host_mut().clipboard = clipboard;
+    }
+
+    /// The bytes of the module's last `clipboard_write` since the previous
+    /// call, if there was one (SPEC-5.2.12): every write, even one that
+    /// repeats the value, so a host process can put it on the system
+    /// clipboard each time.
+    pub fn take_clipboard_write(&mut self) -> Option<Vec<u8>> {
+        self.host_mut().clipboard_written.take()
     }
 
     /// What the module has saved with `state_put` (SPEC-5.2.9).

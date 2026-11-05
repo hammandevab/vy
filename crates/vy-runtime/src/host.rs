@@ -319,6 +319,16 @@ pub struct Host {
     /// a key, committed text), for the 1 s window of `clipboard_read`
     /// (SPEC-5.2.12); `None` before the first.
     pub(crate) last_gesture_ms: Option<i64>,
+    /// True while the event being delivered is a copy gesture the user
+    /// made in the page (Ctrl+C or Ctrl+X): `clipboard_write` then
+    /// succeeds without the `clipboard` capability (SPEC-8.2.4);
+    /// `clipboard_read` never does.
+    pub(crate) copy_gesture: bool,
+    /// The bytes of the last `clipboard_write` not yet taken with
+    /// [`crate::Runtime::take_clipboard_write`]: a host process forwards
+    /// every write, even one that repeats the value (the system clipboard
+    /// may have changed in between).
+    pub(crate) clipboard_written: Option<Vec<u8>>,
     /// Fuel owed for host work in the current import call; settled by
     /// [`with_host`] / [`with_memory`] before the call returns to wasm.
     pending_fuel: u64,
@@ -376,6 +386,8 @@ impl Host {
             navigations: Vec::new(),
             clipboard,
             last_gesture_ms: None,
+            copy_gesture: false,
+            clipboard_written: None,
             pending_fuel: 0,
             host_fuel: 0,
         }
@@ -1420,7 +1432,10 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         "clipboard_write",
         |mut c: Caller<'_, Host>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
-                if !host.caps.clipboard {
+                // A write during a copy gesture (Ctrl+C or Ctrl+X in the
+                // page) needs no capability (SPEC-8.2.4): the user asked
+                // for it, and a write leaks nothing.
+                if !host.caps.clipboard && !host.copy_gesture {
                     return host.denied("clipboard_write", "clipboard");
                 }
                 match slice(data, ptr, len, "text", limits::MAX_CLIPBOARD_BYTES) {
@@ -1431,6 +1446,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                         }
                         let bytes = bytes.to_vec();
                         host.charge(bytes.len());
+                        host.clipboard_written = Some(bytes.clone());
                         host.clipboard = Some(bytes);
                         err::OK
                     }

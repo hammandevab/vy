@@ -481,6 +481,11 @@ pub enum ToTab {
         /// The frame's budget.
         budget: u64,
     },
+    /// The next [`ToTab::Event`] is a copy gesture the user made in the
+    /// page (Ctrl+C or Ctrl+X): a `clipboard_write` while it is handled
+    /// succeeds without the `clipboard` capability (SPEC-8.2.4). One-shot:
+    /// it arms exactly the event that follows it.
+    CopyGesture,
 }
 
 /// Messages from a tab process to the main process.
@@ -574,6 +579,7 @@ const T_SUSPEND: u8 = 9;
 const T_SHUTDOWN: u8 = 10;
 const T_CLIPBOARD: u8 = 11;
 const T_RASTER: u8 = 12;
+const T_COPY_GESTURE: u8 = 13;
 
 const S_LOADED: u8 = 64;
 const S_FRAME: u8 = 65;
@@ -758,6 +764,7 @@ impl ToTab {
                 w.u64(*budget);
                 w.finish()
             }
+            Self::CopyGesture => Writer::new(T_COPY_GESTURE).finish(),
         }
     }
 
@@ -855,6 +862,7 @@ impl ToTab {
                 units: r.u64()?,
                 budget: r.u64()?,
             },
+            T_COPY_GESTURE => Self::CopyGesture,
             other => return Err(DecodeError::Tag(other)),
         };
         r.finish()?;
@@ -1209,6 +1217,7 @@ mod tests {
                 units: 1 << 40,
                 budget: 64 << 20,
             },
+            ToTab::CopyGesture,
         ]
     }
 
@@ -1301,7 +1310,7 @@ mod tests {
             assert!(ToTab::decode(&body).is_err(), "tags are disjoint: {m:?}");
             shell_tags.insert(body[0]);
         }
-        assert_eq!(tab_tags.len(), 12, "every ToTab variant is covered");
+        assert_eq!(tab_tags.len(), 13, "every ToTab variant is covered");
         assert_eq!(shell_tags.len(), 13, "every ToShell variant is covered");
         assert!(tab_tags.is_disjoint(&shell_tags));
         // Over a byte stream: lengths first, little-endian.

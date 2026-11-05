@@ -33,7 +33,9 @@ pub struct TabLoop<T: IpcTransport> {
     last_links: Vec<vy_runtime::Link>,
     last_sem: Vec<vy_runtime::SemNode>,
     last_ime: Option<(f32, f32, f32, f32)>,
-    last_clipboard: Option<Vec<u8>>,
+    /// Set by [`ToTab::CopyGesture`] and spent by the next event: that
+    /// event is delivered as a copy gesture (SPEC-8.2.4).
+    copy_gesture_armed: bool,
 }
 
 /// Capability ids packed as bits for [`LoadRequest::capabilities`].
@@ -73,7 +75,7 @@ impl<T: IpcTransport> TabLoop<T> {
             last_links: Vec::new(),
             last_sem: Vec::new(),
             last_ime: None,
-            last_clipboard: None,
+            copy_gesture_armed: false,
         })
     }
 
@@ -121,12 +123,20 @@ impl<T: IpcTransport> TabLoop<T> {
                 d,
                 clock_ms,
             } => {
+                // Spent whether or not the page is alive: the grant was
+                // for this event only.
+                let gesture = std::mem::take(&mut self.copy_gesture_armed);
                 if let Some(rt) = self.alive() {
                     rt.set_clock_ms(clock_ms);
-                    let r = rt.event(kind, a, b, c, d);
+                    let r = if gesture {
+                        rt.event_as_copy_gesture(kind, a, b, c, d)
+                    } else {
+                        rt.event(kind, a, b, c, d)
+                    };
                     self.settle(r.map(|_| ()))?;
                 }
             }
+            ToTab::CopyGesture => self.copy_gesture_armed = true,
             ToTab::TextInput { text, clock_ms } => {
                 if let Some(rt) = self.alive() {
                     rt.set_clock_ms(clock_ms);
@@ -190,8 +200,7 @@ impl<T: IpcTransport> TabLoop<T> {
             }
             ToTab::Clipboard { bytes } => {
                 if let Some(rt) = &mut self.rt {
-                    rt.set_clipboard(Some(bytes.clone()));
-                    self.last_clipboard = Some(bytes);
+                    rt.set_clipboard(Some(bytes));
                 }
             }
             ToTab::Raster {
@@ -232,7 +241,7 @@ impl<T: IpcTransport> TabLoop<T> {
         self.last_links.clear();
         self.last_sem.clear();
         self.last_ime = None;
-        self.last_clipboard = req.clipboard.clone();
+        self.copy_gesture_armed = false;
         let options = Options {
             memory_max_pages: req.memory_max_pages,
             capabilities: unpack_capabilities(req.capabilities),
@@ -420,12 +429,10 @@ impl<T: IpcTransport> TabLoop<T> {
                 body: f.body,
             });
         }
-        let clip = rt.clipboard().map(<[u8]>::to_vec);
-        if clip != self.last_clipboard {
-            if let Some(bytes) = &clip {
-                out.push(ToShell::Clipboard(bytes.clone()));
-            }
-            self.last_clipboard = clip;
+        // Every write, even of the same bytes: the shell puts it on the
+        // system clipboard, which may have changed in between.
+        if let Some(bytes) = rt.take_clipboard_write() {
+            out.push(ToShell::Clipboard(bytes));
         }
         let ime = rt.ime_rect();
         if ime != self.last_ime {
@@ -811,6 +818,118 @@ mod tests {
             ToShell::Navigate { url, replace: false } if url == "vy://docs.example/personer/maja-ek"
         )), "{msgs:?}");
         tx.send(ToTab::Shutdown.encode()).unwrap();
+        h.join().unwrap();
+    }
+
+    /// SPEC-8.2.4, SPEC-5.2.12, SPEC-5.3.1: a `clipboard_write` while the
+    /// page handles a copy gesture (the `KEY_DOWN` that follows a
+    /// `CopyGesture`) succeeds without the `clipboard` capability and
+    /// comes out as `Clipboard`; the same write on any other event is
+    /// `E_DENIED` and logged, and the grant is spent by the one event:
+    /// a `CopyGesture` arms exactly the next event, whatever it is.
+    #[test]
+    fn spec_8_2_4_copy_gesture_grants_clipboard_write() {
+        // On every event: `clipboard_write("kopia")`, then a redraw request.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "clipboard_write" (func $cw (param i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "kopia")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (drop (call $cw (i32.const 16) (i32.const 5)))
+                    i32.const 1)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        let (tx, rx, h) = start();
+        let mut req = load_request(wasm, 0);
+        req.clipboard = Some(Vec::new());
+        tx.send(ToTab::Load(Box::new(req)).encode()).unwrap();
+        recv_until(&rx, |m| matches!(m, ToShell::Loaded { .. }));
+        let key = |code: i32, modifiers: i32, clock_ms: i64| ToTab::Event {
+            kind: vy_abi::event::KEY_DOWN,
+            a: code,
+            b: modifiers,
+            c: 0,
+            d: 0,
+            clock_ms,
+        };
+        // Without a gesture: denied and logged, nothing written.
+        tx.send(key(crate::shell::hid::C, vy_abi::modifier::CTRL, 16).encode())
+            .unwrap();
+        tx.send(ToTab::Tick { clock_ms: 32 }.encode()).unwrap();
+        let msgs = recv_until(&rx, |m| matches!(m, ToShell::Frame { .. } | ToShell::Idle));
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                ToShell::Log { module: false, message, .. }
+                    if message.starts_with("clipboard_write: E_DENIED")
+            )),
+            "{msgs:?}"
+        );
+        assert!(!msgs.iter().any(|m| matches!(m, ToShell::Clipboard(_))));
+        // With the gesture: written, and the write comes out.
+        tx.send(ToTab::CopyGesture.encode()).unwrap();
+        tx.send(key(crate::shell::hid::C, vy_abi::modifier::CTRL, 48).encode())
+            .unwrap();
+        tx.send(ToTab::Tick { clock_ms: 64 }.encode()).unwrap();
+        let msgs = recv_until(&rx, |m| matches!(m, ToShell::Frame { .. } | ToShell::Idle));
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ToShell::Clipboard(b) if b == b"kopia")),
+            "{msgs:?}"
+        );
+        // The grant was for that one event: the next write is denied again.
+        tx.send(key(crate::shell::hid::X, vy_abi::modifier::CTRL, 80).encode())
+            .unwrap();
+        tx.send(ToTab::Tick { clock_ms: 96 }.encode()).unwrap();
+        let msgs = recv_until(&rx, |m| matches!(m, ToShell::Frame { .. } | ToShell::Idle));
+        assert!(!msgs.iter().any(|m| matches!(m, ToShell::Clipboard(_))));
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| matches!(
+                    m,
+                    ToShell::Log { message, .. } if message.starts_with("clipboard_write: E_DENIED")
+                ))
+                .count(),
+            1
+        );
+        // A gesture arms exactly the next event, whatever it is: a pointer
+        // move spends it and the key after it is denied.
+        tx.send(ToTab::CopyGesture.encode()).unwrap();
+        tx.send(
+            ToTab::Event {
+                kind: vy_abi::event::POINTER_MOVE,
+                a: 100,
+                b: 100,
+                c: 0,
+                d: 0,
+                clock_ms: 112,
+            }
+            .encode(),
+        )
+        .unwrap();
+        tx.send(key(crate::shell::hid::C, vy_abi::modifier::CTRL, 128).encode())
+            .unwrap();
+        tx.send(ToTab::Tick { clock_ms: 144 }.encode()).unwrap();
+        let msgs = recv_until(&rx, |m| matches!(m, ToShell::Frame { .. } | ToShell::Idle));
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| matches!(m, ToShell::Clipboard(_)))
+                .count(),
+            1,
+            "the move wrote, the key did not: {msgs:?}"
+        );
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            ToShell::Log { message, .. } if message.starts_with("clipboard_write: E_DENIED")
+        )));
+        tx.send(ToTab::Shutdown.encode()).unwrap();
+        recv_until(&rx, |m| matches!(m, ToShell::Storage(_)));
         h.join().unwrap();
     }
 
