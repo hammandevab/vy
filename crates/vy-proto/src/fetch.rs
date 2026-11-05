@@ -248,6 +248,16 @@ struct Response {
     body: Vec<u8>,
 }
 
+/// Whether `url` may be fetched for a page at an address that is or is not
+/// localhost (SPEC-7.1.3): `https://` always; plain `http://` only to a
+/// loopback host, and only for a page whose own address is loopback. The
+/// exception is for developing against a local server, not a way for a
+/// remote page to steer the client at services on the user's machine
+/// through a redirect or a blob URL.
+pub fn transport_allowed(page_is_localhost: bool, url: &HttpUrl) -> bool {
+    url.scheme == "https" || (page_is_localhost && url.is_localhost())
+}
+
 /// Body limit per media type of the page response: a manifest is at most
 /// 64 KB (SPEC-4.1.3), a package at most the decompressed cap, and the
 /// body of anything else is not read at all (SPEC-7.2.2).
@@ -306,7 +316,8 @@ impl Fetcher {
     /// Fetch a page.
     pub fn fetch(&mut self, address: &Address) -> Result<Fetched, Error> {
         let mut requests = 0;
-        let primary = self.get_with_http_cache(&address.fetch_url(), &mut requests)?;
+        let local = address.is_localhost();
+        let primary = self.get_with_http_cache(&address.fetch_url(), local, &mut requests)?;
         let (package, form) = match primary.media_type.as_str() {
             MEDIA_PACKAGE => {
                 let package = Package::unpack(&primary.body)?;
@@ -333,6 +344,7 @@ impl Fetcher {
                     manifest.module.size,
                     manifest.module.url.as_deref(),
                     &primary.url,
+                    local,
                     &mut requests,
                 )?;
                 let mut resources = Vec::with_capacity(manifest.resources.len());
@@ -342,6 +354,7 @@ impl Fetcher {
                         r.size,
                         r.url.as_deref(),
                         &primary.url,
+                        local,
                         &mut requests,
                     )?);
                 }
@@ -398,6 +411,7 @@ impl Fetcher {
         size: u64,
         url: Option<&str>,
         base: &str,
+        local: bool,
         requests: &mut u32,
     ) -> Result<Vec<u8>, Error> {
         if let Some(bytes) = self.blobs.get(hash) {
@@ -413,7 +427,7 @@ impl Fetcher {
         // `size` is the manifest's claim, already bounded by
         // `declared_size_problems`; the cap here is the last line of defence.
         let limit = size.min(MAX_BLOB_BYTES);
-        let resp = self.get(&url, "*/*", &|_| limit, None, requests)?;
+        let resp = self.get(&url, "*/*", &|_| limit, None, local, requests)?;
         if resp.status != 200 {
             return Err(Error::Status {
                 url: resp.url,
@@ -434,7 +448,12 @@ impl Fetcher {
 
     /// GET through the HTTP cache (SPEC-7.3.2): a fresh record is used
     /// without a request; a stale one is revalidated with `If-None-Match`.
-    fn get_with_http_cache(&mut self, url: &str, requests: &mut u32) -> Result<Response, Error> {
+    fn get_with_http_cache(
+        &mut self,
+        url: &str,
+        local: bool,
+        requests: &mut u32,
+    ) -> Result<Response, Error> {
         let now = now_secs();
         let cached = self.http.get(url);
         if let Some(rec) = &cached {
@@ -453,7 +472,7 @@ impl Fetcher {
             }
         }
         let etag = cached.as_ref().and_then(|r| r.etag.clone());
-        let resp = self.get(url, ACCEPT, &page_limit, etag.as_deref(), requests)?;
+        let resp = self.get(url, ACCEPT, &page_limit, etag.as_deref(), local, requests)?;
         if resp.status == 304 {
             if let Some(mut rec) = cached {
                 rec.fetched_at = now;
@@ -496,23 +515,25 @@ impl Fetcher {
         Ok(resp)
     }
 
-    /// One GET with up to [`MAX_REDIRECTS`] hops, each checked for TLS
-    /// before it is connected (SPEC-7.1.3). Never sends `Referer`
-    /// (SPEC-7.5.1). `limit` gives the body cap for the media type
-    /// received; 0 means the body is not read.
+    /// One GET with up to [`MAX_REDIRECTS`] hops, each checked with
+    /// [`transport_allowed`] before it is connected (SPEC-7.1.3); `local`
+    /// says whether the page's own address is loopback. Never sends
+    /// `Referer` (SPEC-7.5.1). `limit` gives the body cap for the media
+    /// type received; 0 means the body is not read.
     fn get(
         &self,
         url: &str,
         accept: &str,
         limit: &dyn Fn(&str) -> u64,
         if_none_match: Option<&str>,
+        local: bool,
         requests: &mut u32,
     ) -> Result<Response, Error> {
         let mut url = url.to_string();
         for hop in 0..=MAX_REDIRECTS {
             let parsed =
                 HttpUrl::parse(&url).ok_or_else(|| Error::BadRedirect { url: url.clone() })?;
-            if parsed.scheme != "https" && !parsed.is_localhost() {
+            if !transport_allowed(local, &parsed) {
                 return Err(Error::TlsRequired { url });
             }
             let mut req = self.agent.get(&url).header("Accept", accept);
@@ -638,7 +659,14 @@ impl Fetcher {
         let base = address.fetch_url();
         let url = resolve(&base, WELL_KNOWN_KEY_PATH)
             .ok_or_else(|| Error::BadRedirect { url: base.clone() })?;
-        let resp = self.get(&url, "text/plain", &|_| MAX_KEY_FILE_BYTES, None, requests)?;
+        let resp = self.get(
+            &url,
+            "text/plain",
+            &|_| MAX_KEY_FILE_BYTES,
+            None,
+            address.is_localhost(),
+            requests,
+        )?;
         if resp.status != 200 {
             return Err(Error::Status {
                 url: resp.url,

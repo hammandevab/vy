@@ -306,6 +306,27 @@ fn spec_7_1_3_tls_required() {
     // 127.0.0.1 is loopback too.
     let a = Address::parse(&format!("vy://127.0.0.1:{}/hello", server.port())).unwrap();
     assert!(f.fetch(&a).unwrap().trusted);
+
+    // The exception belongs to the page's own address, not to every hop:
+    // a remote page must not be able to point a redirect or a blob URL at
+    // `http://localhost:<port>/...` on the user's machine (review 0003).
+    let url = |s: &str| HttpUrl::parse(s).unwrap();
+    for local in [
+        "http://localhost:8080/x",
+        "http://127.0.0.1/x",
+        "http://[::1]:1/",
+    ] {
+        assert!(transport_allowed(true, &url(local)), "{local}");
+        assert!(!transport_allowed(false, &url(local)), "{local}");
+    }
+    for remote in ["http://example.com/", "http://localhost.example/"] {
+        assert!(!transport_allowed(true, &url(remote)), "{remote}");
+        assert!(!transport_allowed(false, &url(remote)), "{remote}");
+    }
+    for secure in ["https://example.com/", "https://localhost:1/"] {
+        assert!(transport_allowed(true, &url(secure)), "{secure}");
+        assert!(transport_allowed(false, &url(secure)), "{secure}");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 
