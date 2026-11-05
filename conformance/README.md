@@ -2,7 +2,8 @@
 
 - `cases.toml` – fallen: modul, logisk storlek, skala, antal frames, beviljade `capabilities`,
   `resources`, inspelade svar (`fetch`) och `events` som spelas upp före sista framen (körs av
-  `vy-cli conformance`). Händelserna är både indata (pekare, tangenter, text, rullning, fokus)
+  `vy-cli conformance`). Strängar skrivs `"…"` utan escapes eller som TOML-literalsträngar `'…'`,
+  som får innehålla `"` (ett inspelat JSON-svar i `body`) men inte `'`. Händelserna är både indata (pekare, tangenter, text, rullning, fokus)
   och värdhändelser: `visibility`, `budget`, `resize`, `suspend`, `reinit` och `fetch_done`,
   var och en med valfritt `after_frames = N` som begränsar hur många frames som körs före den.
 - `golden/<modul>-<WxH>@<scale>[-<tillstånd>].png` – guldbilder, en per referensmodul, storlek,

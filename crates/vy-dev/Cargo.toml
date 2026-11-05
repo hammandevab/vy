@@ -1,0 +1,31 @@
+[package]
+name = "vy-dev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Developer tool: scaffold a page project, build and serve it on localhost, run Claude Code from Studio"
+
+[[bin]]
+name = "vy-dev"
+path = "src/main.rs"
+
+[dependencies]
+vy-manifest.workspace = true
+vy-publish.workspace = true
+vy-serve.workspace = true
+# `check_abi_bytes`: the check `vy-cli check-abi` runs.
+vy-runtime.workspace = true
+tiny_http.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+# 16 bytes of OS entropy for the dev API's per-run token (the version ring and
+# vy-publish already use).
+getrandom.workspace = true
+
+[dev-dependencies]
+# Event kinds and method names when the Studio test drives the module.
+vy-abi.workspace = true
+# The client's own request path (`Fetcher::request`, `transport_allowed`) in the
+# origin-boundary tests.
+vy-proto.workspace = true

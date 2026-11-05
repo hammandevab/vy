@@ -77,7 +77,8 @@ pub struct FetchRequest {
     pub id: i32,
     /// `vy_abi::method`: 0 GET, 1 POST, 2 PUT, 3 DELETE.
     pub method: i32,
-    /// An `https://` URL within the manifest's `net` origins.
+    /// An `https://` URL, or `http://` to loopback ([`origin_of`]), within
+    /// the manifest's `net` origins.
     pub url: String,
     /// Request body, at most `MAX_FETCH_BODY_BYTES`.
     pub body: Vec<u8>,
@@ -93,16 +94,56 @@ pub struct Navigation {
     pub replace: bool,
 }
 
-/// Origin of an `https://` URL: scheme, host and port, lower-cased
-/// (SPEC-9.5.1); `None` for anything else.
+/// Origin of a URL a page may fetch: scheme, host and port, lower-cased
+/// (SPEC-9.5.1). `https://` to any host, and plain `http://` only to a
+/// loopback host (`localhost`, `127.0.0.1`, `[::1]`, with an optional
+/// port), the one exception to TLS (SPEC-7.1.3); `None` for anything else.
 pub fn origin_of(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("https://")?;
+    let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        ("https", rest)
+    } else {
+        ("http", url.strip_prefix("http://")?)
+    };
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..end];
-    if authority.is_empty() {
+    let authority = rest[..end].to_ascii_lowercase();
+    if authority.is_empty() || (scheme == "http" && !is_loopback_authority(&authority)) {
         return None;
     }
-    Some(format!("https://{}", authority.to_ascii_lowercase()))
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// Whether a page whose own address is `vy://<page_authority>/…` may make a
+/// plain-http request to `origin` (as [`origin_of`] gives it): only to its
+/// own loopback origin, so `vy://localhost:8081/` reaches
+/// `http://localhost:8081` and nothing else, and no page from another
+/// origin reaches a loopback service over plain http (SPEC-7.1.3,
+/// SPEC-9.5.1). True for every `https://` origin: this is the plain-http
+/// rule only. For the host process, which knows the page's address; the
+/// tab process does not.
+pub fn plain_http_allowed(origin: &str, page_authority: &str) -> bool {
+    match origin.strip_prefix("http://") {
+        None => true,
+        Some(authority) => {
+            is_loopback_authority(authority) && authority.eq_ignore_ascii_case(page_authority)
+        }
+    }
+}
+
+/// `localhost`, `127.0.0.1` or `[::1]`, optionally with `:<digits>`, and
+/// nothing else (no user info, no other name that merely starts so).
+fn is_loopback_authority(authority: &str) -> bool {
+    let (host, port) = match authority.strip_prefix("[::1]") {
+        Some(rest) => ("[::1]", rest),
+        None => match authority.find(':') {
+            Some(i) => (&authority[..i], &authority[i..]),
+            None => (authority, ""),
+        },
+    };
+    let port_ok = port.is_empty()
+        || (port.len() > 1
+            && port.starts_with(':')
+            && port[1..].bytes().all(|b| b.is_ascii_digit()));
+    port_ok && matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 /// Milliseconds the headless clock advances per completed frame.
@@ -1017,10 +1058,16 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 };
                 host.charge(url.len() + body_len);
                 let Some(origin) = origin_of(&url) else {
-                    host.host_log(format!("fetch_begin: E_ARG ({url:?} is not an https:// URL)"));
+                    host.host_log(format!(
+                        "fetch_begin: E_ARG ({url:?} is neither https:// nor http:// to loopback)"
+                    ));
                     return err::E_ARG;
                 };
-                if !host.net_origins.is_empty() && !host.net_origins.contains(&origin) {
+                // No manifest means no gate, but plain http is never let
+                // through by default: only to a loopback origin the
+                // manifest names (SPEC-7.1.3).
+                let gated = !host.net_origins.is_empty() || origin.starts_with("http://");
+                if gated && !host.net_origins.contains(&origin) {
                     host.host_log(format!(
                         "fetch_begin: E_ORIGIN ({origin} is not in the manifest's net list; no request made)"
                     ));

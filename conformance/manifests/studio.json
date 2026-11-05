@@ -1,0 +1,11 @@
+{
+  "abi": "1.0",
+  "name": "Studio",
+  "summary": "Skaparverktyget i vy-dev: skriv ett uppdrag, Claude Code bygger sidan i projektet, och agentens logg, byggloggen och sidans adress syns här. Hämtar från dev-API:t på sin egen origin. Begär ime, net och storage.",
+  "lang": "sv",
+  "memory_max": 256,
+  "published": "2026-11-05",
+  "capabilities": {"ime": {}, "net": {"origins": ["http://localhost:8081"]}, "storage": {"quota_kb": 16}},
+  "fallback": "# Studio\n\nStudio serveras av `vy-dev serve` på vy://localhost:8081/ och kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/studio"
+}

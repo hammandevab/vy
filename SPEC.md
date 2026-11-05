@@ -225,6 +225,12 @@ för utgivarnycklar (M4) och ett komponentregister med sökindex (1.3). Allt fö
 aldrig i en server. Ordning: `vy-serve` först, Studio efter SDK och `file`, loggen med signering,
 registret sist.
 
+Studios första form (M4) är `vy-dev`: `vy-dev serve` bygger en sida i en projektkatalog vid varje
+ändring och serverar den på `vy://localhost:8080/<namn>`, och Studio, en vanlig 1.0-sida på
+`vy://localhost:8081/` med `net` mot sin egen origin, skickar uppdrag till Claude Code i projektet och
+visar agentens logg, byggloggen och sidans adress. Sidan under utveckling och Studio ligger på olika
+origins (SPEC-9.5.1), så sidan kan inte styra agenten; se `docs/DEVELOPING.md`.
+
 ---
 
 ## Bilaga A: ABI-konstanter

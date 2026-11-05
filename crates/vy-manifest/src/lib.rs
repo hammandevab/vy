@@ -1361,7 +1361,8 @@ mod tests {
             })
             .collect();
         names.sort();
-        assert_eq!(names.len(), 11, "{names:?}");
+        // Eleven reference pages and Studio (modules/studio).
+        assert_eq!(names.len(), 12, "{names:?}");
         for n in &names {
             let (draft, dir) = conformance_draft(n);
             assert!(
