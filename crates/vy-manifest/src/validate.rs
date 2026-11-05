@@ -126,6 +126,11 @@ pub enum Problem {
         /// Resource index.
         index: u32,
     },
+    /// `w`/`h` on a resource that is not an image (SPEC-8.1.2).
+    SizeOnNonImage {
+        /// Resource index.
+        index: u32,
+    },
     /// Declared `w`/`h` differ from the image header.
     ImageSizeMismatch {
         /// Resource index.
@@ -258,7 +263,13 @@ impl fmt::Display for Problem {
                 )
             }
             Self::ImageSizeMissing { index } => {
-                write!(f, "image resource {index} lacks w/h")
+                write!(f, "image resource {index} lacks w/h (SPEC-8.1.2)")
+            }
+            Self::SizeOnNonImage { index } => {
+                write!(
+                    f,
+                    "resource {index} is not an image but has w/h (SPEC-8.1.2)"
+                )
             }
             Self::ImageSizeMismatch {
                 index,
@@ -266,7 +277,7 @@ impl fmt::Display for Problem {
                 actual,
             } => write!(
                 f,
-                "image resource {index} declared {}x{}, header says {}x{}",
+                "image resource {index} declared {}x{}, header says {}x{} (SPEC-8.1.2)",
                 declared.0, declared.1, actual.0, actual.1
             ),
             Self::ImageTooLarge { index, size } => write!(
@@ -580,6 +591,8 @@ impl Manifest {
                     }
                     _ => p.push(Problem::ImageSizeMissing { index }),
                 }
+            } else if r.w.is_some() || r.h.is_some() {
+                p.push(Problem::SizeOnNonImage { index });
             }
         }
         if total > MAX_RESOURCES_BYTES {

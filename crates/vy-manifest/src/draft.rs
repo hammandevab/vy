@@ -1,15 +1,18 @@
-//! The publisher's input: a manifest before hashes, sizes, image sizes and
-//! the signature are known. `vy-publish build` turns a [`Draft`] into a
+//! The publisher's input: a manifest before hashes, sizes and the
+//! signature are known. `vy-publish build` turns a [`Draft`] into a
 //! signed [`Manifest`]; `conformance/manifests/*.json` are drafts.
 
 use crate::manifest::{Blob, CapabilityRequests, Manifest, MinSize, Resource};
 use crate::validate::png_dimensions;
 use crate::{AbiVersion, Error, Hash};
 use serde::Deserialize;
+use std::path::Path;
 
 /// A resource as the publisher names it: a file path (relative to the
-/// draft) and, when the extension does not say, its media type. Images
-/// other than PNG need `w`/`h` spelled out, because the client does not
+/// draft) and, when the extension does not say, its media type. An image
+/// may declare `w`/`h`; the declaration is the publisher's claim and
+/// [`Manifest::validate`] checks it against the PNG header (SPEC-8.1.2).
+/// Images other than PNG must declare them, because the client does not
 /// read their headers in M3.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,10 +22,10 @@ pub struct DraftResource {
     /// Media type; inferred from the extension when absent.
     #[serde(default)]
     pub mime: Option<String>,
-    /// Pixel width, for images the tool cannot read.
+    /// Declared pixel width.
     #[serde(default)]
     pub w: Option<u32>,
-    /// Pixel height.
+    /// Declared pixel height.
     #[serde(default)]
     pub h: Option<u32>,
 }
@@ -90,13 +93,14 @@ pub fn mime_for_path(path: &str) -> &'static str {
 }
 
 /// Bytes of one resource with its media type.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceInput {
     /// Media type.
     pub mime: String,
     /// The bytes.
     pub bytes: Vec<u8>,
-    /// Declared size for images the tool cannot read.
+    /// The size the draft declares for an image, `(w, h)`; `None` lets
+    /// the PNG header fill it in.
     pub size_hint: Option<(u32, u32)>,
 }
 
@@ -106,18 +110,45 @@ impl Draft {
         serde_json::from_str(json).map_err(|e| Error::Json(e.to_string()))
     }
 
-    /// Fill in hashes, sizes and image dimensions. The result is unsigned;
-    /// call [`Manifest::sign`] next and [`Manifest::validate`] to check.
+    /// Read the bytes of every resource the draft names, relative to
+    /// `base` (the draft file's directory), in the draft's order: media
+    /// type from the entry or the extension, declared `w`/`h` as the size
+    /// hint. `vy-publish build` and the conformance suite read the same
+    /// files this way.
+    pub fn load_resources(&self, base: &Path) -> Result<Vec<ResourceInput>, Error> {
+        self.resources
+            .iter()
+            .map(|r| {
+                let path = base.join(&r.path);
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+                Ok(ResourceInput {
+                    mime: r
+                        .mime
+                        .clone()
+                        .unwrap_or_else(|| mime_for_path(&r.path).to_string()),
+                    bytes,
+                    size_hint: r.w.zip(r.h),
+                })
+            })
+            .collect()
+    }
+
+    /// Fill in hashes, sizes and image dimensions: a declared size is
+    /// kept as declared (and checked by [`Manifest::validate`], SPEC-8.1.2);
+    /// a PNG without one gets the size of its header. The result is
+    /// unsigned; call [`Manifest::sign`] next and [`Manifest::validate`] to
+    /// check.
     pub fn finish(&self, module: &[u8], resources: &[ResourceInput]) -> Manifest {
         let resources = resources
             .iter()
             .map(|r| {
-                let (w, h) = if r.mime == "image/png" {
+                let (w, h) = if let Some((w, h)) = r.size_hint {
+                    (Some(w), Some(h))
+                } else if r.mime == "image/png" {
                     png_dimensions(&r.bytes)
                         .map(|(w, h)| (Some(w), Some(h)))
                         .unwrap_or((None, None))
-                } else if let Some((w, h)) = r.size_hint {
-                    (Some(w), Some(h))
                 } else {
                     (None, None)
                 };

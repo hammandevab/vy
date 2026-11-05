@@ -89,26 +89,15 @@ pub fn build(
 }
 
 /// Read the resources a draft names, relative to the draft file's
-/// directory, followed by `extra` paths taken as they are.
+/// directory ([`Draft::load_resources`]), followed by `extra` paths taken
+/// as they are.
 pub fn load_resources(
     draft_path: &Path,
     draft: &Draft,
     extra: &[PathBuf],
 ) -> Result<Vec<ResourceInput>, BuildError> {
     let base = draft_path.parent().unwrap_or(Path::new("."));
-    let mut out = Vec::new();
-    for r in &draft.resources {
-        let path = base.join(&r.path);
-        let bytes = std::fs::read(&path).map_err(|e| io_err(&path, e))?;
-        out.push(ResourceInput {
-            mime: r
-                .mime
-                .clone()
-                .unwrap_or_else(|| mime_for_path(&r.path).to_string()),
-            bytes,
-            size_hint: r.w.zip(r.h),
-        });
-    }
+    let mut out = draft.load_resources(base)?;
     for path in extra {
         let bytes = std::fs::read(path).map_err(|e| io_err(path, e))?;
         out.push(ResourceInput {

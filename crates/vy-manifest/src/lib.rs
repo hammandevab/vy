@@ -118,6 +118,41 @@ impl std::error::Error for Error {}
 mod tests {
     use super::*;
     use crate::cbor::{encode_key, Enc};
+    use std::path::{Path, PathBuf};
+
+    /// The repository root.
+    fn root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// The draft of a reference module, `conformance/manifests/<name>.json`,
+    /// and the directory its resource paths are relative to.
+    fn conformance_draft(name: &str) -> (Draft, PathBuf) {
+        let dir = root().join("conformance/manifests");
+        let path = dir.join(format!("{name}.json"));
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let draft = Draft::from_json(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        (draft, dir)
+    }
+
+    /// The reference module `target/wasm/<name>.wasm`, when it is built.
+    fn built_module(name: &str) -> Option<Vec<u8>> {
+        let path = root().join(format!("target/wasm/{name}.wasm"));
+        match std::fs::read(&path) {
+            Ok(wasm) => Some(wasm),
+            Err(_) => {
+                eprintln!(
+                    "skipped: {} missing (run tools/build_modules.sh)",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
 
     /// RFC 8032 §7.1 test vector 1: a publicly known key, never a secret.
     pub(crate) const TEST_SEED: [u8; 32] = [
@@ -210,7 +245,11 @@ mod tests {
         out
     }
 
-    /// SPEC-8.2.1: the six capabilities of 1.0.
+    /// SPEC-8.2.1: the six capabilities of 1.0. The manifest form is a map
+    /// from name to parameter object: `net` carries its origins, `storage`
+    /// its quota, the rest an empty object (decision 31); the limits of the
+    /// sentence are enforced; unknown names, parameters and the old
+    /// top-level `net` are refused.
     #[test]
     fn spec_8_2_1_capability_list() {
         assert_eq!(CAPABILITIES.len(), 6);
@@ -224,8 +263,6 @@ mod tests {
         ] {
             assert!(CAPABILITIES.contains(&c));
         }
-        // Net and storage carry parameters; the rest are empty objects
-        // (decision 31), and the limits of the sentence are enforced.
         let (mut m, wasm) = hello();
         m.capabilities.net = Some(NetRequest {
             origins: (0..17).map(|i| format!("https://o{i}.example")).collect(),
@@ -237,6 +274,54 @@ mod tests {
         m.capabilities.net.as_mut().unwrap().origins.truncate(16);
         m.capabilities.storage.as_mut().unwrap().quota_kb = 16_384;
         assert!(m.validate(&wasm, &Vec::<Vec<u8>>::new()).is_empty());
+
+        // The JSON form of a draft.
+        let d = Draft::from_json(&minimal_json(
+            r#", "capabilities": {"net": {"origins": ["https://a.example"]}, "storage": {"quota_kb": 16}, "ime": {}, "clipboard": {}, "hires_time": {}, "persist_frame": {}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            d.capabilities.net,
+            Some(NetRequest {
+                origins: vec!["https://a.example".into()]
+            })
+        );
+        assert_eq!(
+            d.capabilities.storage,
+            Some(StorageRequest { quota_kb: 16 })
+        );
+        assert!(d.capabilities.requests("persist_frame") && !d.capabilities.requests("file"));
+        assert_eq!(d.capabilities.iter().count(), 6);
+        let (chat, _) = conformance_draft("chat");
+        assert_eq!(
+            chat.capabilities.net.as_ref().map(|n| n.origins.as_slice()),
+            Some(&["https://chat.example".to_string()][..])
+        );
+        assert_eq!(
+            conformance_draft("settings").0.capabilities.storage,
+            Some(StorageRequest { quota_kb: 16 })
+        );
+        for bad in [
+            r#", "capabilities": ["ime"]"#,
+            r#", "capabilities": {"file": {}}"#,
+            r#", "capabilities": {"ime": {"x": 1}}"#,
+            r#", "capabilities": {"net": {"origins": "https://a.example"}}"#,
+            r#", "capabilities": {"net": {}}"#,
+            r#", "capabilities": {"storage": {}}"#,
+            r#", "net": {"origins": []}"#,
+        ] {
+            assert!(
+                matches!(Draft::from_json(&minimal_json(bad)), Err(Error::Json(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    /// A minimal valid draft as JSON text, with `extra` members spliced in.
+    fn minimal_json(extra: &str) -> String {
+        format!(
+            r#"{{"abi": "1.0", "name": "x", "summary": "s", "lang": "sv", "memory_max": 32, "published": "2026-11-05"{extra}}}"#
+        )
     }
 
     /// SPEC-4.1.3, SPEC-4.1.4, SPEC-4.1.5: size limits.
@@ -262,6 +347,23 @@ mod tests {
                 size: MAX_MANIFEST_BYTES + 1
             })
         );
+        // Resources are bounded in all (SPEC-4.1.5), by declared size, and
+        // the module by its bytes (SPEC-4.1.4).
+        let (mut m, wasm, res) = with_image();
+        m.resources[0].size = MAX_RESOURCES_BYTES + 1;
+        let bytes: Vec<Vec<u8>> = res.iter().map(|r| r.bytes.clone()).collect();
+        assert!(m
+            .validate(&wasm, &bytes)
+            .contains(&Problem::ResourcesTooLarge {
+                bytes: MAX_RESOURCES_BYTES + 1
+            }));
+        let (m, _) = hello();
+        let huge = vec![0u8; MAX_MODULE_BYTES + 1];
+        assert!(m
+            .validate(&huge, &Vec::<Vec<u8>>::new())
+            .contains(&Problem::ModuleTooLarge {
+                bytes: MAX_MODULE_BYTES + 1
+            }));
     }
 
     /// SPEC-4.1.1: a package is one manifest, exactly one module, zero or
@@ -309,6 +411,15 @@ mod tests {
             Package::unpack(&swapped.pack().unwrap()),
             Err(PackageError::Invalid(problems))
                 if problems.iter().any(|p| matches!(p, Problem::ModuleHashMismatch { .. }))
+        ));
+        // The reference drafts: hello has no resources, gallery and shop
+        // eight each, and a draft without the required fields is no draft.
+        assert!(conformance_draft("hello").0.resources.is_empty());
+        assert_eq!(conformance_draft("gallery").0.resources.len(), 8);
+        assert_eq!(conformance_draft("shop").0.resources.len(), 8);
+        assert!(matches!(
+            Draft::from_json(r#"{"abi": "1.0"}"#),
+            Err(Error::Json(_))
         ));
     }
 
@@ -483,6 +594,16 @@ mod tests {
         assert!(!v(1, 4).runs_on(v(1, 3)));
         assert!(!v(2, 0).runs_on(v(1, 9)));
         assert!(!v(0, 9).runs_on(v(1, 0)));
+        // The JSON form carries the same text, and a 1.1 draft does not run
+        // on a 1.0 client.
+        assert!(conformance_draft("hello")
+            .0
+            .abi
+            .runs_on(AbiVersion::CURRENT));
+        let one_one = Draft::from_json(&minimal_json("").replace("\"1.0\"", "\"1.1\"")).unwrap();
+        assert_eq!(one_one.abi, v(1, 1));
+        assert!(!one_one.abi.runs_on(v(1, 0)));
+        assert!(one_one.abi.runs_on(v(1, 1)) && one_one.abi.runs_on(v(1, 2)));
     }
 
     /// SPEC-4.4.1: package media type and zstd+tar framing with the entries
@@ -567,6 +688,16 @@ mod tests {
         assert!(m.entry(2).is_none());
         // Packages name resources the same way: res/1 is index 1.
         assert_eq!(ENTRY_RESOURCE_PREFIX, "res/");
+        // The shop draft: eight images, ids 1 to 8, in the draft's order.
+        let (shop, dir) = conformance_draft("shop");
+        assert!(shop.resources[0].path.ends_with("01-mugg.png"));
+        assert!(shop.resources[7].path.ends_with("08-plad.png"));
+        let res = shop.load_resources(&dir).unwrap();
+        let m = shop.finish(&module(2), &res);
+        assert_eq!(m.entry(0).unwrap().mime, MIME_WASM);
+        assert_eq!(*m.entry(1).unwrap().hash, Hash::of(&res[0].bytes));
+        assert_eq!(*m.entry(8).unwrap().hash, Hash::of(&res[7].bytes));
+        assert!(m.entry(9).is_none());
     }
 
     /// SPEC-8.1.1: required fields are enforced, each one.
@@ -625,6 +756,31 @@ mod tests {
         long.summary = "s".repeat(2048);
         long.lang = "sv-SE".into();
         assert!(long.validate(&wasm, &Vec::<Vec<u8>>::new()).is_empty());
+        long.name = String::new();
+        assert!(long
+            .validate(&wasm, &Vec::<Vec<u8>>::new())
+            .contains(&Problem::NameEmpty));
+        // The JSON form of a draft: each required field, except those
+        // tooling fills (module, sig), is required there too.
+        let full = minimal_json("");
+        for field in [
+            "\"abi\": \"1.0\", ",
+            "\"name\": \"x\", ",
+            "\"summary\": \"s\", ",
+            "\"lang\": \"sv\", ",
+            "\"memory_max\": 32, ",
+            ", \"published\": \"2026-11-05\"",
+        ] {
+            assert!(full.contains(field), "{field}");
+            assert!(
+                matches!(
+                    Draft::from_json(&full.replace(field, "")),
+                    Err(Error::Json(_))
+                ),
+                "{field}"
+            );
+        }
+        assert!(Draft::from_json(&full).is_ok());
     }
 
     /// SPEC-8.1.2: optional fields are accepted and unknown fields rejected,
@@ -707,6 +863,124 @@ mod tests {
         assert!(problems.contains(&Problem::EmbedInvalid("https://x".into())));
         assert!(problems.contains(&Problem::SourceUrlInvalid("http://x".into())));
         assert!(problems.contains(&Problem::MinSizeZero));
+
+        // The JSON form of a draft: every optional field, unknown fields
+        // refused at any level, `min_size` is {w, h}.
+        let d = Draft::from_json(&minimal_json(
+            r##", "resources": [{"path": "a.png", "mime": "image/png", "w": 320, "h": 200}, {"path": "b.bin"}], "links": ["vy://x/"], "fallback": "# x", "min_size": {"w": 320, "h": 240}, "icon": 1, "source_url": "https://x/", "skeleton": 1, "embeds": ["vy://y/"], "next_key_id": "0123456789abcdef""##,
+        ))
+        .unwrap();
+        assert_eq!((d.resources[0].w, d.resources[0].h), (Some(320), Some(200)));
+        assert_eq!(d.resources[1].mime, None);
+        assert_eq!(d.links, vec!["vy://x/".to_string()]);
+        assert_eq!(d.min_size, Some(MinSize { w: 320, h: 240 }));
+        assert_eq!((d.icon, d.skeleton), (Some(1), Some(1)));
+        for bad in [
+            r#", "colour": "blue""#,
+            r#", "resources": [{"path": "a.png", "alt": "x"}]"#,
+            r#", "resources": [{"mime": "image/png"}]"#,
+            r#", "min_size": [320]"#,
+            r#", "min_size": {"w": 320}"#,
+            r#", "icon": "icon.png""#,
+            r#", "module": {"hash": "sha256:0", "size": 1}"#,
+            r#", "sig": {"key_id": "dev", "bytes": "ed25519:0"}"#,
+        ] {
+            assert!(
+                matches!(Draft::from_json(&minimal_json(bad)), Err(Error::Json(_))),
+                "{bad}"
+            );
+        }
+        // An image must carry w and h, both above 0 and at most 8192 px
+        // (SPEC-6.5.1); a raw resource must not.
+        let (base, wasm, res) = with_image();
+        let bytes: Vec<Vec<u8>> = res.iter().map(|r| r.bytes.clone()).collect();
+        let check = |edit: &dyn Fn(&mut Resource)| {
+            let mut m = base.clone();
+            edit(&mut m.resources[0]);
+            m.validate(&wasm, &bytes)
+        };
+        assert!(check(&|r| r.h = None).contains(&Problem::ImageSizeMissing { index: 1 }));
+        assert!(check(&|r| r.w = Some(0))
+            .iter()
+            .any(|p| matches!(p, Problem::ImageTooLarge { index: 1, .. })));
+        assert!(check(&|r| r.h = Some(8193))
+            .iter()
+            .any(|p| matches!(p, Problem::ImageTooLarge { index: 1, .. })));
+        assert!(check(&|r| r.mime = "application/octet-stream".into())
+            .contains(&Problem::SizeOnNonImage { index: 1 }));
+        assert!(check(&|r| {
+            r.mime = "application/octet-stream".into();
+            r.w = None;
+            r.h = None;
+        })
+        .is_empty());
+        // The draft's declaration is kept, not silently replaced by the
+        // header, so a wrong one is reported.
+        let mut declared = res.clone();
+        declared[0].size_hint = Some((300, 200));
+        let m = draft().finish(&wasm, &declared);
+        assert_eq!((m.resources[0].w, m.resources[0].h), (Some(300), Some(200)));
+        assert!(m
+            .validate(&wasm, &bytes)
+            .contains(&Problem::ImageSizeMismatch {
+                index: 1,
+                declared: (300, 200),
+                actual: (320, 200)
+            }));
+    }
+
+    /// SPEC-8.1.2, SPEC-6.5.1: the sizes the gallery and shop drafts declare
+    /// for their images are the sizes in the PNG headers; a wrong
+    /// declaration, a missing file or a non-PNG is refused.
+    #[test]
+    fn spec_8_1_2_image_sizes_match_the_files() {
+        let wasm = module(2);
+        for name in ["gallery", "shop"] {
+            let (draft, dir) = conformance_draft(name);
+            assert_eq!(draft.resources.len(), 8);
+            assert!(draft
+                .resources
+                .iter()
+                .all(|r| r.mime.as_deref() == Some("image/png") && r.w.is_some() && r.h.is_some()));
+            let res = draft.load_resources(&dir).unwrap();
+            let m = draft.finish(&wasm, &res);
+            let bytes: Vec<&[u8]> = res.iter().map(|r| r.bytes.as_slice()).collect();
+            let problems = m.validate(&wasm, &bytes);
+            assert!(problems.is_empty(), "{name}: {problems:?}");
+            assert!(m.resources.iter().all(|r| r.is_image()));
+        }
+        let (gallery, dir) = conformance_draft("gallery");
+        let res = gallery.load_resources(&dir).unwrap();
+        let bytes: Vec<&[u8]> = res.iter().map(|r| r.bytes.as_slice()).collect();
+        let m = gallery.finish(&wasm, &res);
+        assert_eq!((m.resources[0].w, m.resources[0].h), (Some(320), Some(200)));
+        assert_eq!((m.resources[2].w, m.resources[2].h), (Some(200), Some(300)));
+        let mut wrong = m.clone();
+        wrong.resources[2].w = Some(300);
+        wrong.resources[2].h = Some(200);
+        let problems = wrong.validate(&wasm, &bytes);
+        let mismatch = problems
+            .iter()
+            .find(|p| matches!(p, Problem::ImageSizeMismatch { index: 3, .. }))
+            .unwrap();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("declared 300x200, header says 200x300"),
+            "{mismatch}"
+        );
+        let mut missing = gallery.clone();
+        missing.resources[0].path = "nowhere.png".into();
+        assert!(matches!(missing.load_resources(&dir), Err(Error::Io(_))));
+        let mut not_png = bytes.clone();
+        not_png[1] = b"not a png";
+        let problems = m.validate(&wasm, &not_png);
+        assert!(problems.contains(&Problem::ImageHeaderInvalid { index: 2 }));
+        assert!(problems
+            .iter()
+            .any(|p| matches!(p, Problem::ResourceHashMismatch { index: 2, .. })));
+        assert_eq!(png_dimensions(bytes[1]), Some((240, 240)));
+        assert_eq!(png_dimensions(b"short"), None);
     }
 
     /// SPEC-8.2.2: a capability absent from the manifest can never be granted.
@@ -789,6 +1063,19 @@ mod tests {
             .validate(&wasm, &no_res)
             .contains(&Problem::MemoryMaxOutOfRange { pages: 0 }));
         assert!(module_initial_pages(b"\0asm").is_err());
+        // The top of the range: 4096 pages holds a module starting at 4095.
+        let big = module(4095);
+        assert_eq!(module_initial_pages(&big).unwrap(), 4095);
+        let mut m = draft().finish(&big, &[]);
+        m.memory_max = 4096;
+        assert!(m.validate(&big, &no_res).is_empty());
+        m.memory_max = 4095;
+        assert!(m
+            .validate(&big, &no_res)
+            .contains(&Problem::MemoryMaxBelowInitial {
+                pages: 4095,
+                initial: 4095
+            }));
     }
 
     /// SPEC-7.4.1: the signature covers the canonical encoding without
@@ -885,17 +1172,44 @@ mod tests {
         assert!(d.capabilities.is_empty());
     }
 
-    /// The real hello module, when built, satisfies the fixture.
+    /// Every draft under `conformance/manifests/` parses, one per reference
+    /// module (appendix B), runs on the current ABI, names resources that
+    /// exist, and, when the module is built, describes it: hashes, sizes,
+    /// image headers and `memory_max` (SPEC-8.1.3) all agree.
     #[test]
-    fn hello_wasm_matches_fixture() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wasm/hello.wasm");
-        let Ok(wasm) = std::fs::read(path) else {
-            eprintln!("skipped: {path} missing (run tools/build_modules.sh)");
-            return;
-        };
-        let mut m = draft().finish(&wasm, &[]);
-        m.sign(&test_key());
-        let problems = m.validate(&wasm, &Vec::<Vec<u8>>::new());
-        assert!(problems.is_empty(), "{problems:?}");
+    fn conformance_manifests_validate() {
+        let dir = root().join("conformance/manifests");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .trim_end_matches(".json")
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 11, "{names:?}");
+        for n in &names {
+            let (draft, dir) = conformance_draft(n);
+            assert!(
+                root().join("modules").join(n).join("Cargo.toml").is_file(),
+                "{n}"
+            );
+            assert!(draft.abi.runs_on(AbiVersion::CURRENT), "{n}");
+            let res = draft
+                .load_resources(&dir)
+                .unwrap_or_else(|e| panic!("{n}: {e}"));
+            let Some(wasm) = built_module(n) else {
+                continue;
+            };
+            let mut m = draft.finish(&wasm, &res);
+            m.sign(&test_key());
+            let bytes: Vec<&[u8]> = res.iter().map(|r| r.bytes.as_slice()).collect();
+            let problems = m.validate(&wasm, &bytes);
+            assert!(problems.is_empty(), "{n}: {problems:?}");
+            assert_eq!(Manifest::decode(&m.encode().unwrap()).unwrap(), m, "{n}");
+        }
     }
 }
