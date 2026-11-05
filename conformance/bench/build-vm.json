@@ -1,0 +1,466 @@
+{
+  "runs": 100,
+  "profile": "release",
+  "rows": [
+    {
+      "id": "compile.chat",
+      "what": "kompilering chat (24 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 54.59397,
+      "p95": 83.90873,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.chat",
+      "what": "kompileringscache-träff chat: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.721932,
+      "p95": 0.932924,
+      "n": 100
+    },
+    {
+      "id": "compile.dashboard",
+      "what": "kompilering dashboard (22 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 51.748837,
+      "p95": 73.00731,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.dashboard",
+      "what": "kompileringscache-träff dashboard: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.703079,
+      "p95": 0.8082900000000001,
+      "n": 100
+    },
+    {
+      "id": "compile.document",
+      "what": "kompilering document (27 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 48.462109000000005,
+      "p95": 58.421607,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.document",
+      "what": "kompileringscache-träff document: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.7037429999999999,
+      "p95": 0.7643380000000001,
+      "n": 100
+    },
+    {
+      "id": "compile.form",
+      "what": "kompilering form (16 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 37.144591,
+      "p95": 39.508187,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.form",
+      "what": "kompileringscache-träff form: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.532537,
+      "p95": 0.604639,
+      "n": 100
+    },
+    {
+      "id": "compile.gallery",
+      "what": "kompilering gallery (16 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 36.708134,
+      "p95": 40.569095,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.gallery",
+      "what": "kompileringscache-träff gallery: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.539497,
+      "p95": 0.6060920000000001,
+      "n": 100
+    },
+    {
+      "id": "compile.game",
+      "what": "kompilering game (14 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 35.477087,
+      "p95": 51.960300000000004,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.game",
+      "what": "kompileringscache-träff game: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.5455139999999999,
+      "p95": 0.7471580000000001,
+      "n": 100
+    },
+    {
+      "id": "compile.hello",
+      "what": "kompilering hello (5 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 14.819920999999999,
+      "p95": 21.161455999999998,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.hello",
+      "what": "kompileringscache-träff hello: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.296835,
+      "p95": 0.44032899999999997,
+      "n": 100
+    },
+    {
+      "id": "compile.list",
+      "what": "kompilering list (18 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 40.674712,
+      "p95": 56.971978,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.list",
+      "what": "kompileringscache-träff list: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.547479,
+      "p95": 0.613782,
+      "n": 100
+    },
+    {
+      "id": "compile.settings",
+      "what": "kompilering settings (22 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 51.132322,
+      "p95": 75.129312,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.settings",
+      "what": "kompileringscache-träff settings: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.687502,
+      "p95": 0.780764,
+      "n": 100
+    },
+    {
+      "id": "compile.shop",
+      "what": "kompilering shop (24 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 52.869898,
+      "p95": 80.702468,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.shop",
+      "what": "kompileringscache-träff shop: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.702042,
+      "p95": 4.780877,
+      "n": 100
+    },
+    {
+      "id": "compile.text",
+      "what": "kompilering text (30 KB)",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 60.0,
+      "p50": 18.422224,
+      "p95": 28.848983,
+      "n": 100
+    },
+    {
+      "id": "compile-hit.text",
+      "what": "kompileringscache-träff text: modulen ur cachen",
+      "spec": "SPEC-13.1.4",
+      "unit": "ms",
+      "budget": 1.0,
+      "p50": 0.45845199999999997,
+      "p95": 0.498463,
+      "n": 100
+    },
+    {
+      "id": "raster.ops-2000",
+      "what": "rasterisering 2 000 opkoder i sidornas proportioner 1280×800",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 34.923791,
+      "p95": 56.463134,
+      "n": 100
+    },
+    {
+      "id": "raster.ops-2000-cold",
+      "what": "dito med ny textmotor varje körning (kall formning och glyfer)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": null,
+      "p50": 37.187934,
+      "p95": 53.104486,
+      "n": 100
+    },
+    {
+      "id": "raster.rects-2000",
+      "what": "rasterisering 2 000 rundade genomskinliga rektanglar 1280×800",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 14.261052,
+      "p95": 19.860718,
+      "n": 100
+    },
+    {
+      "id": "raster.text-200",
+      "what": "rasterisering 200 textrader à 40 tecken 1280×800",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 4.37181,
+      "p95": 4.867513000000001,
+      "n": 100
+    },
+    {
+      "id": "raster.mix-1800-200",
+      "what": "rasterisering 1 800 rektanglar + 200 textrader 1280×800",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 18.252639000000002,
+      "p95": 27.081333,
+      "n": 100
+    },
+    {
+      "id": "raster.cards-2000",
+      "what": "rasterisering 2 000 rundade klipp med rektangel (6 000 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": null,
+      "p50": 23.67396,
+      "p95": 34.920145,
+      "n": 100
+    },
+    {
+      "id": "raster.page.hello",
+      "what": "rasterisering hello-800x600@1 (4 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 0.24586299999999997,
+      "p95": 0.360473,
+      "n": 100
+    },
+    {
+      "id": "raster.page.text",
+      "what": "rasterisering text-800x600@1 (13 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 1.223364,
+      "p95": 1.45773,
+      "n": 100
+    },
+    {
+      "id": "raster.page.form",
+      "what": "rasterisering form-800x600@1 (18 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 0.45242,
+      "p95": 0.507335,
+      "n": 100
+    },
+    {
+      "id": "raster.page.list",
+      "what": "rasterisering list-800x600@1 (70 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 0.602287,
+      "p95": 0.727145,
+      "n": 100
+    },
+    {
+      "id": "raster.page.gallery",
+      "what": "rasterisering gallery-800x600@1 (66 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 5.908667,
+      "p95": 8.055843999999999,
+      "n": 100
+    },
+    {
+      "id": "raster.page.game",
+      "what": "rasterisering game-800x600@1 (60 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 2.405446,
+      "p95": 2.920385,
+      "n": 100
+    },
+    {
+      "id": "raster.page.dashboard",
+      "what": "rasterisering dashboard-1280x800@1 (88 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 2.850086,
+      "p95": 4.78668,
+      "n": 100
+    },
+    {
+      "id": "raster.page.chat",
+      "what": "rasterisering chat-800x600@1 (37 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 1.3562139999999998,
+      "p95": 1.7795109999999998,
+      "n": 100
+    },
+    {
+      "id": "raster.page.shop",
+      "what": "rasterisering shop-1280x800@1 (106 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 10.225932,
+      "p95": 17.975975000000002,
+      "n": 100
+    },
+    {
+      "id": "raster.page.document",
+      "what": "rasterisering document-1280x800@1 (29 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 2.245588,
+      "p95": 2.534727,
+      "n": 100
+    },
+    {
+      "id": "raster.page.settings",
+      "what": "rasterisering settings-800x600@1 (55 opkoder)",
+      "spec": "SPEC-13.2.1",
+      "unit": "ms",
+      "budget": 2.0,
+      "p50": 2.2861930000000004,
+      "p95": 2.490703,
+      "n": 100
+    },
+    {
+      "id": "scroll.text.frame",
+      "what": "rullning text 1280×800: SCROLL 24 px, frame och rasterisering",
+      "spec": "SPEC-13.2.3",
+      "unit": "ms",
+      "budget": 16.666666666666668,
+      "p50": 1.9668960000000002,
+      "p95": 2.319667,
+      "n": 100
+    },
+    {
+      "id": "scroll.text.miss",
+      "what": "textcache-missar vid rullning, rasteriserande sida",
+      "spec": "SPEC-13.2.3",
+      "unit": "%",
+      "budget": 5.0,
+      "p50": 2.591792656587473,
+      "p95": 2.591792656587473,
+      "n": 926
+    },
+    {
+      "id": "scroll.text.measure-miss",
+      "what": "textcache-missar vid rullning, modulens dl_text-mätning",
+      "spec": "SPEC-13.2.3",
+      "unit": "%",
+      "budget": 5.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "n": 926
+    },
+    {
+      "id": "tab.cold-start",
+      "what": "flikprocess: start, laddning, första display list (hello)",
+      "spec": "SPEC-13.1.1",
+      "unit": "ms",
+      "budget": 150.0,
+      "p50": 21.025948999999997,
+      "p95": 37.049960999999996,
+      "n": 100
+    },
+    {
+      "id": "first-frame.hello",
+      "what": "Enter till första bild, huvudlöst (hello, lokal fil)",
+      "spec": "SPEC-13.1.2",
+      "unit": "ms",
+      "budget": 100.0,
+      "p50": 43.637575,
+      "p95": 52.146234,
+      "n": 100
+    },
+    {
+      "id": "first-frame.text",
+      "what": "Enter till första bild, huvudlöst (text, lokal fil)",
+      "spec": "SPEC-13.1.2",
+      "unit": "ms",
+      "budget": 100.0,
+      "p50": 73.739679,
+      "p95": 93.068788,
+      "n": 100
+    },
+    {
+      "id": "input.dashboard",
+      "what": "pekarhändelse till pixel (dashboard)",
+      "spec": "SPEC-13.2.2",
+      "unit": "ms",
+      "budget": 16.0,
+      "p50": 5.421291,
+      "p95": 5.924723,
+      "n": 100
+    }
+  ]
+}
