@@ -6,10 +6,12 @@
 //! same way on every machine (SPEC-2.1.5).
 
 use cosmic_text::{
-    fontdb, Attrs, Buffer, Fallback, Family, FontSystem, Metrics, Shaping, SwashCache, SwashImage,
-    Weight, Wrap,
+    fontdb, Attrs, Buffer, Fallback, Family, FontSystem, LayoutGlyph, Metrics, Shaping, SwashCache,
+    SwashImage, Weight, Wrap,
 };
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use vy_abi::{err, font, weight};
 
@@ -182,12 +184,140 @@ impl CacheStats {
     }
 }
 
+/// Units one generation of the shaped-text cache holds: a shaped text
+/// costs one unit per glyph, per line and per byte of its text. The cache
+/// keeps two generations, so an engine holds at most twice this many units,
+/// a few megabytes; a text costing more than this is shaped every time.
+pub const SHAPE_CACHE_UNITS: usize = 1 << 16;
+/// Rasterized glyph images an engine keeps; past this the image cache
+/// starts over, so a page cycling through sizes cannot grow it without
+/// bound (cosmic-text's own cache has no limit).
+pub const GLYPH_IMAGE_CAP: usize = 16_384;
+
+/// A shaped and laid-out text: the glyphs of every line and the measured size.
+struct Shaped {
+    size: Size,
+    lines: Vec<ShapedLine>,
+    units: usize,
+}
+
+struct ShapedLine {
+    line_y: f32,
+    glyphs: Vec<LayoutGlyph>,
+}
+
+/// What shaping depends on: the face, the size, the wrap width and the
+/// text. The colour does not, so styles that differ only in colour share
+/// entries.
+#[derive(Clone, Copy)]
+struct Probe<'a> {
+    family: &'static str,
+    face_weight: u16,
+    size_bits: u32,
+    width_bits: Option<u32>,
+    text: &'a str,
+}
+
+impl Probe<'_> {
+    fn hash(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.family.hash(&mut h);
+        self.face_weight.hash(&mut h);
+        self.size_bits.hash(&mut h);
+        self.width_bits.hash(&mut h);
+        self.text.hash(&mut h);
+        h.finish()
+    }
+
+    fn matches(&self, key: &ShapeKey) -> bool {
+        self.family == key.family
+            && self.face_weight == key.face_weight
+            && self.size_bits == key.size_bits
+            && self.width_bits == key.width_bits
+            && self.text == &*key.text
+    }
+
+    fn key(&self) -> ShapeKey {
+        ShapeKey {
+            family: self.family,
+            face_weight: self.face_weight,
+            size_bits: self.size_bits,
+            width_bits: self.width_bits,
+            text: self.text.into(),
+        }
+    }
+}
+
+/// [`Probe`] with the text owned.
+struct ShapeKey {
+    family: &'static str,
+    face_weight: u16,
+    size_bits: u32,
+    width_bits: Option<u32>,
+    text: Box<str>,
+}
+
+type Bucket = Vec<(ShapeKey, Arc<Shaped>)>;
+
+/// The shaped-text cache: two generations. A lookup searches the young
+/// one, then the old one, and moves a hit found there to the young one;
+/// when the young one is full it becomes the old one and the old one is
+/// dropped. What a frame keeps using therefore stays, and the cache never
+/// holds more than two generations of [`SHAPE_CACHE_UNITS`]. Hits only
+/// save time: a cached text is what shaping it again would give.
+#[derive(Default)]
+struct ShapeCache {
+    young: HashMap<u64, Bucket>,
+    old: HashMap<u64, Bucket>,
+    young_units: usize,
+}
+
+impl ShapeCache {
+    fn get(&mut self, hash: u64, probe: &Probe<'_>) -> Option<Arc<Shaped>> {
+        if let Some((_, shaped)) = self
+            .young
+            .get(&hash)
+            .and_then(|b| b.iter().find(|(k, _)| probe.matches(k)))
+        {
+            return Some(Arc::clone(shaped));
+        }
+        let bucket = self.old.get_mut(&hash)?;
+        let i = bucket.iter().position(|(k, _)| probe.matches(k))?;
+        let (key, shaped) = bucket.swap_remove(i);
+        if bucket.is_empty() {
+            self.old.remove(&hash);
+        }
+        self.insert(hash, key, Arc::clone(&shaped));
+        Some(shaped)
+    }
+
+    fn insert(&mut self, hash: u64, key: ShapeKey, shaped: Arc<Shaped>) {
+        let units = shaped.units;
+        if units > SHAPE_CACHE_UNITS {
+            return;
+        }
+        if self.young_units + units > SHAPE_CACHE_UNITS {
+            self.old = std::mem::take(&mut self.young);
+            self.young_units = 0;
+        }
+        self.young_units += units;
+        self.young.entry(hash).or_default().push((key, shaped));
+    }
+}
+
 /// Shaping, layout and rasterization state for one module instance.
+///
+/// It persists across frames: the font system, the rasterized glyph
+/// images (cosmic-text's `SwashCache`, capped at [`GLYPH_IMAGE_CAP`]) and
+/// the shaped texts ([`SHAPE_CACHE_UNITS`]), so a text drawn again, by
+/// `dl_text` and then by the rasterizer, or in the next frame, is shaped
+/// once.
 pub struct TextEngine {
     font_system: FontSystem,
     swash: SwashCache,
     buffer: Buffer,
     styles: Vec<Style>,
+    cache: ShapeCache,
     stats: CacheStats,
 }
 
@@ -216,6 +346,7 @@ impl TextEngine {
             swash: SwashCache::new(),
             buffer,
             styles: Vec::new(),
+            cache: ShapeCache::default(),
             stats: CacheStats::default(),
         }
     }
@@ -272,40 +403,62 @@ impl TextEngine {
         self.styles.len()
     }
 
-    fn prepare(&mut self, style: Style, max_w: Option<f32>, text: &str) {
-        // No cache yet: every layout is a miss (M4 adds the cache).
-        self.stats.misses += 1;
+    /// Shape `text` into the buffer. `width` is the wrap width, already
+    /// normalized by [`wrap_width`].
+    fn shape_into_buffer(&mut self, style: Style, width: Option<f32>, text: &str) {
         let buffer = &mut self.buffer;
         buffer.set_metrics(style.metrics());
         buffer.set_wrap(Wrap::WordOrGlyph);
-        // A non-positive, non-finite or absurd width means no wrapping: the
-        // buffer is unbounded, so a right-to-left line starts at its own width,
-        // not at the far right of some huge placeholder width.
-        let width = max_w.filter(|w| *w > 0.0 && *w <= MAX_COORD_PX);
         buffer.set_size(width, None);
         buffer.set_text(&sanitize(text), &style.attrs(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
-    fn measured(&self, style: Style) -> Size {
+    /// The shaped text, from the cache or shaped now (SPEC-13.2.3).
+    fn layout(&mut self, style: Style, max_w: Option<f32>, text: &str) -> Arc<Shaped> {
+        let width = wrap_width(max_w);
+        let probe = Probe {
+            family: style.family,
+            face_weight: style.face_weight,
+            size_bits: style.size_px.to_bits(),
+            width_bits: width.map(f32::to_bits),
+            text,
+        };
+        let hash = probe.hash();
+        if let Some(shaped) = self.cache.get(hash, &probe) {
+            self.stats.hits += 1;
+            return shaped;
+        }
+        self.stats.misses += 1;
+        self.shape_into_buffer(style, width, text);
         let mut w: f32 = 0.0;
-        let mut lines = 0u32;
+        let mut glyphs = 0;
+        let mut lines = Vec::new();
         for run in self.buffer.layout_runs() {
             w = w.max(run.line_w);
-            lines += 1;
+            glyphs += run.glyphs.len();
+            lines.push(ShapedLine {
+                line_y: run.line_y,
+                glyphs: run.glyphs.to_vec(),
+            });
         }
-        Size {
-            w,
-            h: lines as f32 * style.size_px * LINE_HEIGHT_FACTOR,
-        }
+        let shaped = Arc::new(Shaped {
+            size: Size {
+                w,
+                h: lines.len() as f32 * style.size_px * LINE_HEIGHT_FACTOR,
+            },
+            units: glyphs + lines.len() + text.len(),
+            lines,
+        });
+        self.cache.insert(hash, probe.key(), Arc::clone(&shaped));
+        shaped
     }
 
     /// `text_measure`: width of the widest line and total height after wrapping
     /// at `max_w` logical pixels (SPEC-5.2.5, SPEC-6.4.3). `E_STYLE` for an unknown style.
     pub fn measure(&mut self, style_id: u16, max_w: f32, text: &str) -> Result<Size, i32> {
         let style = self.get_style(style_id).ok_or(err::E_STYLE)?;
-        self.prepare(style, Some(max_w), text);
-        Ok(self.measured(style))
+        Ok(self.layout(style, Some(max_w), text).size)
     }
 
     /// `text_caret`: position of the caret before `byte_offset` in logical pixels,
@@ -334,7 +487,7 @@ impl TextEngine {
         }
         let text = sanitize(text);
         let byte_offset = mapped;
-        self.prepare(style, None, &text);
+        self.shape_into_buffer(style, None, &text);
         // Buffer lines split on line endings; find the line holding the offset.
         let mut line = 0usize;
         let mut line_start = 0usize;
@@ -365,8 +518,8 @@ impl TextEngine {
         mut sink: impl FnMut(Glyph<'_>),
     ) -> Result<Size, i32> {
         let style = self.get_style(style_id).ok_or(err::E_STYLE)?;
-        self.prepare(style, Some(max_w), text);
-        let size = self.measured(style);
+        let shaped = self.layout(style, Some(max_w), text);
+        let size = shaped.size;
         // An origin that is not finite, or so far away that nothing can be
         // visible, is measured but never positioned (see `MAX_COORD_PX`).
         let (px, py) = (origin.0 * scale, origin.1 * scale);
@@ -374,27 +527,35 @@ impl TextEngine {
         {
             return Ok(size);
         }
-        let mut keys = Vec::new();
-        for run in self.buffer.layout_runs() {
-            let offset = (origin.0 * scale, (origin.1 + run.line_y) * scale);
-            for glyph in run.glyphs {
-                keys.push(glyph.physical(offset, scale));
-            }
+        if self.swash.image_cache.len() > GLYPH_IMAGE_CAP {
+            self.swash.image_cache.clear();
         }
-        for pg in keys {
-            if let Some(image) = self.swash.get_image(&mut self.font_system, pg.cache_key) {
-                if image.placement.width == 0 || image.placement.height == 0 {
-                    continue;
+        for line in &shaped.lines {
+            let offset = (origin.0 * scale, (origin.1 + line.line_y) * scale);
+            for glyph in &line.glyphs {
+                let pg = glyph.physical(offset, scale);
+                if let Some(image) = self.swash.get_image(&mut self.font_system, pg.cache_key) {
+                    if image.placement.width == 0 || image.placement.height == 0 {
+                        continue;
+                    }
+                    sink(Glyph {
+                        x: pg.x + image.placement.left,
+                        y: pg.y - image.placement.top,
+                        image,
+                    });
                 }
-                sink(Glyph {
-                    x: pg.x + image.placement.left,
-                    y: pg.y - image.placement.top,
-                    image,
-                });
             }
         }
         Ok(size)
     }
+}
+
+/// The wrap width the shaper gets for `max_w`: none for a non-positive,
+/// non-finite or absurd width, so the buffer is unbounded and a
+/// right-to-left line starts at its own width, not at the far right of
+/// some huge placeholder width (SPEC-6.4.3).
+fn wrap_width(max_w: Option<f32>) -> Option<f32> {
+    max_w.filter(|w| *w > 0.0 && *w <= MAX_COORD_PX)
 }
 
 /// Pack a measurement as `dl_text`, `text_measure` and `text_caret` return
@@ -405,4 +566,144 @@ impl TextEngine {
 pub fn pack_x100(a: f32, b: f32) -> i64 {
     let half = |v: f32| (f64::from(v) * 100.0).round().clamp(0.0, 2_147_483_647.0) as i64;
     (half(a) << 32) | half(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Glyphs of a rasterized run as plain data: position, placement and bitmap.
+    fn glyphs(
+        engine: &mut TextEngine,
+        style: u16,
+        max_w: f32,
+        text: &str,
+    ) -> Vec<(i32, i32, Vec<u8>)> {
+        let mut out = Vec::new();
+        engine
+            .rasterize(style, (3.25, 7.5), max_w, 1.5, text, |g| {
+                out.push((g.x, g.y, g.image.data.clone()));
+            })
+            .unwrap();
+        out
+    }
+
+    impl ShapeCache {
+        fn units(&self) -> usize {
+            [&self.young, &self.old]
+                .iter()
+                .flat_map(|m| m.values())
+                .flatten()
+                .map(|(_, s)| s.units)
+                .sum()
+        }
+    }
+
+    /// SPEC-13.2.3: a text is shaped once per (face, size, wrap width,
+    /// bytes): `dl_text` measuring it and the rasterizer drawing it, and
+    /// styles that differ only in colour, share one shaping; another
+    /// width, size or text is shaped anew; every width that means "no
+    /// wrapping" is one key (SPEC-6.4.3).
+    #[test]
+    fn spec_13_2_3_shaped_text_cache_hits_and_misses() {
+        let mut t = TextEngine::new();
+        let ink = t.style(font::SANS, 14.0, 400, 0x1122_33FF).unwrap();
+        let red = t.style(font::SANS, 14.0, 400, 0xFF00_00FF).unwrap();
+        let big = t.style(font::SANS, 15.0, 400, 0x1122_33FF).unwrap();
+        let bold = t.style(font::SANS, 14.0, 700, 0x1122_33FF).unwrap();
+        let stats = |t: &TextEngine| (t.cache_stats().hits, t.cache_stats().misses);
+        let a = t.measure(ink, 200.0, "Vy ritar text").unwrap();
+        assert_eq!(stats(&t), (0, 1));
+        assert_eq!(t.measure(ink, 200.0, "Vy ritar text").unwrap(), a);
+        assert_eq!(t.measure(red, 200.0, "Vy ritar text").unwrap(), a);
+        assert_eq!(stats(&t), (2, 1), "colour is not part of the key");
+        glyphs(&mut t, ink, 200.0, "Vy ritar text");
+        assert_eq!(stats(&t), (3, 1), "the rasterizer reuses the measurement");
+        t.measure(ink, 40.0, "Vy ritar text").unwrap();
+        t.measure(big, 200.0, "Vy ritar text").unwrap();
+        t.measure(bold, 200.0, "Vy ritar text").unwrap();
+        t.measure(ink, 200.0, "Vy ritar texten").unwrap();
+        assert_eq!(stats(&t), (3, 5), "width, size, face and text are keys");
+        t.measure(ink, 0.0, "Vy").unwrap();
+        t.measure(ink, -5.0, "Vy").unwrap();
+        t.measure(ink, f32::NAN, "Vy").unwrap();
+        assert_eq!(stats(&t), (5, 6), "every non-wrapping width is one key");
+        assert!((t.cache_stats().hit_rate() - 5.0 / 11.0).abs() < 1e-12);
+    }
+
+    /// SPEC-13.2.3, SPEC-2.1.5: a cached layout is what shaping gives: an
+    /// engine that has shaped, evicted and reshaped many texts draws every
+    /// glyph where a fresh engine draws it, with the same bitmap, and
+    /// measures the same. Paragraph separators, right-to-left runs,
+    /// wrapping and unwrapped runs included.
+    #[test]
+    fn cached_layout_is_what_shaping_gives() {
+        let texts = [
+            "Vy ritar text i värden, aldrig i modulen",
+            "Lägesrapport för november: allt grönt och inget rött i sikte alls",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd} world \u{5e2}\u{5d5}\u{5dc}\u{5dd}",
+            "one\u{2029}two\u{85}three\nfour",
+            "",
+            "    ",
+            "0x2F5BD6FF  rect 12 x 7  clip 3  text 41",
+        ];
+        let mut warm = TextEngine::new();
+        let mut cold = TextEngine::new();
+        let style = |t: &mut TextEngine| {
+            [
+                t.style(font::SANS, 14.0, 400, 0x2221_1FFF).unwrap(),
+                t.style(font::SERIF, 17.0, 400, 0x2221_1FFF).unwrap(),
+                t.style(font::MONO, 12.0, 400, 0x2221_1FFF).unwrap(),
+            ]
+        };
+        let ws = style(&mut warm);
+        let cs = style(&mut cold);
+        // Fill the cache past a generation so entries are evicted and
+        // promoted between the draws below.
+        let filler: String = "ord ".repeat(400);
+        for round in 0..3 {
+            for i in 0..80 {
+                warm.measure(ws[i % 3], 300.0, &format!("{filler}{i}"))
+                    .unwrap();
+            }
+            for (k, text) in texts.iter().enumerate() {
+                for max_w in [0.0, 90.0, 300.0] {
+                    let (w, c) = (ws[k % 3], cs[k % 3]);
+                    assert_eq!(
+                        warm.measure(w, max_w, text).unwrap(),
+                        cold.measure(c, max_w, text).unwrap(),
+                        "round {round}: {text:?} at {max_w}"
+                    );
+                    let mut fresh = TextEngine::new();
+                    let fs = style(&mut fresh);
+                    assert_eq!(
+                        glyphs(&mut warm, w, max_w, text),
+                        glyphs(&mut fresh, fs[k % 3], max_w, text),
+                        "round {round}: {text:?} at {max_w}"
+                    );
+                }
+            }
+        }
+        assert!(warm.cache_stats().hits > 0 && warm.cache_stats().misses > 0);
+    }
+
+    /// The cache holds at most two generations of [`SHAPE_CACHE_UNITS`]
+    /// however many texts go through it, and a text too large for a
+    /// generation is shaped every time rather than cached.
+    #[test]
+    fn shaped_text_cache_is_bounded() {
+        let mut t = TextEngine::new();
+        let s = t.style(font::SANS, 12.0, 400, 0x0000_00FF).unwrap();
+        for i in 0..2_000 {
+            t.measure(s, 500.0, &format!("{i} {}", "x".repeat(i % 300)))
+                .unwrap();
+            assert!(t.cache.units() <= 2 * SHAPE_CACHE_UNITS);
+        }
+        let huge = "y".repeat(SHAPE_CACHE_UNITS);
+        let before = t.cache_stats().misses;
+        t.measure(s, 0.0, &huge).unwrap();
+        t.measure(s, 0.0, &huge).unwrap();
+        assert_eq!(t.cache_stats().misses, before + 2);
+        assert!(t.cache.units() <= 2 * SHAPE_CACHE_UNITS);
+    }
 }

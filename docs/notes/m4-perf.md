@@ -99,3 +99,58 @@ Jämförelser före/efter görs därför A/B med båda binärerna i samma stund.
 - **Texten formas om varje gång**, både i modulens `dl_text` och i rasteriseringen: 100 % missar.
 - **Kompileringen** är 14–86 ms P50 för 5–30 KB-moduler utan kompileringscache.
 - Rullningen av textsidan ligger på gränsen (14 ms P50, 18 ms P95 mot 16,7).
+
+## Steg 2a: formad-text-cache i `TextEngine` (SPEC-13.2.3)
+
+**Vad.** `TextEngine` håller de formade texterna: nyckel (typsnittsfamilj, snittvikt, storlek,
+radbrytningsbredd, textens byte) – färgen ingår inte, så stilar som bara skiljer i färg delar
+post – och värde glyferna per rad med radens y och det uppmätta måttet. `text_measure`,
+`dl_text` och rasteriseringen slår upp i samma cache; en träff formar inget. Alla bredder som
+betyder "ingen radbrytning" (≤ 0, NaN, absurd) är en nyckel (SPEC-6.4.3). Cachen har två
+generationer om `SHAPE_CACHE_UNITS` = 65 536 enheter (en per glyf, rad och textbyte): en träff i
+den gamla flyttas till den unga, och när den unga är full blir den den gamla och den gamla
+släpps – det en ram fortsätter använda ligger kvar, och en motor håller högst två generationer
+(några MB). En text större än en generation formas varje gång. cosmic-texts `SwashCache`
+(rasteriserade glyfbilder) saknar tak; den börjar om vid `GLYPH_IMAGE_CAP` = 16 384 bilder.
+Font-systemet, `SwashCache` och cachen lever i motorn, som lever över frames: en per
+runtime-instans (fliken), en per flik i skalets huvudprocess (`tab.text`, ny vid navigering)
+och en för chromen – inget byggs om per frame (kontrollerat i `vy-shell`, ingen ändring där).
+
+**Determinism.** Bränslet för `dl_text` och `text_measure` debiteras per byte före uppslaget
+och är detsamma vid träff och miss; rasterbudgeten debiterar textens byte och glyfernas yta som
+förut. Testet `cached_layout_is_what_shaping_gives` jämför en motor som format, kastat och
+format om hundratals texter med en ny motor för höger-till-vänster, styckeavgränsare,
+radbrytning och tom text: samma mått, samma glyfer på samma pixlar. Konformans 55/55 à 0,000 %.
+
+**Tal.** Båda binärerna efter varandra direkt efter att maskinen startats om (load 0,2 → 3),
+100 körningar:
+
+```
+id                          före p50  före p95 efter p50 efter p95
+raster.text-200                16.17     25.04     12.07     17.76
+raster.mix-1800-200            32.54     57.27     25.16     41.32
+raster.ops-2000               100.02    140.57     71.35    109.80
+raster.ops-2000-cold           99.61    149.71     71.89    109.51
+raster.page.text                5.05      9.35      4.23     11.15
+raster.page.document            9.98     14.25      7.51     12.84
+scroll.text.frame              13.08     20.50      6.64     10.07
+scroll.text.miss              100.00    100.00      2.59      2.59
+scroll.text.measure-miss      100.00    100.00      0.00      0.00
+first-frame.text               75.19    101.00     72.49    111.93
+raster.rects-2000              18.32     31.22     16.90     25.41
+raster.cards-2000             103.48    149.64     91.06    135.95
+```
+
+Rullningen håller nu budgeten (P95 10 ms mot 16,7) och träffen är 97,4 % på den rasteriserande
+sidan (missar när ett nytt stycke rullar in) och 100 % i modulen (`text` mäter alla stycken i
+`vy_init`, och `dl_text` slår sedan upp samma text, stil och bredd). Glyfblittningen, inte
+formningen, är resten av textkostnaden (steg 2b). Kontrollraderna utan text (`rects-2000`,
+`cards-2000`) flyttade sig 8–12 % åt samma håll av brus. En interfolierad A/B under last 4–6
+(sex block à 20 körningar per rad, binärerna växelvis, median av blockens P50) gav samma bild:
+`text-200` 0,77, `scroll.text.frame` 0,83, `ops-2000` 0,86, `page.document` 0,87, kontrollerna
+0,98–0,99.
+
+**Brus i debug.** `spec_5_3_3_bench_32_rounded_clips_2000_rects` (vy-render, M2.7) hävdar en
+väggklocka på 1 s i debug och föll tre gånger i rad (1,0–1,6 s) medan de andra spåren byggde
+om efter en omstart; samma test med och utan textcachen gick sedan på 1,4–1,7 s för hela
+binären. Det testet har ingen text. Gränsen lämnas (steg 2b gör ramen billigare).
