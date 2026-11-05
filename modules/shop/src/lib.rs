@@ -6,7 +6,8 @@
 //! What the page exercises in the ABI:
 //! - `dl_image` with package resources (SPEC-5.2.3, SPEC-6.5.1): resource
 //!   ids 1..=8 are the eight PNGs the manifest lists (SPEC-4.5.1), drawn
-//!   with `cover` into cards whose size follows the window.
+//!   with `cover` into cards whose size follows the window, clipped to the
+//!   card's rounded corners (`dl_clip_push` with a radius).
 //! - `link_register` (SPEC-5.2.10) on every card, re-registered each frame
 //!   under a stable id because the cards move when the grid scrolls; the
 //!   host, not the page, opens `vy://shop.example/produkt/<id>`.
@@ -320,7 +321,10 @@ impl ShopPage {
         f.rect(card, 8.0, RULE)?;
         f.rect(card.inset(1.0), 7.0, PANEL)?;
         let image = Rect::new(card.x + 1.0, card.y + 1.0, card.w - 2.0, l.image_h);
-        f.image(image, ResourceId(i as u16 + 1), Fit::Cover)?;
+        // The picture follows the card's rounded corners (SPEC-5.2.3).
+        f.clipped(card.inset(1.0), 7.0, |f| {
+            f.image(image, ResourceId(i as u16 + 1), Fit::Cover)
+        })?;
         let x = card.x + PAD;
         let w = card.w - 2.0 * PAD;
         let name_y = image.bottom() + PAD;
@@ -532,13 +536,15 @@ impl App for ShopPage {
         f.rect(window, 0.0, BG)?;
         f.group(Role::Main, window, "", |f| {
             // Header.
-            let th = f.text(
-                MARGIN,
-                12.0,
-                self.window.width - 2.0 * MARGIN,
-                self.title,
-                TITLE,
-            )?.h;
+            let th = f
+                .text(
+                    MARGIN,
+                    12.0,
+                    self.window.width - 2.0 * MARGIN,
+                    self.title,
+                    TITLE,
+                )?
+                .h;
             f.sem.heading(
                 Rect::new(MARGIN, 12.0, self.window.width - 2.0 * MARGIN, th),
                 TITLE,

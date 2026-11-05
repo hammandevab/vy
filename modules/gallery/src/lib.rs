@@ -8,7 +8,9 @@
 //! are resource ids 1..=8, SPEC-4.5.1) decoded lazily by the host at the
 //! first `dl_image` (SPEC-6.5.1); `dl_image` with `fit` 0 cover, 1 contain
 //! and 2 stretch (SPEC-5.2.3), rotating through the grid so all three are
-//! on screen at once, and contain again in the lightbox; `image` nodes with
+//! on screen at once, and contain again in the lightbox, each thumbnail
+//! clipped to its card's rounded corners (`dl_clip_push` with a radius,
+//! SPEC-5.2.3); `image` nodes with
 //! alt text next to `text` captions (SPEC-10.1.2); a column count derived
 //! from the window so `vy_resize` reflows the grid; `SCROLL`, `KEY_DOWN`
 //! and `POINTER_DOWN` hit-testing against cell rectangles; a `dialog` node
@@ -256,8 +258,9 @@ impl GalleryPage {
         let p = &PICTURES[i];
         let thumb = Rect::new(cell.x, cell.y, cell.w, grid.thumb_h);
         f.rect(cell, 8.0, WHITE)?;
-        // Dark ground so contain's letterbox and cover's crop both read.
-        f.clipped(thumb, 0.0, |f| {
+        // Dark ground so contain's letterbox and cover's crop both read; the
+        // clip follows the card's rounded corners (SPEC-5.2.3).
+        f.clipped(cell, 8.0, |f| {
             f.rect(thumb, 0.0, THUMB_BG)?;
             f.image(thumb, Picture::resource(i), Picture::fit(i))
         })?;
@@ -358,9 +361,11 @@ impl App for GalleryPage {
             );
             let sw = text_measure(self.sub, 0.0, &sub)?.w;
             let sx = (self.window.width - MARGIN - sw).max(MARGIN + 110.0);
-            f.clipped(Rect::new(sx, 0.0, self.window.width - sx, HEADER_H), 0.0, |f| {
-                f.text(sx, 25.0, 0.0, self.sub, &sub)
-            })?;
+            f.clipped(
+                Rect::new(sx, 0.0, self.window.width - sx, HEADER_H),
+                0.0,
+                |f| f.text(sx, 25.0, 0.0, self.sub, &sub),
+            )?;
             f.sem.text(Rect::new(sx, 25.0, sw, 16.25), &sub)?;
 
             f.clipped(below, 0.0, |f| {
