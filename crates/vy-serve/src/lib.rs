@@ -6,9 +6,10 @@
 //! `/_vy/<sha256>` as immutable blobs (SPEC-7.3.1), `ETag` and `max-age`
 //! on manifests (SPEC-7.3.2), the publisher key at `/.well-known/vy-key`
 //! (SPEC-7.4.2), an optional `index.json` under `/.well-known/vy-index/`,
-//! and an HTML rendering of the manifest's `fallback` for ordinary
-//! browsers. No trust lives here: everything a client believes comes from
-//! the signature (SPEC-7.4.1).
+//! and, for ordinary browsers, an HTML rendering of the manifest's
+//! `fallback`, an index of every package at `/` and preview images from
+//! `<dir>/previews/<name>.png` at `/_previews/<name>.png`. No trust lives
+//! here: everything a client believes comes from the signature (SPEC-7.4.1).
 //!
 //! [`Site::reply`] is a pure function of the request, so the routing is
 //! tested without sockets; [`start`] wraps it in `tiny_http`.
@@ -25,7 +26,7 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 use vy_manifest::{parse_key_file, Hash, Manifest, Package, MEDIA_MANIFEST, MEDIA_PACKAGE};
 
-pub use html::{markdown, page as fallback_page};
+pub use html::{index as index_page, markdown, page as fallback_page, Entry};
 
 /// Path of the publisher key file (SPEC-7.4.2).
 pub const WELL_KNOWN_KEY_PATH: &str = "/.well-known/vy-key";
@@ -33,10 +34,18 @@ pub const WELL_KNOWN_KEY_PATH: &str = "/.well-known/vy-key";
 pub const WELL_KNOWN_INDEX_PREFIX: &str = "/.well-known/vy-index/";
 /// Prefix of content-addressed blobs.
 pub const BLOB_PREFIX: &str = "/_vy/";
+/// Prefix of preview images: `/_previews/<name>.png` is the file
+/// `<dir>/previews/<name>.png`, rendered by `vy-cli` when the site was
+/// published.
+pub const PREVIEW_PREFIX: &str = "/_previews/";
+/// Subdirectory of `dir` holding the preview images.
+pub const PREVIEW_DIR: &str = "previews";
 /// `Cache-Control` of manifests, packages and HTML (SPEC-7.3.2).
 pub const CACHE_CONTROL_PAGE: &str = "max-age=60";
 /// `Cache-Control` of blobs: the URL names the bytes (SPEC-7.3.1).
 pub const CACHE_CONTROL_BLOB: &str = "public, max-age=31536000, immutable";
+/// `Cache-Control` of preview images: one hour.
+pub const CACHE_CONTROL_PREVIEW: &str = "public, max-age=3600";
 /// File extension of packages.
 pub const PACKAGE_EXTENSION: &str = "vyp";
 /// Worker threads taking connections.
@@ -109,6 +118,8 @@ pub struct Stats {
     pub keys: AtomicU64,
     /// Index files served.
     pub index: AtomicU64,
+    /// Preview images served.
+    pub previews: AtomicU64,
     /// 304 answers.
     pub not_modified: AtomicU64,
     /// 404 answers.
@@ -132,6 +143,8 @@ pub struct StatsSnapshot {
     pub keys: u64,
     /// Index files served.
     pub index: u64,
+    /// Preview images served.
+    pub previews: u64,
     /// 304 answers.
     pub not_modified: u64,
     /// 404 answers.
@@ -151,6 +164,7 @@ impl Stats {
             html: get(&self.html),
             keys: get(&self.keys),
             index: get(&self.index),
+            previews: get(&self.previews),
             not_modified: get(&self.not_modified),
             not_found: get(&self.not_found),
             rejected: get(&self.rejected),
@@ -215,6 +229,7 @@ impl Reply {
             (200, Counted::Html) => &stats.html,
             (200, Counted::Keys) => &stats.keys,
             (200, Counted::Index) => &stats.index,
+            (200, Counted::Preview) => &stats.previews,
             _ => &stats.rejected,
         };
         counter.fetch_add(1, Ordering::Relaxed);
@@ -229,6 +244,7 @@ enum Counted {
     Html,
     Keys,
     Index,
+    Preview,
     None,
 }
 
@@ -383,6 +399,28 @@ impl Site {
         self.dir.join(format!("{name}.{PACKAGE_EXTENSION}"))
     }
 
+    fn preview_path(&self, name: &str) -> PathBuf {
+        self.dir.join(PREVIEW_DIR).join(format!("{name}.png"))
+    }
+
+    /// URL path of the preview of package `name` when the file exists.
+    fn preview_url(&self, name: &str) -> Option<String> {
+        self.preview_path(name)
+            .is_file()
+            .then(|| format!("{PREVIEW_PREFIX}{name}.png"))
+    }
+
+    /// Every package in name order, (re)loaded, for the index page: the
+    /// directory is scanned again so a package published after start is
+    /// listed, like it is served by name.
+    fn entries(&self) -> Vec<(String, Arc<Loaded>)> {
+        let _ = self.scan(&self.dir, "");
+        self.packages()
+            .into_iter()
+            .filter_map(|name| self.load(&name).map(|l| (name, l)))
+            .collect()
+    }
+
     /// The package `name`, (re)loaded when its file changed.
     fn load(&self, name: &str) -> Option<Arc<Loaded>> {
         let path = self.package_path(name);
@@ -514,9 +552,52 @@ impl Site {
             };
         }
 
+        if let Some(rest) = path.strip_prefix(PREVIEW_PREFIX) {
+            let Some(stem) = rest.strip_suffix(".png") else {
+                return (self.not_found(path, accept), Counted::None);
+            };
+            let Some(name) = package_name(&format!("/{stem}")) else {
+                return (bad_request(), Counted::None);
+            };
+            return match std::fs::read(self.preview_path(&name)) {
+                Ok(body) => {
+                    let etag = etag_of(&body);
+                    if req.if_none_match.as_deref() == Some(etag.as_str()) {
+                        return (not_modified(&etag), Counted::Preview);
+                    }
+                    (
+                        Reply::new(200, body, "image/png")
+                            .header("ETag", &etag)
+                            .header("Cache-Control", CACHE_CONTROL_PREVIEW),
+                        Counted::Preview,
+                    )
+                }
+                Err(_) => (self.not_found(path, accept), Counted::None),
+            };
+        }
+
         let Some(name) = package_name(path) else {
             return (bad_request(), Counted::None);
         };
+        let wants_vy = accepts(accept, MEDIA_MANIFEST) || accepts(accept, MEDIA_PACKAGE);
+        if path == "/" && !wants_vy {
+            let entries = self.entries();
+            let entries: Vec<Entry<'_>> = entries
+                .iter()
+                .map(|(name, l)| Entry {
+                    name,
+                    manifest: &l.manifest,
+                    preview: self.preview_url(name),
+                })
+                .collect();
+            let html = html::index(&self.host_name.lock().unwrap(), &entries);
+            return (
+                Reply::new(200, html.into_bytes(), "text/html; charset=utf-8")
+                    .header("Cache-Control", CACHE_CONTROL_PAGE)
+                    .header("Vary", "Accept"),
+                Counted::Html,
+            );
+        }
         let Some(loaded) = self.load(&name) else {
             return (self.not_found(path, accept), Counted::None);
         };
@@ -535,7 +616,12 @@ impl Site {
                 MEDIA_PACKAGE,
             )
         } else {
-            let html = html::page(&loaded.manifest, &self.vy_address(path), &loaded.identity);
+            let html = html::page(
+                &loaded.manifest,
+                &self.vy_address(path),
+                &loaded.identity,
+                self.preview_url(&name).as_deref(),
+            );
             return (
                 Reply::new(200, html.into_bytes(), "text/html; charset=utf-8")
                     .header("Cache-Control", CACHE_CONTROL_PAGE)
@@ -760,8 +846,8 @@ mod tests {
         b
     }
 
-    /// A directory with `hello.vyp`, `docs/intro.vyp`, `docs/index.json`
-    /// and a key file.
+    /// A directory with `hello.vyp`, `docs/intro.vyp`, `docs/index.json`,
+    /// a preview for `hello` only, and a key file.
     fn site_dir() -> (PathBuf, Package, SigningKey) {
         let dir = std::env::temp_dir().join(format!(
             "vy-serve-test-{}-{}",
@@ -785,6 +871,8 @@ mod tests {
         std::fs::write(dir.join("docs/intro.vyp"), package.pack().unwrap()).unwrap();
         std::fs::write(dir.join("docs/index.json"), b"{\"pages\":[\"intro\"]}").unwrap();
         std::fs::write(dir.join("docs/notes.txt"), b"not a package").unwrap();
+        std::fs::create_dir_all(dir.join(PREVIEW_DIR)).unwrap();
+        std::fs::write(dir.join(PREVIEW_DIR).join("hello.png"), png()).unwrap();
         std::fs::write(
             dir.join("dev.key.pub"),
             vy_manifest::key_file(&[key.public()]),
@@ -894,9 +982,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Ordinary browsers get the fallback as HTML with the vy:// link and
-    /// the package identity; nothing else is ever HTML (SPEC-1.1.1 is the
-    /// client's rule, the server only helps browsers find the client).
+    /// Ordinary browsers get the fallback as HTML with the vy:// link, the
+    /// package identity and the preview image when one exists; nothing
+    /// else is ever HTML (SPEC-1.1.1 is the client's rule, the server only
+    /// helps browsers find the client).
     #[test]
     fn html_fallback_for_browsers() {
         let (dir, package, _) = site_dir();
@@ -908,12 +997,133 @@ mod tests {
         assert!(html.contains("href=\"vy://vy.example/hello\""));
         assert!(html.contains("<h1>Hej från Vy</h1>"));
         assert!(html.contains(&package.identity().to_string()));
+        assert!(html.contains("<img src=\"/_previews/hello.png\""));
         assert!(!html.contains("<script"));
         let r = get(&site, "/docs/", "*/*");
         assert_eq!(r.status, 404, "docs/index.vyp does not exist");
         let r = get(&site, "/docs/intro", "*/*");
         assert_eq!(r.status, 200);
         assert!(r.get("content-type").unwrap().starts_with("text/html"));
+        let html = String::from_utf8(r.body).unwrap();
+        assert!(!html.contains("<img"), "docs/intro has no preview");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/` lists every package for browsers, with manifest text escaped,
+    /// and stays the `index` package for Vy clients.
+    #[test]
+    fn index_lists_packages() {
+        let (dir, package, key) = site_dir();
+        let site = Site::open(&config(&dir)).unwrap();
+        let r = get(&site, "/", "text/html,*/*;q=0.8");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.get("content-type"), Some("text/html; charset=utf-8"));
+        assert_eq!(r.get("cache-control"), Some(CACHE_CONTROL_PAGE));
+        let html = String::from_utf8(r.body).unwrap();
+        assert!(html.contains("<title>Vy – sidor på vy.example</title>"));
+        assert!(html.contains("2 sidor"));
+        assert!(html.contains("<h2><a href=\"/hello\">Hej från Vy</a></h2>"));
+        assert!(html.contains("<h2><a href=\"/docs/intro\">Hej från Vy</a></h2>"));
+        assert!(html.contains(&format!("<p>{}</p>", package.manifest.summary)));
+        assert!(html
+            .contains("Öppna i Vy: <a href=\"vy://vy.example/hello\">vy://vy.example/hello</a>"));
+        assert!(html.contains("href=\"vy://vy.example/docs/intro\""));
+        assert!(html.contains("<a href=\"/hello\"><img src=\"/_previews/hello.png\""));
+        assert_eq!(html.matches("<img").count(), 1, "docs/intro has no preview");
+        assert!(html.contains("href=\"/.well-known/vy-key\""));
+        assert!(!html.contains("<script"));
+        // The query is ignored; HEAD has no body; `/` without an index.vyp
+        // is still 404 for a Vy client (SPEC-7.2.1 names no index).
+        assert_eq!(
+            get(&site, "/?x=<b>", "text/html").body,
+            get(&site, "/", "text/html").body
+        );
+        let head = site.reply(&RequestInfo {
+            method: "HEAD".into(),
+            url: "/".into(),
+            accept: Some("text/html".into()),
+            if_none_match: None,
+        });
+        assert_eq!((head.status, head.body.len()), (200, 0));
+        let both = "application/vy-package+zstd, application/vy-manifest+cbor";
+        assert_eq!(get(&site, "/", both).status, 404);
+        assert_eq!(get(&site, "/", MEDIA_PACKAGE).status, 404);
+
+        // Manifest text is escaped, and a package published after start is
+        // listed (the directory is scanned again).
+        let mut hostile = package.clone();
+        hostile.manifest.name = "<b>Namn</b> & \"citat\"".into();
+        hostile.manifest.summary = "<script>alert(1)</script>".into();
+        hostile.manifest.sign(&key);
+        std::fs::write(dir.join("sen.vyp"), hostile.pack().unwrap()).unwrap();
+        let html = String::from_utf8(get(&site, "/", "text/html").body).unwrap();
+        assert!(html.contains("3 sidor"));
+        assert!(html.contains(
+            "<h2><a href=\"/sen\">&lt;b&gt;Namn&lt;/b&gt; &amp; &quot;citat&quot;</a></h2>"
+        ));
+        assert!(html.contains("<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>"));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("<b>"));
+        assert_eq!(site.stats().snapshot().html, 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Previews are PNG files served under `/_previews/` with a one-hour
+    /// cache and an ETag; a missing one is a clean 404 and the path is
+    /// checked like a package name, so nothing outside `previews/` is
+    /// reachable.
+    #[test]
+    fn preview_images() {
+        let (dir, _, _) = site_dir();
+        let site = Site::open(&config(&dir)).unwrap();
+        let r = get(&site, "/_previews/hello.png", "image/png,*/*");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.get("content-type"), Some("image/png"));
+        assert_eq!(r.get("cache-control"), Some(CACHE_CONTROL_PREVIEW));
+        assert_eq!(r.body, png());
+        let etag = r.get("etag").unwrap().to_string();
+        assert_eq!(etag, etag_of(&png()));
+        let same = site.reply(&RequestInfo {
+            method: "GET".into(),
+            url: "/_previews/hello.png?v=2".into(),
+            accept: None,
+            if_none_match: Some(etag),
+        });
+        assert_eq!((same.status, same.body.len()), (304, 0));
+
+        assert_eq!(get(&site, "/_previews/docs/intro.png", "*/*").status, 404);
+        assert_eq!(get(&site, "/_previews/hello.txt", "*/*").status, 404);
+        assert_eq!(get(&site, "/_previews/hello", "*/*").status, 404);
+        assert_eq!(get(&site, "/_previews/", "*/*").status, 404);
+        assert_eq!(
+            get(&site, "/_previews/.png", "*/*").status,
+            404,
+            "`/` is the index package, so its preview is previews/index.png"
+        );
+        let r = get(&site, "/_previews/nope.png", "text/html");
+        assert_eq!(r.status, 404);
+        assert!(r.get("content-type").unwrap().starts_with("text/html"));
+        assert!(String::from_utf8(r.body)
+            .unwrap()
+            .contains("/_previews/nope.png"));
+        // Traversal and odd names are refused before any file is touched:
+        // `dev.key.pub` sits next to `previews/`.
+        for bad in [
+            "/_previews/../dev.key.pub.png",
+            "/_previews/..%2Fdev.key.pub.png",
+            "/_previews/%2e%2e/hello.png",
+            "/_previews/.hidden.png",
+            "/_previews/a\\b.png",
+            "/_previews/%00.png",
+            "/_previews/docs//intro.png",
+        ] {
+            assert_eq!(get(&site, bad, "*/*").status, 400, "{bad}");
+        }
+        let s = site.stats().snapshot();
+        assert_eq!(
+            (s.previews, s.not_modified, s.not_found, s.rejected),
+            (1, 1, 6, 7)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

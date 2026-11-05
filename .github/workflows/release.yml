@@ -1,0 +1,153 @@
+# Release: en tagg v* (eller en manuell körning med version) bygger vy-cli,
+# vy-publish och vy-serve (och vy-shell så snart den har en binär) i release-
+# läge för Linux x86_64, macOS arm64 och Windows x86_64, publicerar
+# referenssidan med tools/publish_site.sh och fäster allt vid en GitHub Release
+# med genererade noteringar:
+#
+#   vy-<version>-<target>.zip   binärerna + LICENSE
+#   vy-site-<version>.zip       de elva paketen, dev.key.pub och previews/
+#
+# Signeringsnyckeln för paketen är repots secret VY_KEY (64 hextecken, se
+# tools/publish_site.sh); saknas den signeras de med en tillfällig nyckel.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version att släppa, t.ex. v0.1.0 (taggen skapas på den valda commiten om den saknas)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          tag="${INPUT_VERSION:-$GITHUB_REF_NAME}"
+          tag="v${tag#v}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "error: version must look like v0.1.0, got $tag" >&2; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown, ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p vy-cli -p vy-publish -p vy-serve
+      # vy-shell is a library until M3; the job must not fail before then.
+      - name: Build vy-shell when it has a binary
+        shell: bash
+        run: |
+          if cargo metadata --no-deps --format-version 1 \
+              | jq -e '.packages[] | select(.name == "vy-shell") | .targets[] | select(.kind | index("bin"))' > /dev/null; then
+            cargo build --release --locked --target ${{ matrix.target }} -p vy-shell
+          else
+            echo "vy-shell has no binary target yet; skipped"
+          fi
+      - name: Zip
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          ext=""
+          if [ "$RUNNER_OS" = Windows ]; then ext=.exe; fi
+          stage=$(mktemp -d)
+          for bin in vy-cli vy-publish vy-serve vy-shell; do
+            f="target/$TARGET/release/$bin$ext"
+            if [ -f "$f" ]; then cp "$f" "$stage/"; fi
+          done
+          cp LICENSE "$stage/"
+          ls -l "$stage"
+          zip="$PWD/vy-$VERSION-$TARGET.zip"
+          cd "$stage"
+          if [ "$RUNNER_OS" = Windows ]; then 7z a -tzip "$zip" ./*; else zip -j "$zip" ./*; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vy-${{ matrix.target }}
+          path: vy-*.zip
+          if-no-files-found: error
+
+  site:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish the reference site
+        env:
+          VY_KEY: ${{ secrets.VY_KEY }}
+        run: |
+          key=""
+          if [ -n "$VY_KEY" ]; then
+            umask 077
+            printf '%s\n' "$VY_KEY" > "$RUNNER_TEMP/dev.key"
+            key=$RUNNER_TEMP/dev.key
+          fi
+          tools/publish_site.sh deploy $key
+          rm -f "$RUNNER_TEMP/dev.key"
+      - name: Zip
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: cd deploy && zip -r "../vy-site-$VERSION.zip" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vy-site
+          path: vy-site-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [version, binaries, site]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Vy ${{ needs.version.outputs.tag }}
+          generate_release_notes: true
+          files: dist/*.zip
+          fail_on_unmatched_files: true
