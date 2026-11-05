@@ -75,6 +75,13 @@ softbuffer = { version = "0.4", default-features = false, features = ["x11", "x1
 # pulls in `image`); X11 on Linux (no `wayland-data-control`: XWayland
 # bridges the selection), clipboard-win on Windows, NSPasteboard on macOS.
 arboard = { version = "3.7", default-features = false }
+# The platform's accessibility API for the semantic tree (SPEC-10.2.1): the
+# schema crate (always; the tree conversion is tested without a window)
+# and the winit adapter (UIA on Windows, NSAccessibility on macOS). AT-SPI
+# on Linux (`accesskit_unix`, zbus) is vy-shell's opt-in `a11y-linux`
+# feature: it adds 3.1 MB, which takes the Linux client past 25 MB.
+accesskit = "0.25"
+accesskit_winit = { version = "0.34", default-features = false, features = ["rwh_06"] }
 
 [profile.release]
 lto = "thin"

@@ -9,6 +9,7 @@
 //! into one inbox ([`Incoming`]) and call the [`Waker`], which the window
 //! turns into a wake-up of its event loop.
 
+use crate::a11y;
 use crate::address::{AddressField, Edit};
 use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
 use crate::clipboard::{self, ClipboardBackend};
@@ -1261,6 +1262,12 @@ impl Shell {
                 if let Some(tab) = self.tab_mut(id) {
                     for s in styles {
                         let _ = tab.text.style(s.font, s.size_px, s.weight, s.color);
+                    }
+                    // The tree comes before its frame, and only when it
+                    // changed: a first frame without one is a page without
+                    // a tree (SPEC-10.4.1).
+                    if tab.has_tree.is_none() {
+                        tab.has_tree = Some(false);
                     }
                     tab.display_list = display_list;
                     tab.rendered = None;
@@ -2521,6 +2528,125 @@ impl Shell {
             }
         }
         self.send_page_event(event::KEY_DOWN, code, modifiers, i32::from(repeat), 0);
+    }
+
+    // ---- accessibility (SPEC-10.2.1) -------------------------------------
+
+    /// What the accessibility tree is made from now: the window, the
+    /// address field, and the active page's tree and focus.
+    pub fn a11y_snapshot(&self) -> a11y::Snapshot {
+        let tab = self.tabs.get(self.active);
+        let running = tab.filter(|t| t.state == State::Running);
+        a11y::Snapshot {
+            title: self.title(),
+            width: self.width,
+            height: self.height,
+            scale: self.scale,
+            address_rect: self.layout.address,
+            address: self.address.text().to_string(),
+            address_focused: self.address.focused(),
+            page: self.layout.page,
+            zoom: tab.map_or(1.0, |t| t.zoom),
+            page_title: tab
+                .map(|t| {
+                    if t.title.is_empty() {
+                        t.display.clone()
+                    } else {
+                        t.title.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            sem: running.map(|t| t.sem.clone()).unwrap_or_default(),
+            focus: running.and_then(|t| t.focus),
+            inaccessible: running.is_some_and(|t| t.has_tree == Some(false)),
+        }
+    }
+
+    /// Do what an assistive technology asked (SPEC-10.2.1); false when it
+    /// is not something the shell does (`SetValue`: the page owns its
+    /// values) or the node is not there.
+    pub fn a11y_action(&mut self, req: &accesskit::ActionRequest) -> bool {
+        match a11y::request(req) {
+            a11y::Request::FocusAddress => {
+                self.blur_find();
+                self.address.focus_all();
+                self.frame_dirty = true;
+                true
+            }
+            a11y::Request::Focus(id) => self.focus_node(id),
+            a11y::Request::Click(id) => self.activate_node(id),
+            a11y::Request::Unsupported => false,
+        }
+    }
+
+    /// Move the host's keyboard focus to node `id` of the active page the
+    /// way Tab moves it (SPEC-10.3.1): `FOCUS` out for the node that had
+    /// it and in for this one, both with `c = 1`; the tab's runtime takes
+    /// a delivered `FOCUS` as its own focus too. Only a focusable node
+    /// (SPEC-10.3.2); keys go to the page afterwards.
+    pub fn focus_node(&mut self, id: i32) -> bool {
+        let now = self.now_ms();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        let focusable = tab
+            .sem
+            .iter()
+            .any(|n| n.id == id && vy_abi::role::is_focusable(n.role));
+        if !tab.running() || !focusable {
+            return false;
+        }
+        if tab.focus != Some(id) {
+            let focus = |a: i32, b: i32| ToTab::Event {
+                kind: event::FOCUS,
+                a,
+                b,
+                c: 1,
+                d: 0,
+                clock_ms: now,
+            };
+            if let Some(old) = tab.focus {
+                tab.send(&focus(old, 0));
+            }
+            tab.send(&focus(id, 1));
+            tab.focus = Some(id);
+            tab.tick_due = true;
+        }
+        self.address.blur();
+        self.blur_find();
+        self.frame_dirty = true;
+        true
+    }
+
+    /// Press and release the primary button at the centre of node `id` of
+    /// the active page, an assistive technology's click: the page gets
+    /// `POINTER_DOWN` and `POINTER_UP` there (and with them the focus
+    /// change a press makes, SPEC-10.3.1), and a link the page registered
+    /// under that point is followed as for a click.
+    pub fn activate_node(&mut self, id: i32) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let Some(n) = tab.sem.iter().find(|n| n.id == id) else {
+            return false;
+        };
+        if !tab.running() || !(n.x.is_finite() && n.y.is_finite()) {
+            return false;
+        }
+        let (cx, cy) = (n.x + n.w / 2.0, n.y + n.h / 2.0);
+        let link = tab.link_at(cx, cy).map(|l| l.url.clone());
+        let primary = vy_abi::button::PRIMARY;
+        self.send_page_event(event::POINTER_DOWN, x100(cx), x100(cy), primary, 0);
+        self.send_page_event(event::POINTER_UP, x100(cx), x100(cy), primary, 0);
+        if let Some(url) = link {
+            self.follow_link(&url);
+        }
+        true
+    }
+
+    /// The chrome's display list for the current state (SPEC-9.6.1).
+    pub fn chrome_display_list(&mut self) -> Vec<u8> {
+        self.draw_chrome().0
     }
 
     // ---- find on page (Ctrl+F) -------------------------------------------

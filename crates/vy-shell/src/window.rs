@@ -21,13 +21,30 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
-/// The user event that wakes the loop: something arrived in the inbox.
+/// The user events of the loop.
 #[derive(Debug)]
-struct Wake;
+enum UserEvent {
+    /// Something arrived in the shell's inbox.
+    Wake,
+    /// The platform's accessibility layer (SPEC-10.2.1).
+    A11y(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(e: accesskit_winit::Event) -> Self {
+        Self::A11y(e)
+    }
+}
 
 struct App {
     shell: Option<Shell>,
-    proxy: EventLoopProxy<Wake>,
+    proxy: EventLoopProxy<UserEvent>,
+    /// The AccessKit adapter (SPEC-10.2.1), made before the window shows.
+    adapter: Option<accesskit_winit::Adapter>,
+    /// True while an assistive technology listens: only then is the tree
+    /// built, and only when its digest changed.
+    a11y_active: bool,
+    a11y_digest: Option<u64>,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     initial: Vec<Source>,
@@ -87,6 +104,16 @@ impl App {
             self.title = title;
             window.set_title(&self.title);
         }
+        if self.a11y_active {
+            if let Some(adapter) = self.adapter.as_mut() {
+                let snap = shell.a11y_snapshot();
+                let digest = snap.digest();
+                if self.a11y_digest != Some(digest) {
+                    self.a11y_digest = Some(digest);
+                    adapter.update_if_active(|| crate::a11y::tree_update(&snap));
+                }
+            }
+        }
         let cursor = shell.cursor();
         if cursor != self.cursor {
             self.cursor = cursor;
@@ -132,12 +159,15 @@ impl App {
     }
 }
 
-impl ApplicationHandler<Wake> for App {
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
+        // Invisible until the accessibility adapter exists (AccessKit
+        // requires it).
         let attributes = WindowAttributes::default()
+            .with_visible(false)
             .with_title("Vy")
             .with_inner_size(LogicalSize::new(1024.0, 720.0))
             .with_min_inner_size(LogicalSize::new(320.0, 240.0));
@@ -149,6 +179,12 @@ impl ApplicationHandler<Wake> for App {
                 return;
             }
         };
+        self.adapter = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+            el,
+            &window,
+            self.proxy.clone(),
+        ));
+        window.set_visible(true);
         let context = match softbuffer::Context::new(window.clone()) {
             Ok(c) => c,
             Err(e) => {
@@ -173,7 +209,7 @@ impl ApplicationHandler<Wake> for App {
         );
         let proxy = self.proxy.clone();
         let waker = Waker::new(move || {
-            let _ = proxy.send_event(Wake);
+            let _ = proxy.send_event(UserEvent::Wake);
         });
         let data_dir = data_dir().unwrap_or_else(|| scratch_dir("data"));
         let config = Config {
@@ -206,7 +242,24 @@ impl ApplicationHandler<Wake> for App {
         self.settle(el);
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, _event: Wake) {
+    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+        if let UserEvent::A11y(e) = event {
+            match e.window_event {
+                accesskit_winit::WindowEvent::InitialTreeRequested => {
+                    // A full tree now, whatever was sent before.
+                    self.a11y_active = true;
+                    self.a11y_digest = None;
+                }
+                accesskit_winit::WindowEvent::ActionRequested(req) => {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.a11y_action(&req);
+                    }
+                }
+                accesskit_winit::WindowEvent::AccessibilityDeactivated => {
+                    self.a11y_active = false;
+                }
+            }
+        }
         self.settle(el);
     }
 
@@ -215,6 +268,9 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let (Some(adapter), Some(window)) = (self.adapter.as_mut(), self.window.as_ref()) {
+            adapter.process_event(window, &event);
+        }
         let scale = self.scale();
         let Some(shell) = self.shell.as_mut() else {
             if let WindowEvent::CloseRequested = event {
@@ -319,13 +375,16 @@ impl ApplicationHandler<Wake> for App {
 /// Open the window with `sources` in tabs (an empty tab when none) and
 /// run until it closes.
 pub fn run(sources: Vec<Source>) -> Result<(), String> {
-    let event_loop = EventLoop::<Wake>::with_user_event()
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let mut app = App {
         shell: None,
         proxy,
+        adapter: None,
+        a11y_active: false,
+        a11y_digest: None,
         window: None,
         surface: None,
         initial: sources,

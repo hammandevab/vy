@@ -19,10 +19,14 @@ path = "src/main.rs"
 # model, chrome, tab processes and the headless screenshot pipeline, which
 # is what `vy-cli conformance` links.
 default = ["window"]
-window = ["dep:winit", "dep:softbuffer", "os-clipboard"]
+window = ["dep:winit", "dep:softbuffer", "dep:accesskit_winit", "os-clipboard"]
 # The system clipboard behind Ctrl+C/V/X (`arboard`); without it the
 # window uses an in-memory clipboard, as headless runs always do.
 os-clipboard = ["dep:arboard"]
+# AT-SPI over D-Bus for the accessibility tree on Linux and the BSDs
+# (SPEC-10.2.1). Off by default: +3.1 MB takes the client past SPEC-12.3.1's
+# 25 MB. Windows (UIA) and macOS (NSAccessibility) always have it.
+a11y-linux = ["window", "accesskit_winit/accesskit_unix", "accesskit_winit/async-io"]
 
 [dependencies]
 vy-abi.workspace = true
@@ -35,6 +39,8 @@ getrandom.workspace = true
 winit = { workspace = true, optional = true }
 softbuffer = { workspace = true, optional = true }
 arboard = { workspace = true, optional = true }
+accesskit.workspace = true
+accesskit_winit = { workspace = true, optional = true }
 
 # `ShellExecuteW` for https:// links (SPEC-2.1.7), instead of `cmd /C start`,
 # which parses the URL. The same crate, version and features softbuffer

@@ -9,6 +9,7 @@
 //! and never renders HTML (SPEC-1.1.1).
 #![deny(missing_docs)]
 
+pub mod a11y;
 pub mod address;
 pub mod chrome;
 pub mod clipboard;
@@ -1427,15 +1428,6 @@ mod tests {
         todo!()
     }
 
-    /// SPEC-10.2.1: semantic tree exposed through AccessKit. The shell
-    /// receives the tree per frame (`Shell::tab_semantic`); exposing it
-    /// to the platform is M4.
-    #[test]
-    #[ignore = "M4: accessibility"]
-    fn spec_10_2_1_accesskit() {
-        todo!()
-    }
-
     /// SPEC-10.2.2, SPEC-2.1.5: the host owns text selection and copies
     /// logical strings, never pixels. On the document page: a drag over a
     /// paragraph selects its text exactly; a shorter drag on its first line
@@ -1549,22 +1541,339 @@ mod tests {
         shell.shutdown();
     }
 
-    /// SPEC-10.3.1: the shell feeds OS key and pointer events to the runtime, which owns
-    /// the focus order (Tab/Shift+Tab become KIND_FOCUS; Enter/Escape stay KEY_DOWN).
-    /// The keys reach the runtime as HID codes (`keymap`); the visible focus order is M4.
-    #[test]
-    #[ignore = "M4: accessibility"]
-    fn spec_10_3_1_focus_order() {
-        todo!()
+    /// A page with a fixed tree (text 1, button 2, textbox 3, link 4, in
+    /// document order) that logs every `FOCUS` it gets as `F<b><a><c>`
+    /// (in/out, node, keyboard/pointer) and every `POINTER_DOWN` as `P`,
+    /// so a test sees the deliveries themselves, in order.
+    fn focus_logger(dir: &Path) -> Source {
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+                (import "vy" "dl_begin" (func $dl_begin (result i32)))
+                (import "vy" "dl_end" (func $dl_end (result i32)))
+                (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32) (result i32)))
+                (import "vy" "sem_node" (func $sem (param i32 i32 i32 f32 f32 f32 f32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 64) "Rubrik")
+                (data (i32.const 72) "Skicka")
+                (data (i32.const 80) "Namn")
+                (data (i32.const 88) "Mer")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32)
+                    (drop (call $dl_begin))
+                    (drop (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 50) (f32.const 5) (f32.const 0) (i32.const 0x336699FF)))
+                    (drop (call $sem (i32.const 1) (i32.const 0) (i32.const 1) (f32.const 10) (f32.const 10) (f32.const 200) (f32.const 20) (i32.const 64) (i32.const 6)))
+                    (drop (call $sem (i32.const 2) (i32.const 0) (i32.const 4) (f32.const 10) (f32.const 40) (f32.const 100) (f32.const 30) (i32.const 72) (i32.const 6)))
+                    (drop (call $sem (i32.const 3) (i32.const 0) (i32.const 5) (f32.const 10) (f32.const 80) (f32.const 200) (f32.const 30) (i32.const 80) (i32.const 4)))
+                    (drop (call $sem (i32.const 4) (i32.const 0) (i32.const 3) (f32.const 10) (f32.const 120) (f32.const 100) (f32.const 20) (i32.const 88) (i32.const 3)))
+                    (drop (call $dl_end))
+                    i32.const 1)
+                (func (export "vy_event") (param $k i32) (param $a i32) (param $b i32) (param $c i32) (param $d i32) (result i32)
+                    (if (i32.eq (local.get $k) (i32.const 10))
+                        (then
+                            (i32.store8 (i32.const 32) (i32.const 70))
+                            (i32.store8 (i32.const 33) (i32.add (i32.const 48) (local.get $b)))
+                            (i32.store8 (i32.const 34) (i32.add (i32.const 48) (local.get $a)))
+                            (i32.store8 (i32.const 35) (i32.add (i32.const 48) (local.get $c)))
+                            (drop (call $log (i32.const 1) (i32.const 32) (i32.const 4)))))
+                    (if (i32.eq (local.get $k) (i32.const 2))
+                        (then
+                            (i32.store8 (i32.const 32) (i32.const 80))
+                            (drop (call $log (i32.const 1) (i32.const 32) (i32.const 1)))))
+                    i32.const 1)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("focus.wasm");
+        std::fs::write(&path, &wasm).unwrap();
+        Source::File { path, draft: None }
     }
 
-    /// SPEC-10.4.1: a page without a semantic tree is marked inaccessible.
-    /// The chrome draws the marker ("otillgänglig") from `has_tree`; the
-    /// test of the whole path is M4 with AccessKit.
+    /// The module's own log lines since `from`, without the prefix.
+    fn module_logs(shell: &crate::shell::Shell, tab: u32, from: usize) -> Vec<String> {
+        shell.tab_logs(tab)[from..]
+            .iter()
+            .filter_map(|l| l.strip_prefix("[module info] ").map(str::to_string))
+            .collect()
+    }
+
+    /// SPEC-10.2.1, SPEC-10.3.1: the page's tree goes to the platform
+    /// through AccessKit, without a window here: every node with its
+    /// platform role, its text as name or value, and its rectangle in
+    /// physical window pixels under the page area; the host's focus is the
+    /// update's focus (the address field while it is focused, the window
+    /// when nothing is); the digest changes with the tree and focus, not
+    /// otherwise. Actions: Focus moves the host's focus the way Tab does
+    /// (`FOCUS` out and in, `c = 1`), Click presses and releases at the
+    /// node's centre (the press moves focus first, `c = 0`), SetValue is
+    /// not supported.
     #[test]
-    #[ignore = "M4: accessibility"]
+    fn spec_10_2_1_accesskit() {
+        use crate::a11y::{self, node_id};
+        use accesskit::{Action, ActionData, ActionRequest, Role, TreeId};
+        let mut shell = headless_shell(None, 800.0, 600.0, 2.0).unwrap();
+        let form = shell.open_tab(Some(local("form")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let sem = shell.tab_semantic(form);
+        assert!(!sem.is_empty());
+        let snap = shell.a11y_snapshot();
+        assert_eq!(snap.sem, sem);
+        let update = a11y::tree_update(&snap);
+        assert_eq!(update.tree.as_ref().unwrap().root, a11y::WINDOW_ID);
+        assert_eq!(update.tree_id, TreeId::ROOT);
+        assert_eq!(update.focus, a11y::WINDOW_ID, "nothing focused");
+        let by_id: std::collections::HashMap<_, _> =
+            update.nodes.iter().map(|(i, n)| (*i, n)).collect();
+        assert_eq!(update.nodes.len(), sem.len() + 3, "window, address, page");
+        assert_eq!(by_id[&a11y::PAGE_ID].role(), Role::Document);
+        let page = shell.layout().page;
+        for n in &sem {
+            let node = by_id[&node_id(n.id)];
+            assert_eq!(node.role(), a11y::role_of(n.role), "{n:?}");
+            let text = match node.role() {
+                Role::Label | Role::TextInput => node.value(),
+                _ => node.label(),
+            };
+            assert_eq!(text.unwrap_or(""), n.text, "{n:?}");
+            let b = node.bounds().unwrap();
+            assert_eq!(b.x0, f64::from((page.x + n.x) * 2.0));
+            assert_eq!(b.y0, f64::from((page.y + n.y) * 2.0));
+            assert_eq!(
+                node.supports_action(Action::Focus),
+                vy_abi::role::is_focusable(n.role)
+            );
+        }
+        let fields: Vec<i32> = sem
+            .iter()
+            .filter(|n| n.role == vy_abi::role::TEXTBOX)
+            .map(|n| n.id)
+            .collect();
+        assert!(fields.len() >= 2, "{sem:?}");
+        // The digest follows what is shown.
+        assert_eq!(shell.a11y_snapshot().digest(), snap.digest());
+        shell.key(key::TAB, true, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let focused = shell.tab_focus(form).unwrap();
+        let snap2 = shell.a11y_snapshot();
+        assert_ne!(snap2.digest(), snap.digest());
+        assert_eq!(a11y::tree_update(&snap2).focus, node_id(focused));
+        shell.key(crate::shell::hid::L, true, vy_abi::modifier::CTRL, false);
+        assert_eq!(
+            a11y::tree_update(&shell.a11y_snapshot()).focus,
+            a11y::ADDRESS_ID
+        );
+        shell.key(key::ESCAPE, true, 0, false);
+        // Focus action on the second field: the host's focus moves there.
+        let request = |action, node| ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: node,
+            data: None,
+        };
+        let second = fields[1];
+        assert!(shell.a11y_action(&request(Action::Focus, node_id(second))));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_focus(form), Some(second));
+        // SetValue is the page's business.
+        let mut set = request(Action::SetValue, node_id(second));
+        set.data = Some(ActionData::Value("x".into()));
+        assert!(!shell.a11y_action(&set));
+        assert!(!shell.a11y_action(&request(Action::Focus, node_id(987_654))));
+        // Focus on the address field.
+        assert!(shell.a11y_action(&request(Action::Focus, a11y::ADDRESS_ID)));
+        assert!(shell.address().focused());
+        shell.key(key::ESCAPE, true, 0, false);
+        shell.shutdown();
+
+        // The deliveries, seen by a page that logs them.
+        let dir = std::env::temp_dir().join(format!("vy-a11y-{}", std::process::id()));
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(focus_logger(&dir)));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let from = shell.tab_logs(tab).len();
+        assert!(shell.a11y_action(&request(Action::Focus, node_id(2))));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert!(shell.a11y_action(&request(Action::Focus, node_id(3))));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert!(
+            !shell.a11y_action(&request(Action::Focus, node_id(1))),
+            "text is not focusable"
+        );
+        assert!(shell.a11y_action(&request(Action::Click, node_id(4))));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(
+            module_logs(&shell, tab, from),
+            ["F121", "F021", "F131", "F030", "F140", "P"],
+            "keyboard focus in and out, then a click: focus moves by pointer before the press"
+        );
+        assert_eq!(shell.tab_focus(tab), Some(4));
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-10.3.1, SPEC-10.3.2: focus is the host's. On the form page,
+    /// Tab walks the focusable nodes in document order and wraps to the
+    /// first; Shift+Tab walks back and wraps to the last; a press on a
+    /// focusable node focuses it and a press elsewhere takes focus away.
+    /// The module draws its own focus mark from the deliveries, so its
+    /// display list changes with focus. On a page that logs its events the
+    /// deliveries themselves: out before in, `c = 1` for keys and `c = 0`
+    /// for the pointer, and the focus change before the press.
+    #[test]
+    fn spec_10_3_1_focus_order() {
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let form = shell.open_tab(Some(local("form")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let order: Vec<i32> = shell
+            .tab_semantic(form)
+            .iter()
+            .filter(|n| vy_abi::role::is_focusable(n.role))
+            .map(|n| n.id)
+            .collect();
+        assert!(order.len() >= 3, "{order:?}");
+        let tab_key = |shell: &mut crate::shell::Shell, shift: bool| {
+            let m = if shift { vy_abi::modifier::SHIFT } else { 0 };
+            shell.key(key::TAB, true, m, false);
+            shell.key(key::TAB, false, m, false);
+            settle(shell, 1, TIMEOUT).unwrap();
+            shell.tab_focus(form)
+        };
+        let unfocused = shell.tab_display_list(form);
+        let mut walked = Vec::new();
+        for _ in 0..order.len() {
+            walked.push(tab_key(&mut shell, false).unwrap());
+        }
+        assert_eq!(walked, order, "document order");
+        assert_ne!(shell.tab_display_list(form), unfocused, "the mark is drawn");
+        assert_eq!(tab_key(&mut shell, false), Some(order[0]), "wraps");
+        assert_eq!(tab_key(&mut shell, true), order.last().copied(), "back");
+        assert_eq!(
+            tab_key(&mut shell, true),
+            Some(order[order.len() - 2]),
+            "back again"
+        );
+        // Pointer focus.
+        let page = shell.layout().page;
+        let sem = shell.tab_semantic(form);
+        let target = sem.iter().find(|n| n.id == order[1]).unwrap().clone();
+        shell.pointer_move(
+            page.x + target.x + target.w / 2.0,
+            page.y + target.y + target.h / 2.0,
+        );
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_focus(form), Some(order[1]));
+        let outside = |x: f32, y: f32| {
+            !sem.iter().any(|n| {
+                vy_abi::role::is_focusable(n.role)
+                    && x >= n.x
+                    && y >= n.y
+                    && x < n.x + n.w
+                    && y < n.y + n.h
+            })
+        };
+        let (bx, by) = (0..40)
+            .flat_map(|i| (0..40).map(move |j| (i as f32 * 10.0 + 3.0, j as f32 * 10.0 + 3.0)))
+            .find(|&(x, y)| outside(x, y) && y < page.h)
+            .unwrap();
+        shell.pointer_move(page.x + bx, page.y + by);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_focus(form), None, "a press away from it");
+        shell.shutdown();
+
+        // The deliveries.
+        let dir = std::env::temp_dir().join(format!("vy-focus-{}", std::process::id()));
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(focus_logger(&dir)));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let from = shell.tab_logs(tab).len();
+        for shift in [false, false, false, false, true] {
+            let m = if shift { vy_abi::modifier::SHIFT } else { 0 };
+            shell.key(key::TAB, true, m, false);
+            settle(&mut shell, 1, TIMEOUT).unwrap();
+        }
+        let page = shell.layout().page;
+        // The button (id 2) at (10, 40, 100, 30), pressed with the pointer.
+        shell.pointer_move(page.x + 50.0, page.y + 55.0);
+        shell.pointer_button(button::PRIMARY, true);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(
+            module_logs(&shell, tab, from),
+            [
+                "F121", // Tab: in 2
+                "F021", "F131", // Tab: out 2, in 3
+                "F031", "F141", // Tab: out 3, in 4
+                "F041", "F121", // Tab: wraps from 4 to 2
+                "F021", "F141", // Shift+Tab: back to 4
+                "F040", "F120", "P", // press on 2: out 4, in 2 (pointer), then the press
+            ]
+        );
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-10.4.1: a page without a semantic tree runs, and the chrome
+    /// marks it "otillgänglig" next to the address; a page with a tree is
+    /// not marked; the accessibility tree says so too.
+    #[test]
     fn spec_10_4_1_inaccessible_marker() {
-        todo!()
+        let marked = |shell: &mut crate::shell::Shell| {
+            texts(&shell.chrome_display_list()).contains(&"otillgänglig".to_string())
+        };
+        let mut shell = headless_shell(None, 640.0, 400.0, 1.0).unwrap();
+        let hello = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(hello), "running");
+        assert!(!marked(&mut shell), "hello has a tree");
+        assert!(!shell.a11y_snapshot().inaccessible);
+        // A module that draws but registers no node.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "dl_begin" (func $dl_begin (result i32)))
+                (import "vy" "dl_end" (func $dl_end (result i32)))
+                (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32)
+                    (drop (call $dl_begin))
+                    (drop (call $dl_rect (f32.const 10) (f32.const 10) (f32.const 100) (f32.const 50) (f32.const 0) (i32.const 0x2F5BD6FF)))
+                    (drop (call $dl_end))
+                    i32.const 1)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("vy-notree-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notree.wasm");
+        std::fs::write(&path, &wasm).unwrap();
+        let bare = shell.open_tab(Some(Source::File { path, draft: None }));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(bare), "running");
+        assert!(shell.tab_semantic(bare).is_empty());
+        assert!(marked(&mut shell), "otillgänglig");
+        let snap = shell.a11y_snapshot();
+        assert!(snap.inaccessible);
+        let update = crate::a11y::tree_update(&snap);
+        assert!(update
+            .nodes
+            .iter()
+            .any(|(id, n)| *id == crate::a11y::INACCESSIBLE_ID
+                && n.value().is_some_and(|v| v.contains("otillgänglig"))));
+        // Back to hello: the marker goes with the page.
+        shell.switch_tab(true);
+        assert_eq!(shell.active_tab(), Some(hello));
+        assert!(!marked(&mut shell));
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// SPEC-13.1.1: cold start to empty window <= 150 ms.
