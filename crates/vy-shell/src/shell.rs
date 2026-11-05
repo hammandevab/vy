@@ -14,6 +14,7 @@ use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
 use crate::clipboard::{self, ClipboardBackend};
 use crate::compose::{blend, blit, fill_blend, physical};
 use crate::external::{is_external, Opener};
+use crate::find;
 use crate::grants::{GrantStore, Resolved};
 use crate::history::History;
 use crate::ipc::{LoadRequest, ToShell, ToTab};
@@ -329,6 +330,45 @@ struct Retired {
     quota: u64,
 }
 
+/// The find bar (Ctrl+F) and its search of the active page's tree.
+struct Find {
+    /// The query as typed; its committed text follows every edit, so the
+    /// query stays when the field loses focus.
+    field: AddressField,
+    matches: Vec<find::Match>,
+    current: Option<usize>,
+    /// The tab, its frame count and the query the matches are for.
+    key: Option<(TabId, u64, String)>,
+    /// `SCROLL` events sent towards the current match so far, and whether
+    /// another may follow once the page has drawn again.
+    scroll_steps: u32,
+    scrolling: bool,
+    /// The highlight, for the search and current match it was made for.
+    rects: Option<(FindKey, Vec<(Rect, bool)>)>,
+}
+
+/// What a find highlight was computed for: the tab, its frame count, the
+/// query and the current match.
+type FindKey = (TabId, u64, String, Option<usize>);
+
+impl Find {
+    fn new() -> Self {
+        Self {
+            field: AddressField::new(),
+            matches: Vec::new(),
+            current: None,
+            key: None,
+            scroll_steps: 0,
+            scrolling: false,
+            rects: None,
+        }
+    }
+
+    fn query(&self) -> String {
+        self.field.text().to_string()
+    }
+}
+
 /// The shell.
 pub struct Shell {
     config: Config,
@@ -362,6 +402,8 @@ pub struct Shell {
     external_opens: Vec<String>,
     /// Processes let go of whose storage answer is still to come.
     retired: VecDeque<Retired>,
+    /// The find bar, while open.
+    find: Option<Find>,
 }
 
 impl Shell {
@@ -414,6 +456,7 @@ impl Shell {
             quit: false,
             external_opens: Vec::new(),
             retired: VecDeque::new(),
+            find: None,
         };
         shell.relayout();
         Ok(shell)
@@ -623,9 +666,12 @@ impl Shell {
 
     /// The cursor to show at the pointer.
     pub fn cursor(&self) -> Cursor {
+        let (px, py) = self.pointer;
         if self.hover.is_some() {
             Cursor::Hand
-        } else if self.layout.address.contains(self.pointer.0, self.pointer.1) {
+        } else if self.layout.address.contains(px, py)
+            || self.layout.find_field.is_some_and(|f| f.contains(px, py))
+        {
             Cursor::Text
         } else {
             Cursor::Arrow
@@ -637,6 +683,9 @@ impl Shell {
     pub fn ime_area(&self) -> Option<Rect> {
         if self.address.focused() {
             return Some(self.layout.address);
+        }
+        if self.find_focused() {
+            return self.layout.find_field;
         }
         let tab = self.tabs.get(self.active)?;
         let (x, y, w, h) = tab.ime?;
@@ -735,6 +784,7 @@ impl Shell {
         self.hover = None;
         self.relayout();
         self.show_active();
+        self.refresh_find();
         self.frame_dirty = true;
     }
 
@@ -1223,6 +1273,7 @@ impl Shell {
                 }
                 if active {
                     self.frame_dirty = true;
+                    self.refresh_find();
                 }
             }
             ToShell::Idle => {
@@ -1647,6 +1698,7 @@ impl Shell {
             ask: tab.and_then(|t| t.asks.front().copied()),
             page: page_view,
             zoom: tab.map_or(1.0, |t| t.zoom),
+            find: self.find.is_some(),
         };
         chrome::draw(&view, &mut self.chrome_text, &self.styles)
     }
@@ -1757,6 +1809,44 @@ impl Shell {
                             }
                         }
                     }
+                    // Find matches, the current one stronger.
+                    if let Some(f) = self.find.as_mut().filter(|f| !f.matches.is_empty()) {
+                        let key = (tab.id, tab.frames, f.query(), f.current);
+                        if f.rects.as_ref().is_none_or(|(k, _)| *k != key) {
+                            let runs = selection::runs(&tab.display_list);
+                            let view_h = page.h / tab.zoom;
+                            let mut rects = Vec::new();
+                            for (i, m) in f.matches.iter().enumerate() {
+                                let Some(node) = tab.sem.get(m.index) else {
+                                    continue;
+                                };
+                                if node.y + node.h < 0.0 || node.y > view_h {
+                                    continue;
+                                }
+                                let run = selection::run_for(node, &runs);
+                                for r in
+                                    selection::span_rects(&mut tab.text, node, run, m.start, m.end)
+                                {
+                                    rects.push((r, Some(i) == f.current));
+                                }
+                            }
+                            f.rects = Some((key, rects));
+                        }
+                        if let Some((_, rects)) = &f.rects {
+                            for (r, current) in rects {
+                                fill_blend(
+                                    &mut self.frame,
+                                    page_rect_physical(page, tab.zoom, scale, *r),
+                                    if *current {
+                                        chrome::FIND_CURRENT
+                                    } else {
+                                        chrome::FIND_MATCH
+                                    },
+                                    clip,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             if let Some(report) = raster_due {
@@ -1776,6 +1866,17 @@ impl Shell {
             .and_then(|t| t.asks.front().copied());
         if let Some((cap, r)) = ask.zip(self.layout.dialog) {
             let (dl, w, h) = chrome::draw_dialog(&mut self.chrome_text, &self.styles, cap, r.w);
+            let (dw, dh) = physical(w, h, scale);
+            if let Ok(res) = vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none) {
+                let x = (r.x * scale).round() as i64;
+                let y = (r.y * scale).round() as i64;
+                blend(&mut self.frame, &res.image, x, y);
+            }
+        }
+        if let (Some(f), Some(r)) = (&self.find, self.layout.find) {
+            let label = find::label(&f.query(), f.current, f.matches.len());
+            let (dl, w, h) =
+                chrome::draw_find(&mut self.chrome_text, &self.styles, &f.field, &label, r.w);
             let (dw, dh) = physical(w, h, scale);
             if let Ok(res) = vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none) {
                 let x = (r.x * scale).round() as i64;
@@ -1830,6 +1931,10 @@ impl Shell {
         // The capability question lies over the top of the page area:
         // what is under it is the shell's, not the page's.
         if self.layout.dialog.is_some_and(|d| d.contains(x, y)) {
+            return None;
+        }
+        // So does the find bar.
+        if self.layout.find.is_some_and(|f| f.contains(x, y)) {
             return None;
         }
         Some(((x - page.x) / tab.zoom, (y - page.y) / tab.zoom))
@@ -1957,6 +2062,12 @@ impl Shell {
                 self.address.blur();
                 self.frame_dirty = true;
             }
+            if down && self.find_focused() {
+                if let Some(f) = self.find.as_mut() {
+                    f.field.blur();
+                }
+                self.frame_dirty = true;
+            }
             let link = self
                 .tabs
                 .get(self.active)
@@ -2076,6 +2187,24 @@ impl Shell {
             // The question's own surface: neither the page's nor a button.
             return;
         }
+        if layout.find.is_some_and(|r| r.contains(x, y)) {
+            if layout.find_close.is_some_and(|r| r.contains(x, y)) {
+                self.close_find();
+            } else if layout.find_next.is_some_and(|r| r.contains(x, y)) {
+                self.find_step(true);
+            } else if layout.find_prev.is_some_and(|r| r.contains(x, y)) {
+                self.find_step(false);
+            } else {
+                self.address.blur();
+                if let Some(f) = self.find.as_mut() {
+                    if !f.field.focused() {
+                        f.field.focus_all();
+                    }
+                }
+                self.frame_dirty = true;
+            }
+            return;
+        }
         if let Some(r) = layout.external {
             if r.contains(x, y) {
                 let url = self.tabs.get(self.active).and_then(|t| match &t.state {
@@ -2150,8 +2279,13 @@ impl Shell {
         if down {
             match (code, ctrl, alt) {
                 (hid::L, true, _) => {
+                    self.blur_find();
                     self.address.focus_all();
                     self.frame_dirty = true;
+                    return true;
+                }
+                (hid::F, true, _) => {
+                    self.open_find();
                     return true;
                 }
                 (hid::T, true, _) => {
@@ -2200,6 +2334,12 @@ impl Shell {
         if self.address.focused() {
             if down {
                 self.address_key(code, ctrl, shift);
+            }
+            return true;
+        }
+        if self.find_focused() {
+            if down {
+                self.find_key(code, ctrl, shift);
             }
             return true;
         }
@@ -2383,6 +2523,208 @@ impl Shell {
         self.send_page_event(event::KEY_DOWN, code, modifiers, i32::from(repeat), 0);
     }
 
+    // ---- find on page (Ctrl+F) -------------------------------------------
+
+    /// Open the find bar, or focus it and select its query.
+    pub fn open_find(&mut self) {
+        self.address.blur();
+        let f = self.find.get_or_insert_with(Find::new);
+        f.field.focus_all();
+        self.refresh_find();
+        self.frame_dirty = true;
+    }
+
+    /// Close the find bar; its highlights go with it.
+    pub fn close_find(&mut self) {
+        if self.find.take().is_some() {
+            self.frame_dirty = true;
+        }
+    }
+
+    /// True while the find bar is open.
+    pub fn find_open(&self) -> bool {
+        self.find.is_some()
+    }
+
+    /// What the find bar's label says ("3 av 7").
+    pub fn find_label(&self) -> String {
+        self.find
+            .as_ref()
+            .map(|f| find::label(&f.query(), f.current, f.matches.len()))
+            .unwrap_or_default()
+    }
+
+    /// The current match and the number of matches.
+    pub fn find_status(&self) -> (Option<find::Match>, usize) {
+        self.find.as_ref().map_or((None, 0), |f| {
+            (
+                f.current.and_then(|i| f.matches.get(i).copied()),
+                f.matches.len(),
+            )
+        })
+    }
+
+    /// Enter (next) or Shift+Enter (previous) in the find bar, wrapping.
+    pub fn find_step(&mut self, forward: bool) {
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        f.current = find::step(f.current, f.matches.len(), forward);
+        self.find_scroll_start();
+        self.frame_dirty = true;
+    }
+
+    fn find_focused(&self) -> bool {
+        self.find.as_ref().is_some_and(|f| f.field.focused())
+    }
+
+    fn blur_find(&mut self) {
+        if let Some(f) = self.find.as_mut() {
+            f.field.blur();
+        }
+    }
+
+    /// A key in the focused find bar: Enter and Shift+Enter cycle, Escape
+    /// closes, the rest edits the query as in the address bar.
+    fn find_key(&mut self, code: i32, ctrl: bool, shift: bool) {
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        let field = &mut f.field;
+        match code {
+            key::ENTER => {
+                self.find_step(!shift);
+                return;
+            }
+            key::ESCAPE => {
+                self.close_find();
+                return;
+            }
+            hid::LEFT => field.edit(Edit::Left {
+                select: shift,
+                word: ctrl,
+            }),
+            hid::RIGHT => field.edit(Edit::Right {
+                select: shift,
+                word: ctrl,
+            }),
+            hid::HOME => field.edit(Edit::Home { select: shift }),
+            hid::END => field.edit(Edit::End { select: shift }),
+            hid::BACKSPACE => field.edit(Edit::Backspace { word: ctrl }),
+            hid::DELETE => field.edit(Edit::Delete { word: ctrl }),
+            hid::A if ctrl => field.edit(Edit::SelectAll),
+            hid::C if ctrl => {
+                let selected = field.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                }
+            }
+            hid::X if ctrl => {
+                let selected = field.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                    field.insert("");
+                }
+            }
+            hid::V if ctrl => {
+                if let Some(paste) = self.config.clipboard.read() {
+                    field.insert(clipboard::truncate(
+                        &paste,
+                        clipboard::MAX_ADDRESS_PASTE_BYTES,
+                    ));
+                }
+            }
+            _ => return,
+        }
+        self.find_edited();
+    }
+
+    /// The query may have changed: keep it when the field loses focus,
+    /// search again.
+    fn find_edited(&mut self) {
+        if let Some(f) = self.find.as_mut() {
+            let q = f.field.text().to_string();
+            f.field.set_committed(&q);
+        }
+        self.refresh_find();
+        self.frame_dirty = true;
+    }
+
+    /// Search the active page's tree again when the page drew, the tab
+    /// changed or the query did. A new query starts at the first match in
+    /// view and scrolls towards it; a new frame of the same page keeps the
+    /// current match and continues a scroll under way.
+    fn refresh_find(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        let query = f.query();
+        let key = (tab.id, tab.frames, query.clone());
+        if f.key.as_ref() == Some(&key) {
+            return;
+        }
+        let fresh = f.key.as_ref().is_none_or(|k| k.0 != key.0 || k.2 != key.2);
+        let old = f.current.and_then(|i| f.matches.get(i).copied());
+        f.matches = find::search(&tab.sem, &query);
+        f.current = if fresh {
+            find::first_visible(&tab.sem, &f.matches)
+        } else {
+            find::carry(old, &f.matches)
+        };
+        f.key = Some(key);
+        let scrolling = f.scrolling;
+        self.frame_dirty = true;
+        if fresh {
+            self.find_scroll_start();
+        } else if scrolling {
+            self.find_scroll();
+        }
+    }
+
+    fn find_scroll_start(&mut self) {
+        if let Some(f) = self.find.as_mut() {
+            f.scroll_steps = 0;
+            f.scrolling = true;
+        }
+        self.find_scroll();
+    }
+
+    /// Bring the current match towards the middle of the page area with a
+    /// synthetic `SCROLL` (the page owns scrolling and the ABI is frozen):
+    /// `dy` is the node's middle minus the viewport's, in logical pixels.
+    /// One event per frame the page answers with, at most
+    /// `find::MAX_SCROLL_STEPS` per match; a page that does not scroll that
+    /// way is left alone after that. A heuristic, documented as such.
+    fn find_scroll(&mut self) {
+        let page_h = self.layout.page.h;
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if !tab.running() {
+            return;
+        }
+        let view_h = page_h / tab.zoom;
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        let node = f
+            .current
+            .and_then(|i| f.matches.get(i))
+            .and_then(|m| tab.sem.get(m.index));
+        let dy = match node.and_then(|n| find::scroll_delta(n, view_h)) {
+            Some(dy) if f.scrolling && f.scroll_steps < find::MAX_SCROLL_STEPS => dy,
+            _ => {
+                f.scrolling = false;
+                return;
+            }
+        };
+        f.scroll_steps += 1;
+        self.send_page_event(event::SCROLL, 0, x100(dy), 0, 0);
+    }
+
     fn address_key(&mut self, code: i32, ctrl: bool, shift: bool) {
         match code {
             key::ENTER => {
@@ -2435,6 +2777,13 @@ impl Shell {
         if self.address.focused() {
             self.address.insert(text);
             self.frame_dirty = true;
+            return;
+        }
+        if self.find_focused() {
+            if let Some(f) = self.find.as_mut() {
+                f.field.insert(text);
+            }
+            self.find_edited();
             return;
         }
         let now = self.now_ms();
@@ -2543,6 +2892,8 @@ pub mod hid {
     pub const A: i32 = 0x04;
     /// C.
     pub const C: i32 = 0x06;
+    /// F.
+    pub const F: i32 = 0x09;
     /// L.
     pub const L: i32 = 0x0F;
     /// T.
@@ -2563,6 +2914,8 @@ pub mod hid {
     pub const EQUAL: i32 = 0x2E;
     /// F5.
     pub const F5: i32 = 0x3E;
+    /// F12.
+    pub const F12: i32 = 0x45;
     /// Home.
     pub const HOME: i32 = 0x4A;
     /// Delete forward.

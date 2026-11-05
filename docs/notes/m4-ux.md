@@ -11,6 +11,7 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 | 1 | Systemets urklipp bakom Ctrl+C/V/X (`clipboard.rs`, `ClipboardBackend`): `arboard` i fönstret, minne huvudlöst och när systemets inte kan öppnas. Ctrl+V i sidan levererar urklippet som `TEXT_INPUT` (som om det skrivits), i bitar om 4 KB, `\r\n`/`\r` → `\n`, högst 1 MB. Ctrl+C/V/X i adressfältet går mot samma urklipp (inklistring högst 8 KB). Ctrl+C/Ctrl+X i sidan är en kopieringsgest (SPEC-8.2.4): sidans `clipboard_write` under just det `KEY_DOWN` lyckas utan capability. AltGr (Ctrl+Alt) skriver tecken i stället för att trigga genvägar. | `spec_8_2_4_copy_gesture_grants_clipboard_write`, `spec_5_2_12_clipboard_copy_paste_through_the_shell`, `spec_5_2_12_memory_clipboard_and_paste_chunks`, `spec_a_5_1_altgr_is_not_a_shortcut`, `spec_a_5_1_altgr_commits_text` |
 | 2 | Lagring går inte längre förlorad vid F5, navigering och Ctrl+W. Flikprocessen som släpps blir `Retired` (flik, generation, origin, grant, kvot); dess svar på `Shutdown` (`vy_suspend` + `Storage`) sparas under den origin processen hade, fast fliken bytt generation eller stängts. Ctrl+W på sista fliken kör `Shell::shutdown`, som tömmer inkorgen. | `spec_5_2_9_storage_saved_on_reload_and_close` |
 | 3 | Textmarkering (SPEC-10.2.2), värdens egen (`selection.rs`): dra från en textnod markerar (sidan får pekarhändelserna ändå), Skift+klick utökar, Ctrl+A tar alla textnoder, Escape och ett tryck utanför text tömmer. Markeringen är noderna i dokumentordning mellan ändarna, med teckengranularitet i ändnoderna; Ctrl+C (och Ctrl+X) kopierar de logiska strängarna med `\n` mellan noder. Ritas av huvudprocessen som en genomskinlig överlagring i sidytan (`compose::fill_blend`, chromens accentfärg); sidans display list rörs inte. Flikprocessen rapporterar fokus (`ToShell::Focus`) så att Ctrl+A i ett fokuserat textfält går till sidan. | `spec_10_2_2_text_selection` (un-ignorerad, document- och form-sidan), `spec_10_2_2_selected_text_is_logical`, `spec_10_2_2_glyph_granularity_in_wrapped_runs` |
+| 4 | Sök på sidan (Ctrl+F, `find.rs`): en sökruta över sidytans övre högra hörn (egen display list, komponerad efter sidan som frågan; under den är ytan skalets), söker i det semantiska trädets text skiftlägesokänsligt med enkel Unicode-vikning (`char::to_lowercase`), visar "3 av 7"/"Inga träffar", Enter/Skift+Enter bläddrar med omlopp, Escape stänger, knapparna ‹ › × fungerar med pekaren. Träffarna markeras genom överlagringen (aktuell starkare). En träff utanför vyn hämtas in med syntetiska `SCROLL`. | `spec_10_1_1_find_on_page`, `spec_10_1_1_find_in_the_tree` |
 
 ## Beslut
 
@@ -60,6 +61,18 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 - **Fokus speglas i huvudprocessen.** Fokus ägs av runtime i flikprocessen (SPEC-10.3.1); en ny ram
   `ToShell::Focus(Option<i32>)` (tagg 77) skickas när det ändras, så att skalet vet om ett textfält har
   fokus (Ctrl+A) och, i steg 5, vad AccessKit ska få som fokus.
+- **Sök (steg 4) läser trädet, aldrig pixlar**, med samma intervall-till-rektangel som markeringen
+  (`selection::span_rects`). Träffar per nod, icke-överlappande, högst 10 000. En ny sökning börjar vid
+  första träffen vars nod når in i vyn; en ny frame av samma sida behåller aktuell träff (samma nod och
+  startbyte, annars nästa i dokumentordning). **Rullning är en heuristik:** rullning ägs av modulen och
+  ABI:t är fryst, så skalet skickar `SCROLL` med `dy` = nodens mitt − vyns mitt (logiska pixlar, `c` = 0)
+  när den aktuella träffens nod inte ligger helt i vyn, ett event per frame som sidan svarar med, högst 8
+  per träff. En sida som rullar sitt huvudområde med `SCROLL` (referenssidorna gör det) får träffen
+  mitt i vyn; en sida med flera rullbara ytor eller som ignorerar `SCROLL` får högst 8 meningslösa
+  rullningar och sedan inget mer. `SCROLL` bär ingen pekarposition; en sida som rullar ytan under pekaren
+  rullar den yta pekaren senast var över. Sökrutan fångar tangenterna när den har fokus (redigering som i
+  adressfältet, Ctrl+A/C/X/V i fältet); ett klick i sidan ger sidan tangentbordet tillbaka utan att stänga
+  rutan.
 
 ## Tangentbordstabell
 
@@ -73,6 +86,10 @@ Det testguiden skrivs från. "Sidan" betyder att tangenten går till modulen som
 | Ctrl+A | sidan | markerar all text på sidan; i ett fokuserat textfält (och på en sida utan text) går den till sidan |
 | Escape | sidan | tömmer markeringen; går också till sidan |
 | Dra med vänster knapp | sidan, från text | markerar text (sidan får pekarhändelserna ändå); Skift+klick utökar; klick utanför text tömmer |
+| Ctrl+F | överallt | öppnar sökrutan (eller fokuserar den och markerar frågan) |
+| Enter, Skift+Enter | sökrutan | nästa respektive föregående träff, med omlopp |
+| Escape | sökrutan | stänger sökrutan och träffmarkeringarna |
+| ‹ › × | sökrutan (pekare) | föregående, nästa, stäng; ett klick i sidan lämnar rutan öppen men ger sidan tangentbordet |
 | Ctrl+V | adressfältet | klistra in (radbrytningar tas bort, högst 8 KB) |
 | Ctrl+C, Ctrl+X | adressfältet | kopiera/klipp ut markeringen till systemets urklipp |
 | AltGr+tangent | överallt | tecknet (t.ex. `@`, `{`, `\`), aldrig en genväg |

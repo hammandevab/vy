@@ -14,6 +14,7 @@ pub mod chrome;
 pub mod clipboard;
 pub mod compose;
 pub mod external;
+pub mod find;
 pub mod grants;
 pub mod headless;
 pub mod history;
@@ -174,6 +175,7 @@ mod tests {
             ask: None,
             page,
             zoom: 1.0,
+            find: false,
         };
         crate::chrome::draw(&view, &mut text, &styles).0
     }
@@ -1038,6 +1040,107 @@ mod tests {
         shell.shutdown();
         assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x07])], "saved on close");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SPEC-10.1.1, SPEC-9.6.1: find on page (Ctrl+F) searches the page's
+    /// semantic tree, case-insensitively, and counts the matches ("1 av
+    /// N"); Enter and Shift+Enter cycle and wrap; the bar is the shell's,
+    /// over the top right of the page area; a match below the viewport is
+    /// brought into view with synthetic `SCROLL` events (the page owns
+    /// scrolling); the matches are highlighted over the page and the
+    /// highlight goes with the bar on Escape; the bar's buttons work.
+    #[test]
+    fn spec_10_1_1_find_on_page() {
+        use crate::shell::hid;
+        use vy_abi::modifier::{CTRL, SHIFT};
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(local("document")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let page = shell.layout().page;
+        let count = |shell: &crate::shell::Shell, word: &str| -> usize {
+            shell
+                .tab_semantic(tab)
+                .iter()
+                .map(|n| n.text.to_lowercase().matches(word).count())
+                .sum()
+        };
+        // Ctrl+F: the bar, focused; typing searches.
+        assert!(shell.key(hid::F, true, CTRL, false));
+        assert!(shell.find_open());
+        shell.frame();
+        let bar = shell.layout().find.expect("laid out");
+        assert!(bar.y >= page.y && bar.right() <= page.right() && bar.x > page.w / 2.0);
+        let expected = count(&shell, "macos");
+        assert!(expected >= 2, "{expected}");
+        shell.text_input("MACOS");
+        assert_eq!(shell.find_status().1, expected);
+        assert_eq!(shell.find_label(), format!("1 av {expected}"));
+        // Enter, Shift+Enter, wrapping both ways.
+        shell.key(key::ENTER, true, 0, false);
+        assert_eq!(shell.find_label(), format!("2 av {expected}"));
+        shell.key(key::ENTER, true, SHIFT, false);
+        shell.key(key::ENTER, true, SHIFT, false);
+        assert_eq!(shell.find_label(), format!("{expected} av {expected}"));
+        shell.key(key::ENTER, true, 0, false);
+        assert_eq!(shell.find_label(), format!("1 av {expected}"));
+        // Nothing found.
+        shell.key(hid::A, true, CTRL, false);
+        shell.text_input("qqqxyz");
+        assert_eq!(shell.find_label(), "Inga träffar");
+        // A match far below the viewport is scrolled into view.
+        let word = "diffkvot";
+        assert_eq!(count(&shell, word), 1);
+        let target = shell
+            .tab_semantic(tab)
+            .into_iter()
+            .find(|n| n.text.to_lowercase().contains(word))
+            .expect("the last note");
+        assert!(target.y > page.h, "starts below the viewport: {target:?}");
+        shell.key(hid::A, true, CTRL, false);
+        shell.text_input("Diffkvot");
+        settle(&mut shell, 20, TIMEOUT).unwrap();
+        let (current, total) = shell.find_status();
+        assert_eq!(total, 1);
+        let node = shell
+            .tab_semantic(tab)
+            .into_iter()
+            .find(|n| n.id == current.unwrap().id)
+            .unwrap();
+        assert!(
+            node.y >= 0.0 && node.y + node.h <= page.h,
+            "scrolled into view: {node:?}"
+        );
+        // Highlighted over the page; Escape closes the bar and the
+        // highlight with it.
+        let with = shell.frame().clone();
+        assert!(shell.key(key::ESCAPE, true, 0, false), "the bar's Escape");
+        assert!(!shell.find_open());
+        let without = shell.frame().clone();
+        let rows = (page.y + node.y) as u32..(page.y + node.y + node.h) as u32;
+        let differ = rows
+            .flat_map(|y| (0..page.w as u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| with.pixel(x, y) != without.pixel(x, y))
+            .count();
+        assert!(differ > 20, "{differ} pixels tinted by the match");
+        // The bar's buttons: next and close; a click in the page area
+        // under the bar is the shell's, not the page's.
+        shell.key(hid::F, true, CTRL, false);
+        shell.text_input("macos");
+        shell.frame();
+        let next = shell.layout().find_next.unwrap();
+        // The page is scrolled to its end now: the fresh search starts at
+        // the first match in view, and "next" goes on from there.
+        let at = |label: String| -> usize { label.split(' ').next().unwrap().parse().unwrap() };
+        let before = at(shell.find_label());
+        shell.pointer_move(next.x + 4.0, next.y + 4.0);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(at(shell.find_label()), before % expected + 1);
+        let close = shell.layout().find_close.unwrap();
+        shell.pointer_move(close.x + 4.0, close.y + 4.0);
+        shell.pointer_button(button::PRIMARY, true);
+        assert!(!shell.find_open());
+        shell.shutdown();
     }
 
     /// SPEC-A.5.1: Ctrl with Alt is AltGr, a character and not a shortcut:
