@@ -17,7 +17,8 @@
 //!   generates on the module's behalf is charged at
 //!   [`crate::FUEL_PER_HOST_BYTE`] against the same fuel that pays for wasm
 //!   instructions, so expensive imports cannot bypass the 8 ms budget
-//!   (SPEC-5.3.3).
+//!   (SPEC-5.3.3). Decoding a package resource is the exception: a one-time
+//!   cost bounded by the manifest, charged to nobody (SPEC-6.5.1).
 
 use crate::FUEL_PER_HOST_BYTE;
 use vy_abi::{cap, err, fit, limits, ABI_VERSION};
@@ -580,11 +581,12 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                         Ok(id) if id > 0 && usize::from(id) <= host.images.resource_count() => id,
                         _ => return Err(Fault::Code(err::E_RESOURCE)),
                     };
-                    // Decoded at first use (SPEC-6.5.1); the resource bytes
-                    // the host reads for it are charged like any host work
-                    // (SPEC-5.3.3). A cache hit reads nothing.
-                    let read = host.images.ensure(id);
-                    host.charge(read);
+                    // Decoded at first use (SPEC-6.5.1). Decoding is a
+                    // one-time cost bounded by the signed manifest, not by
+                    // what the module does per frame, so it is not charged
+                    // to the frame budget (SPEC-5.3.3); M3 decodes off the
+                    // UI thread.
+                    host.images.ensure(id);
                     if let Err(e) = host.images.get(id) {
                         host.host_log(format!("dl_image: resource {id}: {e}"));
                         return Err(Fault::Code(e.code()));

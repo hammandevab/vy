@@ -90,7 +90,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 
 - **[SPEC-5.3.1]** Ett anrop till en import utan beviljad capability returnerar `E_DENIED`, loggas, och avslutar inte modulen.
 - **[SPEC-5.3.2]** `dl_*`-anrop utanför `dl_begin`/`dl_end` returnerar `E_DL_STATE` och ignoreras.
-- **[SPEC-5.3.3]** `vy_frame` har en budget på 8 ms logisk tid; första överskridandet ger `KIND_BUDGET` med `c = 0` (varning), det andra i rad ger `KIND_BUDGET` med `c = 1` och därefter ett tvingande `vy_suspend`. Värdens eget arbete i importer (textformning, kopiering) debiteras samma budget.
+- **[SPEC-5.3.3]** `vy_frame` har en budget på 8 ms logisk tid; första överskridandet ger `KIND_BUDGET` med `c = 0` (varning), det andra i rad ger `KIND_BUDGET` med `c = 1` och därefter ett tvingande `vy_suspend`. Värdens eget arbete i importer (textformning, kopiering) debiteras samma budget; avkodning av paketets resurser debiteras inte.
 - **[SPEC-5.3.4]** Värden anropar aldrig modulen utanför de sex exporterna; asynkrona svar levereras genom `vy_event`.
 - **[SPEC-5.3.5]** ABI 1.0 fryses vid release; befintliga signaturer ändras aldrig inom 1.x.
 
@@ -108,7 +108,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-6.4.1]** Textformning och typsnittsrendering sker i värden; modulen ser aldrig glyfer.
 - **[SPEC-6.4.2]** Värden tillhandahåller fem inbyggda typsnittsroller `sans`, `serif`, `mono`, `ui`, `emoji` som resurs-id −1 till −5.
 - **[SPEC-6.4.3]** `dl_text` och `text_measure` radbryter vid `w` när `w > 0` och radbryter inte alls när `w ≤ 0`; `dl_text` returnerar bredd och höjd så att modulen kan placera nästa element.
-- **[SPEC-6.5.1]** Bilder avkodas lat vid första `dl_image` och cachas per paket; högst 8192 × 8192 px.
+- **[SPEC-6.5.1]** Bilder avkodas lat vid första `dl_image` och cachas per paket; högst 8192 × 8192 px; avkodningen är en engångskostnad bunden av manifestet och debiteras inte frame-budgeten (från M3 avkodas den utanför UI-tråden).
 
 ## 7. Protokoll
 

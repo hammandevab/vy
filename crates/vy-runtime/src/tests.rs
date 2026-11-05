@@ -1619,15 +1619,15 @@ fn png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
 
 /// SPEC-5.2.3, SPEC-6.5.1, SPEC-4.5.1: `dl_image` takes `fit` 0..=2 (else
 /// `E_ARG`, nothing written); the resource is decoded at the first call that
-/// names it and the bytes read are charged as host work (SPEC-5.3.3); id 0,
-/// an unknown id and an image over 8192 px are `E_RESOURCE`; the decoded
-/// image reaches the pixels through the runtime's cache.
+/// names it, and that decoding costs the frame nothing (SPEC-5.3.3: only
+/// the opcode's bytes are charged, the same on the first frame as on the
+/// next); id 0, an unknown id and an image over 8192 px are `E_RESOURCE`;
+/// the decoded image reaches the pixels through the runtime's cache.
 #[test]
 fn spec_5_2_3_dl_image_fit_and_resources() {
     let red = png(2, 1, [255, 0, 0, 255]);
     let huge = png(limits::MAX_IMAGE_SIDE_PX + 1, 1, [0, 255, 0, 255]);
     let bad = b"not an image".to_vec();
-    let red_len = red.len();
     let opts = Options {
         resources: vec![red, huge, bad],
         ..Options::default()
@@ -1643,8 +1643,8 @@ fn spec_5_2_3_dl_image_fit_and_resources() {
     assert_eq!(host_logs(&rt), vec!["dl_image: E_ARG"]);
     assert_eq!(rt.image_cache().decodes(), 0);
 
-    // fit 0..=2 with resource 1: decoded once, on the first call.
-    for (i, fit_mode) in [0, 1, 2].into_iter().enumerate() {
+    // fit 0..=2 with resource 1: decoded once, on the first call, for free.
+    for fit_mode in [0, 1, 2] {
         let dl = rt.frame_with_dt(10 + fit_mode).unwrap().to_vec();
         let ops = vy_dl::decode(&dl).unwrap();
         assert!(
@@ -1652,11 +1652,10 @@ fn spec_5_2_3_dl_image_fit_and_resources() {
             "{ops:?}"
         );
         assert_eq!(rt.image_cache().decodes(), 1);
-        let expect_fuel = if i == 0 { red_len as u64 } else { 0 } + 20 + 1;
         assert_eq!(
             rt.last_frame().host_fuel,
-            expect_fuel * FUEL_PER_HOST_BYTE,
-            "resource bytes charged once, IMAGE op and END every frame"
+            (20 + 1) * FUEL_PER_HOST_BYTE,
+            "only the IMAGE op and END are charged, decoding is not"
         );
     }
     let images = rt.image_cache();
