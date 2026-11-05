@@ -296,8 +296,10 @@ pub struct Host {
     /// Responses `fetch_begin` can be answered with (SPEC-5.2.7).
     pub(crate) canned: Vec<CannedResponse>,
     /// Origins the manifest lists under `net`, normalised with
-    /// [`origin_of`]; empty when the caller has no manifest, and then the
-    /// gate of SPEC-5.2.8 is not applied.
+    /// [`origin_of`]: the only origins `fetch_begin` reaches (SPEC-5.2.8).
+    /// An entry that is not an `https://` origin names nothing a request
+    /// can go to, and an empty list (no manifest, or one that names no
+    /// origin) admits no origin at all.
     pub(crate) net_origins: Vec<String>,
     /// Open requests in the order they were begun.
     pub(crate) fetches: Vec<Fetch>,
@@ -1020,10 +1022,16 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     host.host_log(format!("fetch_begin: E_ARG ({url:?} is not an https:// URL)"));
                     return err::E_ARG;
                 };
-                if !host.net_origins.is_empty() && !host.net_origins.contains(&origin) {
-                    host.host_log(format!(
-                        "fetch_begin: E_ORIGIN ({origin} is not in the manifest's net list; no request made)"
-                    ));
+                if !host.net_origins.contains(&origin) {
+                    host.host_log(if host.net_origins.is_empty() {
+                        format!(
+                            "fetch_begin: E_ORIGIN ({origin}: the manifest names no https:// origin under net; no request made)"
+                        )
+                    } else {
+                        format!(
+                            "fetch_begin: E_ORIGIN ({origin} is not in the manifest's net list; no request made)"
+                        )
+                    });
                     return err::E_ORIGIN;
                 }
                 if host.fetches.len() >= limits::MAX_OPEN_FETCHES as usize {

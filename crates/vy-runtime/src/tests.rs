@@ -348,7 +348,7 @@ fn spec_5_2_7_fetch_read_zero_only_at_end() {
         status: 200,
         body: vec![0; limits::MAX_FETCH_RESPONSE_BYTES as usize + 1],
     };
-    let mut rt = fetch_runtime(vec![huge], &[]);
+    let mut rt = fetch_runtime(vec![huge], &["https://chat.example"]);
     assert_eq!(call(&mut rt, 200, 0, 0), 1);
     assert_eq!(rt.fetch_done().unwrap(), Some(true));
     assert_eq!(fetch_done_events(&mut rt), vec![(1, err::E_TOO_LARGE, 0)]);
@@ -364,7 +364,7 @@ fn spec_5_2_7_fetch_read_zero_only_at_end() {
         status: 204,
         body: Vec::new(),
     };
-    let mut rt = fetch_runtime(vec![empty], &[]);
+    let mut rt = fetch_runtime(vec![empty], &["https://chat.example"]);
     assert_eq!(call(&mut rt, 200, 0, 0), 1);
     rt.fetch_done().unwrap();
     assert_eq!(fetch_done_events(&mut rt), vec![(1, 204, 0)]);
@@ -375,8 +375,9 @@ fn spec_5_2_7_fetch_read_zero_only_at_end() {
 /// SPEC-5.2.8, SPEC-9.5.1: `fetch_begin` to an origin the manifest does
 /// not list is `E_ORIGIN` with no request made, even with a canned
 /// response for it; origins compare as scheme, host and port; a URL that
-/// is not `https://` is `E_ARG`; with no manifest (no origins) the gate is
-/// not applied.
+/// is not `https://` is `E_ARG`; a list without an `https://` origin
+/// (empty, or only `vy://`/`http://` entries) admits no origin, so `net`
+/// granted for such a manifest reaches nothing (SPEC-8.2.2, SPEC-8.2.3).
 #[test]
 fn spec_5_2_8_origin_gate() {
     let canned = |url: &str| CannedResponse {
@@ -413,8 +414,22 @@ fn spec_5_2_8_origin_gate() {
     );
     let mut rt = fetch_runtime(responses.clone(), &["https://Chat.Example"]);
     assert_eq!(call(&mut rt, 0), 1, "hosts compare case-insensitively");
-    let mut rt = fetch_runtime(responses, &[]);
-    assert_eq!(call(&mut rt, 1), 1, "no manifest, no gate");
+    // A list that names no https:// origin admits none: empty (no
+    // manifest, or `"origins": []`), or only entries a request cannot go
+    // to. The manifest allows `vy://` and `http://` origins (SPEC-8.2.1);
+    // they never open the gate for `https://` requests.
+    for origins in [
+        &[][..],
+        &["vy://chat.example", "http://chat.example", "chat.example"][..],
+    ] {
+        let mut rt = fetch_runtime(responses.clone(), origins);
+        assert_eq!(call(&mut rt, 0), err::E_ORIGIN, "{origins:?}");
+        assert_eq!(call(&mut rt, 1), err::E_ORIGIN, "{origins:?}");
+        assert_eq!(rt.open_fetches(), 0, "{origins:?}: no request made");
+        assert!(host_logs(&rt)
+            .iter()
+            .any(|l| l.contains("the manifest names no https:// origin under net")));
+    }
 
     assert_eq!(
         origin_of("https://Chat.example:8443/a?b#c").as_deref(),
@@ -1809,6 +1824,7 @@ fn spec_5_2_7_fetch_and_storage_denied_headless() {
     ));
     let opts = Options {
         capabilities: Capabilities::from_names(["net", "storage"]).unwrap(),
+        net_origins: vec!["https://chat.example".into()],
         ..Options::default()
     };
     let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
@@ -2957,7 +2973,7 @@ fn spec_5_2_7_external_transport_queues_requests() {
     assert_eq!(rt.fetch_complete(3, 200, Vec::new()).unwrap(), None);
     assert_eq!(rt.fetch_complete(99, 200, Vec::new()).unwrap(), None);
     // The canned transport never queues anything.
-    let mut canned = fetch_runtime(vec![], &[]);
+    let mut canned = fetch_runtime(vec![], &["https://chat.example"]);
     assert_eq!(call(&mut canned, 200, 0, 0), err::E_DENIED);
     assert!(canned.take_fetch_requests().is_empty());
 }

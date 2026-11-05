@@ -217,3 +217,34 @@ Ramen i sidornas proportioner (2 000 opkoder) tar 57 ms P50 här, 28 gånger SPE
 lika många kantutjämnade rundade rektanglar och glyfpixlar ryms inte på den här maskinen med en
 CPU-rasterisering som ger guldbildernas byte (se *Kvar*). De patologiska genomskinliga rundade
 rektanglarna (`rects-2000`) flyttar sig knappt: allt där är tiny-skias `path_aa`.
+
+## Nätgrinden i `vy-runtime`: tom eller okänd origin-lista (SPEC-5.2.8)
+
+Påpekat av m4/dev via koordinatorn; äldre än M4. `Host` sparar manifestets `net`-origins genom
+`origin_of`, som bara känner `https://`. En tom lista betydde "inget manifest, ingen grind": med
+`net` beviljat nådde `fetch_begin` *varje* https-origin. Tom blev listan också när manifestet bara
+angav `vy://`- eller `http://`-origins (som `vy-manifest` godtar, SPEC-8.2.1), och skalets
+standardpolicy beviljar `net` automatiskt när alla listade origins är sidans egna – `all()` över en
+tom lista är sann. En signerad sida med `"net": {"origins": []}` fick alltså `net` utan fråga och
+fritt nät i flikprocessen. Huvudprocessen stoppade det (`Shell::request_verdict` släpper bara
+listade origins, granskning 0004 fynd 2), men grinden i fliken är den första och i
+huvudlöst läge den enda.
+
+Nu: en origin som inte står i listan är `E_ORIGIN`, också när listan är tom eller saknar
+`https://`-origins – en lista som inte namnger något når inget (SPEC-5.2.8 ordagrant). Spec-fråga 24
+(huvudlöst utan manifest) avgörs därmed åt det strängare hållet: `vy-cli render --grant net` utan
+manifest når ingen origin, vilket ändå bara gällde inspelade svar. Testerna som hämtar namnger nu
+sin origin; `spec_5_2_8_origin_gate` visar tom lista och listor med bara `vy://`, `http://` och
+värd utan schema. Ingen guldbild berörs (chat-fallen har `https://chat.example`).
+
+**Berör andra spår.** Skalets standardpolicy (`vy-manifest`, m4/security: `default_grants` med
+`all()` över tom lista) beviljar fortfarande `net` för en tom lista; det ger nu inget nät men
+visas som beviljat i adressfältet. Förslag: `net` med tom origin-lista beviljas inte (eller avvisas
+av valideringen). Spec-fråga 53 nedan.
+
+## Spec-frågor
+
+53. **`net` med tom origin-lista.** SPEC-8.2.1 sätter ett tak (≤ 16) men inget golv, och
+    SPEC-8.2.3 beviljar `net` "för egen origin" automatiskt. En tom lista namnger ingen origin;
+    `vy-runtime` släpper nu ingenting igenom för den, men policyn beviljar ändå `net` och
+    adressfältet visar det. Ska valideringen kräva minst en origin, eller policyn låta bli?

@@ -193,8 +193,9 @@ pub struct Options {
     /// a URL without one is denied. Served only when `net` is granted.
     pub fetch: Vec<CannedResponse>,
     /// Origins the manifest lists under `net` (SPEC-5.2.8); a request to
-    /// any other origin is `E_ORIGIN`. Empty when there is no manifest,
-    /// which skips the gate.
+    /// any other origin is `E_ORIGIN`. Only `https://` origins can be
+    /// reached; an empty list, or one without an `https://` origin,
+    /// admits none.
     pub net_origins: Vec<String>,
     /// The headless host's clipboard (SPEC-5.2.12): `None` means there is
     /// none and `clipboard_*` are denied as unavailable; `Some(bytes)` is
