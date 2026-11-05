@@ -21,7 +21,7 @@
 //!   cost bounded by the manifest, charged to nobody (SPEC-6.5.1).
 
 use crate::FUEL_PER_HOST_BYTE;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use vy_abi::{cap, err, fit, limits, ABI_VERSION};
 use vy_dl::DisplayList;
 use vy_render::{pack_x100, ImageCache, Resource, TextEngine};
@@ -216,6 +216,10 @@ pub struct Host {
     pub(crate) text: TextEngine,
     pub(crate) images: ImageCache,
     pub(crate) sem: Vec<SemNode>,
+    /// Ids registered in `sem` this frame: the duplicate check of
+    /// SPEC-5.2.13 must not scan the tree, or a legal frame of 65 536 nodes
+    /// costs the host seconds that no fuel pays for (SPEC-5.3.3).
+    pub(crate) sem_ids: HashSet<i32>,
     pub(crate) sem_text_bytes: usize,
     pub(crate) links: Vec<Link>,
     pub(crate) log: Vec<LogEntry>,
@@ -264,6 +268,7 @@ impl Host {
             text: TextEngine::new(),
             images: ImageCache::new(resources),
             sem: Vec::new(),
+            sem_ids: HashSet::new(),
             sem_text_bytes: 0,
             links: Vec::new(),
             log: Vec::new(),
@@ -373,6 +378,7 @@ impl Host {
     /// Start a new semantic tree (every `vy_frame`, SPEC-10.1.1).
     pub(crate) fn clear_sem(&mut self) {
         self.sem.clear();
+        self.sem_ids.clear();
         self.sem_text_bytes = 0;
         self.sem_full_logged = false;
     }
@@ -1283,8 +1289,9 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     if host.sem.len() >= limits::MAX_SEM_NODES_PER_FRAME as usize {
                         return Err(Fault::Code(err::E_DL_FULL));
                     }
-                    // One node per id and frame (SPEC-5.2.13).
-                    if host.sem.iter().any(|n| n.id == id) {
+                    // One node per id and frame (SPEC-5.2.13); a set lookup,
+                    // so the frame's cost stays linear in its node count.
+                    if host.sem_ids.contains(&id) {
                         return Err(Fault::Code(err::E_ARG));
                     }
                     let text = if len == 0 {
@@ -1295,6 +1302,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     host.frame_text_room(text.len())?;
                     host.charge(text.len());
                     host.sem_text_bytes += text.len();
+                    host.sem_ids.insert(id);
                     host.sem.push(SemNode {
                         id,
                         parent_id,

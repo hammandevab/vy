@@ -2450,6 +2450,34 @@ fn spec_5_2_13_duplicate_node_id_refused() {
     );
 }
 
+/// SPEC-5.3.3, SPEC-9.3.2, SPEC-5.2.13: a frame of 65 536 nodes is legal,
+/// and the host's own work for it must stay linear in the node count. The
+/// duplicate-id check used to scan the whole tree per call, which made the
+/// legal maximum cost the host seconds (3 s in release, 10 s in debug)
+/// that no fuel paid for; a set lookup keeps it well under a second even in
+/// debug. The bound here is loose on purpose: it only has to tell linear
+/// from quadratic on a slow CI machine.
+#[test]
+fn spec_5_3_3_full_tree_costs_linear_host_time() {
+    let nodes = limits::MAX_SEM_NODES_PER_FRAME as i32;
+    let mut rt = load(&frame_caps_module());
+    rt.init(10, 10, 1.0).unwrap();
+    let start = std::time::Instant::now();
+    rt.event(0, nodes, 0, 0, 0).unwrap();
+    let took = start.elapsed();
+    assert_eq!(rt.semantic_tree().len(), nodes as usize);
+    assert!(host_logs(&rt).is_empty(), "{:?}", host_logs(&rt));
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "65 536 sem_node calls took {took:?}: the duplicate check is not linear (SPEC-5.3.3)"
+    );
+    // The set is per frame like the tree: the same ids are free again.
+    rt.frame_with_dt(0).unwrap();
+    rt.event(0, nodes, 0, 0, 0).unwrap();
+    assert_eq!(rt.semantic_tree().len(), nodes as usize);
+    assert!(host_logs(&rt).is_empty());
+}
+
 /// A module that registers `a` links with ids from `b` in `vy_event` and
 /// draws an empty frame in `vy_frame`.
 fn links_module() -> Vec<u8> {
