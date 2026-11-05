@@ -301,6 +301,22 @@ impl Tab {
     }
 }
 
+/// Most retired tab processes whose storage answer is still awaited.
+const MAX_RETIRED: usize = 64;
+
+/// A tab process the shell let go of (a navigation, a reload, a closed
+/// tab) and what its last [`ToShell::Storage`] needs to be saved: the
+/// answer to its `Shutdown` arrives under a generation the tab no longer
+/// has, or for a tab that is gone, and is saved under the origin, grant
+/// and quota the process had (SPEC-5.2.9, SPEC-5.1.5).
+struct Retired {
+    tab: TabId,
+    generation: u64,
+    origin: String,
+    storage_granted: bool,
+    quota: u64,
+}
+
 /// The shell.
 pub struct Shell {
     config: Config,
@@ -332,6 +348,8 @@ pub struct Shell {
     started: Instant,
     quit: bool,
     external_opens: Vec<String>,
+    /// Processes let go of whose storage answer is still to come.
+    retired: VecDeque<Retired>,
 }
 
 impl Shell {
@@ -383,6 +401,7 @@ impl Shell {
             started: Instant::now(),
             quit: false,
             external_opens: Vec::new(),
+            retired: VecDeque::new(),
         };
         shell.relayout();
         Ok(shell)
@@ -656,9 +675,7 @@ impl Shell {
             return;
         };
         let mut tab = self.tabs.remove(index);
-        if let Some(conn) = tab.conn.take() {
-            conn.shutdown();
-        }
+        retire_process(&mut tab, &mut self.retired);
         if self.tabs.is_empty() {
             self.quit = true;
             self.frame_dirty = true;
@@ -785,12 +802,10 @@ impl Shell {
     pub fn navigate_tab(&mut self, id: TabId, source: Source, push: bool) {
         let generation;
         {
-            let Some(tab) = self.tab_mut(id) else {
+            let Some(tab) = find_tab(&mut self.tabs, id) else {
                 return;
             };
-            if let Some(conn) = tab.conn.take() {
-                conn.shutdown();
-            }
+            retire_process(tab, &mut self.retired);
             tab.generation += 1;
             generation = tab.generation;
             let display = source.display();
@@ -930,11 +945,18 @@ impl Shell {
 
     /// Handle one message from the inbox.
     pub fn handle(&mut self, incoming: Incoming) {
-        if let Incoming::Tab(id, generation, _) = &incoming {
-            if self.tab(*id).is_none_or(|t| t.generation != *generation) {
+        // A message from a process the tab has moved on from (or from a
+        // closed tab) is dropped, except the storage answer to its
+        // shutdown, which is saved for the page it belonged to.
+        let incoming = match incoming {
+            Incoming::Tab(id, generation, inbound)
+                if self.tab(id).is_none_or(|t| t.generation != generation) =>
+            {
+                self.retired_message(id, generation, inbound);
                 return;
             }
-        }
+            other => other,
+        };
         match incoming {
             Incoming::Tab(id, _, Inbound::Message(m)) => self.tab_message(id, m),
             Incoming::Tab(id, _, Inbound::Gone { error }) => {
@@ -1244,33 +1266,15 @@ impl Shell {
                 body,
             } => self.fetch_for(id, req, method, url, body),
             ToShell::Storage(entries) => {
-                let Some(tab) = self.tab_mut(id) else {
+                let Some(tab) = self.tab(id) else {
                     return;
                 };
-                // Only a page granted `storage` has anything to save, and
-                // only within its quota (SPEC-5.2.9, SPEC-9.3.1); the tab
-                // process is not trusted to have kept either.
-                let size: u64 = entries
-                    .iter()
-                    .map(|(k, v)| (k.len() + v.len()) as u64)
-                    .sum();
-                if !entries.is_empty()
-                    && (!tab.capabilities().has(cap::STORAGE) || size > tab.storage_quota_bytes)
-                {
-                    tab.log(format!(
-                        "[host] storage of {size} bytes not saved: not granted or over the quota"
-                    ));
-                    return;
-                }
-                let (origin, headless) = (tab.origin.clone(), self.config.headless);
-                if let (Some(origin), false) = (origin, headless) {
-                    if !origin.starts_with("file:") {
-                        let dir = self.config.data_dir.join("storage");
-                        if let Err(e) = storage::save(&dir, &origin, &entries) {
-                            if let Some(tab) = self.tab_mut(id) {
-                                tab.log(format!("[host] storage not saved: {e}"));
-                            }
-                        }
+                let origin = tab.origin.clone();
+                let granted = tab.capabilities().has(cap::STORAGE);
+                let quota = tab.storage_quota_bytes;
+                if let Err(e) = self.save_storage(origin.as_deref(), granted, quota, &entries) {
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.log(e);
                     }
                 }
             }
@@ -1312,6 +1316,64 @@ impl Shell {
                 }
                 self.frame_dirty = true;
             }
+        }
+    }
+
+    /// Save a page's storage for `origin` (SPEC-5.2.9): only a page granted
+    /// `storage` has anything to save, and only within its quota
+    /// (SPEC-9.3.1); the tab process is not trusted to have kept either.
+    /// Nothing is persisted headless or for a local file.
+    fn save_storage(
+        &self,
+        origin: Option<&str>,
+        granted: bool,
+        quota: u64,
+        entries: &[crate::ipc::Entry],
+    ) -> Result<(), String> {
+        let size: u64 = entries
+            .iter()
+            .map(|(k, v)| (k.len() + v.len()) as u64)
+            .sum();
+        if !entries.is_empty() && (!granted || size > quota) {
+            return Err(format!(
+                "[host] storage of {size} bytes not saved: not granted or over the quota"
+            ));
+        }
+        let Some(origin) = origin.filter(|o| !o.starts_with("file:")) else {
+            return Ok(());
+        };
+        if self.config.headless {
+            return Ok(());
+        }
+        let dir = self.config.data_dir.join("storage");
+        storage::save(&dir, origin, entries).map_err(|e| format!("[host] storage not saved: {e}"))
+    }
+
+    /// A message from a retired process (see [`Retired`]): its storage
+    /// answer is saved, its end forgets it, and anything else is dropped.
+    fn retired_message(&mut self, id: TabId, generation: u64, inbound: Inbound) {
+        let Some(at) = self
+            .retired
+            .iter()
+            .position(|r| r.tab == id && r.generation == generation)
+        else {
+            return;
+        };
+        match inbound {
+            Inbound::Message(ToShell::Storage(entries)) => {
+                let r = self.retired.remove(at).expect("found");
+                if let Err(e) =
+                    self.save_storage(Some(&r.origin), r.storage_granted, r.quota, &entries)
+                {
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.log(format!("{e} (the previous page)"));
+                    }
+                }
+            }
+            Inbound::Gone { .. } => {
+                self.retired.remove(at);
+            }
+            Inbound::Message(_) => {}
         }
     }
 
@@ -2209,6 +2271,32 @@ impl Shell {
         }
         self.drain();
     }
+}
+
+/// Let go of `tab`'s process, keeping what its storage answer needs (see
+/// [`Retired`]). `Shutdown` is the flush: the tab calls `vy_suspend`,
+/// answers with [`ToShell::Storage`] and leaves; `TabConnection::shutdown`
+/// waits for the process to end (at most 500 ms, then it is killed) and
+/// for its reader, so the answer is in the inbox when this returns, ahead
+/// of anything the tab's next page brings, which is how a reload of the
+/// same origin reads what the previous process saved.
+fn retire_process(tab: &mut Tab, retired: &mut VecDeque<Retired>) {
+    let Some(conn) = tab.conn.take() else {
+        return;
+    };
+    if let Some(origin) = tab.origin.clone() {
+        if retired.len() == MAX_RETIRED {
+            retired.pop_front();
+        }
+        retired.push_back(Retired {
+            tab: tab.id,
+            generation: tab.generation,
+            origin,
+            storage_granted: tab.capabilities().has(cap::STORAGE),
+            quota: tab.storage_quota_bytes,
+        });
+    }
+    conn.shutdown();
 }
 
 /// The tab with `id` among `tabs`.

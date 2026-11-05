@@ -9,6 +9,7 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 | Steg | Vad | Test |
 | --- | --- | --- |
 | 1 | Systemets urklipp bakom Ctrl+C/V/X (`clipboard.rs`, `ClipboardBackend`): `arboard` i fönstret, minne huvudlöst och när systemets inte kan öppnas. Ctrl+V i sidan levererar urklippet som `TEXT_INPUT` (som om det skrivits), i bitar om 4 KB, `\r\n`/`\r` → `\n`, högst 1 MB. Ctrl+C/V/X i adressfältet går mot samma urklipp (inklistring högst 8 KB). Ctrl+C/Ctrl+X i sidan är en kopieringsgest (SPEC-8.2.4): sidans `clipboard_write` under just det `KEY_DOWN` lyckas utan capability. AltGr (Ctrl+Alt) skriver tecken i stället för att trigga genvägar. | `spec_8_2_4_copy_gesture_grants_clipboard_write`, `spec_5_2_12_clipboard_copy_paste_through_the_shell`, `spec_5_2_12_memory_clipboard_and_paste_chunks`, `spec_a_5_1_altgr_is_not_a_shortcut`, `spec_a_5_1_altgr_commits_text` |
+| 2 | Lagring går inte längre förlorad vid F5, navigering och Ctrl+W. Flikprocessen som släpps blir `Retired` (flik, generation, origin, grant, kvot); dess svar på `Shutdown` (`vy_suspend` + `Storage`) sparas under den origin processen hade, fast fliken bytt generation eller stängts. Ctrl+W på sista fliken kör `Shell::shutdown`, som tömmer inkorgen. | `spec_5_2_9_storage_saved_on_reload_and_close` |
 
 ## Beslut
 
@@ -31,6 +32,19 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 - **AltGr.** Windows och X11 rapporterar AltGr som Ctrl+Alt. Skalets Ctrl-genvägar kräver nu Ctrl utan
   Alt (eller Meta/Cmd), och fönstret skickar text för Ctrl+Alt (och för Option på macOS). Förr gick
   `@ { [ ] } \ $ |` inte att skriva på ett svenskt tangentbord, och AltGr+0 (`}`) nollställde zoomen.
+- **Lagringens tömning (steg 2) använder `Shutdown` som tömningsbegäran.** Flikloopen svarar redan på
+  `Shutdown` med `vy_suspend` och `ToShell::Storage` innan processen avslutas; ingen ny ram behövdes.
+  Felet var att svaret släpptes: det kom under en generation fliken inte längre hade (F5, navigering)
+  eller för en flik som inte fanns (Ctrl+W). Nu minns skalet den släppta processen (`Retired`, högst 64)
+  och sparar dess svar med processens origin, grant och kvot; allt annat från en gammal generation släpps
+  som förut. **Gränsen** är `TabConnection::shutdown` i `process.rs` (säkerhetsspårets fil): den väntar
+  högst 500 ms på att processen avslutas och dödar den sedan, och den väntar in läsartråden, så svaret
+  ligger i inkorgen när navigeringen fortsätter – före det laddaren svarar för nästa sida, så att en
+  omladdning av samma origin läser det som just sparats. Uppdraget sade "cirka 250 ms"; 500 ms är den
+  befintliga gränsen och inte min fil att ändra. En sida som inte hinner svara (fastnat i `vy_suspend`
+  tills bränslet tar slut, eller en process som dödas) förlorar ändringar sedan senaste dolda läge, som
+  förut. En krasch i huvudprocessen förlorar fortfarande allt sedan senaste suspend (lagring skrivs inte
+  vid varje `state_put`).
 
 ## Tangentbordstabell
 
@@ -83,6 +97,9 @@ Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
   till en `ToTab`-variant med tagg 13 måste en av dem numreras om vid sammanslagning.
 - `SPEC.md`: ny mening SPEC-8.2.4 (eget `spec:`-commit, §8 är inte fryst).
 - `Cargo.toml`, `Cargo.lock`: `arboard` i `[workspace.dependencies]`.
+- `crates/vy-shell/src/process.rs` (m4/security) är **inte** ändrad; steg 2 bygger på att
+  `TabConnection::shutdown` väntar in processen och läsartråden. Ändras det (t.ex. till asynkron
+  nedstängning) måste `Shell::retired_message` fortfarande få svaret före laddarens nästa svar.
 
 ## Spec-frågor
 

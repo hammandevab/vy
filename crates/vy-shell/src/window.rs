@@ -68,6 +68,11 @@ impl App {
             el.set_control_flow(ControlFlow::Wait);
         }
         if shell.quit() {
+            // The last tab was closed: what its process answered (its
+            // storage) is still in the inbox; `shutdown` handles it.
+            if let Some(shell) = self.shell.take() {
+                shell.shutdown();
+            }
             el.exit();
             return;
         }

@@ -926,6 +926,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SPEC-5.2.9, SPEC-5.1.5, SPEC-9.5.1: what a page put in its storage
+    /// is saved when the tab's process is let go of, not only when the tab
+    /// is hidden: on a reload (F5) and a navigation in the same tab, whose
+    /// answer arrives under the old generation, and on Ctrl+W, after which
+    /// the tab is gone, as well as when the window closes. The tab runs in
+    /// the in-process transport; the shell persists as in a window (not
+    /// headless), to a scratch data directory.
+    #[test]
+    fn spec_5_2_9_storage_saved_on_reload_and_close() {
+        use crate::clipboard::MemoryClipboard;
+        use crate::external::RecordingOpener;
+        use crate::shell::{Config, Shell, Waker};
+        // On every key: `state_put("k", [keycode])`.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "k")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then
+                            (i32.store8 (i32.const 32) (local.get 1))
+                            (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        let data = std::env::temp_dir().join(format!("vy-storage-flush-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let origin = "vy://store.example";
+        let page = LoadedPage {
+            display: format!("{origin}/"),
+            origin: Some(origin.into()),
+            manifest: None,
+            sha256: vy_runtime::sha256(&wasm),
+            wasm,
+            resources: Vec::new(),
+            trusted: true,
+            verdicts: vec![("storage", vy_manifest::Grant::Auto)],
+            is_localhost: false,
+        };
+        let mut shell = Shell::new(
+            Config {
+                exe: None,
+                data_dir: data.clone(),
+                headless: false,
+                opener: Box::new(RecordingOpener::default()),
+                clipboard: Box::new(MemoryClipboard::new()),
+                waker: Waker::none(),
+            },
+            800.0,
+            600.0,
+            1.0,
+        )
+        .unwrap();
+        let saved = || crate::storage::load(&data.join("storage"), origin);
+        let key = |shell: &mut Shell, code: i32| {
+            shell.key(code, true, 0, false);
+            shell.key(code, false, 0, false);
+        };
+        // F5: the old process's answer comes under the old generation.
+        let tab = shell.open_tab_loaded(page.clone());
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert_eq!(shell.tab_badges(tab), vec![("storage", true)]);
+        key(&mut shell, 0x04);
+        assert!(saved().is_empty(), "nothing saved while the page runs");
+        shell.reload();
+        shell.drain();
+        assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])], "saved on F5");
+        // A navigation in the same tab: the same.
+        let tab = shell.open_tab_loaded(page.clone());
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        key(&mut shell, 0x05);
+        shell.navigate_tab(
+            tab,
+            Source::File {
+                path: PathBuf::from("no-such-page.wasm"),
+                draft: None,
+            },
+            true,
+        );
+        shell.drain();
+        assert_eq!(
+            saved(),
+            vec![(b"k".to_vec(), vec![0x05])],
+            "saved on navigation"
+        );
+        // Ctrl+W: the tab is gone when its answer is handled.
+        shell.open_tab_loaded(page.clone());
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        key(&mut shell, 0x06);
+        shell.key(crate::shell::hid::W, true, vy_abi::modifier::CTRL, false);
+        shell.drain();
+        assert_eq!(
+            saved(),
+            vec![(b"k".to_vec(), vec![0x06])],
+            "saved on Ctrl+W"
+        );
+        // The window closing, with the tab still open.
+        shell.open_tab_loaded(page);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        key(&mut shell, 0x07);
+        shell.shutdown();
+        assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x07])], "saved on close");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     /// SPEC-A.5.1: Ctrl with Alt is AltGr, a character and not a shortcut:
     /// AltGr+0 (`}`) and AltGr+`+` (`\`) on a Swedish keyboard leave the
     /// zoom alone and reach the address bar as typed text, while Ctrl+0
