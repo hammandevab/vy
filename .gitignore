@@ -4,3 +4,6 @@
 *.png.new
 *.json.new
 .DS_Store
+# tools/publish_site.sh: utdata och nycklar lämnar aldrig maskinen
+/deploy
+*.key

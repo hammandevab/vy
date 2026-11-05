@@ -3,3 +3,5 @@ modules/*/target
 .git
 *.png.new
 *.json.new
+deploy
+*.key
