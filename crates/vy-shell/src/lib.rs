@@ -23,6 +23,7 @@ pub mod markdown;
 pub mod page;
 pub mod paths;
 pub mod process;
+pub mod sandbox;
 pub mod shell;
 pub mod storage;
 pub mod tab;

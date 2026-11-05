@@ -2674,6 +2674,7 @@ name = "vy-shell"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "libc",
  "softbuffer",
  "vy-abi",
  "vy-dl",
