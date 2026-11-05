@@ -715,6 +715,89 @@ events = [
   {kind = "reinit"},                                # ny instans med samma lagring: "Sparade inställningar laddade."
 ]
 
+# studio: skaparverktyget som vy-dev serverar på vy://localhost:8081/ (modules/studio). Sidan
+# hämtar /_dev/state och /_dev/agent/events från sin egen origin (manifestets net-origin, SPEC-5.2.8);
+# svaren är inspelade (fetch) med den okodade modulens platshållarnyckel, och fetch_done lämnar dem
+# i den ordning sidan begärde dem. Den sista begäran (nästa long-poll) står kvar obesvarad, som när
+# inget nytt har hänt. Kräver ime (fältet, SPEC-10.4.2), net och storage (senaste uppdraget).
+
+[[case]]
+name = "studio-800x600@1"
+module = "studio"
+width = 800
+height = 600
+scale = 1
+semantic = "studio"
+capabilities = ["ime", "net", "storage"]
+fetch = [
+  {url = "http://localhost:8081/_dev/state?token=00000000000000000000000000000000", body = '{"name":"min-sida","address":"vy://localhost:8080/min-sida","build":{"status":"ok","log":"$ cargo build --release --target wasm32-unknown-unknown   (/home/anna/min-sida)\n   Compiling vy-abi v0.1.0\n   Compiling vy-sdk v0.1.0\n   Compiling min-sida v0.1.0 (/home/anna/min-sida)\n    Finished `release` profile [optimized] target(s) in 4.21s\n$ vy-cli check-abi target/wasm32-unknown-unknown/release/min_sida.wasm   (6214 bytes)\nexports: vy_alloc, vy_event, vy_frame, vy_init, vy_resize, vy_suspend\nmemory: 17.. pages (no max)\nABI 1.0: OK\n$ vy-publish build --manifest manifest.json\npackage: 3391 bytes, 0 resources\nok: 4.6 s\n","builds":1},"agent":{"running":false,"last_exit":null},"seq":2}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=0&wait=0&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":2,"entries":[{"seq":1,"kind":"build","text":"bygger","status":"building"},{"seq":2,"kind":"build","text":"klar: vy://localhost:8080/min-sida","status":"ok"}]}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=2&wait=1000&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":2,"entries":[]}'},
+]
+events = [
+  {kind = "fetch_done"},                           # /_dev/state: klar, adressen blir en länk
+  {kind = "fetch_done"},                           # historiken: två byggposter; nästa long-poll väntar
+]
+
+[[case]]
+name = "studio-800x600@1-running"
+module = "studio"
+width = 800
+height = 600
+scale = 1
+semantic = "studio-running"
+capabilities = ["ime", "net", "storage"]
+fetch = [
+  {url = "http://localhost:8081/_dev/state?token=00000000000000000000000000000000", body = '{"name":"min-sida","address":"vy://localhost:8080/min-sida","build":{"status":"ok","log":"$ cargo build --release --target wasm32-unknown-unknown   (/home/anna/min-sida)\n   Compiling vy-abi v0.1.0\n   Compiling vy-sdk v0.1.0\n   Compiling min-sida v0.1.0 (/home/anna/min-sida)\n    Finished `release` profile [optimized] target(s) in 4.21s\n$ vy-cli check-abi target/wasm32-unknown-unknown/release/min_sida.wasm   (6214 bytes)\nexports: vy_alloc, vy_event, vy_frame, vy_init, vy_resize, vy_suspend\nmemory: 17.. pages (no max)\nABI 1.0: OK\n$ vy-publish build --manifest manifest.json\npackage: 3391 bytes, 0 resources\nok: 4.6 s\n","builds":1},"agent":{"running":false,"last_exit":null},"seq":2}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=0&wait=0&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":2,"entries":[{"seq":1,"kind":"build","text":"bygger","status":"building"},{"seq":2,"kind":"build","text":"klar: vy://localhost:8080/min-sida","status":"ok"}]}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=2&wait=1000&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":8,"entries":[{"seq":3,"kind":"agent","text":"uppdrag: gör en sida som visar dagens väder"},{"seq":4,"kind":"agent","text":"Claude Code startade (claude-sonnet)"},{"seq":5,"kind":"assistant","text":"Jag läser src/lib.rs och lägger till ett kort med dagens väder under rubriken."},{"seq":6,"kind":"tool","text":"Read src/lib.rs"},{"seq":7,"kind":"tool","text":"Edit src/lib.rs"},{"seq":8,"kind":"tool","text":"Bash cargo build --release --target wasm32-unknown-unknown"}]}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=8&wait=1000&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":8,"entries":[]}'},
+  {url = "http://localhost:8081/_dev/agent?token=00000000000000000000000000000000", status = 202, body = '{"ok":true}'},
+]
+events = [
+  {kind = "fetch_done"},                           # /_dev/state
+  {kind = "fetch_done"},                           # historiken
+  {kind = "pointer_down", x = 282, y = 124},       # uppdragsfältet: fokus och ime_begin
+  {kind = "text_input", text = "gör en sida som visar dagens väder"},
+  {kind = "pointer_down", x = 608, y = 124},       # Kör: POST /_dev/agent, uppdraget sparas
+  {kind = "fetch_done"},                           # long-pollen: agenten startar, läser, ändrar, bygger
+  {kind = "fetch_done"},                           # POST-svaret 202: uppdraget skickat
+]
+
+[[case]]
+name = "studio-400x700@2"
+module = "studio"
+width = 400
+height = 700
+scale = 2
+capabilities = ["ime", "net", "storage"]
+fetch = [
+  {url = "http://localhost:8081/_dev/state?token=00000000000000000000000000000000", body = '{"name":"min-sida","address":"vy://localhost:8080/min-sida","build":{"status":"ok","log":"$ cargo build --release --target wasm32-unknown-unknown   (/home/anna/min-sida)\n   Compiling vy-abi v0.1.0\n   Compiling vy-sdk v0.1.0\n   Compiling min-sida v0.1.0 (/home/anna/min-sida)\n    Finished `release` profile [optimized] target(s) in 4.21s\n$ vy-cli check-abi target/wasm32-unknown-unknown/release/min_sida.wasm   (6214 bytes)\nexports: vy_alloc, vy_event, vy_frame, vy_init, vy_resize, vy_suspend\nmemory: 17.. pages (no max)\nABI 1.0: OK\n$ vy-publish build --manifest manifest.json\npackage: 3391 bytes, 0 resources\nok: 4.6 s\n","builds":1},"agent":{"running":false,"last_exit":null},"seq":2}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=0&wait=0&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":2,"entries":[{"seq":1,"kind":"build","text":"bygger","status":"building"},{"seq":2,"kind":"build","text":"klar: vy://localhost:8080/min-sida","status":"ok"}]}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=2&wait=1000&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":2,"entries":[]}'},
+]
+events = [
+  {kind = "fetch_done"},
+  {kind = "fetch_done"},
+]
+
+[[case]]
+name = "studio-800x600@1-error"                    # ett trasigt bygge: status fel, felraderna i byggloggen
+module = "studio"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime", "net", "storage"]
+fetch = [
+  {url = "http://localhost:8081/_dev/state?token=00000000000000000000000000000000", body = '{"name":"min-sida","address":"vy://localhost:8080/min-sida","build":{"status":"error","log":"$ cargo build --release --target wasm32-unknown-unknown   (/home/anna/min-sida)\n   Compiling min-sida v0.1.0 (/home/anna/min-sida)\nerror[E0425]: cannot find value `vader` in this scope\n  --> src/lib.rs:88:31\n   |\n88 |         let h = f.text(x, y, w, vader, TITLE)?.h;\n   |                               ^^^^^ not found in this scope\nerror: could not compile `min-sida` (lib) due to 1 previous error\nerror: cargo build failed (exit status: 101)\n","builds":1},"agent":{"running":false,"last_exit":null},"seq":2}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=0&wait=0&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":2,"entries":[{"seq":1,"kind":"build","text":"bygger","status":"building"},{"seq":2,"kind":"build","text":"fel: error[E0425]: cannot find value `vader` in this scope","status":"error"}]}'},
+  {url = "http://localhost:8081/_dev/agent/events?after=2&wait=1000&raw=0&limit=200&token=00000000000000000000000000000000", body = '{"next":2,"entries":[]}'},
+]
+events = [
+  {kind = "fetch_done"},
+  {kind = "fetch_done"},
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i

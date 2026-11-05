@@ -1418,7 +1418,8 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         let mut modules: Vec<String> = cases.iter().map(|c| c.module.clone()).collect();
         modules.sort();
         modules.dedup();
-        assert_eq!(modules.len(), 11);
+        // Eleven reference pages and Studio (modules/studio).
+        assert_eq!(modules.len(), 12);
         for m in &modules {
             let first = cases.iter().find(|c| &c.module == m).unwrap();
             let package =

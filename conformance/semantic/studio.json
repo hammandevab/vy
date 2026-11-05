@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 20, "y": 16, "w": 760, "h": 28, "text": "Studio – min-sida"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 727.71, "y": 18, "w": 52.29, "h": 24, "text": "Status: klar"},
+    {"id": -1, "parent_id": 1, "role": 3, "role_name": "link", "x": 178.59, "y": 52, "w": 207.16, "h": 16.25, "text": "vy://localhost:8080/min-sida"},
+    {"id": 4, "parent_id": 1, "role": 1, "role_name": "text", "x": 20, "y": 82, "w": 760, "h": 18, "text": "Uppdrag"},
+    {"id": -2, "parent_id": 1, "role": 5, "role_name": "textbox", "x": 20, "y": 102, "w": 524, "h": 44, "text": ""},
+    {"id": -3, "parent_id": 1, "role": 4, "role_name": "button", "x": 554, "y": 102, "w": 108, "h": 44, "text": "Kör"},
+    {"id": -4, "parent_id": 1, "role": 4, "role_name": "button", "x": 672, "y": 102, "w": 108, "h": 44, "text": "Bygg om"},
+    {"id": 5, "parent_id": 1, "role": 16, "role_name": "region", "x": 20, "y": 182, "w": 431.52, "h": 398, "text": "Agenten"},
+    {"id": 6, "parent_id": 5, "role": 2, "role_name": "heading", "x": 32, "y": 191, "w": 407.52, "h": 18, "text": "Agenten"},
+    {"id": 7, "parent_id": 5, "role": 8, "role_name": "list", "x": 32, "y": 214, "w": 407.52, "h": 354, "text": "Agentens logg"},
+    {"id": 8, "parent_id": 7, "role": 9, "role_name": "listitem", "x": 32, "y": 214, "w": 407.52, "h": 15, "text": "Bygge: bygger"},
+    {"id": 9, "parent_id": 7, "role": 9, "role_name": "listitem", "x": 32, "y": 237, "w": 407.52, "h": 15, "text": "Bygge: klar: vy://localhost:8080/min-sida"},
+    {"id": 10, "parent_id": 1, "role": 16, "role_name": "region", "x": 467.52, "y": 182, "w": 312.48, "h": 398, "text": "Bygglogg"},
+    {"id": 11, "parent_id": 10, "role": 2, "role_name": "heading", "x": 479.52, "y": 191, "w": 288.48, "h": 18, "text": "Bygglogg"},
+    {"id": 12, "parent_id": 10, "role": 1, "role_name": "text", "x": 479.52, "y": 214, "w": 288.48, "h": 354, "text": "$ cargo build --release --target wasm32-unknown-unknown   (/home/anna/min-sida)\n   Compiling vy-abi v0.1.0\n   Compiling vy-sdk v0.1.0\n   Compiling min-sida v0.1.0 (/home/anna/min-sida)\n    Finished `release` profile [optimized] target(s) in 4.21s\n$ vy-cli check-abi target/wasm32-unknown-unknown/release/min_sida.wasm   (6214 bytes)\nexports: vy_alloc, vy_event, vy_frame, vy_init, vy_resize, vy_suspend\nmemory: 17.. pages (no max)\nABI 1.0: OK\n$ vy-publish build --manifest manifest.json\npackage: 3391 bytes, 0 resources\nok: 4.6 s"}
+  ]
+}
