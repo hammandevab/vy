@@ -86,6 +86,16 @@ impl TestServer {
                 while !stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            // The listener is non-blocking so the loop can
+                            // see `stop`; on the BSD sockets of macOS an
+                            // accepted socket inherits that flag (Linux
+                            // does not), and then a read before the request
+                            // has arrived, or a write of a body larger than
+                            // the socket buffer, fails with WouldBlock: no
+                            // response, or a cut one, and the client sees
+                            // "Peer disconnected" at random. Blocking is what
+                            // the handler below is written for.
+                            let _ = stream.set_nonblocking(false);
                             if let Some(req) = read_request(&stream) {
                                 let resp = handler(&req);
                                 requests.lock().unwrap().push(req);
