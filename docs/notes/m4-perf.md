@@ -5,6 +5,98 @@ Byggagentens noteringar. Granskningssidan skrivs av en annan agent. Spåret äge
 `crates/vy-publish` (`--allow-slow`). Målet: §13 mätbart, hållet där maskinen tillåter, med
 identiska pixlar (konformans 0,000 %).
 
+## Sammanfattning
+
+| Commit | Vad |
+| --- | --- |
+| `8516c03` | `vy-cli bench`: P95 över `--runs`, `--only`, `--json`; ramarna i `vy_render::bench`; före-tal |
+| `92cdaaa` | formad-text-cache i `TextEngine`, tak för glyfbildscachen (SPEC-13.2.3) |
+| `1082457` | rasteriseringens snabbvägar med samma byte och budget; M3-rasteriseringen som testreferens (SPEC-13.2.1) |
+| `755a595` | nätgrinden: en lista utan `https://`-origin släpper inget igenom (SPEC-5.2.8, säkerhet) |
+| `34769cd` | kompileringscache med läs- och skrivläge, hotbild (SPEC-13.1.4) |
+| `a89bec0` | `bench:` baslinje för byggmaskinen |
+| `4ab4198` | §13-testerna i release, regressionsgrinden, CI-jobbet `bench` (SPEC-12.2.3, 6.2.2, 13.1.2, 13.1.3, 13.2.2, 13.2.3) |
+| `a04306d` | `vy-publish build` vägrar en frame över 8 ms utan `--allow-slow` (SPEC-13.4.1) |
+
+**Före och efter** (release, 100 körningar; före vid load 0,2–3 direkt efter en omstart av
+maskinen, efter vid load 1,4–2,7; `compile-hit` finns bara efter):
+
+```
+id                          före p50  före p95 efter p50 efter p95    budget
+raster.ops-2000               100.02    140.57     34.92     56.46      2.00  ÖVER
+raster.ops-2000-cold           99.61    149.71     37.19     53.10         -
+raster.rects-2000              18.32     31.22     14.26     19.86      2.00  ÖVER
+raster.text-200                16.17     25.04      4.37      4.87      2.00  ÖVER
+raster.mix-1800-200            32.54     57.27     18.25     27.08      2.00  ÖVER
+raster.cards-2000             103.48    149.64     23.67     34.92         -
+raster.page.hello               1.17      5.21      0.25      0.36      2.00
+raster.page.text                5.05      9.35      1.22      1.46      2.00
+raster.page.form                1.53      5.79      0.45      0.51      2.00
+raster.page.list                3.29      7.89      0.60      0.73      2.00
+raster.page.gallery            13.44     21.22      5.91      8.06      2.00  ÖVER
+raster.page.game                3.31      7.39      2.41      2.92      2.00  ÖVER
+raster.page.dashboard           4.96      8.99      2.85      4.79      2.00  ÖVER
+raster.page.chat                4.14      8.27      1.36      1.78      2.00
+raster.page.shop               21.00     32.17     10.23     17.98      2.00  ÖVER
+raster.page.document            9.98     14.25      2.25      2.53      2.00  ÖVER
+raster.page.settings            4.80     10.71      2.29      2.49      2.00  ÖVER
+scroll.text.frame              13.08     20.50      1.97      2.32     16.67
+scroll.text.miss              100.00    100.00      2.59      2.59      5.00
+scroll.text.measure-miss      100.00    100.00      0.00      0.00      5.00
+tab.cold-start                 22.80     37.87     21.03     37.05    150.00
+first-frame.hello              36.54     55.29     43.64     52.15    100.00
+first-frame.text               75.19    101.00     73.74     93.07    100.00
+input.dashboard                 8.51     14.18      5.42      5.92     16.00
+compile.hello                  13.81     15.38     14.82     21.16     60.00
+compile.text                   19.12     31.17     18.42     28.85     60.00
+compile.chat                   51.91     74.47     54.59     83.91     60.00  ÖVER
+compile-hit.hello                  -         -      0.30      0.44      1.00
+compile-hit.text                   -         -      0.46      0.50      1.00
+compile-hit.chat                   -         -      0.72      0.93      1.00
+```
+
+**Hållet på den här maskinen (release):** 13.1.2 (P95 62 / 87 ms), 13.1.3 (138 ms, loopback,
+31 KB), 13.1.4 vid träff (P95 ≤ 0,83 ms) och för `hello` kallt (22 ms), 13.2.2 (7,4 ms), 13.2.3
+(2,4 ms, 97,4 % / 100 % träff), 6.2.2, 13.4.1. **Inte hållet:** 13.2.1 (P95 44–56 ms mot 2 ms för
+ramen i sidornas proportioner; fem av elva referenssidor under 2 ms) – testet är ignorerat med
+värdet (spec-fråga 55); 13.1.4 kallt för 22–31 KB-moduler under last (P95 58–84 ms) och 300 KB
+utan cache. Konformansen är 55/55 à 0,000 % efter varje commit.
+
+**Grindar och tal (efter `a04306d`).** fmt, clippy, `cargo test --workspace` 273 gröna / 11
+ignorerade (var 252 / 19), spec_trace 132/132, modulerna 11/11 och `check-abi`, `test_modules`
+11/11, konformans 55/55 à 0,000 %. Klienten: `vy-shell` i release 21 905 096 byte (21,9 MB; var
+21,8 MB), under SPEC-12.3.1:s 25 MB. Release: `cargo test --release -p vy-render -p vy-runtime -p
+vy-cli -- spec_13 spec_6_2_2 spec_12_2_3` grönt utom det ignorerade 13.2.1. Typkontroll för
+`x86_64-pc-windows-msvc`: `vy-runtime` och `vy-render` rena; `aarch64-apple-darwin`: `vy-render`
+ren. Hela arbetsytan går inte att typkontrollera för de målen här: `zstd-sys` och wasmtimes
+byggskript kräver en C-korskompilator som maskinen saknar (gäller före mina ändringar också).
+
+**Kvar.** (1) Skalet använder inte kompileringscachen: kopplingen i `page.rs`, `ipc.rs`/
+`process.rs` och sandlådan är andra spårs (steg 3, *Berör andra spår*). (2) SPEC-13.2.1:
+GPU-vägen eller en ändrad mening (spec-fråga 55). (3) Den kalla halvan av SPEC-13.1.4 för 300 KB
+kräver parallell kompilering i wasmtime (avstängd sedan M1 för binärstorleken) eller en
+referensmaskin. (4) Ubuntu-baslinjen för regressionsgrinden: första CI-körningens artefakt
+`bench-ubuntu` incheckad som `conformance/bench/ubuntu.json` i ett `bench:`-commit. (5)
+`vy_render::render` allokerar duken per frame (4 MB vid 1280 × 800): ett API som tar en buffert
+att återanvända skulle spara ≈ 0,2 ms per frame men kräver ändring hos anroparna (skalet).
+
+**Berör andra spår (samlat).** `crates/vy-shell/src/tab.rs` (m4/ux): en rad,
+`compile_cache: vy_runtime::CompileCache::Off` – krävs för att det ska kompilera. Delade filer:
+`.github/workflows/ci.yml` (bench-steget i `gates` tar `--runs` i stället för `--iterations`; nytt
+jobb `bench`), `Cargo.lock` (arbetsytecrates som nya beroenden, inga externa).
+`docs/BUILD-NOTES.md` är orörd (spec-frågorna fortsätter från 52 här). Till m4/security: flikens
+skrivrätt till kompileringscachen (Hotbild, steg 3) och `default_grants` för en tom `net`-lista
+(nätgrinden, spec-fråga 53).
+
+**Byggmiljön.** Fyra worktrees delade `target/` fram till 22:16. Cargos artefakthash för en
+sökvägscrate bortser från worktreens sökväg och färskhetskontrollen jämför bara tidsstämplar,
+så en build kunde länka ett annat spårs `vy-render`/`vy-runtime`, och de upplyfta
+`target/<profil>/vy-cli` byttes ut under körning (skalfallen föll med "Flikprocessen kunde inte
+startas"). Före-talen ovan är tagna om efter isoleringen; alla tal kommer från binärer vars
+arbetsytecrates byggdes ur grenen, körda från privata kopior mot en privat rot. Disken var full en
+stund (117 MB); en kraschad länknings temporärfil (`vy_cli-c195cfb27e701cd5.tmp8525cda`, 395 MB)
+låg kvar i den gamla delade katalogen, orörd enligt reglerna.
+
 ## Mätmetod
 
 - **`vy-cli bench`** mäter P95 och P50 över `--runs N` körningar (standard 100, som §13 säger),
