@@ -25,7 +25,7 @@ function Say([string]$line) {
 }
 
 Say '{"type":"system","subtype":"init","cwd":".","session_id":"fake","model":"fake-agent","tools":["Read","Edit","Bash"]}'
-Say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Jag läser sidan och ändrar texten."}]}}'
+Say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Jag l\u00e4ser sidan och \u00e4ndrar texten."}]}}'
 Say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"src/lib.rs"}}]}}'
 Say '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"..."}]}}'
 
@@ -41,8 +41,8 @@ $text = [IO.File]::ReadAllText($lib, $utf8)
 [IO.File]::WriteAllText($lib, $text.Replace('Inga klick', 'Agenten var har. Inga klick'), $utf8)
 
 if ($mission.Contains('FAIL')) {
-    Say '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Något gick fel."}'
+    Say '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"N\u00e5got gick fel."}'
     exit 3
 }
-Say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Klart: sidan hälsar från agenten."}]}}'
-Say '{"type":"result","subtype":"success","is_error":false,"result":"Sidan är ändrad.","total_cost_usd":0}'
+Say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Klart: sidan h\u00e4lsar fr\u00e5n agenten."}]}}'
+Say '{"type":"result","subtype":"success","is_error":false,"result":"Sidan \u00e4r \u00e4ndrad.","total_cost_usd":0}'
