@@ -1,16 +1,18 @@
-//! `vy-dev`: `new` and `build` for a page project.
+//! `vy-dev`: `new`, `build` and `serve` for a page project.
 
 use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use vy_dev::scaffold::{derive_name, lib_name, Scaffold};
-use vy_dev::{build_project, paths, Project};
+use vy_dev::serve::{DEFAULT_PORT, DEFAULT_STUDIO_PORT};
+use vy_dev::{build_project, paths, Project, ServeConfig};
 
 fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
          vy-dev new <dir> [--name <name>] [--sdk <vy-checkout>]\n  \
-         vy-dev build [<dir>] [--key <dev.key>] [--out <page.vyp>]"
+         vy-dev build [<dir>] [--key <dev.key>] [--out <page.vyp>]\n  \
+         vy-dev serve [<dir>] [--port {DEFAULT_PORT}] [--studio-port {DEFAULT_STUDIO_PORT}] [--key <dev.key>] [--agent-cmd <cmd>] [--quiet]"
     );
     ExitCode::from(2)
 }
@@ -20,6 +22,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("new") => cmd_new(&args[1..]),
         Some("build") => cmd_build(&args[1..]),
+        Some("serve") => cmd_serve(&args[1..]),
         _ => return usage(),
     };
     match result {
@@ -66,6 +69,19 @@ impl Args {
             .find(|(n, _)| n == name)
             .and_then(|(_, v)| v.as_deref())
     }
+
+    fn has(&self, name: &str) -> bool {
+        self.flags.iter().any(|(n, _)| n == name)
+    }
+
+    fn port(&self, name: &str, default: u16) -> Result<u16> {
+        match self.value(name) {
+            Some(p) => p
+                .parse()
+                .map_err(|_| anyhow!("--{name} {p:?} is not a port number")),
+            None => Ok(default),
+        }
+    }
 }
 
 fn cmd_new(args: &[String]) -> Result<ExitCode> {
@@ -94,12 +110,15 @@ fn cmd_new(args: &[String]) -> Result<ExitCode> {
     println!();
     println!("Next:");
     println!("  cd {}", dir.display());
+    println!(
+        "  vy-dev serve      # builds on every change, serves vy://localhost:{DEFAULT_PORT}/{name} and Studio"
+    );
+    println!("or by hand:");
     println!("  cargo build --release --target wasm32-unknown-unknown");
     println!(
         "  vy-cli render target/wasm32-unknown-unknown/release/{}.wasm --out preview.png --size 800x600",
         lib_name(&name)
     );
-    println!("  vy-dev build      # the same, plus the manifest check and a signed package");
     println!("CLAUDE.md in the project has the whole loop.");
     Ok(ExitCode::SUCCESS)
 }
@@ -123,5 +142,44 @@ fn cmd_build(args: &[String]) -> Result<ExitCode> {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
+    }
+}
+
+fn cmd_serve(args: &[String]) -> Result<ExitCode> {
+    let a = Args::parse(
+        args,
+        &["port", "studio-port", "key", "agent-cmd"],
+        &["quiet"],
+    )?;
+    let dir = a.positional.first().map(String::as_str).unwrap_or(".");
+    let config = ServeConfig {
+        project_dir: PathBuf::from(dir),
+        port: a.port("port", DEFAULT_PORT)?,
+        studio_port: a.port("studio-port", DEFAULT_STUDIO_PORT)?,
+        key_path: a.value("key").map(PathBuf::from),
+        target_dir: None,
+        agent_cmd: a.value("agent-cmd").map(String::from),
+        log: !a.has("quiet"),
+    };
+    let handle = vy_dev::start(config)?;
+    if handle.key_created {
+        eprintln!(
+            "new developer key: {} (keep it; its .pub is served at /.well-known/vy-key)",
+            handle.key_path.display()
+        );
+    }
+    let project = &handle.dev.project;
+    eprintln!("vy-dev: {} in {}", project.name, project.dir.display());
+    eprintln!("  page:   {}", handle.address());
+    eprintln!("  studio: {}", handle.studio_address());
+    eprintln!(
+        "  key:    {} ({})",
+        handle.key_id,
+        handle.key_path.display()
+    );
+    eprintln!("  listening on 127.0.0.1 only; Ctrl+C stops");
+    // The threads run until the process is stopped.
+    loop {
+        std::thread::park();
     }
 }
