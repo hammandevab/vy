@@ -6,7 +6,8 @@ annan agent. Spåret: en användare startar `vy-dev` i en projektkatalog, öppna
 
 Rörda kataloger: `crates/vy-dev` (ny), `tools/fake_agent.sh` och `tools/fake_agent.ps1` (nya),
 `docs/notes/m4-dev.md` (den här sidan), `Cargo.toml` (en medlemsrad), `Cargo.lock`, och utanför
-spåret `crates/vy-runtime/src/{host,lib,tests}.rs` (se *Berör andra spår*).
+spåret `crates/vy-runtime/src/{host,lib,tests}.rs` och `crates/vy-cli/src/conformance.rs` med
+formatraden i `conformance/cases.toml` och `conformance/README.md` (se *Berör andra spår*).
 
 ## Vad som landat
 
@@ -179,6 +180,12 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
   `spec_7_1_3_plain_http_only_to_a_listed_loopback_origin`. Inga signaturer ändrade, inga befintliga
   tester ändrade. `vy-shell` får beteendet utan kodändring, eftersom huvudprocessen normaliserar
   manifestets origins och prövar anropens origin med samma `origin_of`.
+- **`crates/vy-cli/src/conformance.rs` (konformanssviten).** Eget commit, bara tillägg:
+  `cases.toml` får TOML-literalsträngar `'…'` (inga escapes, får innehålla `"`, inte `'`), så att
+  ett inspelat JSON-svar kan stå i `fetch`-postens `body`. De tre hjälparna som letar citattecken
+  (`split_top`, `strip_comment`, `depth`) delar nu en skanner `scan` som känner båda sorterna.
+  Inga befintliga fall ändrade (inget innehöll `'`). Nytt test `literal_strings_hold_json_bodies`.
+  Formatraden överst i `conformance/cases.toml` och en mening i `conformance/README.md`.
 - **`crates/vy-shell` (m4/ux), inte ändrat, men en rad behövs:** i `Shell::request_verdict`, efter
   att origin hittats i listan, även `vy_runtime::plain_http_allowed(&origin, <sidans auktoritet ur
   tab.origin>)`, annars `E_ORIGIN`. Då når en sida bara sin egen loopback-origin över plain http,

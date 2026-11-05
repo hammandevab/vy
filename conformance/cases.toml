@@ -4,7 +4,8 @@
 # (SPEC-10.2.3). Guldbyte: `cargo run -p vy-cli -- conformance --update` i ett eget
 # commit med prefixet `golden:`.
 #
-# Formatet är en delmängd av TOML: [[case]]-tabeller med name, module, width, height,
+# Formatet är en delmängd av TOML: strängar är "…" utan escapes eller literalsträngar '…' (som
+# får innehålla " men inte ', för inspelade JSON-svar); [[case]]-tabeller med name, module, width, height,
 # scale (standard 1), frames (standard 1 + antal events; ett tak – vy_frame anropas bara så
 # länge modulen begär en ny frame, SPEC-6.2.1), semantic, capabilities (lista med namn ur
 # SPEC-8.2.1; bara vad modulens manifest i manifests/ begär, SPEC-8.2.2), resources (lista med

@@ -122,6 +122,17 @@ impl Scalar {
             }
             return Ok(Self::Str(inner.to_string()));
         }
+        // A TOML literal string: no escapes, so it can hold `"` and `\`
+        // (a canned JSON body), but not `'`.
+        if let Some(inner) = v.strip_prefix('\'') {
+            let inner = inner
+                .strip_suffix('\'')
+                .ok_or_else(|| anyhow!("line {line}: unterminated literal string"))?;
+            if inner.contains('\'') {
+                bail!("line {line}: a literal string cannot hold '");
+            }
+            return Ok(Self::Str(inner.to_string()));
+        }
         match v {
             "true" => return Ok(Self::Bool(true)),
             "false" => return Ok(Self::Bool(false)),
@@ -166,16 +177,35 @@ impl Scalar {
     }
 }
 
+/// The characters of `s` with whether each is inside a string: `"…"` or a
+/// literal `'…'`, the quote characters themselves counted as inside. A
+/// `'` in a `"…"` string and a `"` in a `'…'` string are text.
+fn scan(s: &str) -> impl Iterator<Item = (usize, char, bool)> + '_ {
+    let mut open: Option<char> = None;
+    s.char_indices().map(move |(i, c)| match open {
+        Some(q) if c == q => {
+            open = None;
+            (i, c, true)
+        }
+        Some(_) => (i, c, true),
+        None if c == '"' || c == '\'' => {
+            open = Some(c);
+            (i, c, true)
+        }
+        None => (i, c, false),
+    })
+}
+
 /// Split `s` on `sep` at bracket depth 0 and outside quotes.
 fn split_top(s: &str, sep: char) -> Vec<&str> {
     let mut parts = Vec::new();
-    let (mut depth, mut quoted, mut start) = (0i32, false, 0usize);
-    for (i, c) in s.char_indices() {
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (i, c, quoted) in scan(s) {
         match c {
-            '"' => quoted = !quoted,
-            '[' | '{' if !quoted => depth += 1,
-            ']' | '}' if !quoted => depth -= 1,
-            c if c == sep && !quoted && depth == 0 => {
+            _ if quoted => {}
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            c if c == sep && depth == 0 => {
                 parts.push(&s[start..i]);
                 start = i + c.len_utf8();
             }
@@ -188,12 +218,9 @@ fn split_top(s: &str, sep: char) -> Vec<&str> {
 
 /// `s` without a trailing `#` comment; a `#` inside quotes is text.
 fn strip_comment(s: &str) -> &str {
-    let mut quoted = false;
-    for (i, c) in s.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            '#' if !quoted => return &s[..i],
-            _ => {}
+    for (i, c, quoted) in scan(s) {
+        if c == '#' && !quoted {
+            return &s[..i];
         }
     }
     s
@@ -201,16 +228,12 @@ fn strip_comment(s: &str) -> &str {
 
 /// Net bracket depth of `s` outside quotes.
 fn depth(s: &str) -> i32 {
-    let (mut depth, mut quoted) = (0i32, false);
-    for c in s.chars() {
-        match c {
-            '"' => quoted = !quoted,
-            '[' | '{' if !quoted => depth += 1,
-            ']' | '}' if !quoted => depth -= 1,
-            _ => {}
-        }
-    }
-    depth
+    scan(s).fold(0, |d, (_, c, quoted)| match c {
+        _ if quoted => d,
+        '[' | '{' => d + 1,
+        ']' | '}' => d - 1,
+        _ => d,
+    })
 }
 
 /// Parse `[ a, b, ... ]` into its top-level elements.
@@ -989,6 +1012,33 @@ mod tests {
             .join("../..")
             .canonicalize()
             .unwrap()
+    }
+
+    /// A canned body can be a TOML literal string, `'…'`, which holds the
+    /// `"`, `{`, `,` and `#` of a JSON answer; a `'` inside `"…"` is text.
+    #[test]
+    fn literal_strings_hold_json_bodies() {
+        let text = r#"
+[[case]]
+name = "x-10x10@1"
+module = "x"
+width = 10
+height = 10
+fetch = [
+  {url = "http://localhost:8081/a?b=1", body = '{"next": 3, "entries": [{"text": "a, b # c"}]}'},
+  {url = "https://x.example/it's", status = 404},
+]
+events = [{kind = "text_input", text = "it's"}]   # a comment with ' and "
+"#;
+        let cases = parse_cases(text).unwrap();
+        assert_eq!(cases[0].fetch.len(), 2);
+        assert_eq!(
+            cases[0].fetch[0].body,
+            br#"{"next": 3, "entries": [{"text": "a, b # c"}]}"#
+        );
+        assert_eq!(cases[0].fetch[1].url, "https://x.example/it's");
+        assert_eq!(cases[0].fetch[1].status, 404);
+        assert!(parse_cases(&text.replace("a, b # c", "it's")).is_err());
     }
 
     /// SPEC-12.2.2: every case renders within 0.1 % of its golden image.
