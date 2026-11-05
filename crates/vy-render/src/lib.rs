@@ -10,7 +10,7 @@ pub mod text;
 
 pub use image::{diff_ratio, ImageCache, ImageError, RgbaImage, MAX_IMAGE_CACHE_BYTES};
 pub use raster::{render, RenderError};
-pub use text::{height_x100, pack_x100, Size, TextEngine};
+pub use text::{pack_x100, Size, TextEngine};
 
 #[cfg(test)]
 mod tests {
@@ -62,12 +62,40 @@ mod tests {
         assert!(narrow.h > wide.h, "{narrow:?} vs {wide:?}");
         assert!(narrow.w <= 120.0, "wrapped width {}", narrow.w);
         assert_eq!(narrow.h % line, 0.0, "height is whole lines");
-        assert_eq!(height_x100(narrow.h), (narrow.h * 100.0).round() as i32);
-        // Packed measurement: width in the high 32 bits, height in the low (SPEC-5.2.5).
+        // Packed measurement: width in the high 32 bits, height in the low,
+        // as both `dl_text` and `text_measure` return it (SPEC-5.2.4, SPEC-5.2.5).
         let packed = pack_x100(narrow.w, narrow.h);
-        assert_eq!((packed & 0xFFFF_FFFF) as i32, height_x100(narrow.h));
+        assert_eq!(
+            (packed & 0xFFFF_FFFF) as i32,
+            (narrow.h * 100.0).round() as i32
+        );
         assert_eq!((packed >> 32) as i32, (narrow.w * 100.0).round() as i32);
         assert_eq!(t.measure(99, 100.0, txt), Err(err::E_STYLE));
+        // `max_w <= 0` means no wrapping at all (SPEC-6.4.3).
+        for w in [0.0, -1.0, -1e9] {
+            assert_eq!(t.measure(s, w, txt).unwrap(), wide, "max_w {w}");
+        }
+    }
+
+    /// SPEC-5.2.5, SPEC-5.2.4: each packed half is at most 2³¹ − 1, so a
+    /// 21 million pixel wide line is still a non-negative `i64` and never
+    /// mistaken for a status code; negative and non-finite inputs pack as 0.
+    #[test]
+    fn spec_5_2_5_packed_halves_fit_i32() {
+        let wide = pack_x100(21_474_840.0, 1.0);
+        assert_eq!(
+            wide >> 32,
+            2_147_483_647,
+            "21.5 million px clamps to 2^31 - 1"
+        );
+        assert_eq!(wide & 0xFFFF_FFFF, 100);
+        assert!(wide >= 0);
+        let over = pack_x100(1e12, 1e12);
+        assert_eq!(over >> 32, i64::from(i32::MAX));
+        assert_eq!(over & 0xFFFF_FFFF, i64::from(i32::MAX));
+        assert!(over >= 0, "clamped halves never set the sign bit");
+        assert_eq!(pack_x100(-5.0, f32::NAN), 0);
+        assert_eq!(pack_x100(1.234, 5.678), (123 << 32) | 568);
     }
 
     /// SPEC-6.3.1: scale 2 gives twice the physical pixels and the same logical layout.
@@ -76,7 +104,7 @@ mod tests {
         let mut t = TextEngine::new();
         let s = sans(&mut t, 20.0);
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         dl.rect(0.0, 0.0, 100.0, 50.0, 0.0, 0xFF00_00FF).unwrap();
         dl.rect(10.0, 10.0, 20.0, 20.0, 4.0, 0x0000_FFFF).unwrap();
         dl.text(10.0, 30.0, 80.0, s, b"Vy").unwrap();
@@ -103,7 +131,7 @@ mod tests {
         let mut t = TextEngine::new();
         let s = sans(&mut t, 16.0);
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         dl.text(0.0, 0.0, 200.0, s, "Hej från Vy – ﬁ".as_bytes())
             .unwrap();
         dl.end().unwrap();
@@ -148,7 +176,7 @@ mod tests {
     fn spec_6_1_3_paint_order_and_clip() {
         let mut t = TextEngine::new();
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0xFF00_00FF).unwrap();
         dl.clip_push(0.0, 0.0, 20.0, 40.0).unwrap();
         dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0x00FF_00FF).unwrap();
@@ -175,7 +203,7 @@ mod tests {
         use vy_dl::PathCmd;
         let mut t = TextEngine::new();
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         let tri = [
             PathCmd::MoveTo(0.0, 0.0),
             PathCmd::LineTo(40.0, 0.0),
@@ -376,7 +404,7 @@ mod tests {
         cache.decode(1).unwrap();
         let mut t = TextEngine::new();
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         // cover into 2x2 at (0,0): scaled 4x2, centred, cropped to columns 1..3 of the image
         dl.image(0.0, 0.0, 2.0, 2.0, 1, Fit::Cover).unwrap();
         // contain into 2x2 at (4,0): scaled 2x1, centred vertically
@@ -427,7 +455,7 @@ mod tests {
         let mut cache = ImageCache::new(vec![b"not a png".to_vec()]);
         assert!(cache.decode(1).is_err());
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         dl.image(0.0, 0.0, 2.0, 2.0, 1, Fit::Cover).unwrap();
         dl.end().unwrap();
         let mut bytes = dl.bytes().to_vec();
@@ -465,7 +493,7 @@ mod tests {
             assert_eq!(t.caret(s, &ltr, 1).unwrap().1, 0.0, "{sep:?}");
             assert!(t.caret(s, &ltr, after + 1).unwrap().0 > 0.0, "{sep:?}");
             let mut dl = DisplayList::new();
-            dl.begin();
+            dl.begin().unwrap();
             dl.text(0.0, 0.0, 100.0, s, txt.as_bytes()).unwrap();
             dl.end().unwrap();
             render(dl.bytes(), 100, 50, 1.0, &mut t).unwrap();
@@ -487,7 +515,7 @@ mod tests {
         for w in [1e30, f32::INFINITY, f32::NAN, text::MAX_COORD_PX * 2.0] {
             assert_eq!(t.measure(s, w, rtl).unwrap(), m, "max_w {w}");
             let mut dl = DisplayList::new();
-            dl.begin();
+            dl.begin().unwrap();
             dl.text(2.0, 2.0, w, s, rtl.as_bytes()).unwrap();
             dl.end().unwrap();
             render(dl.bytes(), 200, 30, 1.0, &mut t).unwrap();
@@ -498,7 +526,7 @@ mod tests {
             assert_eq!(y, 0.0);
         }
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         dl.text(2.0, 2.0, 0.0, s, rtl.as_bytes()).unwrap();
         dl.end().unwrap();
         let img = render(dl.bytes(), 200, 30, 1.0, &mut t).unwrap();
@@ -531,7 +559,7 @@ mod tests {
             f32::MAX,
         ] {
             let mut dl = DisplayList::new();
-            dl.begin();
+            dl.begin().unwrap();
             dl.rect(v, 0.0, 10.0, 10.0, 0.0, 0xFF).unwrap();
             dl.rect(0.0, 0.0, 10.0, 10.0, v, 0xFF).unwrap();
             dl.text(v, 0.0, 100.0, s, b"hej").unwrap();
@@ -578,7 +606,7 @@ mod tests {
         // The largest accepted magnitude, at the largest CLI scale, still renders.
         let m = raster::MAX_MAGNITUDE;
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         dl.rect(-m, -m, 2.0 * m, 2.0 * m, m, 0xFF).unwrap();
         dl.line(-m, -m, m, m, m, 0xFF).unwrap();
         dl.shadow(-m, -m, m, m, m, m, 0xFF).unwrap();

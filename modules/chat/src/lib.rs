@@ -291,9 +291,9 @@ impl ChatPage {
         }
         self.focused = focused;
         if focused {
-            ime_begin(self.field_rect());
+            let _ = ime_begin(self.field_rect());
         } else {
-            ime_end();
+            let _ = ime_end();
         }
         true
     }
@@ -512,7 +512,7 @@ impl App for ChatPage {
             let h = self.header();
             f.rect(h, 0.0, PANEL)?;
             f.rect(Rect::new(0.0, h.bottom() - 1.0, h.w, 1.0), 0.0, RULE)?;
-            let th = f.text(MARGIN, 10.0, h.w - 2.0 * MARGIN, self.title, TITLE)?;
+            let th = f.text(MARGIN, 10.0, h.w - 2.0 * MARGIN, self.title, TITLE)?.h;
             f.sem
                 .heading(Rect::new(MARGIN, 10.0, h.w - 2.0 * MARGIN, th), TITLE)?;
             let status = if self.offline.is_some() {
@@ -521,7 +521,7 @@ impl App for ChatPage {
                 format!("{MEMBERS} · ansluten")
             };
             let sy = 10.0 + th;
-            let sh = f.text(MARGIN, sy, h.w - 2.0 * MARGIN, self.subtitle, &status)?;
+            let sh = f.text(MARGIN, sy, h.w - 2.0 * MARGIN, self.subtitle, &status)?.h;
             f.sem
                 .text(Rect::new(MARGIN, sy, h.w - 2.0 * MARGIN, sh), &status)?;
 
@@ -631,7 +631,7 @@ impl App for ChatPage {
         self.relayout();
         if self.focused {
             // The composer moved; tell the host where composition happens now.
-            ime_begin(self.field_rect());
+            let _ = ime_begin(self.field_rect());
         }
     }
 }

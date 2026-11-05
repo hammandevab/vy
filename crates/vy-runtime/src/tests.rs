@@ -137,10 +137,10 @@ fn spec_5_3_1_denied_call_is_harmless() {
             (import "vy" "fetch_begin" (func $fetch_begin (param i32 i32 i32 i32 i32) (result i32)))
             (import "vy" "state_put" (func $state_put (param i32 i32 i32 i32) (result i32)))
             (import "vy" "clipboard_read" (func $clipboard_read (param i32 i32) (result i32)))
-            (import "vy" "navigate" (func $navigate (param i32 i32 i32)))
-            (import "vy" "dl_begin" (func $dl_begin))
-            (import "vy" "dl_end" (func $dl_end))
-            (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32)))
+            (import "vy" "navigate" (func $navigate (param i32 i32 i32) (result i32)))
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 0) "vy://example.test/")
             {INIT_OK}
@@ -149,10 +149,10 @@ fn spec_5_3_1_denied_call_is_harmless() {
                 (local.set $sum (call $fetch_begin (i32.const 0) (i32.const 0) (i32.const 18) (i32.const 0) (i32.const 0)))
                 (local.set $sum (i32.add (local.get $sum) (call $state_put (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 1))))
                 (local.set $sum (i32.add (local.get $sum) (call $clipboard_read (i32.const 0) (i32.const 16))))
-                (call $navigate (i32.const 0) (i32.const 18) (i32.const 0))
-                (call $dl_begin)
-                (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (f32.const 0) (i32.const 0))
-                (call $dl_end)
+                (drop (call $navigate (i32.const 0) (i32.const 18) (i32.const 0)))
+                (drop (call $dl_begin))
+                (drop (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (f32.const 0) (i32.const 0)))
+                (drop (call $dl_end))
                 local.get $sum)
             {STUBS})"#
     ));
@@ -186,7 +186,7 @@ fn spec_5_2_8_origin_gate() {
 fn budget_module() -> Vec<u8> {
     wasm(&format!(
         r#"(module
-            (import "vy" "log" (func $log (param i32 i32 i32)))
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 0) "budget")
             (data (i32.const 16) "suspend")
@@ -203,13 +203,13 @@ fn budget_module() -> Vec<u8> {
                 i32.const 0)
             (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
                 (if (i32.eq (local.get 0) (i32.const 31)) (then
-                    (call $log (i32.const 0) (i32.const 0) (i32.const 6))
+                    (drop (call $log (i32.const 0) (i32.const 0) (i32.const 6)))
                     (if (i32.eq (local.get 3) (i32.const 1)) (then
-                        (call $log (i32.const 0) (i32.const 32) (i32.const 5))))))
+                        (drop (call $log (i32.const 0) (i32.const 32) (i32.const 5)))))))
                 i32.const 0)
             (func (export "vy_resize") (param i32 i32 f32))
             (func (export "vy_suspend") (result i32)
-                (call $log (i32.const 0) (i32.const 16) (i32.const 7))
+                (drop (call $log (i32.const 0) (i32.const 16) (i32.const 7)))
                 i32.const 0)
             (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
     ))
@@ -273,10 +273,10 @@ fn host_work_module() -> Vec<u8> {
     let text = "a".repeat(limits::MAX_TEXT_BYTES as usize);
     wasm(&format!(
         r#"(module
-            (import "vy" "log" (func $log (param i32 i32 i32)))
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
             (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
             (import "vy" "text_measure" (func $text_measure (param i32 f32 i32 i32) (result i64)))
-            (import "vy" "random" (func $random (param i32 i32)))
+            (import "vy" "random" (func $random (param i32 i32) (result i32)))
             ;; page 0: the text; page 1: the log message; pages 2..: random
             (memory (export "memory") 34)
             (global $style (mut i32) (i32.const 0))
@@ -288,7 +288,7 @@ fn host_work_module() -> Vec<u8> {
             (func (export "vy_frame") (param i32) (result i32)
                 (local $i i32)
                 (if (i32.lt_s (local.get 0) (i32.const 0)) (then
-                    (call $random (i32.const 131072) (i32.sub (i32.const 0) (local.get 0)))
+                    (drop (call $random (i32.const 131072) (i32.sub (i32.const 0) (local.get 0))))
                     (return (i32.const 0))))
                 (local.set $i (local.get 0))
                 (block (loop
@@ -299,7 +299,7 @@ fn host_work_module() -> Vec<u8> {
                 i32.const 0)
             (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
                 (if (i32.eq (local.get 0) (i32.const 31)) (then
-                    (call $log (i32.const 0) (i32.const 65536) (i32.const 6))))
+                    (drop (call $log (i32.const 0) (i32.const 65536) (i32.const 6)))))
                 i32.const 0)
             (func (export "vy_resize") (param i32 i32 f32))
             (func (export "vy_suspend") (result i32) i32.const 0)
@@ -408,12 +408,12 @@ fn spec_5_3_4_no_callbacks() {
 fn drawing_module() -> Vec<u8> {
     wasm(&format!(
         r#"(module
-            (import "vy" "dl_begin" (func $dl_begin))
-            (import "vy" "dl_end" (func $dl_end))
-            (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32)))
-            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i32)))
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32) (result i32)))
+            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i64)))
             (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
-            (import "vy" "random" (func $random (param i32 i32)))
+            (import "vy" "random" (func $random (param i32 i32) (result i32)))
             (import "vy" "now_ms" (func $now_ms (result i64)))
             (memory (export "memory") 1)
             (global $style (mut i32) (i32.const 0))
@@ -422,16 +422,16 @@ fn drawing_module() -> Vec<u8> {
                 (global.set $style (call $text_style (i32.const -1) (f32.const 18) (i32.const 700) (i32.const 0x202020FF)))
                 i32.const 0)
             (func (export "vy_frame") (param i32) (result i32)
-                (call $random (i32.const 64) (i32.const 4))
-                (call $dl_begin)
-                (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 120) (f32.const 60) (f32.const 0) (i32.const 0xF0F0F0FF))
+                (drop (call $random (i32.const 64) (i32.const 4)))
+                (drop (call $dl_begin))
+                (drop (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 120) (f32.const 60) (f32.const 0) (i32.const 0xF0F0F0FF)))
                 ;; a rectangle placed by the random source and the clock
-                (call $dl_rect
+                (drop (call $dl_rect
                     (f32.convert_i32_u (i32.rem_u (i32.load8_u (i32.const 64)) (i32.const 40)))
                     (f32.convert_i64_s (i64.rem_s (call $now_ms) (i64.const 40)))
-                    (f32.const 10) (f32.const 10) (f32.const 2) (i32.const 0xFF0000FF))
+                    (f32.const 10) (f32.const 10) (f32.const 2) (i32.const 0xFF0000FF)))
                 (drop (call $dl_text (f32.const 4) (f32.const 30) (f32.const 110) (global.get $style) (i32.const 0) (i32.const 12)))
-                (call $dl_end)
+                (drop (call $dl_end))
                 i32.const 3)
             {STUBS})"#
     ))
@@ -520,32 +520,42 @@ fn spec_2_1_5_relaxed_simd_refused() {
     assert_eq!(rt.last_frame().ops_reported, 3);
 }
 
-/// SPEC-5.2.4, SPEC-6.4.3: dl_text returns the layout height times 100, and text_measure
-/// packs width and height the same way (SPEC-5.2.5).
+/// SPEC-5.2.4, SPEC-5.2.5, SPEC-6.4.3: `dl_text` returns the laid-out width
+/// × 100 in the high 32 bits and the height × 100 in the low ones, packed
+/// exactly like `text_measure`; wrapping at `w` raises the height and
+/// bounds the width, `w <= 0` wraps nothing, and a refused call is a
+/// negative `i64`.
 #[test]
-fn spec_5_2_4_dl_text_height() {
+fn spec_5_2_4_dl_text_size() {
     let bytes = wasm(
         r#"(module
-            (import "vy" "dl_begin" (func $dl_begin))
-            (import "vy" "dl_end" (func $dl_end))
-            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i32)))
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i64)))
             (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
             (import "vy" "text_measure" (func $text_measure (param i32 f32 i32 i32) (result i64)))
             (memory (export "memory") 1)
             (global $style (mut i32) (i32.const 0))
+            (global $last (mut i64) (i64.const 0))
             (data (i32.const 0) "ett två tre fyra fem sex sju åtta nio tio")
             (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
                 (global.set $style (call $text_style (i32.const -1) (f32.const 16) (i32.const 400) (i32.const 0)))
                 i32.const 0)
-            ;; dt_ms is used as the wrap width
+            ;; dt_ms is the wrap width; -1 asks for a bad style. Returns the low half.
             (func (export "vy_frame") (param i32) (result i32)
-                (local $h i32)
-                (call $dl_begin)
-                (local.set $h (call $dl_text (f32.const 0) (f32.const 0) (f32.convert_i32_s (local.get 0)) (global.get $style) (i32.const 0) (i32.const 46)))
-                (call $dl_end)
-                local.get $h)
-            ;; returns the low 32 bits of text_measure: height * 100
+                (drop (call $dl_begin))
+                (global.set $last (call $dl_text (f32.const 0) (f32.const 0) (f32.convert_i32_s (local.get 0))
+                    (if (result i32) (i32.lt_s (local.get 0) (i32.const 0)) (then (i32.const 99)) (else (global.get $style)))
+                    (i32.const 0) (i32.const 46)))
+                (drop (call $dl_end))
+                (i32.wrap_i64 (global.get $last)))
+            ;; kind 0: low half of text_measure at width b; kind 1: high half of the
+            ;; last dl_text; kind 2: 1 if the last dl_text was negative.
             (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 1)) (then
+                    (return (i32.wrap_i64 (i64.shr_u (global.get $last) (i64.const 32))))))
+                (if (i32.eq (local.get 0) (i32.const 2)) (then
+                    (return (i64.lt_s (global.get $last) (i64.const 0)))))
                 (i32.wrap_i64 (call $text_measure (global.get $style) (f32.convert_i32_s (local.get 1)) (i32.const 0) (i32.const 46))))
             (func (export "vy_resize") (param i32 i32 f32))
             (func (export "vy_suspend") (result i32) i32.const 0)
@@ -556,10 +566,23 @@ fn spec_5_2_4_dl_text_height() {
     rt.frame(1000).unwrap();
     let one_line = rt.last_frame().ops_reported;
     assert_eq!(one_line, 2000, "16 px * 1.25 line height * 100");
+    // The high half is the width: one line is wider than 100 px.
+    let r = rt.event(1, 0, 0, 0, 0);
+    assert!(matches!(r, Ok(false)), "{r:?}");
+    let wide_w = rt.last_event_result();
+    assert!(wide_w > 100 * 100, "width x100: {wide_w}");
+    assert!(!rt.event(2, 0, 0, 0, 0).unwrap(), "non-negative i64");
+
     rt.frame(100).unwrap();
     let wrapped = rt.last_frame().ops_reported;
     assert!(wrapped > one_line, "{wrapped} > {one_line}");
     assert_eq!(wrapped % 2000, 0);
+    rt.event(1, 0, 0, 0, 0).unwrap();
+    let narrow_w = rt.last_event_result();
+    assert!(
+        narrow_w <= 100 * 100 && narrow_w > 0,
+        "wrapped width x100: {narrow_w}"
+    );
     let dl = rt.frame(100).unwrap().to_vec();
     let ops = vy_dl::decode(&dl).unwrap();
     assert!(matches!(ops[0], vy_dl::Op::Text { max_w, .. } if max_w == 100.0));
@@ -570,7 +593,29 @@ fn spec_5_2_4_dl_text_height() {
         .text_engine_mut()
         .measure(1, 100.0, "ett två tre fyra fem sex sju åtta nio tio")
         .unwrap();
-    assert_eq!(vy_render::height_x100(m.h), wrapped);
+    assert_eq!(
+        vy_render::pack_x100(m.w, m.h),
+        ((i64::from(narrow_w)) << 32) | i64::from(wrapped)
+    );
+
+    // w <= 0: no wrapping, same as the wide layout (SPEC-6.4.3).
+    rt.frame(0).unwrap();
+    assert_eq!(rt.last_frame().ops_reported, one_line);
+    rt.event(1, 0, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), wide_w);
+
+    // A refused call is the status code sign-extended to i64: negative as a whole.
+    rt.frame(-1).unwrap();
+    assert_eq!(
+        rt.last_frame().ops_reported,
+        err::E_STYLE,
+        "low half is the code"
+    );
+    assert!(
+        rt.event(2, 0, 0, 0, 0).unwrap(),
+        "the whole i64 is negative"
+    );
+    assert!(host_logs(&rt).contains(&"dl_text: E_STYLE".to_string()));
 }
 
 /// SPEC-4.2.4, SPEC-8.1.3: memory may not grow past memory_max.
@@ -641,22 +686,22 @@ fn caps_module() -> Vec<u8> {
     let text = "a".repeat(limits::MAX_TEXT_BYTES as usize + 1);
     wasm(&format!(
         r#"(module
-            (import "vy" "log" (func $log (param i32 i32 i32)))
-            (import "vy" "dl_begin" (func $dl_begin))
-            (import "vy" "dl_end" (func $dl_end))
-            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i32)))
-            (import "vy" "dl_path" (func $dl_path (param i32 i32 i32 f32)))
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i64)))
+            (import "vy" "dl_path" (func $dl_path (param i32 i32 i32 f32) (result i32)))
             (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
             (import "vy" "text_measure" (func $text_measure (param i32 f32 i32 i32) (result i64)))
             (import "vy" "text_caret" (func $text_caret (param i32 i32 i32 i32) (result i64)))
-            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32)))
-            (import "vy" "link_register" (func $link_register (param i32 f32 f32 f32 f32 i32 i32)))
-            (import "vy" "navigate" (func $navigate (param i32 i32 i32)))
+            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32) (result i32)))
+            (import "vy" "link_register" (func $link_register (param i32 f32 f32 f32 f32 i32 i32) (result i32)))
+            (import "vy" "navigate" (func $navigate (param i32 i32 i32) (result i32)))
             (import "vy" "fetch_begin" (func $fetch_begin (param i32 i32 i32 i32 i32) (result i32)))
             (import "vy" "state_put" (func $state_put (param i32 i32 i32 i32) (result i32)))
             (import "vy" "state_get" (func $state_get (param i32 i32 i32 i32) (result i32)))
-            (import "vy" "state_delete" (func $state_delete (param i32 i32)))
-            (import "vy" "clipboard_write" (func $clipboard_write (param i32 i32)))
+            (import "vy" "state_delete" (func $state_delete (param i32 i32) (result i32)))
+            (import "vy" "clipboard_write" (func $clipboard_write (param i32 i32) (result i32)))
             ;; 17 pages: every oversized range below lies inside memory, so the
             ;; only reason to refuse it is the cap.
             (memory (export "memory") 17)
@@ -669,12 +714,12 @@ fn caps_module() -> Vec<u8> {
                 (local $r i32)
                 (block $done
                     (if (i32.eq (local.get $n) (i32.const 1)) (then
-                        (call $log (i32.const 0) (i32.const 0) (i32.const {log1}))
+                        (drop (call $log (i32.const 0) (i32.const 0) (i32.const {log1})))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 2)) (then
-                        (call $dl_begin)
-                        (local.set $r (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (i32.const {text1})))
-                        (call $dl_end)
+                        (drop (call $dl_begin))
+                        (local.set $r (i32.wrap_i64 (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (i32.const {text1}))))
+                        (drop (call $dl_end))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 3)) (then
                         (local.set $r (i32.wrap_i64 (call $text_measure (global.get $style) (f32.const 0) (i32.const 0) (i32.const {text1}))))
@@ -683,18 +728,18 @@ fn caps_module() -> Vec<u8> {
                         (local.set $r (i32.wrap_i64 (call $text_caret (global.get $style) (i32.const 0) (i32.const {text1}) (i32.const 0))))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 5)) (then
-                        (call $dl_begin)
-                        (call $dl_path (i32.const 0) (i32.const {path1}) (i32.const 0) (f32.const 0))
-                        (call $dl_end)
+                        (drop (call $dl_begin))
+                        (drop (call $dl_path (i32.const 0) (i32.const {path1}) (i32.const 0) (f32.const 0)))
+                        (drop (call $dl_end))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 6)) (then
-                        (call $sem_node (i32.const 1) (i32.const 0) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const {sem1}))
+                        (drop (call $sem_node (i32.const 1) (i32.const 0) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const {sem1})))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 7)) (then
-                        (call $link_register (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const {url1}))
+                        (drop (call $link_register (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const {url1})))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 8)) (then
-                        (call $navigate (i32.const 0) (i32.const {url1}) (i32.const 0))
+                        (drop (call $navigate (i32.const 0) (i32.const {url1}) (i32.const 0)))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 9)) (then
                         (local.set $r (call $fetch_begin (i32.const 0) (i32.const 0) (i32.const {url1}) (i32.const 0) (i32.const 0)))
@@ -712,16 +757,16 @@ fn caps_module() -> Vec<u8> {
                         (local.set $r (call $state_get (i32.const 0) (i32.const {key1}) (i32.const 0) (i32.const 0)))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 14)) (then
-                        (call $state_delete (i32.const 0) (i32.const {key1}))
+                        (drop (call $state_delete (i32.const 0) (i32.const {key1})))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 15)) (then
-                        (call $clipboard_write (i32.const 0) (i32.const {clip1}))
+                        (drop (call $clipboard_write (i32.const 0) (i32.const {clip1})))
                         (br $done)))
                     (if (i32.eq (local.get $n) (i32.const 20)) (then
-                        (call $log (i32.const 0) (i32.const 0) (i32.const {log0}))
-                        (call $dl_begin)
-                        (local.set $r (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (i32.const {text0})))
-                        (call $dl_end)
+                        (drop (call $log (i32.const 0) (i32.const 0) (i32.const {log0})))
+                        (drop (call $dl_begin))
+                        (local.set $r (i32.wrap_i64 (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (i32.const {text0}))))
+                        (drop (call $dl_end))
                         (br $done))))
                 local.get $r)
             (func (export "vy_frame") (param i32) (result i32) (call $case (local.get 0)))
@@ -859,38 +904,44 @@ fn spec_9_3_1_byte_caps_per_call() {
 }
 
 /// A module that builds the semantic tree and display list from `vy_event`:
-/// kind 0 adds `a` nodes with `b` bytes of text each, kind 1 draws two text
-/// runs of `a` and `b` bytes and returns the status of the first.
+/// kind 0 adds `a` nodes with `b` bytes of text each (ids from a running
+/// counter, so no two nodes of one frame share an id, SPEC-5.2.13), kind 1
+/// draws two text runs of `a` and `b` bytes and returns the status of the
+/// first.
 fn frame_caps_module() -> Vec<u8> {
     let text = "a".repeat(limits::MAX_SEM_TEXT_BYTES as usize);
     wasm(&format!(
         r#"(module
-            (import "vy" "dl_begin" (func $dl_begin))
-            (import "vy" "dl_end" (func $dl_end))
-            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i32)))
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "dl_text" (func $dl_text (param f32 f32 f32 i32 i32 i32) (result i64)))
             (import "vy" "text_style" (func $text_style (param i32 f32 i32 i32) (result i32)))
-            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32)))
+            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (global $style (mut i32) (i32.const 0))
+            (global $next (mut i32) (i32.const 1))
             (data (i32.const 0) "{text}")
             (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
                 (global.set $style (call $text_style (i32.const -1) (f32.const 16) (i32.const 400) (i32.const 0)))
                 i32.const 0)
-            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_frame") (param i32) (result i32)
+                (global.set $next (i32.const 1))
+                i32.const 0)
             (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
                 (local $i i32)
                 (local $r i32)
                 (if (i32.eq (local.get 0) (i32.const 0)) (then
                     (block (loop
                         (br_if 1 (i32.ge_s (local.get $i) (local.get 1)))
-                        (call $sem_node (local.get $i) (i32.const 0) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (local.get 2))
+                        (drop (call $sem_node (global.get $next) (i32.const 0) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (local.get 2)))
+                        (global.set $next (i32.add (global.get $next) (i32.const 1)))
                         (local.set $i (i32.add (local.get $i) (i32.const 1)))
                         (br 0)))))
                 (if (i32.eq (local.get 0) (i32.const 1)) (then
-                    (call $dl_begin)
-                    (local.set $r (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (local.get 1)))
+                    (drop (call $dl_begin))
+                    (local.set $r (i32.wrap_i64 (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (local.get 1))))
                     (drop (call $dl_text (f32.const 0) (f32.const 0) (f32.const 0) (global.get $style) (i32.const 0) (local.get 2)))
-                    (call $dl_end)))
+                    (drop (call $dl_end))))
                 local.get $r)
             (func (export "vy_resize") (param i32 i32 f32))
             (func (export "vy_suspend") (result i32) i32.const 0)
@@ -965,10 +1016,10 @@ fn spec_9_3_1_frame_caps() {
 fn spec_9_4_1_hash_mismatch_never_runs() {
     let bytes = wasm(&format!(
         r#"(module
-            (import "vy" "log" (func $log (param i32 i32 i32)))
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (start $boom)
-            (func $boom (call $log (i32.const 3) (i32.const 0) (i32.const 0)))
+            (func $boom (drop (call $log (i32.const 3) (i32.const 0) (i32.const 0))))
             {INIT_OK}
             (func (export "vy_frame") (param i32) (result i32) i32.const 0)
             {STUBS})"#
@@ -1012,16 +1063,16 @@ fn spec_9_5_1_per_origin_isolation() {
 fn spec_10_1_1_semantic_tree() {
     let bytes = wasm(&format!(
         r#"(module
-            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32)))
+            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 0) "Hej \"där\"")
             {INIT_OK}
             (func (export "vy_frame") (param i32) (result i32)
-                (call $sem_node (i32.const 1) (i32.const 0) (i32.const 15) (f32.const 0) (f32.const 0) (f32.const 100) (f32.const 50) (i32.const 0) (i32.const 0))
-                (call $sem_node (i32.const 2) (i32.const 1) (i32.const 2) (f32.const 4) (f32.const 4.5) (f32.const 90) (f32.const 20) (i32.const 0) (i32.const 10))
-                (call $sem_node (i32.const 3) (i32.const 1) (i32.const 25) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 0))
-                (call $sem_node (i32.const 4) (i32.const 1) (i32.const 0) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 0))
-                (call $sem_node (i32.const 5) (i32.const 1) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 65530) (i32.const 100))
+                (drop (call $sem_node (i32.const 1) (i32.const 0) (i32.const 15) (f32.const 0) (f32.const 0) (f32.const 100) (f32.const 50) (i32.const 0) (i32.const 0)))
+                (drop (call $sem_node (i32.const 2) (i32.const 1) (i32.const 2) (f32.const 4) (f32.const 4.5) (f32.const 90) (f32.const 20) (i32.const 0) (i32.const 10)))
+                (drop (call $sem_node (i32.const 3) (i32.const 1) (i32.const 25) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 0)))
+                (drop (call $sem_node (i32.const 4) (i32.const 1) (i32.const 0) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 0)))
+                (drop (call $sem_node (i32.const 5) (i32.const 1) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 65530) (i32.const 100)))
                 i32.const 0)
             {STUBS})"#
     ));
@@ -1100,13 +1151,13 @@ fn spec_5_2_11_time_resolution() {
 fn spec_5_1_6_text_input_via_alloc() {
     let bytes = wasm(&format!(
         r#"(module
-            (import "vy" "log" (func $log (param i32 i32 i32)))
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             {INIT_OK}
             (func (export "vy_frame") (param i32) (result i32) i32.const 0)
             (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
                 (if (i32.eq (local.get 0) (i32.const 7)) (then
-                    (call $log (i32.const 0) (local.get 1) (local.get 2))))
+                    (drop (call $log (i32.const 0) (local.get 1) (local.get 2)))))
                 i32.const 1)
             (func (export "vy_resize") (param i32 i32 f32))
             (func (export "vy_suspend") (result i32) i32.const 0)
@@ -1124,17 +1175,17 @@ fn spec_5_1_6_text_input_via_alloc() {
 fn image_module() -> Vec<u8> {
     wasm(&format!(
         r#"(module
-            (import "vy" "dl_begin" (func $dl_begin))
-            (import "vy" "dl_end" (func $dl_end))
-            (import "vy" "dl_image" (func $dl_image (param f32 f32 f32 f32 i32 i32)))
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "dl_image" (func $dl_image (param f32 f32 f32 f32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             {INIT_OK}
             (func (export "vy_frame") (param i32) (result i32)
-                (call $dl_begin)
-                (call $dl_image (f32.const 0) (f32.const 0) (f32.const 4) (f32.const 2)
+                (drop (call $dl_begin))
+                (drop (call $dl_image (f32.const 0) (f32.const 0) (f32.const 4) (f32.const 2)
                     (i32.div_s (local.get 0) (i32.const 10))
-                    (i32.rem_s (local.get 0) (i32.const 10)))
-                (call $dl_end)
+                    (i32.rem_s (local.get 0) (i32.const 10))))
+                (drop (call $dl_end))
                 i32.const 1)
             {STUBS})"#
     ))
@@ -1263,13 +1314,13 @@ fn spec_8_2_1_capabilities_from_names() {
 
     let bytes = wasm(&format!(
         r#"(module
-            (import "vy" "ime_begin" (func $ime_begin (param f32 f32 f32 f32)))
-            (import "vy" "ime_end" (func $ime_end))
+            (import "vy" "ime_begin" (func $ime_begin (param f32 f32 f32 f32) (result i32)))
+            (import "vy" "ime_end" (func $ime_end (result i32)))
             (memory (export "memory") 1)
             {INIT_OK}
             (func (export "vy_frame") (param i32) (result i32)
-                (call $ime_begin (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1))
-                (call $ime_end)
+                (drop (call $ime_begin (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1)))
+                (drop (call $ime_end))
                 i32.const 0)
             {STUBS})"#
     ));
@@ -1308,6 +1359,233 @@ fn spec_5_2_1_exit() {
     assert!(matches!(rt.frame(1), Err(Error::Exited(42))));
     assert_eq!(rt.exit_code(), Some(42));
     assert!(matches!(rt.frame(0), Err(Error::Exited(42))));
+}
+
+/// A module whose frame runs one import call selected by `dt_ms` and returns
+/// the status code the import gave back.
+fn status_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32) (result i32)))
+            (import "vy" "dl_image" (func $dl_image (param f32 f32 f32 f32 i32 i32) (result i32)))
+            (import "vy" "dl_path" (func $dl_path (param i32 i32 i32 f32) (result i32)))
+            (import "vy" "dl_clip_push" (func $dl_clip_push (param f32 f32 f32 f32) (result i32)))
+            (import "vy" "dl_clip_pop" (func $dl_clip_pop (result i32)))
+            (import "vy" "ime_begin" (func $ime_begin (param f32 f32 f32 f32) (result i32)))
+            (import "vy" "ime_end" (func $ime_end (result i32)))
+            (import "vy" "fetch_cancel" (func $fetch_cancel (param i32) (result i32)))
+            (import "vy" "state_delete" (func $state_delete (param i32 i32) (result i32)))
+            (import "vy" "navigate" (func $navigate (param i32 i32 i32) (result i32)))
+            (import "vy" "link_register" (func $link_register (param i32 f32 f32 f32 f32 i32 i32) (result i32)))
+            (import "vy" "random" (func $random (param i32 i32) (result i32)))
+            (import "vy" "clipboard_write" (func $clipboard_write (param i32 i32) (result i32)))
+            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "vy://example.test/")
+            (data (i32.const 32) "ftp://nej")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (local $r i32)
+                (block $done
+                    (if (i32.eq (local.get 0) (i32.const 1)) (then
+                        (local.set $r (call $log (i32.const 1) (i32.const 0) (i32.const 18))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 2)) (then
+                        (local.set $r (call $log (i32.const 1) (i32.const 0) (i32.const -1))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 3)) (then
+                        (local.set $r (call $dl_rect (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (f32.const 0) (i32.const 0))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 4)) (then
+                        (drop (call $dl_begin))
+                        (local.set $r (call $dl_begin))
+                        (drop (call $dl_end))
+                        (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 5)) (then
+                        (drop (call $dl_begin))
+                        (local.set $r (call $dl_clip_pop))
+                        (drop (call $dl_end))
+                        (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 6)) (then
+                        (drop (call $dl_begin))
+                        (drop (call $dl_clip_push (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1)))
+                        (local.set $r (call $dl_end))
+                        (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 7)) (then
+                        (drop (call $dl_begin))
+                        (local.set $r (call $dl_image (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 1) (i32.const 0)))
+                        (drop (call $dl_end))
+                        (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 8)) (then
+                        (drop (call $dl_begin))
+                        (local.set $r (call $dl_path (i32.const 0) (i32.const 5) (i32.const 0) (f32.const 0)))
+                        (drop (call $dl_end))
+                        (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 9)) (then
+                        (local.set $r (call $ime_begin (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 10)) (then
+                        (local.set $r (call $ime_end)) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 11)) (then
+                        (local.set $r (call $fetch_cancel (i32.const 1))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 12)) (then
+                        (local.set $r (call $state_delete (i32.const 0) (i32.const 1))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 13)) (then
+                        (local.set $r (call $navigate (i32.const 32) (i32.const 9) (i32.const 0))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 14)) (then
+                        (local.set $r (call $navigate (i32.const 0) (i32.const 18) (i32.const 0))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 15)) (then
+                        (local.set $r (call $link_register (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 18))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 16)) (then
+                        (local.set $r (call $random (i32.const 0) (i32.const 8))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 17)) (then
+                        (local.set $r (call $random (i32.const 65530) (i32.const 8))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 18)) (then
+                        (local.set $r (call $clipboard_write (i32.const 0) (i32.const 18))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 19)) (then
+                        (local.set $r (call $sem_node (i32.const 1) (i32.const 0) (i32.const 99) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 0))) (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 20)) (then
+                        (drop (call $sem_node (i32.const 7) (i32.const 0) (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 0)))
+                        (local.set $r (call $sem_node (i32.const 7) (i32.const 0) (i32.const 2) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 0)))
+                        (br $done)))
+                    (if (i32.eq (local.get 0) (i32.const 21)) (then
+                        (drop (call $dl_begin))
+                        (local.set $r (call $dl_end))
+                        (br $done))))
+                local.get $r)
+            {STUBS})"#
+    ))
+}
+
+/// SPEC-5.3.1, SPEC-5.3.2, SPEC-6.1.4, SPEC-5.2.1, SPEC-5.2.3, SPEC-5.2.6,
+/// SPEC-5.2.7, SPEC-5.2.9, SPEC-5.2.10, SPEC-5.2.11, SPEC-5.2.12,
+/// SPEC-5.2.13: every import that can refuse a call returns the status code
+/// of appendix A to the module, the same code the host logs, and `OK` when
+/// the call went through.
+#[test]
+fn spec_5_3_1_status_codes_reach_the_module() {
+    let cases: [(i32, &str, i32); 21] = [
+        (1, "log ok", err::OK),
+        (2, "log negative len", err::E_ARG),
+        (3, "dl_rect outside begin/end", err::E_DL_STATE),
+        (4, "dl_begin while open", err::E_DL_STATE),
+        (5, "dl_clip_pop without push", err::E_DL_CLIP),
+        (6, "dl_end with an open clip", err::E_DL_CLIP),
+        (7, "dl_image without resources", err::E_RESOURCE),
+        (8, "dl_path with 5 bytes", err::E_ARG),
+        (9, "ime_begin without ime", err::E_DENIED),
+        (10, "ime_end without ime", err::E_DENIED),
+        (11, "fetch_cancel without net", err::E_DENIED),
+        (12, "state_delete without storage", err::E_DENIED),
+        (13, "navigate ftp://", err::E_ARG),
+        (14, "navigate headless", err::E_DENIED),
+        (15, "link_register ok", err::OK),
+        (16, "random ok", err::OK),
+        (17, "random past memory", err::E_ARG),
+        (18, "clipboard_write without clipboard", err::E_DENIED),
+        (19, "sem_node bad role", err::E_ARG),
+        (20, "sem_node duplicate id", err::E_ARG),
+        (21, "dl_end ok", err::OK),
+    ];
+    let mut rt = load(&status_module());
+    rt.init(10, 10, 1.0).unwrap();
+    for (case, what, expect) in cases {
+        let before = rt.logs().len();
+        rt.frame(case).unwrap();
+        assert_eq!(rt.last_frame().ops_reported, expect, "case {case}: {what}");
+        let logged = rt.logs()[before..]
+            .iter()
+            .filter(|l| l.source == LogSource::Host)
+            .any(|l| l.message.contains(host::err_name(expect)));
+        assert_eq!(
+            logged,
+            expect != err::OK,
+            "case {case}: {what} logged as refused"
+        );
+    }
+    assert!(!rt.is_suspended());
+}
+
+/// SPEC-5.2.13: a node id already registered in the same frame is `E_ARG`
+/// and the second node is dropped; the next frame starts with a clean slate.
+#[test]
+fn spec_5_2_13_duplicate_node_id_refused() {
+    let mut rt = load(&status_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame(20).unwrap();
+    assert_eq!(rt.last_frame().ops_reported, err::E_ARG);
+    let tree = rt.semantic_tree();
+    assert_eq!(tree.len(), 1, "{tree:?}");
+    assert_eq!(
+        (tree[0].id, tree[0].role),
+        (7, vy_abi::role::TEXT),
+        "the first one stays"
+    );
+    assert_eq!(host_logs(&rt), vec!["sem_node: E_ARG"]);
+    rt.frame(20).unwrap();
+    assert_eq!(
+        rt.semantic_tree().len(),
+        1,
+        "a new frame, the same id is free again"
+    );
+}
+
+/// A module that registers `a` links with ids from `b` in `vy_event` and
+/// draws an empty frame in `vy_frame`.
+fn links_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "link_register" (func $link_register (param i32 f32 f32 f32 f32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "vy://example.test/")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (drop (call $dl_begin))
+                (drop (call $link_register (i32.const 1) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 18)))
+                (drop (call $dl_end))
+                i32.const 1)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (local $i i32)
+                (local $r i32)
+                (block (loop
+                    (br_if 1 (i32.ge_s (local.get $i) (local.get 1)))
+                    (local.set $r (call $link_register (i32.add (local.get 2) (local.get $i)) (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (i32.const 0) (i32.const 18)))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br 0)))
+                local.get $r)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ))
+}
+
+/// SPEC-5.2.10, SPEC-9.3.2: links live per frame: `dl_begin` empties the
+/// list, the same id in one frame replaces the earlier rectangle, and the
+/// 4 097th link of a frame is `E_DL_FULL`.
+#[test]
+fn spec_5_2_10_links_per_frame() {
+    let mut rt = load(&links_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame(0).unwrap();
+    assert_eq!(rt.links().len(), 1, "the frame's own link");
+    rt.event(0, 10, 100, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), err::OK);
+    assert_eq!(rt.links().len(), 11, "links from events add to the frame's");
+    rt.event(0, 1, 100, 0, 0).unwrap();
+    assert_eq!(rt.links().len(), 11, "same id replaces, never duplicates");
+    rt.frame(0).unwrap();
+    assert_eq!(rt.links().len(), 1, "dl_begin emptied the list");
+    let cap = host::MAX_LINKS_PER_FRAME as i32;
+    rt.event(0, cap - 1, 1000, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), err::OK);
+    assert_eq!(rt.links().len(), cap as usize);
+    rt.event(0, 1, 999_999, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), err::E_DL_FULL, "the 4 097th link");
+    assert_eq!(rt.links().len(), cap as usize);
+    assert_eq!(host_logs(&rt), vec!["link_register: E_DL_FULL"]);
+    rt.frame(0).unwrap();
+    assert_eq!(rt.links().len(), 1, "and the next frame is free again");
 }
 
 /// SPEC-2.1.6, SPEC-4.1.4: a trapping module is reported, not interpreted around.

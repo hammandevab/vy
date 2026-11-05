@@ -104,7 +104,7 @@ impl Column {
     /// return the rectangle it took (height from the host, SPEC-6.4.3).
     pub fn text(&mut self, f: &mut Frame, style: StyleId, text: &str) -> Result<Rect, VyError> {
         let y = self.cursor();
-        let h = f.text(self.x(), y, self.width(), style, text)?;
+        let h = f.text(self.x(), y, self.width(), style, text)?.h;
         Ok(self.next(h))
     }
 

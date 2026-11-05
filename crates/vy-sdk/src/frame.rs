@@ -6,12 +6,14 @@
 //! the 65 537th opcode is `DlFull` (SPEC-6.1.6), a 33rd clip push or a pop
 //! without push is `DlClip` (SPEC-6.1.4), text over 65 535 bytes and a path
 //! over 65 535 commands are `Arg` (SPEC-9.3.2). Nothing is sent to the host
-//! for a refused call.
+//! for a refused call, and a call the host refuses (every `dl_*` import
+//! returns its status, SPEC-5.2.3) is not counted as an opcode either, so
+//! `vy_frame` reports exactly what the list holds (SPEC-5.1.2).
 
-use crate::error::{check, VyError};
+use crate::error::{check, check64, VyError};
 use crate::raw::{self, pl};
 use crate::sem::Sem;
-use crate::{from_x100, Color, Rect, ResourceId, StyleId};
+use crate::{from_x100, Color, Rect, ResourceId, Size, StyleId};
 use alloc::vec::Vec;
 use vy_abi::limits;
 
@@ -101,10 +103,12 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// `dl_begin`: start a new display list (SPEC-6.1.2).
+    /// `dl_begin`: start a new display list (SPEC-6.1.2). The host refuses
+    /// a `dl_begin` while a list is open (SPEC-5.3.2), which a `Frame` built
+    /// by the export glue never does; the status is therefore not surfaced.
     pub fn begin() -> Self {
         // SAFETY: no arguments.
-        unsafe { raw::dl_begin() };
+        let _ = unsafe { raw::dl_begin() };
         Self {
             ops: 0,
             clip_depth: 0,
@@ -117,7 +121,7 @@ impl Frame {
     /// in which case the host closed the list anyway.
     pub fn end(self) -> Result<u32, VyError> {
         // SAFETY: no arguments.
-        unsafe { raw::dl_end() };
+        check(unsafe { raw::dl_end() })?;
         if self.clip_depth != 0 {
             return Err(VyError::DlClip);
         }
@@ -145,13 +149,14 @@ impl Frame {
     pub fn rect(&mut self, r: Rect, radius: f32, color: Color) -> Result<(), VyError> {
         self.slot()?;
         // SAFETY: no pointers.
-        unsafe { raw::dl_rect(r.x, r.y, r.w, r.h, radius, color.as_i32()) };
+        check(unsafe { raw::dl_rect(r.x, r.y, r.w, r.h, radius, color.as_i32()) })?;
         self.ops += 1;
         Ok(())
     }
 
     /// `dl_text`: shape and wrap `text` at `max_w` from `(x, y)`; returns the
-    /// laid-out height in logical pixels (SPEC-5.2.4, SPEC-6.4.3). `max_w <= 0`
+    /// laid-out width and height in logical pixels (SPEC-5.2.4, SPEC-6.4.3),
+    /// so the next element can follow on the same line or below. `max_w <= 0`
     /// means no wrapping.
     pub fn text(
         &mut self,
@@ -160,27 +165,31 @@ impl Frame {
         max_w: f32,
         style: StyleId,
         text: &str,
-    ) -> Result<f32, VyError> {
+    ) -> Result<Size, VyError> {
         self.slot()?;
         if text.len() > limits::MAX_TEXT_BYTES as usize {
             return Err(VyError::Arg);
         }
         let (p, l) = pl(text.as_bytes());
         // SAFETY: `p` is valid for `l` bytes during the call.
-        let h = check(unsafe { raw::dl_text(x, y, max_w, style.0, p, l) })?;
+        let packed = check64(unsafe { raw::dl_text(x, y, max_w, style.0, p, l) })?;
         self.ops += 1;
-        Ok(from_x100(h))
+        Ok(Size {
+            w: from_x100((packed >> 32) as i32),
+            h: from_x100(packed as i32),
+        })
     }
 
     /// `dl_image`: draw resource `id` fitted into `r` (SPEC-5.2.3). Id 0 is
-    /// the module itself and never an image (SPEC-4.5.1).
+    /// the module itself and never an image (SPEC-4.5.1); an id the package
+    /// has no image for is `Resource`.
     pub fn image(&mut self, r: Rect, id: ResourceId, fit: Fit) -> Result<(), VyError> {
         self.slot()?;
         if id.0 == 0 {
             return Err(VyError::Resource);
         }
         // SAFETY: no pointers.
-        unsafe { raw::dl_image(r.x, r.y, r.w, r.h, i32::from(id.0), fit as i32) };
+        check(unsafe { raw::dl_image(r.x, r.y, r.w, r.h, i32::from(id.0), fit as i32) })?;
         self.ops += 1;
         Ok(())
     }
@@ -193,7 +202,7 @@ impl Frame {
         }
         let (p, l) = pl(path.bytes());
         // SAFETY: `p` is valid for `l` bytes during the call.
-        unsafe { raw::dl_path(p, l, color.as_i32(), stroke_w) };
+        check(unsafe { raw::dl_path(p, l, color.as_i32(), stroke_w) })?;
         self.ops += 1;
         Ok(())
     }
@@ -206,7 +215,7 @@ impl Frame {
             return Err(VyError::DlClip);
         }
         // SAFETY: no pointers.
-        unsafe { raw::dl_clip_push(r.x, r.y, r.w, r.h) };
+        check(unsafe { raw::dl_clip_push(r.x, r.y, r.w, r.h) })?;
         self.clip_depth += 1;
         self.ops += 1;
         Ok(())
@@ -219,7 +228,7 @@ impl Frame {
             return Err(VyError::DlClip);
         }
         // SAFETY: no arguments.
-        unsafe { raw::dl_clip_pop() };
+        check(unsafe { raw::dl_clip_pop() })?;
         self.clip_depth -= 1;
         self.ops += 1;
         Ok(())

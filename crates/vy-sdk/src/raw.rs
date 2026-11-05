@@ -11,24 +11,24 @@ mod ffi {
     #[link(wasm_import_module = "vy")]
     extern "C" {
         pub fn abi_version() -> i32;
-        pub fn log(level: i32, ptr: *const u8, len: i32);
+        pub fn log(level: i32, ptr: *const u8, len: i32) -> i32;
         pub fn request_frame();
         pub fn exit(code: i32);
-        pub fn dl_begin();
-        pub fn dl_end();
-        pub fn dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32);
-        pub fn dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: *const u8, len: i32) -> i32;
-        pub fn dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32);
-        pub fn dl_path(ptr: *const u8, len: i32, color: i32, stroke_w: f32);
-        pub fn dl_clip_push(x: f32, y: f32, w: f32, h: f32);
-        pub fn dl_clip_pop();
+        pub fn dl_begin() -> i32;
+        pub fn dl_end() -> i32;
+        pub fn dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32) -> i32;
+        pub fn dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: *const u8, len: i32) -> i64;
+        pub fn dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32) -> i32;
+        pub fn dl_path(ptr: *const u8, len: i32, color: i32, stroke_w: f32) -> i32;
+        pub fn dl_clip_push(x: f32, y: f32, w: f32, h: f32) -> i32;
+        pub fn dl_clip_pop() -> i32;
         pub fn text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32;
         pub fn text_measure(style_id: i32, max_w: f32, ptr: *const u8, len: i32) -> i64;
         pub fn text_caret(style_id: i32, ptr: *const u8, len: i32, byte_offset: i32) -> i64;
         pub fn pointer_get() -> i64;
         pub fn key_down(code: i32) -> i32;
-        pub fn ime_begin(x: f32, y: f32, w: f32, h: f32);
-        pub fn ime_end();
+        pub fn ime_begin(x: f32, y: f32, w: f32, h: f32) -> i32;
+        pub fn ime_end() -> i32;
         pub fn fetch_begin(
             method: i32,
             url_ptr: *const u8,
@@ -38,12 +38,12 @@ mod ffi {
         ) -> i32;
         pub fn fetch_poll(req_id: i32) -> i32;
         pub fn fetch_read(req_id: i32, dst_ptr: *mut u8, max: i32) -> i32;
-        pub fn fetch_cancel(req_id: i32);
+        pub fn fetch_cancel(req_id: i32) -> i32;
         pub fn state_put(key_ptr: *const u8, key_len: i32, val_ptr: *const u8, val_len: i32)
             -> i32;
         pub fn state_get(key_ptr: *const u8, key_len: i32, dst_ptr: *mut u8, max: i32) -> i32;
-        pub fn state_delete(key_ptr: *const u8, key_len: i32);
-        pub fn navigate(url_ptr: *const u8, url_len: i32, replace: i32);
+        pub fn state_delete(key_ptr: *const u8, key_len: i32) -> i32;
+        pub fn navigate(url_ptr: *const u8, url_len: i32, replace: i32) -> i32;
         pub fn link_register(
             id: i32,
             x: f32,
@@ -52,11 +52,11 @@ mod ffi {
             h: f32,
             url_ptr: *const u8,
             url_len: i32,
-        );
+        ) -> i32;
         pub fn now_ms() -> i64;
-        pub fn random(dst_ptr: *mut u8, len: i32);
+        pub fn random(dst_ptr: *mut u8, len: i32) -> i32;
         pub fn clipboard_read(dst_ptr: *mut u8, max: i32) -> i32;
-        pub fn clipboard_write(ptr: *const u8, len: i32);
+        pub fn clipboard_write(ptr: *const u8, len: i32) -> i32;
         pub fn sem_node(
             id: i32,
             parent_id: i32,
@@ -67,7 +67,7 @@ mod ffi {
             h: f32,
             ptr: *const u8,
             len: i32,
-        );
+        ) -> i32;
     }
 }
 
@@ -99,7 +99,7 @@ mod ffi {
     pub unsafe fn abi_version() -> i32 {
         with(|h| h.abi_version())
     }
-    pub unsafe fn log(level: i32, ptr: *const u8, len: i32) {
+    pub unsafe fn log(level: i32, ptr: *const u8, len: i32) -> i32 {
         let b = bytes(ptr, len);
         with(|h| h.log(level, b))
     }
@@ -109,30 +109,30 @@ mod ffi {
     pub unsafe fn exit(code: i32) {
         with(|h| h.exit(code))
     }
-    pub unsafe fn dl_begin() {
+    pub unsafe fn dl_begin() -> i32 {
         with(|h| h.dl_begin())
     }
-    pub unsafe fn dl_end() {
+    pub unsafe fn dl_end() -> i32 {
         with(|h| h.dl_end())
     }
-    pub unsafe fn dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32) {
+    pub unsafe fn dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32) -> i32 {
         with(|m| m.dl_rect(x, y, w, h, radius, color))
     }
-    pub unsafe fn dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: *const u8, len: i32) -> i32 {
+    pub unsafe fn dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: *const u8, len: i32) -> i64 {
         let b = bytes(ptr, len);
         with(|m| m.dl_text(x, y, w, style_id, b))
     }
-    pub unsafe fn dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32) {
+    pub unsafe fn dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32) -> i32 {
         with(|m| m.dl_image(x, y, w, h, resource_id, fit))
     }
-    pub unsafe fn dl_path(ptr: *const u8, len: i32, color: i32, stroke_w: f32) {
+    pub unsafe fn dl_path(ptr: *const u8, len: i32, color: i32, stroke_w: f32) -> i32 {
         let b = bytes(ptr, len);
         with(|m| m.dl_path(b, color, stroke_w))
     }
-    pub unsafe fn dl_clip_push(x: f32, y: f32, w: f32, h: f32) {
+    pub unsafe fn dl_clip_push(x: f32, y: f32, w: f32, h: f32) -> i32 {
         with(|m| m.dl_clip_push(x, y, w, h))
     }
-    pub unsafe fn dl_clip_pop() {
+    pub unsafe fn dl_clip_pop() -> i32 {
         with(|m| m.dl_clip_pop())
     }
     pub unsafe fn text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32 {
@@ -152,10 +152,10 @@ mod ffi {
     pub unsafe fn key_down(code: i32) -> i32 {
         with(|m| m.key_down(code))
     }
-    pub unsafe fn ime_begin(x: f32, y: f32, w: f32, h: f32) {
+    pub unsafe fn ime_begin(x: f32, y: f32, w: f32, h: f32) -> i32 {
         with(|m| m.ime_begin(x, y, w, h))
     }
-    pub unsafe fn ime_end() {
+    pub unsafe fn ime_end() -> i32 {
         with(|m| m.ime_end())
     }
     pub unsafe fn fetch_begin(
@@ -175,7 +175,7 @@ mod ffi {
         let d = bytes_mut(dst_ptr, max);
         with(|m| m.fetch_read(req_id, d))
     }
-    pub unsafe fn fetch_cancel(req_id: i32) {
+    pub unsafe fn fetch_cancel(req_id: i32) -> i32 {
         with(|m| m.fetch_cancel(req_id))
     }
     pub unsafe fn state_put(
@@ -192,11 +192,11 @@ mod ffi {
         let d = bytes_mut(dst_ptr, max);
         with(|m| m.state_get(k, d))
     }
-    pub unsafe fn state_delete(key_ptr: *const u8, key_len: i32) {
+    pub unsafe fn state_delete(key_ptr: *const u8, key_len: i32) -> i32 {
         let k = bytes(key_ptr, key_len);
         with(|m| m.state_delete(k))
     }
-    pub unsafe fn navigate(url_ptr: *const u8, url_len: i32, replace: i32) {
+    pub unsafe fn navigate(url_ptr: *const u8, url_len: i32, replace: i32) -> i32 {
         let u = bytes(url_ptr, url_len);
         with(|m| m.navigate(u, replace))
     }
@@ -208,14 +208,14 @@ mod ffi {
         h: f32,
         url_ptr: *const u8,
         url_len: i32,
-    ) {
+    ) -> i32 {
         let u = bytes(url_ptr, url_len);
         with(|m| m.link_register(id, x, y, w, h, u))
     }
     pub unsafe fn now_ms() -> i64 {
         with(|m| m.now_ms())
     }
-    pub unsafe fn random(dst_ptr: *mut u8, len: i32) {
+    pub unsafe fn random(dst_ptr: *mut u8, len: i32) -> i32 {
         let d = bytes_mut(dst_ptr, len);
         with(|m| m.random(d))
     }
@@ -223,7 +223,7 @@ mod ffi {
         let d = bytes_mut(dst_ptr, max);
         with(|m| m.clipboard_read(d))
     }
-    pub unsafe fn clipboard_write(ptr: *const u8, len: i32) {
+    pub unsafe fn clipboard_write(ptr: *const u8, len: i32) -> i32 {
         let b = bytes(ptr, len);
         with(|m| m.clipboard_write(b))
     }
@@ -238,7 +238,7 @@ mod ffi {
         h: f32,
         ptr: *const u8,
         len: i32,
-    ) {
+    ) -> i32 {
         let b = bytes(ptr, len);
         with(|m| m.sem_node(id, parent_id, role, x, y, w, h, b))
     }

@@ -335,15 +335,12 @@ impl TextEngine {
     }
 }
 
-/// Pack a measurement as `text_measure` returns it: width × 100 in the high
-/// 32 bits, height × 100 in the low 32 bits (SPEC-5.2.5).
-pub fn pack_x100(w: f32, h: f32) -> i64 {
-    let hi = (w * 100.0).round().clamp(0.0, u32::MAX as f32) as u32;
-    let lo = (h * 100.0).round().clamp(0.0, u32::MAX as f32) as u32;
-    ((hi as i64) << 32) | (lo as i64)
-}
-
-/// Height × 100 as `dl_text` returns it (SPEC-5.2.4).
-pub fn height_x100(h: f32) -> i32 {
-    (h * 100.0).round().clamp(0.0, i32::MAX as f32) as i32
+/// Pack a measurement as `dl_text`, `text_measure` and `text_caret` return
+/// it: the first value × 100 in the high 32 bits, the second × 100 in the
+/// low 32 bits, each half clamped to `0..=2³¹ − 1`, so the whole value is
+/// never negative and a negative `i64` is always a status code
+/// (SPEC-5.2.4, SPEC-5.2.5).
+pub fn pack_x100(a: f32, b: f32) -> i64 {
+    let half = |v: f32| (f64::from(v) * 100.0).round().clamp(0.0, 2_147_483_647.0) as i64;
+    (half(a) << 32) | half(b)
 }

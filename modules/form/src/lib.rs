@@ -177,12 +177,12 @@ impl FormPage {
             return false;
         }
         if self.focus.is_some_and(Focus::is_field) {
-            ime_end();
+            let _ = ime_end();
         }
         self.focus = next;
         if let Some(f) = next.filter(|f| f.is_field()) {
             let l = self.layout();
-            ime_begin(if f == Focus::Name { l.name } else { l.email });
+            let _ = ime_begin(if f == Focus::Name { l.name } else { l.email });
         }
         true
     }
@@ -289,10 +289,10 @@ impl App for FormPage {
             let x = l.card.x + PAD;
             let w = l.card.w - 2.0 * PAD;
             let mut y = l.card.y + PAD;
-            let h = f.text(x, y, w, self.title, TITLE)?;
+            let h = f.text(x, y, w, self.title, TITLE)?.h;
             f.sem.heading(Rect::new(x, y, w, h), TITLE)?;
             y += h + GAP;
-            let h = f.text(x, y, w, self.help, HELP)?;
+            let h = f.text(x, y, w, self.help, HELP)?.h;
             f.sem.text(Rect::new(x, y, w, h), HELP)?;
 
             self.draw_field(f, l.name, Focus::Name)?;
@@ -348,7 +348,7 @@ impl App for FormPage {
             // Outcome.
             let my = l.submit.bottom() + 16.0;
             if let Some(e) = self.error_text {
-                let h = f.text(x, my, w, self.error, e)?;
+                let h = f.text(x, my, w, self.error, e)?.h;
                 f.sem.text(Rect::new(x, my, w, h), e)?;
             } else if self.submitted {
                 let msg = self.message();

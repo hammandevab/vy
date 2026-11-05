@@ -59,12 +59,17 @@ fn spec_5_2_all_imports_bound() {
     for name in BOUND {
         assert!(vy_abi::import(name).is_some(), "{name} is not an import");
     }
-    // The native stand-ins carry the ABI's Rust signatures.
-    let _: unsafe fn(i32, *const u8, i32) = crate::raw::log;
-    let _: unsafe fn(f32, f32, f32, i32, *const u8, i32) -> i32 = crate::raw::dl_text;
-    let _: unsafe fn(f32, f32, f32, f32, i32, i32) = crate::raw::dl_image;
+    // The native stand-ins carry the ABI's Rust signatures (SPEC-5.3.1:
+    // every fallible import returns its status).
+    let _: unsafe fn(i32, *const u8, i32) -> i32 = crate::raw::log;
+    let _: unsafe fn() -> i32 = crate::raw::dl_begin;
+    let _: unsafe fn(f32, f32, f32, i32, *const u8, i32) -> i64 = crate::raw::dl_text;
+    let _: unsafe fn(f32, f32, f32, f32, i32, i32) -> i32 = crate::raw::dl_image;
     let _: unsafe fn(i32, f32, *const u8, i32) -> i64 = crate::raw::text_measure;
-    let _: unsafe fn(i32, i32, i32, f32, f32, f32, f32, *const u8, i32) = crate::raw::sem_node;
+    type SemNodeFn = unsafe fn(i32, i32, i32, f32, f32, f32, f32, *const u8, i32) -> i32;
+    let _: SemNodeFn = crate::raw::sem_node;
+    let _: unsafe fn(f32, f32, f32, f32) -> i32 = crate::raw::ime_begin;
+    let _: unsafe fn(*mut u8, i32) -> i32 = crate::raw::random;
     mock::reset();
     assert_eq!(api::abi_version(), vy_abi::ABI_VERSION);
 }
@@ -123,7 +128,7 @@ impl App for TestApp {
         let area = Rect::new(0.0, 0.0, self.window.width, self.window.height);
         f.rect(area, 0.0, Color::rgb(255, 255, 255))?;
         f.group(Role::Main, area, "", |f| {
-            let h = f.text(10.0, 10.0, area.w - 20.0, s, "Hej")?;
+            let h = f.text(10.0, 10.0, area.w - 20.0, s, "Hej")?.h;
             f.sem
                 .heading(Rect::new(10.0, 10.0, area.w - 20.0, h), "Hej")?;
             Ok(())
@@ -527,21 +532,28 @@ fn spec_5_1_6_arena() {
 }
 
 /// SPEC-5.2.4, SPEC-5.2.5, SPEC-6.4.3: `Frame::text` returns the host's
-/// height in logical pixels and `text_measure` agrees; `Column::text`
-/// advances by that height and `Column`/`Row` do the arithmetic of padding
-/// and gap (SPEC-2.1.3: layout lives in the module).
+/// width and height in logical pixels, unpacked from the same `i64` layout
+/// as `text_measure`, which agrees; `max_w <= 0` wraps nothing;
+/// `Column::text` advances by that height and `Column`/`Row` do the
+/// arithmetic of padding and gap (SPEC-2.1.3: layout lives in the module).
 #[test]
-fn spec_5_2_4_text_height_and_layout() {
+fn spec_5_2_4_text_size_and_layout() {
     mock::reset();
     let s = style();
     let m = text_measure(s, 100.0, "ett två tre fyra").unwrap();
     assert_eq!(m.h, 40.0, "two lines of 16 px * 1.25 under the mock model");
     assert!(m.w <= 100.0);
     let mut f = Frame::begin();
+    assert_eq!(f.text(0.0, 0.0, 100.0, s, "ett två tre fyra").unwrap(), m);
+    let one_line = f.text(0.0, 0.0, 0.0, s, "ett två tre fyra").unwrap();
+    assert_eq!(one_line.h, 20.0, "no wrapping at max_w 0");
+    assert_eq!(one_line.w, 16.0 * 0.6 * 16.0);
     assert_eq!(
-        f.text(0.0, 0.0, 100.0, s, "ett två tre fyra").unwrap(),
-        40.0
+        f.text(0.0, 0.0, -5.0, s, "ett två tre fyra").unwrap(),
+        one_line
     );
+    assert_eq!(f.text(0.0, 0.0, 0.0, StyleId(42), "x"), Err(VyError::Style));
+    assert_eq!(f.ops(), 3, "a refused text is not counted");
 
     let mut col = Column::new(Rect::new(10.0, 20.0, 120.0, 400.0))
         .padding(10.0)
@@ -561,10 +573,10 @@ fn spec_5_2_4_text_height_and_layout() {
     assert_eq!(row.remaining(), 100.0 - 30.0 - 4.0);
     assert_eq!(row.fill(), Rect::new(54.0, 94.0, 66.0, 20.0));
     assert_eq!(row.remaining(), 0.0);
-    assert_eq!(f.end(), Ok(2), "the bare text and the column's text");
+    assert_eq!(f.end(), Ok(4), "three bare texts and the column's text");
     mock::with(|h| {
         assert!(
-            matches!(&h.frame_ops()[1], Op::Text { x, y, max_w, .. } if (*x, *y, *max_w) == (20.0, 30.0, 100.0))
+            matches!(&h.frame_ops()[3], Op::Text { x, y, max_w, .. } if (*x, *y, *max_w) == (20.0, 30.0, 100.0))
         );
     });
     assert_eq!(api::text_caret(s, "ab\ncd", 4).unwrap(), (9.6, 20.0));
@@ -674,20 +686,27 @@ fn spec_5_2_6_bindings_pass_through() {
     let mut buf = [0u8; 12];
     api::random(&mut buf).unwrap();
     assert_ne!(buf, [0u8; 12]);
-    api::ime_begin(Rect::new(1.0, 2.0, 3.0, 4.0));
+    assert_eq!(
+        api::ime_begin(Rect::new(1.0, 2.0, 3.0, 4.0)),
+        Err(VyError::Denied)
+    );
+    assert_eq!(api::ime_end(), Err(VyError::Denied));
     assert_eq!(api::state_put("k", b"v"), Err(VyError::Denied));
+    assert_eq!(api::state_delete("k"), Err(VyError::Denied));
     assert_eq!(api::clipboard_read(&mut buf), Err(VyError::Denied));
+    assert_eq!(api::clipboard_write("x"), Err(VyError::Denied));
     assert_eq!(api::fetch_poll(api::Request(1)), Err(VyError::Denied));
+    assert_eq!(api::fetch_cancel(api::Request(1)), Err(VyError::Denied));
     mock::with(|h| {
-        assert_eq!(h.refusals.len(), 4);
+        assert_eq!(h.refusals.len(), 8);
         h.refusals.clear();
         h.caps.ime = true;
         h.caps.storage = true;
         h.caps.clipboard = true;
     });
-    api::ime_begin(Rect::new(1.0, 2.0, 3.0, 4.0));
+    api::ime_begin(Rect::new(1.0, 2.0, 3.0, 4.0)).unwrap();
     mock::with(|h| assert_eq!(h.ime_rect, Some((1.0, 2.0, 3.0, 4.0))));
-    api::ime_end();
+    api::ime_end().unwrap();
     api::state_put("k", "värde".as_bytes()).unwrap();
     let mut small = [0u8; 3];
     assert_eq!(
@@ -714,6 +733,33 @@ fn spec_5_2_6_bindings_pass_through() {
         assert_eq!(h.frame_requests, 1);
         assert_eq!(h.exit_code, Some(3));
     });
+}
+
+/// SPEC-5.2.13, SPEC-5.2.10: a node id used twice in one frame is refused
+/// as `Arg` and not counted, like the host does; links are forgotten at
+/// `dl_begin` and the same id replaces the earlier rectangle.
+#[test]
+fn spec_5_2_13_duplicate_ids_and_links_per_frame() {
+    mock::reset();
+    let r = Rect::new(0.0, 0.0, 1.0, 1.0);
+    let mut f = Frame::begin();
+    f.sem.node_with_id(5, Role::Button, r, "a").unwrap();
+    assert_eq!(
+        f.sem.node_with_id(5, Role::Button, r, "b"),
+        Err(VyError::Arg)
+    );
+    assert_eq!(f.sem.count(), 1);
+    api::link_register(1, r, "vy://x/").unwrap();
+    api::link_register(1, r, "vy://y/").unwrap();
+    mock::with(|h| {
+        assert_eq!(h.links.len(), 1);
+        assert_eq!(h.links[0].5, "vy://y/");
+        assert_eq!(h.refusals, ["sem_node: E_ARG"]);
+    });
+    f.end().unwrap();
+    let f = Frame::begin();
+    mock::with(|h| assert!(h.links.is_empty(), "dl_begin forgets the links"));
+    assert_eq!(f.end(), Ok(0));
 }
 
 /// A memory source over a static arena for testing the heap natively.

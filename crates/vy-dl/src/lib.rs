@@ -160,13 +160,20 @@ impl DisplayList {
     }
 
     /// `dl_begin`: discard the previous frame and start a new list (SPEC-6.1.2).
-    pub fn begin(&mut self) {
+    ///
+    /// Returns `E_DL_STATE` when a list is already open; that list is left
+    /// as it is (SPEC-5.3.2).
+    pub fn begin(&mut self) -> Result<(), i32> {
+        if self.open {
+            return Err(err::E_DL_STATE);
+        }
         self.buf.clear();
         self.ops = 0;
         self.clip_depth = 0;
         self.shadows = 0;
         self.text_bytes = 0;
         self.open = true;
+        Ok(())
     }
 
     /// `dl_end`: write `END` and close the list.
@@ -600,7 +607,7 @@ mod tests {
 
     fn open() -> DisplayList {
         let mut dl = DisplayList::new();
-        dl.begin();
+        dl.begin().unwrap();
         dl
     }
 
@@ -681,14 +688,18 @@ mod tests {
         );
     }
 
-    /// SPEC-5.3.2: dl_* outside begin/end is E_DL_STATE and ignored.
+    /// SPEC-5.3.2: dl_* outside begin/end is E_DL_STATE and ignored; a second
+    /// begin inside an open list is E_DL_STATE too and leaves the list alone.
     #[test]
     fn spec_5_3_2_calls_outside_begin_end() {
         let mut dl = DisplayList::new();
         assert_eq!(dl.rect(0.0, 0.0, 1.0, 1.0, 0.0, 0), Err(err::E_DL_STATE));
         assert_eq!(dl.end(), Err(err::E_DL_STATE));
         assert!(dl.bytes().is_empty());
-        dl.begin();
+        dl.begin().unwrap();
+        dl.rect(0.0, 0.0, 1.0, 1.0, 0.0, 0).unwrap();
+        assert_eq!(dl.begin(), Err(err::E_DL_STATE));
+        assert_eq!(dl.op_count(), 1, "the open list is kept");
         dl.end().unwrap();
         assert_eq!(dl.clip_pop(), Err(err::E_DL_STATE));
     }
@@ -699,7 +710,7 @@ mod tests {
         let mut dl = open();
         dl.rect(0.0, 0.0, 1.0, 1.0, 0.0, 0).unwrap();
         dl.end().unwrap();
-        dl.begin();
+        dl.begin().unwrap();
         assert!(dl.bytes().is_empty());
         assert_eq!(dl.op_count(), 0);
     }
@@ -787,7 +798,7 @@ mod tests {
         dl.text(0.0, 0.0, 1.0, 1, &max).unwrap();
         assert_eq!(dl.text_bytes(), 3 + 8 + usize::from(u16::MAX));
         dl.end().unwrap();
-        dl.begin();
+        dl.begin().unwrap();
         assert_eq!(dl.text_bytes(), 0);
     }
 

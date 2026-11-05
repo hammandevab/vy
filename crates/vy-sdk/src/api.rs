@@ -3,8 +3,9 @@
 //!
 //! Lengths are checked against `vy_abi::limits` before the call (SPEC-9.3.2),
 //! so an over-long string is `Err(VyError::Arg)` here and never reaches the
-//! host. Imports that return nothing cannot report refusals; the host logs
-//! them.
+//! host. Every import that can refuse a call returns its status code
+//! (SPEC-5.3.1), which these bindings turn into `Err`; the host logs the
+//! refusal as well.
 
 use crate::error::{check, check64, VyError};
 use crate::raw::{self, pl};
@@ -63,8 +64,7 @@ pub fn abi_version() -> i32 {
 pub fn log(level: Level, message: &str) -> Result<(), VyError> {
     let (p, l) = capped(message.as_bytes(), limits::MAX_LOG_BYTES)?;
     // SAFETY: `p` is valid for `l` bytes for the duration of the call.
-    unsafe { raw::log(level as i32, p, l) };
-    Ok(())
+    check(unsafe { raw::log(level as i32, p, l) }).map(|_| ())
 }
 
 /// `request_frame`: ask for a `vy_frame` outside events and window changes
@@ -129,16 +129,17 @@ pub fn key_down(code: i32) -> bool {
     unsafe { raw::key_down(code) != 0 }
 }
 
-/// `ime_begin`: start text composition over `rect` (SPEC-5.2.6; capability `ime`).
-pub fn ime_begin(rect: Rect) {
+/// `ime_begin`: start text composition over `rect` (SPEC-5.2.6; capability
+/// `ime`, else `Denied`).
+pub fn ime_begin(rect: Rect) -> Result<(), VyError> {
     // SAFETY: no pointers.
-    unsafe { raw::ime_begin(rect.x, rect.y, rect.w, rect.h) }
+    check(unsafe { raw::ime_begin(rect.x, rect.y, rect.w, rect.h) }).map(|_| ())
 }
 
-/// `ime_end`: end text composition (SPEC-5.2.6; capability `ime`).
-pub fn ime_end() {
+/// `ime_end`: end text composition (SPEC-5.2.6; capability `ime`, else `Denied`).
+pub fn ime_end() -> Result<(), VyError> {
     // SAFETY: no arguments.
-    unsafe { raw::ime_end() }
+    check(unsafe { raw::ime_end() }).map(|_| ())
 }
 
 /// `fetch_begin` (SPEC-5.2.7; capability `net`). URL over 2 KB or body over
@@ -164,10 +165,11 @@ pub fn fetch_read(req: Request, dst: &mut [u8]) -> Result<usize, VyError> {
     check(unsafe { raw::fetch_read(req.0, dst.as_mut_ptr(), max) }).map(|n| n as usize)
 }
 
-/// `fetch_cancel` (SPEC-5.2.7).
-pub fn fetch_cancel(req: Request) {
+/// `fetch_cancel`: drop a request and the response body the host holds for
+/// it (SPEC-5.2.7).
+pub fn fetch_cancel(req: Request) -> Result<(), VyError> {
     // SAFETY: no pointers.
-    unsafe { raw::fetch_cancel(req.0) }
+    check(unsafe { raw::fetch_cancel(req.0) }).map(|_| ())
 }
 
 /// `state_put` (SPEC-5.2.9; capability `storage`). Key over 256 bytes or
@@ -180,7 +182,8 @@ pub fn state_put(key: &str, value: &[u8]) -> Result<(), VyError> {
 }
 
 /// `state_get`: copy a value into `dst`; returns the value's full length,
-/// which may exceed `dst.len()` (SPEC-5.2.9).
+/// which may exceed `dst.len()`; a key with no value is `Resource`
+/// (SPEC-5.2.9).
 pub fn state_get(key: &str, dst: &mut [u8]) -> Result<usize, VyError> {
     let (kp, kl) = capped(key.as_bytes(), limits::MAX_STATE_KEY_BYTES)?;
     let max = len_i32(dst.len())?;
@@ -192,8 +195,7 @@ pub fn state_get(key: &str, dst: &mut [u8]) -> Result<usize, VyError> {
 pub fn state_delete(key: &str) -> Result<(), VyError> {
     let (kp, kl) = capped(key.as_bytes(), limits::MAX_STATE_KEY_BYTES)?;
     // SAFETY: `kp` is valid for `kl` bytes during the call.
-    unsafe { raw::state_delete(kp, kl) };
-    Ok(())
+    check(unsafe { raw::state_delete(kp, kl) }).map(|_| ())
 }
 
 /// `navigate` to a `vy://` or `https://` address (SPEC-5.2.10); `replace`
@@ -204,16 +206,17 @@ pub fn navigate(url: &str, replace: bool) -> Result<(), VyError> {
     }
     let (p, l) = capped(url.as_bytes(), limits::MAX_URL_BYTES)?;
     // SAFETY: `p` is valid for `l` bytes during the call.
-    unsafe { raw::navigate(p, l, i32::from(replace)) };
-    Ok(())
+    check(unsafe { raw::navigate(p, l, i32::from(replace)) }).map(|_| ())
 }
 
-/// `link_register`: tell the host that `rect` opens `url` (SPEC-5.2.10).
+/// `link_register`: tell the host that `rect` opens `url` for the current
+/// frame (SPEC-5.2.10); `dl_begin` forgets every link, so a page registers
+/// its links while it draws. The same `id` twice in a frame replaces the
+/// rectangle; the 4 097th link of a frame is `DlFull` (SPEC-9.3.2).
 pub fn link_register(id: i32, rect: Rect, url: &str) -> Result<(), VyError> {
     let (p, l) = capped(url.as_bytes(), limits::MAX_URL_BYTES)?;
     // SAFETY: `p` is valid for `l` bytes during the call.
-    unsafe { raw::link_register(id, rect.x, rect.y, rect.w, rect.h, p, l) };
-    Ok(())
+    check(unsafe { raw::link_register(id, rect.x, rect.y, rect.w, rect.h, p, l) }).map(|_| ())
 }
 
 /// `now_ms`: the host's monotonic clock (SPEC-5.2.11).
@@ -226,8 +229,7 @@ pub fn now_ms() -> i64 {
 pub fn random(dst: &mut [u8]) -> Result<(), VyError> {
     let len = len_i32(dst.len())?;
     // SAFETY: `dst` is valid for `len` bytes during the call.
-    unsafe { raw::random(dst.as_mut_ptr(), len) };
-    Ok(())
+    check(unsafe { raw::random(dst.as_mut_ptr(), len) }).map(|_| ())
 }
 
 /// `clipboard_read`: copy the clipboard into `dst`; returns its full length
@@ -242,6 +244,5 @@ pub fn clipboard_read(dst: &mut [u8]) -> Result<usize, VyError> {
 pub fn clipboard_write(text: &str) -> Result<(), VyError> {
     let (p, l) = capped(text.as_bytes(), limits::MAX_CLIPBOARD_BYTES)?;
     // SAFETY: `p` is valid for `l` bytes during the call.
-    unsafe { raw::clipboard_write(p, l) };
-    Ok(())
+    check(unsafe { raw::clipboard_write(p, l) }).map(|_| ())
 }

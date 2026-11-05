@@ -380,11 +380,11 @@ impl ShopPage {
             } else {
                 format!("{CART} ({})", self.count_label())
             };
-            let h = f.text(x, y, w, self.heading, &heading)?;
+            let h = f.text(x, y, w, self.heading, &heading)?.h;
             f.sem.heading(Rect::new(x, y, w, h), &heading)?;
             y += 24.0 + 12.0;
             if self.count() == 0 {
-                let h = f.text(x, y, w, self.muted, EMPTY)?;
+                let h = f.text(x, y, w, self.muted, EMPTY)?.h;
                 f.sem.text(Rect::new(x, y, w, h), EMPTY)?;
                 y += ROW_H;
             } else {
@@ -538,12 +538,12 @@ impl App for ShopPage {
                 self.window.width - 2.0 * MARGIN,
                 self.title,
                 TITLE,
-            )?;
+            )?.h;
             f.sem.heading(
                 Rect::new(MARGIN, 12.0, self.window.width - 2.0 * MARGIN, th),
                 TITLE,
             )?;
-            let sh = f.text(MARGIN, 12.0 + th, 0.0, self.subtitle, SUBTITLE)?;
+            let sh = f.text(MARGIN, 12.0 + th, 0.0, self.subtitle, SUBTITLE)?.h;
             f.sem.text(
                 Rect::new(MARGIN, 12.0 + th, self.window.width - 2.0 * MARGIN, sh),
                 SUBTITLE,

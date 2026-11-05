@@ -678,10 +678,10 @@ impl App for SettingsPage {
             f.group(Role::Main, Rect::new(x, 0.0, w, l.content_h), "", |f| {
                 let s = self.styles();
                 let ty = MARGIN - self.scroll;
-                let th = f.text(x, ty, w, s.title, TITLE)?;
+                let th = f.text(x, ty, w, s.title, TITLE)?.h;
                 f.sem.heading(Rect::new(x, ty, w, th), TITLE)?;
                 let status = self.status_text();
-                let sh = f.text(x, ty + th + 4.0, w, s.status, &status)?;
+                let sh = f.text(x, ty + th + 4.0, w, s.status, &status)?.h;
                 f.sem.text(Rect::new(x, ty + th + 4.0, w, sh), &status)?;
 
                 for (c, card) in l.card.iter().enumerate() {
@@ -689,8 +689,9 @@ impl App for SettingsPage {
                     f.group(Role::Region, *card, SECTIONS[c], |f| {
                         let s = self.styles();
                         let hy = card.y + PAD;
-                        let hh =
-                            f.text(card.x + PAD, hy, card.w - 2.0 * PAD, s.heading, SECTIONS[c])?;
+                        let hh = f
+                            .text(card.x + PAD, hy, card.w - 2.0 * PAD, s.heading, SECTIONS[c])?
+                            .h;
                         f.sem.heading(
                             Rect::new(card.x + PAD, hy, card.w - 2.0 * PAD, hh),
                             SECTIONS[c],
@@ -721,7 +722,7 @@ impl App for SettingsPage {
                                     l.preview.w,
                                     s.preview[self.values.size as usize],
                                     PREVIEW,
-                                )?;
+                                )?.h;
                                 f.sem.text(
                                     Rect::new(l.preview.x, l.preview.y, l.preview.w, ph),
                                     PREVIEW,
@@ -759,7 +760,7 @@ impl App for SettingsPage {
                 self.node_ids[Control::Reset.index()] = id.0;
 
                 let note = "Ändringar sparas direkt via state_put; vy_suspend sparar en gång till.";
-                let nh = f.text(x, l.status_y, w, s.status, note)?;
+                let nh = f.text(x, l.status_y, w, s.status, note)?.h;
                 f.sem.text(Rect::new(x, l.status_y, w, nh), note)?;
                 Ok(())
             })

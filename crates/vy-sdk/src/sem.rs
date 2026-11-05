@@ -5,9 +5,10 @@
 //! parents, and refuses locally what the host would: the 65 537th node is
 //! `DlFull` and a text over 4 KB is `Arg` (SPEC-9.3.2). Ids are stable across
 //! frames as long as the draw order is, which is what `KIND_FOCUS` events
-//! rely on (SPEC-10.3.1).
+//! rely on (SPEC-10.3.1). An id used twice in one frame is refused by the
+//! host as `Arg` (SPEC-5.2.13) and surfaces here as `Err`.
 
-use crate::error::VyError;
+use crate::error::{check, VyError};
 use crate::raw::{self, pl};
 use crate::Rect;
 use alloc::vec::Vec;
@@ -127,7 +128,7 @@ impl Sem {
         }
         let (p, l) = pl(text.as_bytes());
         // SAFETY: `p` is valid for `l` bytes during the call.
-        unsafe {
+        check(unsafe {
             raw::sem_node(
                 id,
                 self.parent(),
@@ -139,7 +140,7 @@ impl Sem {
                 p,
                 l,
             )
-        };
+        })?;
         self.count += 1;
         self.next_id = self.next_id.max(id.saturating_add(1));
         Ok(NodeId(id))

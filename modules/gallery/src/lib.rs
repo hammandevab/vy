@@ -350,7 +350,7 @@ impl App for GalleryPage {
                 0.0,
                 LINE,
             )?;
-            let h = f.text(MARGIN, 18.0, 200.0, self.header, TITLE)?;
+            let h = f.text(MARGIN, 18.0, 200.0, self.header, TITLE)?.h;
             f.sem.heading(Rect::new(MARGIN, 18.0, 200.0, h), TITLE)?;
             let sub = format!(
                 "{} bilder · cover, contain och stretch i tur och ordning · klicka för att öppna",

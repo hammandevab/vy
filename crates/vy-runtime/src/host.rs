@@ -22,7 +22,7 @@
 use crate::FUEL_PER_HOST_BYTE;
 use vy_abi::{cap, err, fit, limits, ABI_VERSION};
 use vy_dl::DisplayList;
-use vy_render::{height_x100, pack_x100, ImageCache, TextEngine};
+use vy_render::{pack_x100, ImageCache, TextEngine};
 use wasmtime::{Caller, Linker, Memory, StoreLimits, Trap};
 
 /// Milliseconds the headless clock advances per completed frame.
@@ -31,8 +31,9 @@ pub const HEADLESS_FRAME_MS: i64 = 16;
 pub const HEADLESS_RANDOM_SEED: u64 = 0x5EED_5EED_0000_0001;
 /// Upper bound on retained log entries per instance.
 pub const MAX_LOG_ENTRIES: usize = 10_000;
-/// Upper bound on registered links.
-pub const MAX_LINKS: usize = 4_096;
+/// Upper bound on links registered in one frame (SPEC-9.3.2); the list is
+/// emptied by every `dl_begin` (SPEC-5.2.10).
+pub const MAX_LINKS_PER_FRAME: usize = 4_096;
 
 /// Capabilities granted to the instance (SPEC-8.2.1). All false by default:
 /// the headless host grants only what the caller names (`vy-cli render
@@ -227,6 +228,12 @@ impl Host {
             "{name}: E_DENIED (capability `{capability}` not granted)"
         ));
         err::E_DENIED
+    }
+
+    /// Log a refusal and return its status code.
+    fn refuse(&mut self, name: &str, fault: &Fault) -> i32 {
+        self.report(name, fault);
+        fault.code()
     }
 
     fn report(&mut self, name: &str, fault: &Fault) {
@@ -427,15 +434,16 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "log",
-        |mut c: Caller<'_, Host>, level: i32, ptr: i32, len: i32| -> wasmtime::Result<()> {
+        |mut c: Caller<'_, Host>, level: i32, ptr: i32, len: i32| -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 match slice(data, ptr, len, "message", limits::MAX_LOG_BYTES) {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(bytes).into_owned();
                         host.charge(text.len());
                         host.log(LogSource::Module, level, text);
+                        err::OK
                     }
-                    Err(fault) => host.report("log", &fault),
+                    Err(fault) => host.refuse("log", &fault),
                 }
             })
         },
@@ -451,20 +459,31 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "dl_begin",
-        |mut c: Caller<'_, Host>| -> wasmtime::Result<()> {
-            with_host(&mut c, |host| host.dl.begin())
+        |mut c: Caller<'_, Host>| -> wasmtime::Result<i32> {
+            with_host(&mut c, |host| {
+                // A new list also starts a new link set (SPEC-5.2.10).
+                match host.dl.begin() {
+                    Ok(()) => {
+                        host.links.clear();
+                        err::OK
+                    }
+                    Err(code) => host.refuse("dl_begin", &code.into()),
+                }
+            })
         },
     )?;
     linker.func_wrap(
         m,
         "dl_end",
-        |mut c: Caller<'_, Host>| -> wasmtime::Result<()> {
+        |mut c: Caller<'_, Host>| -> wasmtime::Result<i32> {
             with_host(&mut c, |host| {
                 let before = host.dl.bytes().len();
-                if let Err(code) = host.dl.end() {
-                    host.report("dl_end", &code.into());
-                }
+                let code = match host.dl.end() {
+                    Ok(()) => err::OK,
+                    Err(code) => host.refuse("dl_end", &code.into()),
+                };
                 host.charge(host.dl.bytes().len().saturating_sub(before));
+                code
             })
         },
     )?;
@@ -478,13 +497,15 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          h: f32,
          radius: f32,
          color: i32|
-         -> wasmtime::Result<()> {
+         -> wasmtime::Result<i32> {
             with_host(&mut c, |host| {
                 let before = host.dl.bytes().len();
-                if let Err(code) = host.dl.rect(x, y, w, h, radius, color as u32) {
-                    host.report("dl_rect", &code.into());
-                }
+                let code = match host.dl.rect(x, y, w, h, radius, color as u32) {
+                    Ok(()) => err::OK,
+                    Err(code) => host.refuse("dl_rect", &code.into()),
+                };
                 host.charge(host.dl.bytes().len().saturating_sub(before));
+                code
             })
         },
     )?;
@@ -498,7 +519,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          style_id: i32,
          ptr: i32,
          len: i32|
-         -> wasmtime::Result<i32> {
+         -> wasmtime::Result<i64> {
             with_memory(&mut c, |data, host| {
                 let before = host.dl.bytes().len();
                 let result = (|| {
@@ -519,15 +540,13 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     host.charge(text.len());
                     let size = host.text.measure(sid, w, &text)?;
                     host.dl.text(x, y, w, sid, text.as_bytes())?;
-                    Ok(height_x100(size.h))
+                    // Width and height packed like `text_measure` (SPEC-5.2.4, SPEC-5.2.5).
+                    Ok(pack_x100(size.w, size.h))
                 })();
                 host.charge(host.dl.bytes().len().saturating_sub(before));
                 match result {
-                    Ok(h) => h,
-                    Err(fault) => {
-                        host.report("dl_text", &fault);
-                        fault.code()
-                    }
+                    Ok(packed) => packed,
+                    Err(fault) => i64::from(host.refuse("dl_text", &fault)),
                 }
             })
         },
@@ -542,7 +561,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          h: f32,
          resource_id: i32,
          fit_mode: i32|
-         -> wasmtime::Result<()> {
+         -> wasmtime::Result<i32> {
             with_host(&mut c, |host| {
                 let before = host.dl.bytes().len();
                 let result = (|| {
@@ -575,10 +594,12 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     host.dl.image(x, y, w, h, id, fit_mode)?;
                     Ok(())
                 })();
-                if let Err(fault) = result {
-                    host.report("dl_image", &fault);
-                }
+                let code = match result {
+                    Ok(()) => err::OK,
+                    Err(fault) => host.refuse("dl_image", &fault),
+                };
                 host.charge(host.dl.bytes().len().saturating_sub(before));
+                code
             })
         },
     )?;
@@ -590,7 +611,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          len: i32,
          color: i32,
          stroke_w: f32|
-         -> wasmtime::Result<()> {
+         -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 let before = host.dl.bytes().len();
                 let result = (|| {
@@ -605,8 +626,9 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     Ok(())
                 })();
                 host.charge(host.dl.bytes().len().saturating_sub(before));
-                if let Err(fault) = result {
-                    host.report("dl_path", &fault);
+                match result {
+                    Ok(()) => err::OK,
+                    Err(fault) => host.refuse("dl_path", &fault),
                 }
             })
         },
@@ -614,26 +636,30 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "dl_clip_push",
-        |mut c: Caller<'_, Host>, x: f32, y: f32, w: f32, h: f32| -> wasmtime::Result<()> {
+        |mut c: Caller<'_, Host>, x: f32, y: f32, w: f32, h: f32| -> wasmtime::Result<i32> {
             with_host(&mut c, |host| {
                 let before = host.dl.bytes().len();
-                if let Err(code) = host.dl.clip_push(x, y, w, h) {
-                    host.report("dl_clip_push", &code.into());
-                }
+                let code = match host.dl.clip_push(x, y, w, h) {
+                    Ok(()) => err::OK,
+                    Err(code) => host.refuse("dl_clip_push", &code.into()),
+                };
                 host.charge(host.dl.bytes().len().saturating_sub(before));
+                code
             })
         },
     )?;
     linker.func_wrap(
         m,
         "dl_clip_pop",
-        |mut c: Caller<'_, Host>| -> wasmtime::Result<()> {
+        |mut c: Caller<'_, Host>| -> wasmtime::Result<i32> {
             with_host(&mut c, |host| {
                 let before = host.dl.bytes().len();
-                if let Err(code) = host.dl.clip_pop() {
-                    host.report("dl_clip_pop", &code.into());
-                }
+                let code = match host.dl.clip_pop() {
+                    Ok(()) => err::OK,
+                    Err(code) => host.refuse("dl_clip_pop", &code.into()),
+                };
                 host.charge(host.dl.bytes().len().saturating_sub(before));
+                code
             })
         },
     )?;
@@ -735,21 +761,23 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "ime_begin",
-        |mut c: Caller<'_, Host>, x: f32, y: f32, w: f32, h: f32| {
+        |mut c: Caller<'_, Host>, x: f32, y: f32, w: f32, h: f32| -> i32 {
             let host = c.data_mut();
             if host.caps.ime {
                 host.ime_rect = Some((x, y, w, h));
+                err::OK
             } else {
-                host.denied("ime_begin", "ime");
+                host.denied("ime_begin", "ime")
             }
         },
     )?;
-    linker.func_wrap(m, "ime_end", |mut c: Caller<'_, Host>| {
+    linker.func_wrap(m, "ime_end", |mut c: Caller<'_, Host>| -> i32 {
         let host = c.data_mut();
         if host.caps.ime {
             host.ime_rect = None;
+            err::OK
         } else {
-            host.denied("ime_end", "ime");
+            host.denied("ime_end", "ime")
         }
     })?;
 
@@ -806,8 +834,8 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "fetch_cancel",
-        |mut c: Caller<'_, Host>, _req_id: i32| {
-            c.data_mut().denied("fetch_cancel", "net");
+        |mut c: Caller<'_, Host>, _req_id: i32| -> i32 {
+            c.data_mut().denied("fetch_cancel", "net")
         },
     )?;
 
@@ -872,17 +900,14 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "state_delete",
-        |mut c: Caller<'_, Host>, key_ptr: i32, key_len: i32| -> wasmtime::Result<()> {
+        |mut c: Caller<'_, Host>, key_ptr: i32, key_len: i32| -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 if !host.caps.storage {
-                    host.denied("state_delete", "storage");
-                    return;
+                    return host.denied("state_delete", "storage");
                 }
                 match slice(data, key_ptr, key_len, "key", limits::MAX_STATE_KEY_BYTES) {
-                    Err(fault) => host.report("state_delete", &fault),
-                    Ok(_) => {
-                        host.denied("state_delete", "storage (headless host)");
-                    }
+                    Err(fault) => host.refuse("state_delete", &fault),
+                    Ok(_) => host.denied("state_delete", "storage (headless host)"),
                 }
             })
         },
@@ -896,18 +921,18 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          url_ptr: i32,
          url_len: i32,
          _replace: i32|
-         -> wasmtime::Result<()> {
+         -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 match string(data, url_ptr, url_len, "url", limits::MAX_URL_BYTES) {
                     Ok(url) => {
                         host.charge(url.len());
                         if url.starts_with("vy://") || url.starts_with("https://") {
-                            host.denied("navigate", "navigation (headless host)");
+                            host.denied("navigate", "navigation (headless host)")
                         } else {
-                            host.report("navigate", &err::E_ARG.into());
+                            host.refuse("navigate", &err::E_ARG.into())
                         }
                     }
-                    Err(fault) => host.report("navigate", &fault),
+                    Err(fault) => host.refuse("navigate", &fault),
                 }
             })
         },
@@ -923,7 +948,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          h: f32,
          url_ptr: i32,
          url_len: i32|
-         -> wasmtime::Result<()> {
+         -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 match string(data, url_ptr, url_len, "url", limits::MAX_URL_BYTES) {
                     Ok(url) => {
@@ -938,13 +963,15 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                         };
                         if let Some(slot) = host.links.iter_mut().find(|l| l.id == id) {
                             *slot = link;
-                        } else if host.links.len() < MAX_LINKS {
+                            err::OK
+                        } else if host.links.len() < MAX_LINKS_PER_FRAME {
                             host.links.push(link);
+                            err::OK
                         } else {
-                            host.report("link_register", &err::E_QUOTA.into());
+                            host.refuse("link_register", &err::E_DL_FULL.into())
                         }
                     }
-                    Err(fault) => host.report("link_register", &fault),
+                    Err(fault) => host.refuse("link_register", &fault),
                 }
             })
         },
@@ -957,25 +984,24 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "random",
-        |mut c: Caller<'_, Host>, dst_ptr: i32, len: i32| -> wasmtime::Result<()> {
+        |mut c: Caller<'_, Host>, dst_ptr: i32, len: i32| -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 if dst_ptr < 0 || len < 0 {
-                    host.report("random", &err::E_ARG.into());
-                    return;
+                    return host.refuse("random", &err::E_ARG.into());
                 }
                 let (start, len) = (dst_ptr as usize, len as usize);
                 let Some(dst) = start
                     .checked_add(len)
                     .and_then(|end| data.get_mut(start..end))
                 else {
-                    host.report("random", &err::E_ARG.into());
-                    return;
+                    return host.refuse("random", &err::E_ARG.into());
                 };
                 host.charge(len);
                 for chunk in dst.chunks_mut(8) {
                     let bytes = host.next_random().to_le_bytes();
                     chunk.copy_from_slice(&bytes[..chunk.len()]);
                 }
+                err::OK
             })
         },
     )?;
@@ -991,17 +1017,14 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "clipboard_write",
-        |mut c: Caller<'_, Host>, ptr: i32, len: i32| -> wasmtime::Result<()> {
+        |mut c: Caller<'_, Host>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 if !host.caps.clipboard {
-                    host.denied("clipboard_write", "clipboard");
-                    return;
+                    return host.denied("clipboard_write", "clipboard");
                 }
                 match slice(data, ptr, len, "text", limits::MAX_CLIPBOARD_BYTES) {
-                    Err(fault) => host.report("clipboard_write", &fault),
-                    Ok(_) => {
-                        host.denied("clipboard_write", "clipboard (headless host)");
-                    }
+                    Err(fault) => host.refuse("clipboard_write", &fault),
+                    Ok(_) => host.denied("clipboard_write", "clipboard (headless host)"),
                 }
             })
         },
@@ -1021,7 +1044,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
          h: f32,
          ptr: i32,
          len: i32|
-         -> wasmtime::Result<()> {
+         -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 let result = (|| {
                     if vy_abi::role::name(role).is_none() {
@@ -1029,6 +1052,10 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     }
                     if host.sem.len() >= limits::MAX_SEM_NODES_PER_FRAME as usize {
                         return Err(Fault::Code(err::E_DL_FULL));
+                    }
+                    // One node per id and frame (SPEC-5.2.13).
+                    if host.sem.iter().any(|n| n.id == id) {
+                        return Err(Fault::Code(err::E_ARG));
                     }
                     let text = if len == 0 {
                         String::new()
@@ -1051,7 +1078,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     Ok(())
                 })();
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => err::OK,
                     // A full tree is reported once per frame, like the first
                     // dropped opcode is what matters (SPEC-6.1.6).
                     Err(Fault::Code(err::E_DL_FULL)) => {
@@ -1059,8 +1086,9 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                             host.sem_full_logged = true;
                             host.report("sem_node", &err::E_DL_FULL.into());
                         }
+                        err::E_DL_FULL
                     }
-                    Err(fault) => host.report("sem_node", &fault),
+                    Err(fault) => host.refuse("sem_node", &fault),
                 }
             })
         },

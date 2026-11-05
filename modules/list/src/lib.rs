@@ -297,7 +297,7 @@ impl ListPage {
             let x = card.x + DIALOG_PAD;
             let w = card.w - 2.0 * DIALOG_PAD;
             let mut y = card.y + DIALOG_PAD;
-            let h = f.text(x, y, w, self.dialog_title, &heading)?;
+            let h = f.text(x, y, w, self.dialog_title, &heading)?.h;
             f.sem.heading(Rect::new(x, y, w, h), &heading)?;
             y += h + 16.0;
             let value = row.value();
@@ -315,7 +315,7 @@ impl ListPage {
                 y += 24.0;
             }
             y += 12.0;
-            let h = f.text(x, y, w, self.body, DESCRIPTION)?;
+            let h = f.text(x, y, w, self.body, DESCRIPTION)?.h;
             f.sem.text(Rect::new(x, y, w, h), DESCRIPTION)?;
             f.rect(button, 6.0, ACCENT)?;
             let tw = text_measure(self.button, 0.0, "Stäng")?.w;
@@ -374,12 +374,12 @@ impl App for ListPage {
                 self.window.width - 2.0 * PAD,
                 self.header,
                 "Fakturor",
-            )?;
+            )?.h;
             f.sem.heading(Rect::new(PAD, 18.0, 200.0, h), "Fakturor")?;
             let count = format!("{ROWS} poster · rad {}", self.selected + 1);
             let cw = text_measure(self.count, 0.0, &count)?.w;
             let cx = self.window.width - PAD - cw;
-            let ch = f.text(cx, 25.0, 0.0, self.count, &count)?;
+            let ch = f.text(cx, 25.0, 0.0, self.count, &count)?.h;
             f.sem.text(Rect::new(cx, 25.0, cw, ch), &count)?;
 
             // The rows on screen, clipped to the viewport (SPEC-6.1.4).

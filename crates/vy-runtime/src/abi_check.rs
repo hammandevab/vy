@@ -252,8 +252,8 @@ mod tests {
 
     const GOOD: &str = r#"
         (module
-          (import "vy" "dl_begin" (func))
-          (import "vy" "dl_rect" (func (param f32 f32 f32 f32 f32 i32)))
+          (import "vy" "dl_begin" (func (result i32)))
+          (import "vy" "dl_rect" (func (param f32 f32 f32 f32 f32 i32) (result i32)))
           (memory (export "memory") 1 16)
           (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
           (func (export "vy_frame") (param i32) (result i32) i32.const 0)
@@ -343,8 +343,8 @@ mod tests {
     #[test]
     fn spec_4_2_2_foreign_namespace_fails() {
         let wat = GOOD.replace(
-            r#"(import "vy" "dl_begin" (func))"#,
-            r#"(import "env" "dl_begin" (func))"#,
+            r#"(import "vy" "dl_begin" (func (result i32)))"#,
+            r#"(import "env" "dl_begin" (func (result i32)))"#,
         );
         let r = check_abi_bytes(&wasm(&wat)).unwrap();
         assert!(
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn spec_4_2_3_wasi_import_fails() {
         let wat = GOOD.replace(
-            r#"(import "vy" "dl_begin" (func))"#,
+            r#"(import "vy" "dl_begin" (func (result i32)))"#,
             r#"(import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32)))"#,
         );
         let r = check_abi_bytes(&wasm(&wat)).unwrap();
@@ -368,8 +368,8 @@ mod tests {
     #[test]
     fn spec_5_2_3_wrong_import_signature_fails() {
         let wat = GOOD.replace(
+            r#"(import "vy" "dl_rect" (func (param f32 f32 f32 f32 f32 i32) (result i32)))"#,
             r#"(import "vy" "dl_rect" (func (param f32 f32 f32 f32 f32 i32)))"#,
-            r#"(import "vy" "dl_rect" (func (param f32 f32 f32 f32 i32)))"#,
         );
         let r = check_abi_bytes(&wasm(&wat)).unwrap();
         assert!(

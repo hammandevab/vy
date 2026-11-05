@@ -387,7 +387,7 @@ pub const IMPORTS: &[Sig] = &[
     Sig {
         name: "log",
         params: &[I32, I32, I32],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "request_frame",
@@ -403,42 +403,42 @@ pub const IMPORTS: &[Sig] = &[
     Sig {
         name: "dl_begin",
         params: &[],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "dl_end",
         params: &[],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "dl_rect",
         params: &[F32, F32, F32, F32, F32, I32],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "dl_text",
         params: &[F32, F32, F32, I32, I32, I32],
-        result: Some(I32),
+        result: Some(I64),
     },
     Sig {
         name: "dl_image",
         params: &[F32, F32, F32, F32, I32, I32],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "dl_path",
         params: &[I32, I32, I32, F32],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "dl_clip_push",
         params: &[F32, F32, F32, F32],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "dl_clip_pop",
         params: &[],
-        result: None,
+        result: Some(I32),
     },
     // text (SPEC-5.2.5)
     Sig {
@@ -470,12 +470,12 @@ pub const IMPORTS: &[Sig] = &[
     Sig {
         name: "ime_begin",
         params: &[F32, F32, F32, F32],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "ime_end",
         params: &[],
-        result: None,
+        result: Some(I32),
     },
     // network (SPEC-5.2.7)
     Sig {
@@ -496,7 +496,7 @@ pub const IMPORTS: &[Sig] = &[
     Sig {
         name: "fetch_cancel",
         params: &[I32],
-        result: None,
+        result: Some(I32),
     },
     // storage (SPEC-5.2.9)
     Sig {
@@ -512,18 +512,18 @@ pub const IMPORTS: &[Sig] = &[
     Sig {
         name: "state_delete",
         params: &[I32, I32],
-        result: None,
+        result: Some(I32),
     },
     // navigation (SPEC-5.2.10)
     Sig {
         name: "navigate",
         params: &[I32, I32, I32],
-        result: None,
+        result: Some(I32),
     },
     Sig {
         name: "link_register",
         params: &[I32, F32, F32, F32, F32, I32, I32],
-        result: None,
+        result: Some(I32),
     },
     // time and randomness (SPEC-5.2.11)
     Sig {
@@ -534,7 +534,7 @@ pub const IMPORTS: &[Sig] = &[
     Sig {
         name: "random",
         params: &[I32, I32],
-        result: None,
+        result: Some(I32),
     },
     // clipboard (SPEC-5.2.12)
     Sig {
@@ -545,13 +545,13 @@ pub const IMPORTS: &[Sig] = &[
     Sig {
         name: "clipboard_write",
         params: &[I32, I32],
-        result: None,
+        result: Some(I32),
     },
     // semantics (SPEC-5.2.13)
     Sig {
         name: "sem_node",
         params: &[I32, I32, I32, F32, F32, F32, F32, I32, I32],
-        result: None,
+        result: Some(I32),
     },
 ];
 
@@ -682,6 +682,23 @@ mod tests {
         }
     }
 
+    /// SPEC-5.3.1, SPEC-5.3.2, SPEC-6.1.4, SPEC-A.1.1: every import that has
+    /// an error path in appendix A returns a status (`i32`, or `i64` for the
+    /// text measurements); only `request_frame` and `exit`, which cannot
+    /// fail, return nothing.
+    #[test]
+    fn spec_5_3_1_fallible_imports_return_status() {
+        for s in IMPORTS {
+            match s.name {
+                "request_frame" | "exit" => assert_eq!(s.result, None, "{}", s.name),
+                "text_measure" | "text_caret" | "dl_text" | "now_ms" | "pointer_get" => {
+                    assert_eq!(s.result, Some(I64), "{}", s.name)
+                }
+                _ => assert_eq!(s.result, Some(I32), "{} returns a status", s.name),
+            }
+        }
+    }
+
     /// SPEC-A.1.1: error code values are fixed.
     #[test]
     fn spec_a_1_1_error_codes_fixed() {
@@ -700,7 +717,7 @@ mod tests {
     fn spec_5_2_3_image_fit_modes() {
         let s = import("dl_image").unwrap();
         assert_eq!(s.params, &[F32, F32, F32, F32, I32, I32]);
-        assert_eq!(s.result, None);
+        assert_eq!(s.result, Some(I32));
         assert_eq!(fit::COVER, 0);
         assert_eq!(fit::CONTAIN, 1);
         assert_eq!(fit::STRETCH, 2);

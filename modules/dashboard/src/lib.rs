@@ -523,9 +523,9 @@ impl App for Dashboard {
         f.rect(window, 0.0, SURFACE)?;
         f.group(Role::Main, window, "", |f| {
             let w = self.window.width - 2.0 * MARGIN;
-            let h = f.text(MARGIN, MARGIN, w, self.title, TITLE)?;
+            let h = f.text(MARGIN, MARGIN, w, self.title, TITLE)?.h;
             f.sem.heading(Rect::new(MARGIN, MARGIN, w, h), TITLE)?;
-            let sh = f.text(MARGIN, MARGIN + 32.0, w, self.subtitle, SUBTITLE)?;
+            let sh = f.text(MARGIN, MARGIN + 32.0, w, self.subtitle, SUBTITLE)?.h;
             f.sem
                 .text(Rect::new(MARGIN, MARGIN + 32.0, w, sh), SUBTITLE)?;
             f.group(

@@ -210,6 +210,7 @@ pub struct Runtime {
     budget_streak: u32,
     frames: u64,
     last_frame: FrameStats,
+    last_event: i32,
 }
 
 impl Runtime {
@@ -276,6 +277,7 @@ impl Runtime {
                 ops_reported: 0,
                 over_budget: false,
             },
+            last_event: 0,
         })
     }
 
@@ -386,6 +388,16 @@ impl Runtime {
             let host = self.host_mut();
             host.wants_frame = false;
             host.clear_sem();
+            // A list left open by an earlier export is closed here, so the
+            // frame's own `dl_begin` always starts fresh (SPEC-6.1.2).
+            if host.dl.is_open() {
+                host.log(
+                    LogSource::Host,
+                    2,
+                    "display list left open before vy_frame; list closed by host".into(),
+                );
+                let _ = host.dl.end();
+            }
         }
         let frame = self.exports.frame.clone();
         let outcome = self.call(&frame, dt_ms);
@@ -470,11 +482,18 @@ impl Runtime {
         }
         let ev = self.exports.event.clone();
         let (r, _) = self.call(&ev, (kind, a, b, c, d)).map_err(|(e, _)| e)?;
+        self.last_event = r;
         let redraw = r == 1;
         if redraw {
             self.host_mut().wants_frame = true;
         }
         Ok(redraw)
+    }
+
+    /// The raw value the last `vy_event` returned (1 asks for a redraw,
+    /// SPEC-5.1.3; anything else is the module's own business).
+    pub fn last_event_result(&self) -> i32 {
+        self.last_event
     }
 
     /// Deliver committed text as `TEXT_INPUT`: the bytes are written into
@@ -551,7 +570,8 @@ impl Runtime {
         &self.host().sem
     }
 
-    /// Links registered so far.
+    /// Links registered since the last `dl_begin` (SPEC-5.2.10): the links
+    /// of the last frame, plus any registered from events after it.
     pub fn links(&self) -> &[Link] {
         &self.host().links
     }
