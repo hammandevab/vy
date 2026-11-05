@@ -1,8 +1,149 @@
 # Byggnoteringar
 
 Skrivna av byggagenten. Granskningssidorna skrivs av en annan agent (`docs/reviews/`).
-M3:s första del står först, sedan M2.6, M2.5, M2 och M1; äldre delar är oförändrade utom där
-senare milstolpar ändrat läget (markerat).
+M2.7 (luckorna före frysen, efter granskning 0003) står först, sedan M3:s första del, M2.6, M2.5,
+M2 och M1; äldre delar är oförändrade utom där senare milstolpar ändrat läget (markerat).
+
+# M2.7 – sista luckorna före frys
+
+Granskning 0003 (`docs/reviews/0003-m3-del1-abi-frys.md`) är genomförd i de delar som pekade på
+byggagenten: avsnittet *ABI-frysning: inte klar* (sju tal och tre returvärden), fynd 4
+(rasterbudget), fynd 6 (`HttpCache`-tak, typsäkra beviljanden) och fynd 7 (manifestets schema).
+Tio commits (denna inräknad), varje `spec:`-commit med sina tester. Specens version- och statusrad är orörd –
+specägaren fryser. `docs/ABI-1.0.md` är omgenererad och är grind som förr.
+
+## De sju talen och tre returvärdena (SPEC-5.3.5)
+
+| | Spec | `vy-abi` | Värden |
+| --- | --- | --- | --- |
+| (i) `fetch_begin.method` | SPEC-5.2.7: 0 GET, 1 POST, 2 PUT, 3 DELETE; annat `E_ARG` utan anrop | `method` | kontrolleras efter capability-grinden, före bytetaken |
+| (ii) `log.level` | SPEC-5.2.1: 0 debug, 1 info, 2 warn, 3 error; annat loggas som 3 | `level`, `level::clamp` | klampar; anropet lyckas |
+| (iii) pekarknappar | **ny mening SPEC-A.2.2** med tabell: `POINTER_DOWN/UP.c` 1 primär, 2 sekundär, 3 mitten, 4 bakåt, 5 framåt; `POINTER_MOVE.c` mask med bit n − 1 | `button`, `button::mask` | skalets sak; runnern tar `PRIMARY` som standard |
+| (iv) `text_style.weight` | SPEC-5.2.5: 1–1000 som i CSS; klampas; närmaste snitt, tyngre vid lika | `weight::{MIN, MAX, NORMAL, BOLD, clamp, nearest}` | `vy-render` väljer snittet själv (tabellen nedan); vikt 0 ger inte längre `E_ARG` |
+| (v) typsnittsroller | SPEC-6.4.2 namnger id: −1 sans … −5 emoji | `font` | `vy-render` och SDK:ts `Font` läser konstanterna |
+| (vi) länkar per frame | SPEC-9.3.2 (oförändrad: 4 096) | `limits::MAX_LINKS_PER_FRAME` | värd och mock läser samma konstant |
+| (vii) tangenter | SPEC-10.3.1: Tab 43, Skift+Tab = Tab med bit 1 (skifttangenterna 225/229), Enter 40, Escape 41 | `key::SHIFT_LEFT`, `key::SHIFT_RIGHT` | – |
+| `clipboard_read` | SPEC-5.2.12: gest inom 1 s annars `E_GESTURE`; `max` = 0 ger längden; annars hela urklippet och längden, eller `E_ARG` utan kopia | – | `Options::clipboard` (None = nekas som otillgängligt); gestfönstret räknas på värdens klocka från pekartryck/-släpp, tangent och textinmatning |
+| `fetch_poll` | SPEC-5.2.7: 0 på väg, 1 klar, annars negativ kod | – | som förr |
+| `vy_event` ≠ 0/1 | SPEC-5.1.3: behandlas som 1, loggas en gång per instans på debug | – | `Runtime::deliver` |
+
+Förteckningen fick avsnitten *Argumentvärden* (nivå, metod, typsnittsroller, vikt) och
+*Pekarknappar*, tangentmeningen med decimala koder och Skift, och sex rader i *Gränser*
+(`MAX_LINKS_PER_FRAME`, `level::MAX`, `method::MAX`, `button::MAX`, `weight::MAX`). Importer: 32.
+Spec-id: 132 (nytt: A.2.2), alla spårade.
+
+### Typsnitt (ändrat i M2.7; ersätter tabellen under M1)
+
+Avbildningen från `weight` till snitt görs nu i `vy_render::text::face_weight`, inte av
+cosmic-texts reservkedja, som vid exakt 700 gav serif och mono DejaVu Sans Bold:
+
+| Roll | Resurs-id | Snitt |
+| --- | --- | --- |
+| `sans`, `ui`, `emoji` | −1, −4, −5 | DejaVu Sans för 1–549, DejaVu Sans Bold för 550–1000 |
+| `serif` | −2 | DejaVu Serif för alla vikter |
+| `mono` | −3 | DejaVu Sans Mono för alla vikter |
+
+Referenssidorna använder 400, 600 och 700; inga pixlar ändrades (50/50 à 0,000 %).
+
+## Fynd 7 – manifestets schema (`spec:`)
+
+SPEC-8.1.1, 8.1.2 och 7.4.4 säger nu det `vy-manifest` kodar och signerar: `module`
+{hash, size, url?}, `resources` {hash, size, mime, url?, w?, h?} (inte {path, type, hash, size}),
+`published` som ISO 8601-datum i text, `sig` {key_id, bytes}, hash som 32 byte i CBOR och
+`sha256:<64 hex>` i JSON-formen, nyckel-id som de 16 första hextecknen av SHA-256 över nyckeln,
+`icon`/`skeleton` som resursindex, `chunks` {hash, size, url?}, `next_key_id` som valfritt fält
+(16 hextecken) för rotation, utelämnat `url` = `/_vy/<64 hex>` relativt manifestet, tomma listor
+och mappar utelämnade i den kanoniska kodningen. Ingen kodändring; testerna som refererar
+meningarna utökades med deras nya delar. Spec-frågorna 28, 29, 32, 33 och 35 är därmed avgjorda.
+
+## Fynd 4 – rasteriseringen har en budget (`spec:`)
+
+SPEC-5.3.3 fick en mening: värdens rasterisering av framens display list är bunden av samma
+budget, räknad i ritade pixlar; överskrids den ritas resten inte, och överskridandet räknas och
+levereras som `KIND_BUDGET` som ett i `vy_frame`.
+
+| Frame, 1280 × 800 | Före, release | Före, debug | Efter, debug | Efter, release |
+| --- | --- | --- | --- | --- |
+| 65 000 helskärmsrektanglar | 13,2 s | ≈ 340 s | **0,39 s** (avbruten efter 65 ops) | 19 ms |
+| 32 nästlade rundade klipp + 2 000 rektanglar | 8,6 s | 348 s | **0,31 s** | 14 ms |
+| 32 nästlade rundade klipp + 65 000 rektanglar | 312 s (granskningen) | – | 0,27 s | 15 ms |
+| 32 nästlade raka klipp + 2 000 rektanglar | 8,0 s | 333 s | 0,80 s | 21 ms |
+
+Mätt på byggmaskinen i `vy-render` ensam (ingen modul). Testerna `spec_5_3_3_bench_*` kör de två
+första i debug med taken 2 s respektive 1 s.
+
+**Klippstacken** (`raster.rs::Clip`) är nivåer: varje `CLIP_PUSH` håller det analytiska snittet av
+rektanglarna hittills, de pixlar ett rakt klipp täcker (`exact_pixels`, tiny-skias egen
+26.6-avrundning i den icke-antialiasade fyllaren, prövad mot tiny-skias fyllning på 200 000
+slumprektanglar i `exact_pixels_match_tiny_skia`) och en mask som byggs först när en op behöver
+den: ett rakt klipps mask är en memset av de pixlarna, en rundad nivås mask är formens AA-fyllning
+över dess egna gränser multiplicerad med föräldern (samma `premultiply_u8` som
+`Mask::intersect_path`, så byten är desamma). Masken behålls tills nivån poppas: en push kostar
+högst formens yta, en pop inget, och stacken byggs aldrig om. Ops skärs till klippets pixelgränser
+innan de fylls (masken är noll utanför), men ritas fortfarande *genom* masken: tiny-skia blandar
+en maskad fyllning (source-over med förskalad täckning) och en omaskad (source som lerp) längs
+olika heltalsvägar som skiljer sig med en enhet vid AA-kanter, och guldbilderna är de maskade
+byten. Den geometriska snabbvägen utan mask gav 13 avvikande guldbilder och är borttagen.
+
+**Budgeten** (`RASTER_BUDGET_UNITS` = 64 × 2²⁰ enheter per frame; på dukar över en megapixel
+64 × ytan, `raster_budget_units`): en enhet per pixel i en opak fyllning utan klipp (memset);
+`PIPELINE_WEIGHT` = 16 per pixel som går genom rasterpipelinen (mask, genomskinlig färg, glyf,
+bild, bana – mätt till 15–20 × memset i både release och debug); `MASK_WEIGHT` = 4 per pixel av
+en rundad nivås gränser när masken byggs; `OP_UNITS` = 64 per op. Text debiteras byte × 16 i
+förväg och glyfernas bitmappsyta × 16 efteråt; en strykning längd × bredd, en fylld bana sin
+bounding box. När nästa op inte ryms avbryts listan, inget mer ritas, och `render` returnerar
+`Rendered { image, report: RasterReport { truncated, ops_done, units, budget } }`.
+`Runtime::raster_report` loggar och räknar ett avbrutet raster som ett budgetöverskridande – samma
+`KIND_BUDGET` (`a` ≥ 9), streak och tvingande `vy_suspend`; en frame som redan bröt i bränsle
+räknas en gång; streaken nollställs först vid nästa frame när både bränsle och raster höll.
+`vy-cli render` anropar den efter sista framen och skriver enheterna. Guldbildernas tyngsta fall
+ligger på 61 % av budgeten (`shop-400x700@2`: 43 M av 72 M, åtta bildkort med rundade klipp under
+ett rullklipp vid skala 2), de flesta under 15 %; i release tar de tyngsta 16–38 ms, så enheterna
+motsvarar ungefär 1,3 M per ms på byggmaskinen.
+
+## Fynd 6 – `HttpCache`-tak och typsäkra beviljanden
+
+- `HttpCache` (svar per URL, SPEC-7.3.2) har nu ett index `http/index` med logiskt löpnummer och
+  storlek som blobcachen, räknar en träff som användning, kastar ut den äldsta posten när summan
+  passerar `Options::http_cache_cap_bytes` (standard `DEFAULT_HTTP_CACHE_CAP_BYTES` = 64 MB),
+  överlever omstart och släpper en skadad fil som miss. Test
+  `http_cache_evicts_least_recently_used_at_cap`.
+- `Manifest::verify` returnerar `Option<Trust>`, en typ bara `vy-manifest` kan skapa;
+  `default_grant` är crate-privat och `CapabilityRequests::default_grants(trust, net_is_own)` är
+  enda vägen från begäran till `Grant` – utan `Trust` är allt `Denied`. `Fetched` håller sin
+  `Trust` privat och exponerar `trusted()` och `grants()`; `Fetched.trusted` som fält är borta.
+  Capabilities-mappen förblir läsbar (värden behöver `net`-origins och `quota_kb`) men ger inga
+  `Grant`. (`docs/notes/m3-proto-serve.md` beskriver det gamla läget med `trusted == false`.)
+
+## Grindar och tal
+
+207 gröna tester i workspace (var 189), 28 ignorerade (oförändrat). Spec-id 132/132. 50
+konformansfall à 0,000 %, 26 semantiska träd lika (27 fall jämför), inga guldbyten. Importer 32. Inga nya
+beroenden. Modulerna: 11/11 bygger, `test_modules` 11/11, `check-abi` 11/11. `abi-dump` =
+`docs/ABI-1.0.md`.
+
+## Spec-frågor (M2.7)
+
+39. **Rasterbudgetens konstanter** (`RASTER_BUDGET_UNITS`, vikterna 16 och 4) är värdpolicy i
+    `vy-render`, inte ABI, och står därför inte i förteckningen. SPEC-5.3.3 säger "samma budget"
+    men enheterna växer med dukens yta över en megapixel (ett 4K-fönster får 64 lager, inte 16).
+    Bör §13 nämna rasterenheter, eller räcker meningen?
+40. **Tyngsta lagliga sidan ligger på 61 %** av budgeten (`shop-400x700@2`). Marginalen är 1,6 ×
+    för den; 4 × eller mer för alla andra fall. Om specägaren vill ha mer marginal är
+    `PIPELINE_WEIGHT` = 8 (hälften av mätt kostnad) eller 128 lager alternativen; båda gör de
+    patologiska ramarna i debug 2 × långsammare (fortfarande under taken på byggmaskinen).
+41. **Maskad mot omaskad fyllning** skiljer sig med en enhet vid AA-kanter i tiny-skia, så den
+    geometriska snabbvägen för rektanglar under raka klipp (ingen mask alls) är borttagen för att
+    hålla guldbilderna. GPU-vägen (M3) får egen avrundning och kräver ändå guldbyte; då kan
+    snabbvägen tas tillbaka med nya guldbilder.
+42. **Gestfönstret för `clipboard_read`**: 1 s på värdens klocka från `POINTER_DOWN`,
+    `POINTER_UP`, `KEY_DOWN`, `KEY_UP` och `TEXT_INPUT`; pekarrörelse och rullning räknas inte.
+    Headless går klockan 16 ms per frame, så fönstret är 62 frames. Bekräftas.
+43. **Viktavbildningen** går till närmaste snitt med det tyngre vid lika avstånd: 501–549 blir
+    DejaVu Sans där CSS hade valt Bold. Ingen referenssida använder vikter mellan 400 och 600.
+    Bekräftas, eller byt till CSS-regeln (> 500 uppåt) före frysen.
+44. **`vy_event` utanför 0/1** loggas på nivå debug, en gång per instans, och behandlas som 1.
+    Alternativet (0, ingen omritning) hade dolt buggar i SDK-lösa moduler. Bekräftas.
 
 # M3 del 1 – manifest, publish, proto, serve
 
@@ -310,7 +451,8 @@ finns inte headless än; formuläret hanterar eventet men inget fall skickar det
 
 ## Approximationer och öppet i M2:s andra halva
 
-- Enbart DejaVu Sans har fet vikt; serif/mono med vikt ≥ 600 matchas av fontdb till Sans Bold.
+- Enbart DejaVu Sans har fet vikt; serif/mono med vikt ≥ 600 matchas av fontdb till Sans Bold
+  (sedan M2.7 väljer `vy-render` snittet själv: serif och mono är alltid sitt enda snitt).
   `text` begär därför sans för titeln. Fet serif/mono: fler typsnittsfiler eller syntetisk
   fetstil (M3).
 - `text_caret` layoutar utan radbrytning (M1); formulärets fält är enradiga så det räcker.
@@ -375,7 +517,7 @@ kräver 1.89. `rust-toolchain.toml` pekar på `stable`.
 
 | Roll | Resurs-id | Typsnitt |
 | --- | --- | --- |
-| `sans` | −1 | DejaVu Sans (+ Bold för vikt ≥ 600) |
+| `sans` | −1 | DejaVu Sans (+ Bold för vikt ≥ 600; sedan M2.7 ≥ 550, se *Typsnitt* under M2.7) |
 | `serif` | −2 | DejaVu Serif |
 | `mono` | −3 | DejaVu Sans Mono |
 | `ui` | −4 | DejaVu Sans |
