@@ -33,6 +33,7 @@ pub struct TabLoop<T: IpcTransport> {
     last_links: Vec<vy_runtime::Link>,
     last_sem: Vec<vy_runtime::SemNode>,
     last_ime: Option<(f32, f32, f32, f32)>,
+    last_focus: Option<i32>,
     /// Set by [`ToTab::CopyGesture`] and spent by the next event: that
     /// event is delivered as a copy gesture (SPEC-8.2.4).
     copy_gesture_armed: bool,
@@ -75,6 +76,7 @@ impl<T: IpcTransport> TabLoop<T> {
             last_links: Vec::new(),
             last_sem: Vec::new(),
             last_ime: None,
+            last_focus: None,
             copy_gesture_armed: false,
         })
     }
@@ -241,6 +243,7 @@ impl<T: IpcTransport> TabLoop<T> {
         self.last_links.clear();
         self.last_sem.clear();
         self.last_ime = None;
+        self.last_focus = None;
         self.copy_gesture_armed = false;
         let options = Options {
             memory_max_pages: req.memory_max_pages,
@@ -400,8 +403,8 @@ impl<T: IpcTransport> TabLoop<T> {
         Ok(())
     }
 
-    /// Logs, navigations, fetch requests, clipboard and IME changes since
-    /// the last call.
+    /// Logs, navigations, fetch requests, clipboard, IME and focus changes
+    /// since the last call.
     fn after_call(&mut self) -> io::Result<()> {
         let Some(rt) = self.rt.as_mut() else {
             return Ok(());
@@ -438,6 +441,11 @@ impl<T: IpcTransport> TabLoop<T> {
         if ime != self.last_ime {
             self.last_ime = ime;
             out.push(ToShell::Ime(ime));
+        }
+        let focus = rt.focus();
+        if focus != self.last_focus {
+            self.last_focus = focus;
+            out.push(ToShell::Focus(focus));
         }
         for m in &out {
             self.send(m)?;

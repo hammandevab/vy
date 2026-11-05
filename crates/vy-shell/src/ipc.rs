@@ -559,6 +559,11 @@ pub enum ToShell {
     Clipboard(Vec<u8>),
     /// The IME composition rectangle changed (`ime_begin`/`ime_end`, SPEC-5.2.6).
     Ime(Option<(f32, f32, f32, f32)>),
+    /// The semantic node the host holds keyboard focus on changed
+    /// (SPEC-10.3.1): focus is the runtime's, in the tab process; the main
+    /// process mirrors it for the chrome's own decisions (Ctrl+A in a
+    /// field) and the platform's accessibility tree (SPEC-10.2.1).
+    Focus(Option<i32>),
     /// The page stopped for good: a trap, `exit`, the hard fuel limit or a
     /// forced suspend (SPEC-5.3.3). The process stays until told to leave.
     Stopped {
@@ -594,6 +599,7 @@ const S_STORAGE: u8 = 73;
 const S_CLIPBOARD: u8 = 74;
 const S_IME: u8 = 75;
 const S_STOPPED: u8 = 76;
+const S_FOCUS: u8 = 77;
 
 fn put_random(w: &mut Writer, r: RandomSource) {
     match r {
@@ -988,6 +994,17 @@ impl ToShell {
                 }
                 w.finish()
             }
+            Self::Focus(node) => {
+                let mut w = Writer::new(S_FOCUS);
+                match node {
+                    None => w.bool(false),
+                    Some(id) => {
+                        w.bool(true);
+                        w.i32(*id);
+                    }
+                }
+                w.finish()
+            }
             Self::Stopped { reason } => {
                 let mut w = Writer::new(S_STOPPED);
                 w.str(reason);
@@ -1132,6 +1149,7 @@ impl ToShell {
             } else {
                 None
             }),
+            S_FOCUS => Self::Focus(if r.bool()? { Some(r.i32()?) } else { None }),
             S_STOPPED => Self::Stopped {
                 reason: r.str_max(MAX_MESSAGE_TEXT_BYTES, "reason")?.to_string(),
             },
@@ -1285,6 +1303,8 @@ mod tests {
             ToShell::Clipboard(b"x".to_vec()),
             ToShell::Ime(Some((1.0, 2.0, 3.0, 4.0))),
             ToShell::Ime(None),
+            ToShell::Focus(Some(-10)),
+            ToShell::Focus(None),
             ToShell::Stopped {
                 reason: "module trapped: unreachable".into(),
             },
@@ -1311,7 +1331,7 @@ mod tests {
             shell_tags.insert(body[0]);
         }
         assert_eq!(tab_tags.len(), 13, "every ToTab variant is covered");
-        assert_eq!(shell_tags.len(), 13, "every ToShell variant is covered");
+        assert_eq!(shell_tags.len(), 14, "every ToShell variant is covered");
         assert!(tab_tags.is_disjoint(&shell_tags));
         // Over a byte stream: lengths first, little-endian.
         let mut pipe = Vec::new();

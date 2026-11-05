@@ -24,6 +24,7 @@ pub mod markdown;
 pub mod page;
 pub mod paths;
 pub mod process;
+pub mod selection;
 pub mod shell;
 pub mod storage;
 pub mod tab;
@@ -1332,11 +1333,117 @@ mod tests {
         todo!()
     }
 
-    /// SPEC-10.2.2: text selection copies logical strings.
+    /// SPEC-10.2.2, SPEC-2.1.5: the host owns text selection and copies
+    /// logical strings, never pixels. On the document page: a drag over a
+    /// paragraph selects its text exactly; a shorter drag on its first line
+    /// selects a prefix that grows with the drag (glyph granularity from the
+    /// renderer's measurements); a drag into the next paragraph takes both,
+    /// joined with a line break; Ctrl+C puts that on the clipboard. The
+    /// highlight is the shell's overlay: the frame is tinted under it, the
+    /// page's own display list is byte for byte what it was, and Escape
+    /// restores the pixels. Ctrl+A selects every text node, a press away
+    /// from text clears; in a focused field Ctrl+A is the page's.
     #[test]
-    #[ignore = "M4: accessibility"]
     fn spec_10_2_2_text_selection() {
-        todo!()
+        use crate::shell::hid;
+        use vy_abi::modifier::CTRL;
+        use vy_runtime::SemNode;
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(local("document")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        let page = shell.layout().page;
+        let sem = shell.tab_semantic(tab);
+        let shown = |n: &&SemNode| {
+            n.role == vy_abi::role::TEXT
+                && n.text.len() > 60
+                && n.x >= 0.0
+                && n.y >= 0.0
+                && n.x + n.w <= page.w
+                && n.y + n.h <= page.h
+        };
+        let paragraphs: Vec<SemNode> = sem.iter().filter(shown).cloned().collect();
+        assert!(paragraphs.len() >= 2, "{sem:?}");
+        let (a, b) = (&paragraphs[0], &paragraphs[1]);
+        let at = |n: &SemNode, dx: f32, dy: f32| (page.x + n.x + dx, page.y + n.y + dy);
+        let drag = |shell: &mut crate::shell::Shell, from: (f32, f32), to: (f32, f32)| {
+            shell.pointer_move(from.0, from.1);
+            shell.pointer_button(button::PRIMARY, true);
+            shell.pointer_move((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+            shell.pointer_move(to.0, to.1);
+            shell.pointer_button(button::PRIMARY, false);
+        };
+        let list_before = shell.tab_display_list(tab);
+        let frame_before = shell.frame().clone();
+        // The whole paragraph, corner to corner.
+        drag(&mut shell, at(a, 0.5, 2.0), at(a, a.w - 0.5, a.h - 2.0));
+        assert_eq!(shell.selected_text(), a.text);
+        // Part of its first line: a proper prefix, longer the further the
+        // drag goes, cut at a character boundary.
+        drag(&mut shell, at(a, 0.5, 2.0), at(a, a.w * 0.25, 2.0));
+        let short = shell.selected_text();
+        drag(&mut shell, at(a, 0.5, 2.0), at(a, a.w * 0.5, 2.0));
+        let longer = shell.selected_text();
+        assert!(!short.is_empty() && a.text.starts_with(&short), "{short:?}");
+        assert!(longer.len() > short.len() && a.text.starts_with(&longer));
+        assert!(longer.len() < a.text.len(), "the first line only");
+        // Into the next paragraph: both, a line break between.
+        drag(&mut shell, at(a, 0.5, 2.0), at(b, b.w * 0.3, 2.0));
+        let both = shell.selected_text();
+        let tail = both.rsplit('\n').next().unwrap();
+        assert!(both.starts_with(&format!("{}\n", a.text)), "{both:?}");
+        assert!(!tail.is_empty() && b.text.starts_with(tail), "{both:?}");
+        // Copied as text.
+        assert!(shell.key(hid::C, true, CTRL, false), "the shell's copy");
+        assert_eq!(shell.clipboard_text().as_deref(), Some(both.as_str()));
+        // The highlight is drawn by the shell over the page: the frame is
+        // tinted at the selection's first line, the page's list unchanged.
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let (px, py) = at(a, 1.0, 1.0);
+        let tinted = shell.frame().pixel(px as u32, py as u32);
+        assert_ne!(tinted, frame_before.pixel(px as u32, py as u32));
+        assert_eq!(shell.tab_display_list(tab), list_before);
+        // Escape clears it and the pixels are the page's again.
+        assert!(
+            !shell.key(key::ESCAPE, true, 0, false),
+            "Escape reaches the page"
+        );
+        assert_eq!(shell.selected_text(), "");
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(
+            shell.frame().pixel(px as u32, py as u32),
+            frame_before.pixel(px as u32, py as u32)
+        );
+        // Ctrl+A: every text node in document order.
+        assert!(shell.key(hid::A, true, CTRL, false));
+        let all = crate::selection::selected_text(
+            &shell.tab_semantic(tab),
+            &crate::selection::all(&shell.tab_semantic(tab)),
+        );
+        assert_eq!(shell.selected_text(), all);
+        assert!(all.contains(&a.text) && all.contains(&b.text));
+        // A press away from text clears.
+        shell.pointer_move(page.x + page.w - 2.0, page.bottom() - 2.0);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(shell.selected_text(), "");
+        shell.shutdown();
+
+        // In a focused field, Ctrl+A belongs to the page.
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let form = shell.open_tab(Some(local("form")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.key(key::TAB, true, 0, false);
+        shell.key(key::TAB, false, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let focused = shell.tab_focus(form).expect("Tab focused a field");
+        assert!(shell
+            .tab_semantic(form)
+            .iter()
+            .any(|n| n.id == focused && n.role == vy_abi::role::TEXTBOX));
+        assert!(!shell.key(hid::A, true, CTRL, false), "went to the page");
+        assert_eq!(shell.selected_text(), "");
+        shell.shutdown();
     }
 
     /// SPEC-10.3.1: the shell feeds OS key and pointer events to the runtime, which owns

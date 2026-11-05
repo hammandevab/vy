@@ -52,6 +52,9 @@ const BUTTON_INK: u32 = 0xFFFF_FFFF;
 const BUTTON_PLAIN: u32 = 0xDAD8_D1FF;
 const PAGE_BG: u32 = 0xFFFF_FFFF;
 const STATUS_BG: u32 = 0x2221_1FE6;
+/// The host's text selection over the page area (SPEC-10.2.2): the
+/// chrome's accent, translucent.
+pub const SELECTION_OVERLAY: u32 = 0x2F5B_D660;
 
 /// A rectangle in logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

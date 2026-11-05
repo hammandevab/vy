@@ -12,7 +12,7 @@
 use crate::address::{AddressField, Edit};
 use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
 use crate::clipboard::{self, ClipboardBackend};
-use crate::compose::{blend, blit, physical};
+use crate::compose::{blend, blit, fill_blend, physical};
 use crate::external::{is_external, Opener};
 use crate::grants::{GrantStore, Resolved};
 use crate::history::History;
@@ -20,6 +20,7 @@ use crate::ipc::{LoadRequest, ToShell, ToTab};
 use crate::markdown::{self, Block};
 use crate::page::{self, Done, Job, LoadError, LoadedPage, Source};
 use crate::process::{self, Inbound, TabConnection, TabId};
+use crate::selection::{self, Caret, Selection};
 use crate::storage;
 use crate::tab::pack_capabilities;
 use std::collections::VecDeque;
@@ -178,6 +179,14 @@ struct Tab {
     /// The clipboard as the tab's runtime holds it, for `clipboard_read`:
     /// what it last wrote or was last sent; `None` before the load.
     clipboard_sent: Option<Vec<u8>>,
+    /// The semantic node holding keyboard focus, as the tab reports it
+    /// (SPEC-10.3.1).
+    focus: Option<i32>,
+    /// The host's text selection in the page (SPEC-10.2.2).
+    selection: Selection,
+    /// The selection's highlight in page coordinates, for the frame count
+    /// and selection it was computed for.
+    selection_rects: Option<(u64, Selection, Vec<Rect>)>,
 }
 
 impl Tab {
@@ -223,6 +232,9 @@ impl Tab {
             ask_since: None,
             copy_gesture_ms: None,
             clipboard_sent: None,
+            focus: None,
+            selection: Selection::default(),
+            selection_rects: None,
         }
     }
 
@@ -557,6 +569,18 @@ impl Shell {
         self.tab(id).map(|t| t.sem.clone()).unwrap_or_default()
     }
 
+    /// A tab's last display list, as the page made it (appendix C).
+    pub fn tab_display_list(&self, id: TabId) -> Vec<u8> {
+        self.tab(id)
+            .map(|t| t.display_list.clone())
+            .unwrap_or_default()
+    }
+
+    /// The semantic node holding keyboard focus in a tab (SPEC-10.3.1).
+    pub fn tab_focus(&self, id: TabId) -> Option<i32> {
+        self.tab(id).and_then(|t| t.focus)
+    }
+
     /// True when a tab is hidden (not active, or under its `min_size`).
     pub fn tab_hidden(&self, id: TabId) -> bool {
         self.tab(id).is_some_and(|t| t.hidden)
@@ -846,6 +870,9 @@ impl Shell {
             tab.ask_since = None;
             tab.copy_gesture_ms = None;
             tab.clipboard_sent = None;
+            tab.focus = None;
+            tab.selection.clear();
+            tab.selection_rects = None;
         }
         if Some(id) == self.active_tab() {
             let display = self.tab(id).map(|t| t.display.clone()).unwrap_or_default();
@@ -1224,6 +1251,15 @@ impl Shell {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.has_tree = Some(has);
                     tab.sem = nodes;
+                    // A selection whose ends left the tree is gone.
+                    let ends = [tab.selection.anchor, tab.selection.focus];
+                    if ends
+                        .iter()
+                        .flatten()
+                        .any(|c| !tab.sem.iter().any(|n| n.id == c.id))
+                    {
+                        tab.selection.clear();
+                    }
                 }
                 if had != Some(has) && active {
                     self.frame_dirty = true;
@@ -1302,6 +1338,11 @@ impl Shell {
             ToShell::Ime(rect) => {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.ime = rect;
+                }
+            }
+            ToShell::Focus(node) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.focus = node;
                 }
             }
             ToShell::Stopped { reason } => {
@@ -1693,6 +1734,29 @@ impl Shell {
                         (page.h * scale).round() as i64,
                     );
                     blit(&mut self.frame, img, px, py, Some(clip));
+                    // The selection, over the page and under nothing else
+                    // the shell draws there (SPEC-10.2.2); the page's own
+                    // list is untouched.
+                    if !tab.selection.is_empty() {
+                        let fresh = matches!(&tab.selection_rects,
+                            Some((f, sel, _)) if *f == tab.frames && *sel == tab.selection);
+                        if !fresh {
+                            let runs = selection::runs(&tab.display_list);
+                            let rects =
+                                selection::rects(&mut tab.text, &tab.sem, &runs, &tab.selection);
+                            tab.selection_rects = Some((tab.frames, tab.selection.clone(), rects));
+                        }
+                        if let Some((_, _, rects)) = &tab.selection_rects {
+                            for r in rects {
+                                fill_blend(
+                                    &mut self.frame,
+                                    page_rect_physical(page, tab.zoom, scale, *r),
+                                    chrome::SELECTION_OVERLAY,
+                                    clip,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             if let Some(report) = raster_due {
@@ -1848,6 +1912,7 @@ impl Shell {
         self.pointer = (x, y);
         if let Some((px, py)) = self.page_point(x, y) {
             self.in_page = true;
+            self.select_drag(px, py);
             self.send_page_event(
                 event::POINTER_MOVE,
                 x100(px),
@@ -1902,6 +1967,9 @@ impl Shell {
             } else {
                 event::POINTER_UP
             };
+            if button == vy_abi::button::PRIMARY {
+                self.select_press(down, px, py);
+            }
             self.send_page_event(kind, x100(px), x100(py), button, self.modifiers);
             if button == vy_abi::button::PRIMARY {
                 if down {
@@ -2142,17 +2210,138 @@ impl Shell {
                     self.paste_into_page();
                     return true;
                 }
-                // Copy or cut: a copy gesture for the page (SPEC-8.2.4).
+                // Select all: every text node of the page (SPEC-10.2.2),
+                // unless a field has focus (its own select-all), or the
+                // page has no text.
+                hid::A if !self.focus_in_field() && self.select_all() => return true,
+                // Copy or cut: the host's selection when there is one
+                // (SPEC-10.2.2; text in the page cannot be cut, so Ctrl+X
+                // copies it), else a copy gesture for the page (SPEC-8.2.4).
                 hid::C | hid::X => {
+                    let text = self.selected_text();
+                    if !text.is_empty() {
+                        self.config.clipboard.write(&text);
+                        return true;
+                    }
                     self.copy_gesture(code, modifiers, repeat);
                     return false;
                 }
                 _ => {}
             }
         }
+        if down && code == key::ESCAPE {
+            // Escape clears the selection and still reaches the page
+            // (SPEC-10.3.1).
+            self.clear_selection();
+        }
         let kind = if down { event::KEY_DOWN } else { event::KEY_UP };
         self.send_page_event(kind, code, modifiers, i32::from(repeat && down), 0);
         false
+    }
+
+    /// The host's selection in the active page as the clipboard gets it
+    /// (SPEC-10.2.2): the logical strings of the selected text nodes, in
+    /// document order, `\n` between nodes; empty when nothing is selected.
+    pub fn selected_text(&self) -> String {
+        self.tabs
+            .get(self.active)
+            .map(|t| selection::selected_text(&t.sem, &t.selection))
+            .unwrap_or_default()
+    }
+
+    /// The active page's selection.
+    pub fn selection(&self) -> Selection {
+        self.tabs
+            .get(self.active)
+            .map(|t| t.selection.clone())
+            .unwrap_or_default()
+    }
+
+    /// Forget the active page's selection.
+    pub fn clear_selection(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if tab.selection != Selection::default() {
+                tab.selection.clear();
+                self.frame_dirty = true;
+            }
+        }
+    }
+
+    /// Select every text node of the active page (Ctrl+A); false when it
+    /// has none.
+    pub fn select_all(&mut self) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        let all = selection::all(&tab.sem);
+        if all.is_empty() {
+            return false;
+        }
+        tab.selection = all;
+        self.frame_dirty = true;
+        true
+    }
+
+    /// True when the node with keyboard focus is a text field, whose own
+    /// keys Ctrl+A belongs to.
+    fn focus_in_field(&self) -> bool {
+        self.tabs.get(self.active).is_some_and(|t| {
+            t.focus.is_some_and(|f| {
+                t.sem
+                    .iter()
+                    .any(|n| n.id == f && n.role == vy_abi::role::TEXTBOX)
+            })
+        })
+    }
+
+    /// The primary button went down or up at page point `(px, py)`: a
+    /// press on a text node starts a selection there (Shift extends the
+    /// one there is), a press anywhere else clears it; the release ends
+    /// the drag. The page gets the pointer events all the same.
+    fn select_press(&mut self, down: bool, px: f32, py: f32) {
+        let shift = self.modifiers & modifier::SHIFT != 0;
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let before = tab.selection.clone();
+        if !down {
+            tab.selection.dragging = false;
+            if tab.selection.is_empty() {
+                tab.selection.clear();
+            }
+        } else if shift && tab.selection.anchor.is_some() {
+            tab.selection.focus = caret_at(tab, px, py, true).or(tab.selection.focus);
+            tab.selection.dragging = true;
+        } else if let Some(c) = caret_at(tab, px, py, false) {
+            tab.selection = Selection {
+                anchor: Some(c),
+                focus: Some(c),
+                dragging: true,
+            };
+        } else {
+            tab.selection.clear();
+        }
+        if tab.selection != before {
+            self.frame_dirty = true;
+        }
+    }
+
+    /// The pointer moved to page point `(px, py)`: a drag moves the
+    /// selection's focus to the text under it, or the nearest.
+    fn select_drag(&mut self, px: f32, py: f32) {
+        let held = self.buttons & vy_abi::button::mask(vy_abi::button::PRIMARY) != 0;
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if !(tab.selection.dragging && held) {
+            return;
+        }
+        if let Some(c) = caret_at(tab, px, py, true) {
+            if tab.selection.focus != Some(c) {
+                tab.selection.focus = Some(c);
+                self.frame_dirty = true;
+            }
+        }
     }
 
     /// Ctrl+V with keyboard focus in the page: the clipboard's text goes
@@ -2273,6 +2462,26 @@ impl Shell {
     }
 }
 
+/// The selection caret for page point `(px, py)` in `tab`: in the text
+/// node under it, or with `nearest` the closest one, at glyph granularity
+/// where the frame draws the node's text in one run (SPEC-10.2.2).
+fn caret_at(tab: &mut Tab, px: f32, py: f32, nearest: bool) -> Option<Caret> {
+    let order = selection::order(&tab.sem);
+    let i = selection::node_at(&tab.sem, &order, px, py).or_else(|| {
+        nearest
+            .then(|| selection::nearest(&tab.sem, &order, px, py))
+            .flatten()
+    })?;
+    let runs = selection::runs(&tab.display_list);
+    let node = &tab.sem[i];
+    let run = selection::run_for(node, &runs);
+    let offset = selection::offset_at(&mut tab.text, node, run, px, py);
+    Some(Caret {
+        id: node.id,
+        offset,
+    })
+}
+
 /// Let go of `tab`'s process, keeping what its storage answer needs (see
 /// [`Retired`]). `Shutdown` is the flush: the tab calls `vy_suspend`,
 /// answers with [`ToShell::Storage`] and leaves; `TabConnection::shutdown`
@@ -2311,6 +2520,16 @@ fn page_size(page: Rect, zoom: f32, scale: f32) -> (u32, u32, f32) {
         (page.h / zoom).round().max(1.0) as u32,
         scale * zoom,
     )
+}
+
+/// A rectangle in page coordinates (the module's logical pixels) as
+/// physical window pixels: `(x, y, w, h)`.
+fn page_rect_physical(page: Rect, zoom: f32, scale: f32, r: Rect) -> (i64, i64, i64, i64) {
+    let x0 = ((page.x + r.x * zoom) * scale).round() as i64;
+    let y0 = ((page.y + r.y * zoom) * scale).round() as i64;
+    let x1 = ((page.x + r.right() * zoom) * scale).round() as i64;
+    let y1 = ((page.y + r.bottom() * zoom) * scale).round() as i64;
+    (x0, y0, x1 - x0, y1 - y0)
 }
 
 fn x100(v: f32) -> i32 {

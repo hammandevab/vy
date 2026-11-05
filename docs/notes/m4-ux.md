@@ -10,6 +10,7 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 | --- | --- | --- |
 | 1 | Systemets urklipp bakom Ctrl+C/V/X (`clipboard.rs`, `ClipboardBackend`): `arboard` i fönstret, minne huvudlöst och när systemets inte kan öppnas. Ctrl+V i sidan levererar urklippet som `TEXT_INPUT` (som om det skrivits), i bitar om 4 KB, `\r\n`/`\r` → `\n`, högst 1 MB. Ctrl+C/V/X i adressfältet går mot samma urklipp (inklistring högst 8 KB). Ctrl+C/Ctrl+X i sidan är en kopieringsgest (SPEC-8.2.4): sidans `clipboard_write` under just det `KEY_DOWN` lyckas utan capability. AltGr (Ctrl+Alt) skriver tecken i stället för att trigga genvägar. | `spec_8_2_4_copy_gesture_grants_clipboard_write`, `spec_5_2_12_clipboard_copy_paste_through_the_shell`, `spec_5_2_12_memory_clipboard_and_paste_chunks`, `spec_a_5_1_altgr_is_not_a_shortcut`, `spec_a_5_1_altgr_commits_text` |
 | 2 | Lagring går inte längre förlorad vid F5, navigering och Ctrl+W. Flikprocessen som släpps blir `Retired` (flik, generation, origin, grant, kvot); dess svar på `Shutdown` (`vy_suspend` + `Storage`) sparas under den origin processen hade, fast fliken bytt generation eller stängts. Ctrl+W på sista fliken kör `Shell::shutdown`, som tömmer inkorgen. | `spec_5_2_9_storage_saved_on_reload_and_close` |
+| 3 | Textmarkering (SPEC-10.2.2), värdens egen (`selection.rs`): dra från en textnod markerar (sidan får pekarhändelserna ändå), Skift+klick utökar, Ctrl+A tar alla textnoder, Escape och ett tryck utanför text tömmer. Markeringen är noderna i dokumentordning mellan ändarna, med teckengranularitet i ändnoderna; Ctrl+C (och Ctrl+X) kopierar de logiska strängarna med `\n` mellan noder. Ritas av huvudprocessen som en genomskinlig överlagring i sidytan (`compose::fill_blend`, chromens accentfärg); sidans display list rörs inte. Flikprocessen rapporterar fokus (`ToShell::Focus`) så att Ctrl+A i ett fokuserat textfält går till sidan. | `spec_10_2_2_text_selection` (un-ignorerad, document- och form-sidan), `spec_10_2_2_selected_text_is_logical`, `spec_10_2_2_glyph_granularity_in_wrapped_runs` |
 
 ## Beslut
 
@@ -45,6 +46,20 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
   tills bränslet tar slut, eller en process som dödas) förlorar ändringar sedan senaste dolda läge, som
   förut. En krasch i huvudprocessen förlorar fortfarande allt sedan senaste suspend (lagring skrivs inte
   vid varje `state_put`).
+- **Markeringen (steg 3) är värdens och bara logisk.** Valbara roller: `text`, `heading`, `link`,
+  `listitem`, `cell` med text; kontroller (knappar, fält, rutor) lämnas åt sidan. En ände är (nod-id,
+  byteoffset). Teckengranulariteten kommer från samma `TextEngine` och stilar som rasteriserade framen,
+  genom dess befintliga `measure` och `caret` – ingen ny funktion i `vy-render`: en nods text knyts till
+  den `TEXT`-op som har samma text och börjar i nodens rektangel; radbrytningarna hittas med binärsökning
+  på `measure` över prefix till och med ett ords slut (ombrytningen är girig, så det som kommer efter ett
+  ord flyttar det aldrig), och x inom raden med binärsökning på `caret`. **Approximationer:** ett ord som
+  är bredare än raden (som motorn bryter inuti) räknas som en rad; höger-till-vänster-text får
+  vänster-till-höger-positioner; en nod vars text inte är en enda op (bylines, bildtexter av två körningar)
+  markeras hel. Försvinner en ändes nod ur trädet töms markeringen. Ctrl+X kopierar (sidans text kan inte
+  klippas ut). Escape tömmer markeringen och går ändå till sidan (SPEC-10.3.1).
+- **Fokus speglas i huvudprocessen.** Fokus ägs av runtime i flikprocessen (SPEC-10.3.1); en ny ram
+  `ToShell::Focus(Option<i32>)` (tagg 77) skickas när det ändras, så att skalet vet om ett textfält har
+  fokus (Ctrl+A) och, i steg 5, vad AccessKit ska få som fokus.
 
 ## Tangentbordstabell
 
@@ -53,7 +68,11 @@ Det testguiden skrivs från. "Sidan" betyder att tangenten går till modulen som
 | Tangent | Var | Verkan |
 | --- | --- | --- |
 | Ctrl+V | sidan | urklippets text till sidan som inskriven text (`TEXT_INPUT`); hamnar i fokuserat fält |
-| Ctrl+C, Ctrl+X | sidan | går till sidan; sidan får skriva urklippet under tangenten utan capability (SPEC-8.2.4) |
+| Ctrl+C, Ctrl+X | sidan, med markering | kopierar markerad text (logiska strängar, `\n` mellan noder); tangenten går inte till sidan |
+| Ctrl+C, Ctrl+X | sidan, utan markering | går till sidan; sidan får skriva urklippet under tangenten utan capability (SPEC-8.2.4) |
+| Ctrl+A | sidan | markerar all text på sidan; i ett fokuserat textfält (och på en sida utan text) går den till sidan |
+| Escape | sidan | tömmer markeringen; går också till sidan |
+| Dra med vänster knapp | sidan, från text | markerar text (sidan får pekarhändelserna ändå); Skift+klick utökar; klick utanför text tömmer |
 | Ctrl+V | adressfältet | klistra in (radbrytningar tas bort, högst 8 KB) |
 | Ctrl+C, Ctrl+X | adressfältet | kopiera/klipp ut markeringen till systemets urklipp |
 | AltGr+tangent | överallt | tecknet (t.ex. `@`, `{`, `\`), aldrig en genväg |
@@ -72,6 +91,16 @@ Urklipp på Wayland utan XWayland: `arboard::Clipboard::new()` misslyckas, skale
 Samma sak i CI utan display.
 
 Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
+
+## Grindar och tal
+
+- Delad byggkatalog med fyra arbetsträd på 2 CPU:er: `vy-render`:s två väggklocktester
+  (`spec_5_3_3_bench_32_rounded_clips_2000_rects`, `spec_5_3_3_bench_65000_fullscreen_rects`, gräns 1 s i
+  debug) föll ibland vid belastning 4–7 (1,02–1,5 s). `vy-render` är orörd på den här grenen; de gick
+  igenom vid lägre belastning. Övriga grindar gröna vid varje commit: fmt, clippy, `cargo test --workspace`,
+  spec_trace, konformans 55/55 à 0,000 %, typkontroll av `vy-shell` för Windows och macOS (`check-cross`,
+  C-beroenden ersatta av tomma objekt).
+- Binärstorlek, `vy-shell` release på Linux, strippad: 21 958 136 byte (20,9 MiB) med `arboard`.
 
 ## Hotbild
 
@@ -93,8 +122,9 @@ Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
 - `crates/vy-runtime/src/host.rs`, `src/lib.rs` (m4/perf): additivt – fälten `Host::copy_gesture` och
   `Host::clipboard_written`, `Runtime::event_as_copy_gesture`, `Runtime::take_clipboard_write`; grinden i
   `clipboard_write` släpper igenom under kopieringsgesten. Inget befintligt API ändrat. (Commit 26e77b6.)
-- `crates/vy-shell/src/ipc.rs`: ny ram `ToTab::CopyGesture` med tagg 13. Om ett annat spår också lagt
-  till en `ToTab`-variant med tagg 13 måste en av dem numreras om vid sammanslagning.
+- `crates/vy-shell/src/ipc.rs`: nya ramar `ToTab::CopyGesture` (tagg 13) och `ToShell::Focus` (tagg 77).
+  Om ett annat spår (m4/security fuzzar ramningen) också lagt till varianter med samma taggar måste en av
+  dem numreras om vid sammanslagning; testet `ipc::tests` räknar varianterna (13 respektive 14 här).
 - `SPEC.md`: ny mening SPEC-8.2.4 (eget `spec:`-commit, §8 är inte fryst).
 - `Cargo.toml`, `Cargo.lock`: `arboard` i `[workspace.dependencies]`.
 - `crates/vy-shell/src/process.rs` (m4/security) är **inte** ändrad; steg 2 bygger på att
