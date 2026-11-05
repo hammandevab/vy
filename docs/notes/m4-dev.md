@@ -176,15 +176,19 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
 
 ## Grindar och tal
 
-På grenens topp: `cargo fmt --all --check` och `cargo clippy --workspace --all-targets -D warnings`
-rena; `cargo test --workspace` 282 gröna och 19 ignorerade (var 257 och 19 på `3bc0bcb`), där enda
-röda någon gång är tidsgränstestet i *Öppna frågor* 3, som går igenom ensamt; `spec_trace.py`
-132/132 (inga nya id); 12 moduler bygger, `check-abi` OK, `test_modules.sh` 12/12; konformans 59/59
-à 0,000 % (var 55), med en privat kopia av `vy-cli` (delade binärer i `target/debug` kan bytas av
-andra arbetskopior mellan bygge och körning). `vy-dev` typkontrollerad för
-`x86_64-pc-windows-msvc` och `aarch64-apple-darwin` (byggskripten för C-beroenden fick en låtsas-
-kompilator som skriver tomma objektfiler, eftersom sandlådan saknar Windows- och macOS-SDK:er).
-Testprojekt byggs i `target/vy-dev-tests` (13 MB).
+Sista körningen (22:17–22:27, i arbetskopians egen målkatalog efter samordnarens byte, moduler
+byggda på nytt): `cargo fmt --all --check` och `cargo clippy --workspace --all-targets -D warnings`
+rena; `cargo test --workspace` 282 gröna och 19 ignorerade (var 257 och 19 på `3bc0bcb`), ett rött:
+tidsgränstestet i *Öppna frågor* 3; `spec_trace.py` 132/132 (inga nya id); 12 moduler bygger,
+`check-abi` OK, `test_modules.sh` 12/12; konformans 59/59 à 0,000 % (var 55). Guldbilderna för
+Studio renderades två gånger, den andra med en privat kopia av `vy-cli` medan målkatalogen var
+delad, med samma byte. `vy-dev` typkontrollerad för `x86_64-pc-windows-msvc` och
+`aarch64-apple-darwin` (byggskripten för C-beroenden fick en låtsaskompilator som skriver tomma
+objektfiler, eftersom sandlådan saknar Windows- och macOS-SDK:er). Testprojekt byggs i
+`target/vy-dev-tests`.
+
+Commitet `0aba99f` (Studio utan fall) är avsiktligt rött i `spec_12_1_2_conformance_defines_client`
+tills `0c46014` lägger till fallen med guldbilderna, efter mönstret `5c3adca`/`4d929b4`.
 
 ## Öppna frågor
 
@@ -196,8 +200,9 @@ Testprojekt byggs i `target/vy-dev-tests` (13 MB).
    typkontrollerade men inte körda här (ingen Windows i sandlådan); CI:s Windows-jobb kör
    `agent_end_to_end` med den.
 3. **Byggtestet för tidsgränser** `vy_render::tests::spec_5_3_3_bench_32_rounded_clips_2000_rects`
-   (1 s i debug) faller ibland här när fyra agenter bygger på två kärnor (1,0–1,3 s) och går igenom
-   ensam. Oberoende av den här grenen.
+   (1 s i debug) beror på lasten: när fyra agenter bygger på två kärnor (load 5–6) tar det
+   1,0–1,5 s och faller, också ensamt; vid lägre last tidigare under kvällen gick det igenom ensamt.
+   `vy-render`, `vy-dl` och `vy-abi` är oförändrade mot `3bc0bcb`, och testet kör ingen modul.
 4. **Skalets laddare är en tråd.** `vy_shell::page::start_loader` utför sidors `fetch_begin` en i
    taget; en long-poll från Studio (≤ 1 s) skjuter upp andra flikars laddning lika länge. En liten
    pool eller en tråd per begäran (med samma gränser) vore bättre – m4/ux.
