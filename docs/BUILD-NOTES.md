@@ -1,8 +1,111 @@
 # Byggnoteringar
 
 Skrivna av byggagenten. Granskningssidorna skrivs av en annan agent (`docs/reviews/`).
-M2.5-delen står först, sedan M2 och M1; äldre delar är oförändrade utom där senare milstolpar
-ändrat läget (markerat).
+M2.6-delen står först, sedan M2.5, M2 och M1; äldre delar är oförändrade utom där senare
+milstolpar ändrat läget (markerat).
+
+# M2.6 – SDK, spec-frågor 17–21, verktyg och frysförberedelse
+
+Beslutslistan i `docs/reviews/0002-m2-sdk-referenssidor.md` är nu genomförd i sin helhet:
+23–28 (SDK) och 32–34 (verktyg) i den här delen, 1–22 och 29–31 i M2.5. Spec-frågorna 17–21
+är avgjorda av specägaren och införda. `docs/ABI-1.0.md` är den frysta förteckningen; specens
+version- och statusrad är orörd – specägaren fryser.
+
+## SDK (beslut 23–28)
+
+| Beslut | Ändring |
+| --- | --- |
+| 23 | `Event::Capability { cap: Capability, granted }` med enum `Capability` (sex varianter, id ur SPEC-A.4.1, `from_id`/`id`/`name`); ett okänt id blir `Event::Unknown`. `chat` beror inte längre på `vy-abi`. |
+| 24 | `Sem` har `node`, `node_with_id`, `begin`, `end` och `group`; rollhjälparna är borta. Elva sidor skriver `sem.node(Role::X, …)`; pixlar och träd oförändrade. |
+| 25 | `Column`/`Row` utgår (ingen sida använde dem). README visar `layout()`-mönstret: rektanglarna räknas ur fönstret på ett ställe, `event` träfftestar och `frame` ritar samma rektanglar. README-exemplet är kompilerat mot wasm32 och dess testsnutt körd. |
+| 26 | `vy_sdk::math`: `floor`, `round`, `ceil` via cast och jämförelse (exakta under 2²³, NaN/∞ oförändrade) och `snap(v, scale)` = `round(v × scale) / scale`. text, document och dashboard ritar 1 px-linjer med `snap`; tio guldbilder bytta (*pixelsnappning*). Vid skala under 0,5 rundas en hårlinje till 0 – `.max(1.0 / scale)` om det någonsin behövs. |
+| 27 | `App::init -> Result<Self, VyError>`; `Err` loggas på nivå Error och blir `vy_init`:s returvärde, varpå värden avvisar sidan (`InitFailed`). De nio `unwrap_or(StyleId(0))` är borta. |
+| 28 | `Frame::begin`/`end` är `pub(crate)`: bara exportlimmet skapar en `Frame`; nativa modultester kör `mock::run_frame(&mut sida, dt)`. `arena::bytes` ersätts av `arena::Dispatch` som limmet skapar per `vy_event`; `Event<'_>` med `TEXT_INPUT` lånar texten ur den och kan inte överleva utskicket. |
+
+## Spec-frågor 17–21 (avgjorda)
+
+- **17 Programmatisk fokus: avslås i 1.0.** SPEC-10.3.1: ingen `focus_request`-import; modulen
+  följer värdens fokus, och en sida som vill flytta fokus ändrar trädet (noden som ska fokuseras
+  registreras först i dokumentordning, dit Tab går från inget fokus). Sidorna form, chat,
+  document och settings håller inte längre egen fokus: ingen fokusflytt vid fel (form), vid
+  Escape, eller i egen pekar-träfftest; chat autofokuserar inte kompositören (fallen börjar
+  med Tab); settings träfftestar vippknappsraden mot samma rektangel som dess nod. Fem
+  guldbilder bytta (*modulen följer värdens fokus*).
+- **18 Pekarfokus:** bekräftat och normativt i SPEC-10.3.1 – `FOCUS` levereras före `POINTER_DOWN`.
+- **19 Fokuserbara roller:** bekräftade som implementerat (SPEC-10.3.2).
+- **20 Försvunnen nod:** SPEC-10.3.2 – registreras den fokuserade noden inte i ett `vy_frame`
+  levererar värden `FOCUS` ut (`b = 0`, `c = 0`) efter framen och inget har fokus.
+  `Runtime::drop_focus_if_gone`, test `spec_10_3_2_focus_lost_when_node_disappears`.
+- **21 `fetch_read` = 0 som slut:** SPEC-5.2.7 – värden buffrar hela kroppen (högst 64 MB, annars
+  `E_TOO_LARGE` och ingen kropp) innan `FETCH_DONE`; `fetch_read` kopierar i ordning och
+  returnerar 0 först vid slutet, som frigör kroppen. Provat på riktigt mot headless-transporten
+  (nedan), inte bara nekad väg: `spec_5_2_7_fetch_read_zero_only_at_end`.
+
+## Värden headless (beslut 32, 34)
+
+- **Lagring i minnet** när `storage` beviljas (SPEC-5.2.9): `state_get` på saknad nyckel är
+  `E_RESOURCE`, hela längden rapporteras, högst `max` kopieras; `state_delete`; kvot
+  `Options::storage_quota_bytes` (manifestets `quota_kb` × 1024 i sviten, annars 1 MB enligt
+  SPEC-8.2.3) ger `E_QUOTA`. `Runtime::take_storage` flyttar lagringen till nästa instans.
+- **Inspelad hämtning** (`Options::fetch`, SPEC-5.2.7): `fetch_begin` till en URL med inspelat
+  svar får ett `req_id`; `Runtime::fetch_done` levererar `FETCH_DONE` för den äldsta väntande.
+  `fetch_poll` är 0 tills dess och 1 därefter; `fetch_read` före `FETCH_DONE` eller mot en stängd
+  begäran är `E_ARG`; 65:e öppna begäran `E_RATE`. Utan inspelat svar nekas som förr.
+- **Origin-grind** (SPEC-5.2.8): `Options::net_origins` ur manifestet; främmande origin ger
+  `E_ORIGIN` utan anrop, icke-https ger `E_ARG`; tom lista (inget manifest) tillämpar ingen grind.
+  Testet `spec_5_2_8_origin_gate` är un-ignorerat.
+- **Loggnivåer**: nekad capability är nivå 2 (SPEC-5.3.1); "nekad för att headless saknar
+  implementation" (navigate, urklipp, fetch utan inspelat svar) och "nyckel saknas" är nivå 0.
+- **Budgetsimulering**: `Runtime::force_budget_breach` rapporterar nästa frame över budget
+  (`a = 9`) med samma svit, streak och tvingande suspend som en riktig.
+
+## Konformansrunnern (beslut 32)
+
+`events` tar nu även värdhändelser, var och en med valfritt `after_frames = N` (högst N frames
+mellan föregående händelse och denna): `visibility` (inga frames gömd), `budget`, `resize`
+(sista storleken är bildens), `suspend`, `reinit` (ny instans med den gamlas lagring; loggarna
+behålls), `fetch_done`. `fetch = [{url, status, body}]` är fallets inspelade svar. Manifestets
+`memory_max`, `net.origins` och `storage.quota_kb` tillämpas på körningen. Efter ett tvingande
+suspend körs inga fler frames; en händelse därefter är ett fel i fallet. `vy-cli render` tar
+`--resource <fil>` (resurs-id 1, 2, …) och `--resource-size WxH`.
+
+Fem nya fall: `settings-800x600@1-reloaded` (persistens över `vy_suspend` och ny `vy_init`),
+`game-800x600@1-paused` (gömd 20 frames efter serven, visad igen: pausöverlägg vid 0,3 s),
+`game-800x600@1-budget` (BUDGET efter tio frames: stjärnfält och svans borta),
+`document-1280x800@1-to-400x700` (omflöde: bild och träd identiska med `document-400x700@1`),
+`chat-800x600@1-delivered` (inspelat svar och `FETCH_DONE`: "levererat"). Runnertester i
+`vy-cli` för varje steg.
+
+## Verktyg och grindar (beslut 33) och förteckningen
+
+- `tools/test_modules.sh`: varje moduls `cargo fmt --check`, nativa `cargo test` och
+  wasm32-clippy; i CI i både `gates` (Ubuntu) och `platform` (macOS, som fick rustfmt och clippy).
+- `docs/ABI-1.0.md` genereras av `vy-cli abi-dump` ur `vy-abi` (nya tabeller: `err::ALL`,
+  `event::ALL`, `modifier::ALL`, `op::ALL`/`RESERVED`, `Sig::args`, `Ty::name`) och är en grind:
+  `spec_5_3_5_abi_listing_is_frozen` fallerar när filen avviker.
+
+## Grindar och tal
+
+50 konformansfall (var 45), 26 semantiska träd (var 23). Guldbyten: 10 (pixelsnappning), 5
+(fokus), 2 bilder + 2 träd (headless lagring), 5 nya. Tester: 146 gröna i workspace (var 133),
+41 ignorerade (var 42: 5.2.8 un-ignorerat). Spec-id: 131, alla spårade. Importer: 32. Inga nya
+beroenden. 16 commits sedan M2.5.
+
+## Spec-frågor (M2.6)
+
+22. **`fetch_poll`:s returvärde** är ospecificerat i SPEC-5.2.7. Headless: 0 tills `FETCH_DONE`
+    levererats, 1 därefter, `E_ARG` för en begäran som inte är öppen. Bör in i specen (eller
+    importen strykas: `FETCH_DONE` bär redan allt).
+23. **`fetch_read` före `FETCH_DONE`** ger `E_ARG` headless ("inte läsbar än"); `E_RATE` eller
+    0-utan-stängning vore alternativen. Specen säger inget. Samma för `fetch_begin` med en
+    adress som inte är `https://`: `E_ARG`.
+24. **Origin-grind utan manifest.** Headless tillämpar SPEC-5.2.8 bara när en origin-lista finns
+    (`vy-cli render --grant net` har inget manifest). Skalet har alltid ett manifest, så frågan
+    är bara om `render` ska kräva `--manifest`.
+25. **Fokus-ut utan orsak.** `FOCUS` för en försvunnen nod bär `c = 0` (som pekare). En tredje
+    orsakskod (2 = trädet) vore tydligare men SPEC-A.2.1 låser argumenten; `c = 0` valdes.
+26. **`E_RESOURCE` från `state_get` loggas** på nivå 0. SPEC-5.3.1 kräver logg bara för nekade
+    capabilities; en saknad nyckel är sidans normala väg. Bör nivåerna stå i specen?
 
 # M2.5 – ABI-ändringar före frysning
 
