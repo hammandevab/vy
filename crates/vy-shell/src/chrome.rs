@@ -4,7 +4,10 @@
 //! fallback, stopped). All of it is a display list rasterized by
 //! `vy-render` with the bundled faces, like a page; no toolkit. A page can
 //! never draw here: its own display list is rasterized into its own area
-//! and composited under the chrome's (see `compose`).
+//! and composited under the chrome's (see `compose`). The capability
+//! question is the one piece drawn over the page area instead of above
+//! it ([`draw_dialog`]): the page keeps its place, so a page cannot move
+//! what is under the user's pointer by making the shell ask.
 //!
 //! Everything is laid out in logical pixels and depends only on the
 //! [`View`], so a screenshot of the same state is the same pixels
@@ -21,7 +24,7 @@ use vy_render::TextEngine;
 pub const TAB_STRIP_H: f32 = 34.0;
 /// Height of the address row.
 pub const ADDRESS_H: f32 = 44.0;
-/// Height of the capability question row, when shown.
+/// Height of the capability question, laid over the top of the page area.
 pub const DIALOG_H: f32 = 40.0;
 /// Height of the loading bar under the address row.
 pub const LOADING_H: f32 = 3.0;
@@ -173,6 +176,9 @@ pub struct Layout {
     pub address_text_x: f32,
     /// Capability badges: name and rectangle; a click revokes or re-grants.
     pub badges: Vec<(&'static str, Rect)>,
+    /// The capability question, over the top of the page area: what is
+    /// under it is the shell's, not the page's.
+    pub dialog: Option<Rect>,
     /// "Tillåt" in the capability question.
     pub allow: Option<Rect>,
     /// "Neka" in the capability question.
@@ -472,38 +478,35 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
     }
     let _ = dl.clip_pop();
 
-    let mut y = row_y + ADDRESS_H;
+    let y = row_y + ADDRESS_H;
     // Loading bar.
     if view.loading {
         let _ = dl.rect(0.0, y - LOADING_H, w, LOADING_H, 0.0, TAB_INACTIVE);
         let _ = dl.rect(0.0, y - LOADING_H, w * 0.35, LOADING_H, 0.0, ACCENT);
     }
-    // Capability question.
-    if let Some(cap) = view.ask {
-        let _ = dl.rect(0.0, y, w, DIALOG_H, 0.0, DIALOG_BG);
-        let _ = dl.rect(0.0, y + DIALOG_H - 1.0, w, 1.0, 0.0, RULE);
-        let question = format!("Sidan vill använda {} ({}).", cap_label(cap), cap);
-        let question = fit(text, styles.ui, &question, w - 200.0);
-        centred_text(
-            &mut dl,
-            text,
-            styles.ui,
-            Rect::new(12.0, y, w - 200.0, DIALOG_H),
-            &question,
-        );
-        let allow = Rect::new(w - 168.0, y + 7.0, 72.0, 26.0);
-        let deny = Rect::new(w - 88.0, y + 7.0, 72.0, 26.0);
-        let _ = dl.rect(allow.x, allow.y, allow.w, allow.h, 5.0, BUTTON_BG);
-        centred_both(&mut dl, text, styles.small_white, allow, "Tillåt");
-        let _ = dl.rect(deny.x, deny.y, deny.w, deny.h, 5.0, BUTTON_PLAIN);
-        centred_both(&mut dl, text, styles.small, deny, "Neka");
-        layout.allow = Some(allow);
-        layout.deny = Some(deny);
-        y += DIALOG_H;
-    }
     layout.chrome_h = y;
     layout.page = Rect::new(0.0, y, w, (h - y).max(0.0));
     let page = layout.page;
+    // The capability question lies over the top of the page area and
+    // moves nothing: its pixels come from `draw_dialog`, composited after
+    // the page; here only where it is and where its buttons are.
+    if view.ask.is_some() {
+        let dialog = Rect::new(page.x, page.y, page.w, DIALOG_H);
+        let (allow, deny) = dialog_buttons(dialog.w);
+        layout.dialog = Some(dialog);
+        layout.allow = Some(Rect::new(
+            dialog.x + allow.x,
+            dialog.y + allow.y,
+            allow.w,
+            allow.h,
+        ));
+        layout.deny = Some(Rect::new(
+            dialog.x + deny.x,
+            dialog.y + deny.y,
+            deny.w,
+            deny.h,
+        ));
+    }
 
     // The page area, when the shell draws it.
     let _ = dl.rect(page.x, page.y, page.w, page.h, 0.0, PAGE_BG);
@@ -609,6 +612,48 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
     (dl.bytes().to_vec(), layout)
 }
 
+/// "Tillåt" and "Neka" within a question `w` wide, in its own coordinates.
+fn dialog_buttons(w: f32) -> (Rect, Rect) {
+    (
+        Rect::new(w - 168.0, 7.0, 72.0, 26.0),
+        Rect::new(w - 88.0, 7.0, 72.0, 26.0),
+    )
+}
+
+/// The capability question (SPEC-8.2.3) about `cap`, laid over the top
+/// of the page area without moving it: its own display list, `(bytes,
+/// width, height)` in logical pixels, composited after the page (see
+/// `compose`). Full width, so it is the same question wherever the
+/// pointer is, and opaque, so nothing a page draws shows through it.
+pub fn draw_dialog(
+    text: &mut TextEngine,
+    styles: &Styles,
+    cap: &str,
+    width: f32,
+) -> (Vec<u8>, f32, f32) {
+    let (w, h) = (width.max(1.0), DIALOG_H);
+    let mut dl = DisplayList::new();
+    dl.begin().expect("fresh list");
+    let _ = dl.rect(0.0, 0.0, w, h, 0.0, DIALOG_BG);
+    let _ = dl.rect(0.0, h - 1.0, w, 1.0, 0.0, RULE);
+    let question = format!("Sidan vill använda {} ({}).", cap_label(cap), cap);
+    let question = fit(text, styles.ui, &question, (w - 200.0).max(20.0));
+    centred_text(
+        &mut dl,
+        text,
+        styles.ui,
+        Rect::new(12.0, 0.0, (w - 200.0).max(20.0), h),
+        &question,
+    );
+    let (allow, deny) = dialog_buttons(w);
+    let _ = dl.rect(allow.x, allow.y, allow.w, allow.h, 5.0, BUTTON_BG);
+    centred_both(&mut dl, text, styles.small_white, allow, "Tillåt");
+    let _ = dl.rect(deny.x, deny.y, deny.w, deny.h, 5.0, BUTTON_PLAIN);
+    centred_both(&mut dl, text, styles.small, deny, "Neka");
+    dl.end().expect("balanced list");
+    (dl.bytes().to_vec(), w, h)
+}
+
 /// The status pill shown over the page's bottom-left corner while the
 /// pointer is on a link: its own small display list, `(bytes, width,
 /// height)` in logical pixels.
@@ -671,10 +716,11 @@ mod tests {
         }
     }
 
-    /// SPEC-9.6.1: the chrome is a display list of the shell's own with
-    /// the address text in it; its layout gives the page area below the
-    /// chrome, grows by the dialog row when a capability is asked, and
-    /// places every button; the same view draws the same bytes.
+    /// SPEC-9.6.1, SPEC-8.2.3: the chrome is a display list of the shell's
+    /// own with the address text in it; its layout gives the page area
+    /// below the chrome and places every button; the same view draws the
+    /// same bytes. A capability question lies over the top of the page
+    /// area as its own list and moves neither the chrome nor the page.
     #[test]
     fn spec_9_6_1_chrome_layout_is_deterministic() {
         let mut text = TextEngine::new();
@@ -719,7 +765,7 @@ mod tests {
         assert!(texts.contains(&"vy://docs.example/rapport".to_string()));
         assert!(texts.contains(&"Hej från Vy".to_string()));
         assert!(texts.contains(&"Laddar…".to_string()));
-        assert!(layout.allow.is_none());
+        assert!(layout.allow.is_none() && layout.dialog.is_none());
 
         let mut asking = view(&tabs, &address);
         asking.ask = Some("clipboard");
@@ -727,42 +773,71 @@ mod tests {
         asking.restricted = true;
         asking.inaccessible = true;
         asking.zoom = 1.25;
-        let (bytes, layout) = draw(&asking, &mut text, &styles);
-        assert_eq!(layout.chrome_h, TAB_STRIP_H + ADDRESS_H + DIALOG_H);
-        assert!(layout
-            .allow
-            .unwrap()
-            .contains(800.0 - 168.0 + 10.0, 78.0 + 20.0));
-        assert!(layout.deny.unwrap().x > layout.allow.unwrap().right());
+        let (asking_bytes, layout) = draw(&asking, &mut text, &styles);
+        // The question moves nothing: the chrome's height and the page
+        // area are those of the view without it; the question lies over
+        // the top of the page area, its buttons inside it.
+        assert_eq!(layout.chrome_h, TAB_STRIP_H + ADDRESS_H);
+        assert_eq!(layout.page, Rect::new(0.0, 78.0, 800.0, 522.0));
+        let dialog = layout.dialog.unwrap();
+        assert_eq!(dialog, Rect::new(0.0, 78.0, 800.0, DIALOG_H));
+        let allow = layout.allow.unwrap();
+        assert!(allow.contains(800.0 - 168.0 + 10.0, 78.0 + 20.0));
+        assert!(layout.deny.unwrap().x > allow.right());
+        for r in [allow, layout.deny.unwrap()] {
+            assert!(r.y >= dialog.y && r.bottom() <= dialog.bottom());
+            assert!(r.x >= dialog.x && r.right() <= dialog.right());
+        }
         assert_eq!(layout.badges.len(), 2);
         assert_eq!(layout.badges[0].0, "net");
         assert!(
             layout.badges[0].1.x < layout.badges[1].1.x,
             "in request order"
         );
-        let texts: Vec<String> = vy_dl::decode(&bytes)
-            .unwrap()
-            .iter()
-            .filter_map(|op| match op {
-                vy_dl::Op::Text { text, .. } => Some(String::from_utf8_lossy(text).into_owned()),
-                _ => None,
-            })
-            .collect();
+        let decode = |bytes: &[u8]| -> Vec<String> {
+            vy_dl::decode(bytes)
+                .unwrap()
+                .iter()
+                .filter_map(|op| match op {
+                    vy_dl::Op::Text { text, .. } => {
+                        Some(String::from_utf8_lossy(text).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let texts = decode(&asking_bytes);
         for expected in [
             "begränsat läge",
             "otillgänglig",
             "net",
             "clipboard",
             "125 %",
-            "Tillåt",
-            "Neka",
         ] {
             assert!(
                 texts.contains(&expected.to_string()),
                 "{expected}: {texts:?}"
             );
         }
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t == "Tillåt" || t.contains("urklippet")),
+            "the question is not part of the chrome's list: {texts:?}"
+        );
+        let (dialog_bytes, dw, dh) = draw_dialog(&mut text, &styles, "clipboard", dialog.w);
+        assert_eq!((dw, dh), (800.0, DIALOG_H));
+        let texts = decode(&dialog_bytes);
+        assert!(texts.contains(&"Tillåt".to_string()));
+        assert!(texts.contains(&"Neka".to_string()));
         assert!(texts.iter().any(|t| t.contains("urklippet")));
+        assert_eq!(
+            draw_dialog(&mut text, &styles, "clipboard", dialog.w).0,
+            dialog_bytes,
+            "deterministic"
+        );
+        let (narrow_dialog, _, _) = draw_dialog(&mut text, &styles, "persist_frame", 150.0);
+        assert!(!narrow_dialog.is_empty());
 
         // Error and fallback views draw their content in the page area.
         let mut err = view(&tabs, &address);

@@ -81,14 +81,20 @@ mod tests {
     /// verified, so it is trusted and the default policy applies
     /// (SPEC-8.2.3); `extra` adds capabilities to the draft's request, and
     /// `net=<origin>` replaces the `net` origins with one treated as the
-    /// page's own.
+    /// page's own. The page is at `vy://<name>.example/`.
     fn trusted_page(name: &str, extra: &[&str]) -> LoadedPage {
+        trusted_page_at(name, extra, &format!("{name}.example"))
+    }
+
+    /// [`trusted_page`] at `vy://<authority>/`: a `net` request for
+    /// another authority than the page's own is then a question.
+    fn trusted_page_at(name: &str, extra: &[&str], authority: &str) -> LoadedPage {
         let wasm = std::fs::read(module_path(name)).unwrap();
         let draft_path = root().join(format!("conformance/manifests/{name}.json"));
         let draft = Draft::from_json(&std::fs::read_to_string(&draft_path).unwrap()).unwrap();
         let inputs = draft.load_resources(draft_path.parent().unwrap()).unwrap();
         let mut manifest = draft.finish(&wasm, &inputs);
-        let mut own = vec!["https://chat.example".to_string()];
+        let mut own = vec![format!("https://{authority}")];
         for cap in extra {
             match *cap {
                 "clipboard" => manifest.capabilities.clipboard = Some(Empty {}),
@@ -117,8 +123,8 @@ mod tests {
             .map(|(i, r)| (i.bytes, r.w.zip(r.h)))
             .collect();
         LoadedPage {
-            display: format!("vy://{name}.example/"),
-            origin: Some(format!("vy://{name}.example")),
+            display: format!("vy://{authority}/"),
+            origin: Some(format!("vy://{authority}")),
             sha256: manifest.module.hash.0,
             manifest: Some(manifest),
             wasm,
@@ -307,6 +313,130 @@ mod tests {
         shell.shutdown();
     }
 
+    /// SPEC-8.2.3, SPEC-9.6.1: the capability question lies over the top
+    /// of the page area without moving the page, and a click on "Tillåt"
+    /// counts only once the question has been up for `DIALOG_ARM_MS`;
+    /// "Neka" counts at once. So a page that makes the shell ask right
+    /// under the user's next click gets no grant from it, and a click
+    /// aimed at page content lands where it was aimed.
+    #[test]
+    fn spec_8_2_3_capability_question_overlays_and_arms_late() {
+        use crate::chrome::{Rect, ADDRESS_H, DIALOG_H, TAB_STRIP_H};
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab_loaded(trusted_page("chat", &["clipboard"]));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.pending_ask(), Some("clipboard"));
+        let frame = shell.frame().clone();
+        let layout = shell.layout().clone();
+        // The page area is where it is without a question; the question
+        // covers its top and holds both buttons.
+        let page = Rect::new(
+            0.0,
+            TAB_STRIP_H + ADDRESS_H,
+            800.0,
+            600.0 - TAB_STRIP_H - ADDRESS_H,
+        );
+        assert_eq!(layout.page, page);
+        let dialog = layout.dialog.unwrap();
+        assert_eq!(dialog, Rect::new(page.x, page.y, page.w, DIALOG_H));
+        let (allow, deny) = (layout.allow.unwrap(), layout.deny.unwrap());
+        assert!(dialog.contains(allow.x, allow.y) && dialog.contains(deny.x, deny.y));
+        // The question's pixels are the shell's, over the page's frame.
+        let dialog_bg = [0xFF, 0xF4, 0xD6, 0xFF];
+        assert_eq!(frame.pixel(4, dialog.y as u32 + 2), Some(dialog_bg));
+        assert_eq!(
+            frame.pixel(400, dialog.y as u32 + 2),
+            Some(dialog_bg),
+            "opaque: nothing of the page shows through"
+        );
+        assert_ne!(
+            frame.pixel(4, dialog.bottom() as u32 + 2),
+            Some(dialog_bg),
+            "the page below the question"
+        );
+        // Over the question, the pointer is not in the page.
+        shell.pointer_move(allow.x + 5.0, allow.y + 5.0);
+        assert_eq!(shell.cursor(), Cursor::Arrow);
+        // A click on "Tillåt" right away is ignored and logged...
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(shell.pending_ask(), Some("clipboard"));
+        assert_eq!(shell.tab_badges(tab)[1], ("clipboard", false));
+        assert!(shell
+            .tab_logs(tab)
+            .iter()
+            .any(|l| l.starts_with("[host info] click on Tillåt ignored")));
+        // ...and again just before the arming time; then it counts.
+        shell.advance_clock(crate::shell::DIALOG_ARM_MS - shell.now_ms() - 1);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(shell.pending_ask(), Some("clipboard"));
+        shell.advance_clock(1);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(shell.pending_ask(), None);
+        assert_eq!(shell.tab_badges(tab)[1], ("clipboard", true));
+        let _ = shell.frame();
+        assert!(shell.layout().dialog.is_none(), "the question is gone");
+        assert_eq!(shell.layout().page, page, "and the page did not move");
+        // "Neka" counts at once: a fresh question in a fresh tab.
+        let other = shell.open_tab_loaded(trusted_page("chat", &["persist_frame"]));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.pending_ask(), Some("persist_frame"));
+        let _ = shell.frame();
+        let deny = shell.layout().deny.unwrap();
+        shell.pointer_move(deny.x + 5.0, deny.y + 5.0);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(shell.pending_ask(), None);
+        assert!(shell.tab_badges(other).contains(&("persist_frame", false)));
+        // A page at another authority than its `net` origin has two
+        // questions (SPEC-8.2.3). Switching to its tab shows the first
+        // afresh: it arms from the switch, not from the load; and the
+        // second arms from the moment the first was answered.
+        let third = shell.open_tab_loaded(trusted_page_at(
+            "chat",
+            &["persist_frame"],
+            "another.example",
+        ));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.pending_ask(), Some("net"));
+        shell.advance_clock(crate::shell::DIALOG_ARM_MS);
+        shell.switch_tab(true);
+        assert_ne!(shell.active_tab(), Some(third));
+        assert_eq!(shell.pending_ask(), None, "the other tabs have no question");
+        shell.switch_tab(false);
+        assert_eq!(shell.active_tab(), Some(third));
+        let _ = shell.frame();
+        let allow = shell.layout().allow.unwrap();
+        shell.pointer_move(allow.x + 5.0, allow.y + 5.0);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(
+            shell.pending_ask(),
+            Some("net"),
+            "not armed since the switch"
+        );
+        shell.advance_clock(crate::shell::DIALOG_ARM_MS);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(
+            shell.pending_ask(),
+            Some("persist_frame"),
+            "the next question"
+        );
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(shell.pending_ask(), Some("persist_frame"), "not armed yet");
+        shell.advance_clock(crate::shell::DIALOG_ARM_MS);
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        assert_eq!(shell.pending_ask(), None);
+        assert!(shell.tab_badges(third).contains(&("net", true)));
+        assert!(shell.tab_badges(third).contains(&("persist_frame", true)));
+        shell.shutdown();
+    }
+
     /// SPEC-9.1.1, SPEC-9.1.2: every tab is its own OS process, distinct
     /// from the shell's and from each other's; what crosses the boundary
     /// is a display list (bytes of appendix C), rasterized here.
@@ -373,8 +503,10 @@ mod tests {
             layout.badges.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
             ["net", "clipboard", "ime"]
         );
-        // Allow by clicking the button.
+        // Allow by clicking the button, once the question has been up
+        // long enough to be armed (`spec_8_2_3_capability_question_overlays_and_arms_late`).
         let allow = layout.allow.unwrap();
+        shell.advance_clock(crate::shell::DIALOG_ARM_MS);
         shell.pointer_move(allow.x + 5.0, allow.y + 5.0);
         shell.pointer_button(button::PRIMARY, true);
         assert_eq!(shell.pending_ask(), None);

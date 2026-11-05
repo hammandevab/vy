@@ -40,6 +40,11 @@ const ZOOM_STEPS: [f32; 9] = [0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0];
 const NET_BYTES_PER_MINUTE: u64 = 256 << 20;
 /// Log lines kept per tab.
 const MAX_TAB_LOGS: usize = 200;
+/// How long the capability question has to have been up before a click
+/// on "Tillåt" counts (SPEC-8.2.3): a page that makes the shell ask
+/// right before the user's next click (a reload on pointer movement)
+/// gets nothing from it. "Neka" always counts.
+pub const DIALOG_ARM_MS: i64 = 700;
 
 /// Something that wakes the UI thread after a message was put in the inbox.
 #[derive(Clone)]
@@ -152,6 +157,9 @@ struct Tab {
     pressed_link: Option<String>,
     hidden: bool,
     under_min: bool,
+    /// Clock reading at which the capability question now shown for this
+    /// tab appeared, for arming "Tillåt" (`DIALOG_ARM_MS`).
+    ask_since: Option<i64>,
 }
 
 impl Tab {
@@ -193,7 +201,13 @@ impl Tab {
             pressed_link: None,
             hidden: false,
             under_min: false,
+            ask_since: None,
         }
+    }
+
+    /// The question now shown appeared at `now`, if there is one.
+    fn ask_shown(&mut self, now: i64) {
+        self.ask_since = (!self.asks.is_empty()).then_some(now);
     }
 
     /// Whether a request the page wants made may be made (SPEC-5.2.8,
@@ -358,6 +372,16 @@ impl Shell {
             self.clock_headless
         } else {
             self.started.elapsed().as_millis() as i64
+        }
+    }
+
+    /// Move the headless clock forward by `ms` (it never goes back,
+    /// SPEC-5.2.11); a window's clock is the monotonic one and is not
+    /// moved. For tests and drivers that need time to pass without a
+    /// tick: the gesture window and the arming of the question.
+    pub fn advance_clock(&mut self, ms: i64) {
+        if self.config.headless {
+            self.clock_headless += ms.max(0);
         }
     }
 
@@ -622,6 +646,8 @@ impl Shell {
             }
         }
         self.active = index;
+        // A question the tab has pending appears now, with the tab.
+        self.tabs[index].ask_shown(now);
         let display = self.tabs[index].display.clone();
         self.address.set_committed(&display);
         self.address.blur();
@@ -761,6 +787,7 @@ impl Shell {
             tab.hidden = false;
             tab.under_min = false;
             tab.pressed_link = None;
+            tab.ask_since = None;
         }
         if Some(id) == self.active_tab() {
             let display = self.tab(id).map(|t| t.display.clone()).unwrap_or_default();
@@ -996,6 +1023,7 @@ impl Shell {
             .collect();
         tab.storage_quota_bytes = storage_quota_bytes;
         tab.asks = resolved.iter().filter(|r| r.ask).map(|r| r.name).collect();
+        tab.ask_shown(clock_ms);
         tab.caps = resolved;
         tab.images = ImageCache::empty(page.resources.len());
         tab.manifest = page.manifest;
@@ -1268,14 +1296,20 @@ impl Shell {
 
     // ---- capabilities (SPEC-9.2.1) ---------------------------------------
 
-    /// Answer the capability question of the active tab.
+    /// Answer the capability question of the active tab. A click on
+    /// "Tillåt" reaches this only once the question has been up for
+    /// `DIALOG_ARM_MS` (see `click_chrome`); the model itself is not
+    /// timed.
     pub fn answer_ask(&mut self, allow: bool) {
+        let now = self.now_ms();
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
         let Some(name) = tab.asks.pop_front() else {
             return;
         };
+        // The next question, if any, appears now.
+        tab.ask_shown(now);
         let origin = tab.origin.clone();
         let id = tab.id;
         if let Some(o) = &origin {
@@ -1539,6 +1573,21 @@ impl Shell {
                 });
             }
         }
+        // The capability question over the top of the page area, after
+        // the page: the page is where it would be without the question.
+        let ask = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.asks.front().copied());
+        if let Some((cap, r)) = ask.zip(self.layout.dialog) {
+            let (dl, w, h) = chrome::draw_dialog(&mut self.chrome_text, &self.styles, cap, r.w);
+            let (dw, dh) = physical(w, h, scale);
+            if let Ok(res) = vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none) {
+                let x = (r.x * scale).round() as i64;
+                let y = (r.y * scale).round() as i64;
+                blend(&mut self.frame, &res.image, x, y);
+            }
+        }
         if let Some(url) = self.hover.clone() {
             let (dl, w, h) = chrome::draw_status(&mut self.chrome_text, &self.styles, &url, page.w);
             let (sw, sh) = physical(w, h, scale);
@@ -1583,6 +1632,11 @@ impl Shell {
         if !page.contains(x, y) || !tab.running() || tab.under_min {
             return None;
         }
+        // The capability question lies over the top of the page area:
+        // what is under it is the shell's, not the page's.
+        if self.layout.dialog.is_some_and(|d| d.contains(x, y)) {
+            return None;
+        }
         Some(((x - page.x) / tab.zoom, (y - page.y) / tab.zoom))
     }
 
@@ -1601,6 +1655,16 @@ impl Shell {
                 tab.tick_due = true;
             }
         }
+    }
+
+    /// True once the active tab's question has been up for
+    /// `DIALOG_ARM_MS`, so that a click on "Tillåt" counts.
+    fn dialog_armed(&self) -> bool {
+        let now = self.now_ms();
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.ask_since)
+            .is_some_and(|since| now - since >= DIALOG_ARM_MS)
     }
 
     fn update_hover(&mut self) {
@@ -1760,11 +1824,24 @@ impl Shell {
             return;
         }
         if layout.allow.is_some_and(|r| r.contains(x, y)) {
-            self.answer_ask(true);
+            // Not before the question has been up for a moment: a page
+            // that makes the shell ask right under the user's next click
+            // (a reload on pointer movement) gets no grant from it.
+            if self.dialog_armed() {
+                self.answer_ask(true);
+            } else if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.log(format!(
+                    "[host info] click on Tillåt ignored: the question has been up for less than {DIALOG_ARM_MS} ms"
+                ));
+            }
             return;
         }
         if layout.deny.is_some_and(|r| r.contains(x, y)) {
             self.answer_ask(false);
+            return;
+        }
+        if layout.dialog.is_some_and(|r| r.contains(x, y)) {
+            // The question's own surface: neither the page's nor a button.
             return;
         }
         if let Some(r) = layout.external {
