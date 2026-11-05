@@ -9,16 +9,21 @@
 //! into one inbox ([`Incoming`]) and call the [`Waker`], which the window
 //! turns into a wake-up of its event loop.
 
+use crate::a11y;
 use crate::address::{AddressField, Edit};
 use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
-use crate::compose::{blend, blit, physical};
+use crate::clipboard::{self, ClipboardBackend};
+use crate::compose::{blend, blit, fill_blend, physical};
+use crate::devtools::{self, Command, Pane};
 use crate::external::{is_external, Opener};
+use crate::find;
 use crate::grants::{GrantStore, Resolved};
 use crate::history::History;
 use crate::ipc::{LoadRequest, ToShell, ToTab};
 use crate::markdown::{self, Block};
-use crate::page::{self, Done, Job, LoadError, LoadedPage, Source};
+use crate::page::{self, Check, Done, Job, LoadError, LoadedPage, Source};
 use crate::process::{self, Inbound, TabConnection, TabId};
+use crate::selection::{self, Caret, Selection};
 use crate::storage;
 use crate::tab::pack_capabilities;
 use std::collections::VecDeque;
@@ -92,6 +97,9 @@ pub struct Config {
     pub headless: bool,
     /// Opens `https://` addresses (SPEC-2.1.7).
     pub opener: Box<dyn Opener>,
+    /// The clipboard behind Ctrl+C/V/X and the pages' `clipboard_*`
+    /// (SPEC-5.2.12): the system's in a window, memory headless.
+    pub clipboard: Box<dyn ClipboardBackend>,
     /// Wakes the UI thread.
     pub waker: Waker,
 }
@@ -157,7 +165,8 @@ struct Tab {
     sent_size: (u32, u32, f32),
     zoom: f32,
     ime: Option<(f32, f32, f32, f32)>,
-    logs: VecDeque<String>,
+    /// Log lines with the frame count they came at (devtools "Logg").
+    logs: VecDeque<(u64, String)>,
     net_window: (i64, u64),
     pressed_link: Option<String>,
     hidden: bool,
@@ -168,6 +177,30 @@ struct Tab {
     /// Clock reading at which the capability question now shown for this
     /// tab appeared, for arming "Tillåt" (`DIALOG_ARM_MS`).
     ask_since: Option<i64>,
+    /// Clock reading of the last copy gesture (Ctrl+C or Ctrl+X) delivered
+    /// to the page that no `clipboard_write` has used yet (SPEC-8.2.4).
+    copy_gesture_ms: Option<i64>,
+    /// The clipboard as the tab's runtime holds it, for `clipboard_read`:
+    /// what it last wrote or was last sent; `None` before the load.
+    clipboard_sent: Option<Vec<u8>>,
+    /// The semantic node holding keyboard focus, as the tab reports it
+    /// (SPEC-10.3.1).
+    focus: Option<i32>,
+    /// The host's text selection in the page (SPEC-10.2.2).
+    selection: Selection,
+    /// The selection's highlight in page coordinates, for the frame count
+    /// and selection it was computed for.
+    selection_rects: Option<(u64, Selection, Vec<Rect>)>,
+    /// The file the tab's process records its session to (devtools,
+    /// SPEC-11.4.1); the next process of the tab is started with it.
+    record: Option<PathBuf>,
+    /// The recording this tab replays; its last frame stays when the
+    /// replay ends.
+    replay: Option<PathBuf>,
+    /// Live reload: the hash of the page as its server last answered,
+    /// and whether a check is under way.
+    live_version: Option<[u8; 32]>,
+    check_pending: bool,
 }
 
 impl Tab {
@@ -211,6 +244,15 @@ impl Tab {
             under_min: false,
             gesture_ms: None,
             ask_since: None,
+            copy_gesture_ms: None,
+            clipboard_sent: None,
+            focus: None,
+            selection: Selection::default(),
+            selection_rects: None,
+            record: None,
+            replay: None,
+            live_version: None,
+            check_pending: false,
         }
     }
 
@@ -218,6 +260,14 @@ impl Tab {
     /// true at most once per gesture.
     fn take_gesture(&mut self, now: i64) -> bool {
         self.gesture_ms
+            .take()
+            .is_some_and(|at| now - at <= GESTURE_WINDOW_MS)
+    }
+
+    /// Take the tab's recent copy gesture (SPEC-8.2.4), if there is one at
+    /// `now`: one `clipboard_write` without the capability per gesture.
+    fn take_copy_gesture(&mut self, now: i64) -> bool {
+        self.copy_gesture_ms
             .take()
             .is_some_and(|at| now - at <= GESTURE_WINDOW_MS)
     }
@@ -235,6 +285,12 @@ impl Tab {
     fn request_verdict(&self, url: &str) -> Result<(), i32> {
         if !self.capabilities().has(cap::NET) {
             return Err(vy_abi::err::E_DENIED);
+        }
+        // Plain http (loopback only, SPEC-7.1.3) goes to the page's own
+        // loopback origin and nowhere else: a remote page never reaches
+        // localhost, a localhost page never another local port.
+        if url.starts_with("http://") && !plain_http_allowed(url, self.origin.as_deref()) {
+            return Err(vy_abi::err::E_ORIGIN);
         }
         match vy_runtime::origin_of(url) {
             Some(origin) if self.net_origins.contains(&origin) => Ok(()),
@@ -256,7 +312,7 @@ impl Tab {
         if self.logs.len() == MAX_TAB_LOGS {
             self.logs.pop_front();
         }
-        self.logs.push_back(line);
+        self.logs.push_back((self.frames, line));
     }
 
     fn badges(&self) -> Vec<(&'static str, bool)> {
@@ -278,6 +334,76 @@ impl Tab {
             .iter()
             .rev()
             .find(|l| x >= l.x && y >= l.y && x < l.x + l.w && y < l.y + l.h)
+    }
+}
+
+/// Most retired tab processes whose storage answer is still awaited.
+const MAX_RETIRED: usize = 64;
+
+/// A tab process the shell let go of (a navigation, a reload, a closed
+/// tab) and what its last [`ToShell::Storage`] needs to be saved: the
+/// answer to its `Shutdown` arrives under a generation the tab no longer
+/// has, or for a tab that is gone, and is saved under the origin, grant
+/// and quota the process had (SPEC-5.2.9, SPEC-5.1.5).
+struct Retired {
+    tab: TabId,
+    generation: u64,
+    origin: String,
+    storage_granted: bool,
+    quota: u64,
+}
+
+/// The find bar (Ctrl+F) and its search of the active page's tree.
+struct Find {
+    /// The query as typed; its committed text follows every edit, so the
+    /// query stays when the field loses focus.
+    field: AddressField,
+    matches: Vec<find::Match>,
+    current: Option<usize>,
+    /// The tab, its frame count and the query the matches are for.
+    key: Option<(TabId, u64, String)>,
+    /// `SCROLL` events sent towards the current match so far, and whether
+    /// another may follow once the page has drawn again.
+    scroll_steps: u32,
+    scrolling: bool,
+    /// The highlight, for the search and current match it was made for.
+    rects: Option<(FindKey, Vec<(Rect, bool)>)>,
+}
+
+/// The devtools panel (F12).
+struct Devtools {
+    pane: Pane,
+    /// First line shown.
+    scroll: usize,
+    /// The op of the frame outlined over the page.
+    selected_op: Option<usize>,
+    /// What the last recording command did.
+    status: String,
+    /// Hit rectangles from the last draw, in window coordinates.
+    hits: Vec<(Rect, chrome::DevHit)>,
+    /// The panel as last rasterized: its list and pixels.
+    cache: Option<(Vec<u8>, u32, u32, RgbaImage)>,
+}
+
+/// What a find highlight was computed for: the tab, its frame count, the
+/// query and the current match.
+type FindKey = (TabId, u64, String, Option<usize>);
+
+impl Find {
+    fn new() -> Self {
+        Self {
+            field: AddressField::new(),
+            matches: Vec::new(),
+            current: None,
+            key: None,
+            scroll_steps: 0,
+            scrolling: false,
+            rects: None,
+        }
+    }
+
+    fn query(&self) -> String {
+        self.field.text().to_string()
     }
 }
 
@@ -308,11 +434,20 @@ pub struct Shell {
     buttons: i32,
     modifiers: i32,
     hover: Option<String>,
-    clipboard: Vec<u8>,
     clock_headless: i64,
     started: Instant,
     quit: bool,
     external_opens: Vec<String>,
+    /// Processes let go of whose storage answer is still to come.
+    retired: VecDeque<Retired>,
+    /// The find bar, while open.
+    find: Option<Find>,
+    /// The devtools panel, while open.
+    devtools: Option<Devtools>,
+    /// Live reload of localhost pages (devtools "Studio"), and when the
+    /// next check is due on the shell's clock.
+    live_reload: bool,
+    next_live_check: i64,
 }
 
 impl Shell {
@@ -360,11 +495,15 @@ impl Shell {
             buttons: 0,
             modifiers: 0,
             hover: None,
-            clipboard: Vec::new(),
             clock_headless: 0,
             started: Instant::now(),
             quit: false,
             external_opens: Vec::new(),
+            retired: VecDeque::new(),
+            find: None,
+            devtools: None,
+            live_reload: false,
+            next_live_check: 0,
         };
         shell.relayout();
         Ok(shell)
@@ -421,10 +560,15 @@ impl Shell {
         &self.external_opens
     }
 
-    /// The shell's clipboard (SPEC-5.2.12), as the last page or address
-    /// bar left it.
-    pub fn clipboard(&self) -> &[u8] {
-        &self.clipboard
+    /// The clipboard's text (SPEC-5.2.12), as the last page, copy or
+    /// address bar left it; `None` when empty.
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        self.config.clipboard.read()
+    }
+
+    /// Replace the clipboard's text, as another program would.
+    pub fn set_clipboard_text(&mut self, text: &str) {
+        self.config.clipboard.write(text);
     }
 
     /// The active tab's id.
@@ -501,7 +645,7 @@ impl Shell {
     /// The active tab's log lines.
     pub fn tab_logs(&self, id: TabId) -> Vec<String> {
         self.tab(id)
-            .map(|t| t.logs.iter().cloned().collect())
+            .map(|t| t.logs.iter().map(|(_, l)| l.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -513,6 +657,18 @@ impl Shell {
     /// A tab's semantic tree as last sent (SPEC-10.1.1).
     pub fn tab_semantic(&self, id: TabId) -> Vec<SemNode> {
         self.tab(id).map(|t| t.sem.clone()).unwrap_or_default()
+    }
+
+    /// A tab's last display list, as the page made it (appendix C).
+    pub fn tab_display_list(&self, id: TabId) -> Vec<u8> {
+        self.tab(id)
+            .map(|t| t.display_list.clone())
+            .unwrap_or_default()
+    }
+
+    /// The semantic node holding keyboard focus in a tab (SPEC-10.3.1).
+    pub fn tab_focus(&self, id: TabId) -> Option<i32> {
+        self.tab(id).and_then(|t| t.focus)
     }
 
     /// True when a tab is hidden (not active, or under its `min_size`).
@@ -557,9 +713,12 @@ impl Shell {
 
     /// The cursor to show at the pointer.
     pub fn cursor(&self) -> Cursor {
+        let (px, py) = self.pointer;
         if self.hover.is_some() {
             Cursor::Hand
-        } else if self.layout.address.contains(self.pointer.0, self.pointer.1) {
+        } else if self.layout.address.contains(px, py)
+            || self.layout.find_field.is_some_and(|f| f.contains(px, py))
+        {
             Cursor::Text
         } else {
             Cursor::Arrow
@@ -571,6 +730,9 @@ impl Shell {
     pub fn ime_area(&self) -> Option<Rect> {
         if self.address.focused() {
             return Some(self.layout.address);
+        }
+        if self.find_focused() {
+            return self.layout.find_field;
         }
         let tab = self.tabs.get(self.active)?;
         let (x, y, w, h) = tab.ime?;
@@ -633,9 +795,7 @@ impl Shell {
             return;
         };
         let mut tab = self.tabs.remove(index);
-        if let Some(conn) = tab.conn.take() {
-            conn.shutdown();
-        }
+        retire_process(&mut tab, &mut self.retired);
         if self.tabs.is_empty() {
             self.quit = true;
             self.frame_dirty = true;
@@ -671,6 +831,7 @@ impl Shell {
         self.hover = None;
         self.relayout();
         self.show_active();
+        self.refresh_find();
         self.frame_dirty = true;
     }
 
@@ -693,6 +854,9 @@ impl Shell {
                 height: want_size.1,
                 scale: want_size.2,
             });
+            // A window change gets a frame (SPEC-6.2.1): without a tick
+            // the page kept its old layout until the next input.
+            tab.tick_due = true;
         }
         let under = tab
             .manifest
@@ -762,12 +926,10 @@ impl Shell {
     pub fn navigate_tab(&mut self, id: TabId, source: Source, push: bool) {
         let generation;
         {
-            let Some(tab) = self.tab_mut(id) else {
+            let Some(tab) = find_tab(&mut self.tabs, id) else {
                 return;
             };
-            if let Some(conn) = tab.conn.take() {
-                conn.shutdown();
-            }
+            retire_process(tab, &mut self.retired);
             tab.generation += 1;
             generation = tab.generation;
             let display = source.display();
@@ -806,6 +968,14 @@ impl Shell {
             tab.pressed_link = None;
             tab.gesture_ms = None;
             tab.ask_since = None;
+            tab.copy_gesture_ms = None;
+            tab.clipboard_sent = None;
+            tab.focus = None;
+            tab.selection.clear();
+            tab.selection_rects = None;
+            tab.replay = None;
+            tab.live_version = None;
+            tab.check_pending = false;
         }
         if Some(id) == self.active_tab() {
             let display = self.tab(id).map(|t| t.display.clone()).unwrap_or_default();
@@ -905,11 +1075,18 @@ impl Shell {
 
     /// Handle one message from the inbox.
     pub fn handle(&mut self, incoming: Incoming) {
-        if let Incoming::Tab(id, generation, _) = &incoming {
-            if self.tab(*id).is_none_or(|t| t.generation != *generation) {
+        // A message from a process the tab has moved on from (or from a
+        // closed tab) is dropped, except the storage answer to its
+        // shutdown, which is saved for the page it belonged to.
+        let incoming = match incoming {
+            Incoming::Tab(id, generation, inbound)
+                if self.tab(id).is_none_or(|t| t.generation != generation) =>
+            {
+                self.retired_message(id, generation, inbound);
                 return;
             }
-        }
+            other => other,
+        };
         match incoming {
             Incoming::Tab(id, _, Inbound::Message(m)) => self.tab_message(id, m),
             Incoming::Tab(id, _, Inbound::Gone { error }) => {
@@ -923,6 +1100,23 @@ impl Shell {
                         tab.state,
                         State::Loading | State::Running | State::Stopped(_)
                     ) {
+                        return;
+                    }
+                    if tab.replay.is_some() {
+                        tab.conn = None;
+                        tab.loaded = false;
+                        tab.tick_pending = false;
+                        tab.wants_more = false;
+                        if tab.state == State::Running {
+                            // The recording ended: the last frame stays.
+                            tab.title = format!("Uppspelning klar: {}", tab.display);
+                        } else {
+                            tab.state = State::Stopped(
+                                "Inspelningen tog slut innan sidan laddats: filen är ofullständig eller ingen inspelning."
+                                    .into(),
+                            );
+                        }
+                        self.frame_dirty = true;
                         return;
                     }
                     let reason = match (error, status) {
@@ -953,6 +1147,11 @@ impl Shell {
                     }
                 }
             }
+            Incoming::Load(Done::Check {
+                tab,
+                generation,
+                result,
+            }) => self.live_checked(tab, generation, result),
             Incoming::Load(Done::Request {
                 tab,
                 generation,
@@ -1013,7 +1212,6 @@ impl Shell {
                 RandomSource::ChaCha20(keybytes),
             )
         };
-        let clipboard = self.clipboard.clone();
         let (net_origins, storage_quota_bytes, memory_max_pages) = match &page.manifest {
             Some(m) => (
                 m.capabilities
@@ -1035,6 +1233,7 @@ impl Shell {
             ),
         };
         let generation = self.tab(id).map_or(0, |t| t.generation);
+        let record = self.tab(id).and_then(|t| t.record.clone());
         let forward = move |tab_id: TabId, inbound: Inbound| {
             let ok = sink
                 .send(Incoming::Tab(tab_id, generation, inbound))
@@ -1043,7 +1242,7 @@ impl Shell {
             ok
         };
         let conn = match &exe {
-            Some(exe) => process::spawn_process(exe, id, forward, None, None),
+            Some(exe) => process::spawn_process(exe, id, forward, record.as_deref(), None),
             None => process::spawn_thread(id, forward),
         };
         let active = Some(id) == self.active_tab();
@@ -1071,6 +1270,10 @@ impl Shell {
         tab.display = page.display;
         let want_size = page_size(page_rect, tab.zoom, scale);
         tab.sent_size = want_size;
+        // The page's runtime starts with an empty clipboard and is handed
+        // the real one before each gesture, when `clipboard` is granted
+        // (see `send_page_event`).
+        tab.clipboard_sent = Some(Vec::new());
         match conn {
             Ok(conn) => {
                 let request = LoadRequest {
@@ -1087,7 +1290,7 @@ impl Shell {
                     height: want_size.1,
                     scale: want_size.2,
                     clock_ms,
-                    clipboard: Some(clipboard),
+                    clipboard: Some(Vec::new()),
                 };
                 conn.send(&ToTab::Load(Box::new(request)));
                 tab.conn = Some(conn);
@@ -1135,6 +1338,12 @@ impl Shell {
                     for s in styles {
                         let _ = tab.text.style(s.font, s.size_px, s.weight, s.color);
                     }
+                    // The tree comes before its frame, and only when it
+                    // changed: a first frame without one is a page without
+                    // a tree (SPEC-10.4.1).
+                    if tab.has_tree.is_none() {
+                        tab.has_tree = Some(false);
+                    }
                     tab.display_list = display_list;
                     tab.rendered = None;
                     tab.wants_more = wants_more;
@@ -1146,6 +1355,7 @@ impl Shell {
                 }
                 if active {
                     self.frame_dirty = true;
+                    self.refresh_find();
                 }
             }
             ToShell::Idle => {
@@ -1174,6 +1384,15 @@ impl Shell {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.has_tree = Some(has);
                     tab.sem = nodes;
+                    // A selection whose ends left the tree is gone.
+                    let ends = [tab.selection.anchor, tab.selection.focus];
+                    if ends
+                        .iter()
+                        .flatten()
+                        .any(|c| !tab.sem.iter().any(|n| n.id == c.id))
+                    {
+                        tab.selection.clear();
+                    }
                 }
                 if had != Some(has) && active {
                     self.frame_dirty = true;
@@ -1216,59 +1435,47 @@ impl Shell {
                 body,
             } => self.fetch_for(id, req, method, url, body),
             ToShell::Storage(entries) => {
-                let Some(tab) = self.tab_mut(id) else {
+                let Some(tab) = self.tab(id) else {
                     return;
                 };
-                // Only a page granted `storage` has anything to save, and
-                // only within its quota (SPEC-5.2.9, SPEC-9.3.1); the tab
-                // process is not trusted to have kept either.
-                let size: u64 = entries
-                    .iter()
-                    .map(|(k, v)| (k.len() + v.len()) as u64)
-                    .sum();
-                if !entries.is_empty()
-                    && (!tab.capabilities().has(cap::STORAGE) || size > tab.storage_quota_bytes)
-                {
-                    tab.log(format!(
-                        "[host] storage of {size} bytes not saved: not granted or over the quota"
-                    ));
-                    return;
-                }
-                let (origin, headless) = (tab.origin.clone(), self.config.headless);
-                if let (Some(origin), false) = (origin, headless) {
-                    if !origin.starts_with("file:") {
-                        let dir = self.config.data_dir.join("storage");
-                        if let Err(e) = storage::save(&dir, &origin, &entries) {
-                            if let Some(tab) = self.tab_mut(id) {
-                                tab.log(format!("[host] storage not saved: {e}"));
-                            }
-                        }
+                let origin = tab.origin.clone();
+                let granted = tab.capabilities().has(cap::STORAGE);
+                let quota = tab.storage_quota_bytes;
+                if let Err(e) = self.save_storage(origin.as_deref(), granted, quota, &entries) {
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.log(e);
                     }
                 }
             }
             ToShell::Clipboard(bytes) => {
                 // The clipboard is written through `clipboard_write`, which
-                // needs the capability (SPEC-5.2.12, SPEC-5.3.1): a tab
-                // without it has nothing to say to the other tabs.
-                let Some(tab) = self.tab_mut(id) else {
+                // needs the capability (SPEC-5.2.12, SPEC-5.3.1) or the
+                // user's own copy gesture in that tab, once per gesture
+                // (SPEC-8.2.4); the tab process runs page code, so the
+                // main process decides again.
+                let now = self.now_ms();
+                let Some(tab) = find_tab(&mut self.tabs, id) else {
                     return;
                 };
-                if !tab.capabilities().has(cap::CLIPBOARD) {
-                    tab.log("[host] clipboard ignored: `clipboard` is not granted".into());
+                if !tab.capabilities().has(cap::CLIPBOARD) && !tab.take_copy_gesture(now) {
+                    tab.log(
+                        "[host] clipboard ignored: `clipboard` is not granted and no copy gesture is pending"
+                            .into(),
+                    );
                     return;
                 }
-                self.clipboard = bytes.clone();
-                for tab in &self.tabs {
-                    if tab.id != id && tab.running() {
-                        tab.send(&ToTab::Clipboard {
-                            bytes: bytes.clone(),
-                        });
-                    }
-                }
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                tab.clipboard_sent = Some(bytes);
+                self.config.clipboard.write(&text);
             }
             ToShell::Ime(rect) => {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.ime = rect;
+                }
+            }
+            ToShell::Focus(node) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.focus = node;
                 }
             }
             ToShell::Stopped { reason } => {
@@ -1283,6 +1490,64 @@ impl Shell {
                 }
                 self.frame_dirty = true;
             }
+        }
+    }
+
+    /// Save a page's storage for `origin` (SPEC-5.2.9): only a page granted
+    /// `storage` has anything to save, and only within its quota
+    /// (SPEC-9.3.1); the tab process is not trusted to have kept either.
+    /// Nothing is persisted headless or for a local file.
+    fn save_storage(
+        &self,
+        origin: Option<&str>,
+        granted: bool,
+        quota: u64,
+        entries: &[crate::ipc::Entry],
+    ) -> Result<(), String> {
+        let size: u64 = entries
+            .iter()
+            .map(|(k, v)| (k.len() + v.len()) as u64)
+            .sum();
+        if !entries.is_empty() && (!granted || size > quota) {
+            return Err(format!(
+                "[host] storage of {size} bytes not saved: not granted or over the quota"
+            ));
+        }
+        let Some(origin) = origin.filter(|o| !o.starts_with("file:")) else {
+            return Ok(());
+        };
+        if self.config.headless {
+            return Ok(());
+        }
+        let dir = self.config.data_dir.join("storage");
+        storage::save(&dir, origin, entries).map_err(|e| format!("[host] storage not saved: {e}"))
+    }
+
+    /// A message from a retired process (see [`Retired`]): its storage
+    /// answer is saved, its end forgets it, and anything else is dropped.
+    fn retired_message(&mut self, id: TabId, generation: u64, inbound: Inbound) {
+        let Some(at) = self
+            .retired
+            .iter()
+            .position(|r| r.tab == id && r.generation == generation)
+        else {
+            return;
+        };
+        match inbound {
+            Inbound::Message(ToShell::Storage(entries)) => {
+                let r = self.retired.remove(at).expect("found");
+                if let Err(e) =
+                    self.save_storage(Some(&r.origin), r.storage_granted, r.quota, &entries)
+                {
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.log(format!("{e} (the previous page)"));
+                    }
+                }
+            }
+            Inbound::Gone { .. } => {
+                self.retired.remove(at);
+            }
+            Inbound::Message(_) => {}
         }
     }
 
@@ -1515,6 +1780,8 @@ impl Shell {
             ask: tab.and_then(|t| t.asks.front().copied()),
             page: page_view,
             zoom: tab.map_or(1.0, |t| t.zoom),
+            find: self.find.is_some(),
+            devtools: self.devtools.is_some(),
         };
         chrome::draw(&view, &mut self.chrome_text, &self.styles)
     }
@@ -1602,6 +1869,88 @@ impl Shell {
                         (page.h * scale).round() as i64,
                     );
                     blit(&mut self.frame, img, px, py, Some(clip));
+                    // The selection, over the page and under nothing else
+                    // the shell draws there (SPEC-10.2.2); the page's own
+                    // list is untouched.
+                    if !tab.selection.is_empty() {
+                        let fresh = matches!(&tab.selection_rects,
+                            Some((f, sel, _)) if *f == tab.frames && *sel == tab.selection);
+                        if !fresh {
+                            let runs = selection::runs(&tab.display_list);
+                            let rects =
+                                selection::rects(&mut tab.text, &tab.sem, &runs, &tab.selection);
+                            tab.selection_rects = Some((tab.frames, tab.selection.clone(), rects));
+                        }
+                        if let Some((_, _, rects)) = &tab.selection_rects {
+                            for r in rects {
+                                fill_blend(
+                                    &mut self.frame,
+                                    page_rect_physical(page, tab.zoom, scale, *r),
+                                    chrome::SELECTION_OVERLAY,
+                                    clip,
+                                );
+                            }
+                        }
+                    }
+                    // Find matches, the current one stronger.
+                    if let Some(f) = self.find.as_mut().filter(|f| !f.matches.is_empty()) {
+                        let key = (tab.id, tab.frames, f.query(), f.current);
+                        if f.rects.as_ref().is_none_or(|(k, _)| *k != key) {
+                            let runs = selection::runs(&tab.display_list);
+                            let view_h = page.h / tab.zoom;
+                            let mut rects = Vec::new();
+                            for (i, m) in f.matches.iter().enumerate() {
+                                let Some(node) = tab.sem.get(m.index) else {
+                                    continue;
+                                };
+                                if node.y + node.h < 0.0 || node.y > view_h {
+                                    continue;
+                                }
+                                let run = selection::run_for(node, &runs);
+                                for r in
+                                    selection::span_rects(&mut tab.text, node, run, m.start, m.end)
+                                {
+                                    rects.push((r, Some(i) == f.current));
+                                }
+                            }
+                            f.rects = Some((key, rects));
+                        }
+                        if let Some((_, rects)) = &f.rects {
+                            for (r, current) in rects {
+                                fill_blend(
+                                    &mut self.frame,
+                                    page_rect_physical(page, tab.zoom, scale, *r),
+                                    if *current {
+                                        chrome::FIND_CURRENT
+                                    } else {
+                                        chrome::FIND_MATCH
+                                    },
+                                    clip,
+                                );
+                            }
+                        }
+                    }
+                    // The op selected in devtools, outlined.
+                    let selected = self
+                        .devtools
+                        .as_ref()
+                        .filter(|d| d.pane == Pane::DisplayList)
+                        .and_then(|d| d.selected_op);
+                    if let Some(r) = selected
+                        .and_then(|i| devtools::op_rect(&tab.display_list, i, &mut tab.text))
+                    {
+                        let (x, y, w, h) = page_rect_physical(page, tab.zoom, scale, r);
+                        let t = (2.0 * scale).round().max(1.0) as i64;
+                        fill_blend(&mut self.frame, (x, y, w, h), chrome::OUTLINE_FILL, clip);
+                        for edge in [
+                            (x, y, w, t),
+                            (x, y + h - t, w, t),
+                            (x, y, t, h),
+                            (x + w - t, y, t, h),
+                        ] {
+                            fill_blend(&mut self.frame, edge, chrome::OUTLINE, clip);
+                        }
+                    }
                 }
             }
             if let Some(report) = raster_due {
@@ -1626,6 +1975,49 @@ impl Shell {
                 let x = (r.x * scale).round() as i64;
                 let y = (r.y * scale).round() as i64;
                 blend(&mut self.frame, &res.image, x, y);
+            }
+        }
+        if let (Some(f), Some(r)) = (&self.find, self.layout.find) {
+            let label = find::label(&f.query(), f.current, f.matches.len());
+            let (dl, w, h) =
+                chrome::draw_find(&mut self.chrome_text, &self.styles, &f.field, &label, r.w);
+            let (dw, dh) = physical(w, h, scale);
+            if let Ok(res) = vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none) {
+                let x = (r.x * scale).round() as i64;
+                let y = (r.y * scale).round() as i64;
+                blend(&mut self.frame, &res.image, x, y);
+            }
+        }
+        if let Some(r) = self.layout.devtools {
+            let lines = self.devtools_lines();
+            if let Some(d) = self.devtools.as_mut() {
+                let (dl, hits) = chrome::draw_devtools(
+                    &mut self.chrome_text,
+                    &self.styles,
+                    d.pane,
+                    &lines,
+                    d.scroll,
+                    (r.w, r.h),
+                );
+                d.hits = hits
+                    .into_iter()
+                    .map(|(h, hit)| (Rect::new(r.x + h.x, r.y + h.y, h.w, h.h), hit))
+                    .collect();
+                let (dw, dh) = physical(r.w, r.h, scale);
+                let fresh =
+                    matches!(&d.cache, Some((c, w, h, _)) if *c == dl && (*w, *h) == (dw, dh));
+                if !fresh {
+                    if let Ok(res) =
+                        vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none)
+                    {
+                        d.cache = Some((dl, dw, dh, res.image));
+                    }
+                }
+                if let Some((_, _, _, img)) = &d.cache {
+                    let x = (r.x * scale).round() as i64;
+                    let y = (r.y * scale).round() as i64;
+                    blit(&mut self.frame, img, x, y, None);
+                }
             }
         }
         if let Some(url) = self.hover.clone() {
@@ -1677,11 +2069,40 @@ impl Shell {
         if self.layout.dialog.is_some_and(|d| d.contains(x, y)) {
             return None;
         }
+        // So does the find bar.
+        if self.layout.find.is_some_and(|f| f.contains(x, y)) {
+            return None;
+        }
         Some(((x - page.x) / tab.zoom, (y - page.y) / tab.zoom))
     }
 
     fn send_page_event(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) {
         let now = self.now_ms();
+        // A gesture lets the page read the clipboard for a second
+        // (SPEC-5.2.12): a page granted `clipboard` is handed the current
+        // one first, when it changed since the last time.
+        let fresh_press = kind == event::POINTER_DOWN || (kind == event::KEY_DOWN && c == 0);
+        if fresh_press
+            && self
+                .tabs
+                .get(self.active)
+                .is_some_and(|t| t.running() && t.capabilities().has(cap::CLIPBOARD))
+        {
+            let bytes = self
+                .config
+                .clipboard
+                .read()
+                .map(String::into_bytes)
+                .unwrap_or_default();
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                if tab.clipboard_sent.as_ref() != Some(&bytes) {
+                    tab.send(&ToTab::Clipboard {
+                        bytes: bytes.clone(),
+                    });
+                    tab.clipboard_sent = Some(bytes);
+                }
+            }
+        }
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.running() {
                 tab.send(&ToTab::Event {
@@ -1732,6 +2153,7 @@ impl Shell {
         self.pointer = (x, y);
         if let Some((px, py)) = self.page_point(x, y) {
             self.in_page = true;
+            self.select_drag(px, py);
             self.send_page_event(
                 event::POINTER_MOVE,
                 x100(px),
@@ -1776,6 +2198,12 @@ impl Shell {
                 self.address.blur();
                 self.frame_dirty = true;
             }
+            if down && self.find_focused() {
+                if let Some(f) = self.find.as_mut() {
+                    f.field.blur();
+                }
+                self.frame_dirty = true;
+            }
             let link = self
                 .tabs
                 .get(self.active)
@@ -1786,6 +2214,9 @@ impl Shell {
             } else {
                 event::POINTER_UP
             };
+            if button == vy_abi::button::PRIMARY {
+                self.select_press(down, px, py);
+            }
             self.send_page_event(kind, x100(px), x100(py), button, self.modifiers);
             if button == vy_abi::button::PRIMARY {
                 if down {
@@ -1892,6 +2323,43 @@ impl Shell {
             // The question's own surface: neither the page's nor a button.
             return;
         }
+        if layout.devtools.is_some_and(|r| r.contains(x, y)) {
+            let hit = self.devtools.as_ref().and_then(|d| {
+                d.hits
+                    .iter()
+                    .find(|(r, _)| r.contains(x, y))
+                    .map(|(_, h)| *h)
+            });
+            match hit {
+                Some(chrome::DevHit::Pane(p)) => self.set_devtools_pane(p),
+                Some(chrome::DevHit::Line(i)) => {
+                    if let Some(cmd) = self.devtools_lines().get(i).and_then(|l| l.command.clone())
+                    {
+                        self.devtools_run(cmd);
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
+        if layout.find.is_some_and(|r| r.contains(x, y)) {
+            if layout.find_close.is_some_and(|r| r.contains(x, y)) {
+                self.close_find();
+            } else if layout.find_next.is_some_and(|r| r.contains(x, y)) {
+                self.find_step(true);
+            } else if layout.find_prev.is_some_and(|r| r.contains(x, y)) {
+                self.find_step(false);
+            } else {
+                self.address.blur();
+                if let Some(f) = self.find.as_mut() {
+                    if !f.field.focused() {
+                        f.field.focus_all();
+                    }
+                }
+                self.frame_dirty = true;
+            }
+            return;
+        }
         if let Some(r) = layout.external {
             if r.contains(x, y) {
                 let url = self.tabs.get(self.active).and_then(|t| match &t.state {
@@ -1942,6 +2410,16 @@ impl Shell {
     /// Scrolling over the window.
     pub fn scroll(&mut self, dx: f32, dy: f32, lines: bool) {
         let (x, y) = self.pointer;
+        if self.layout.devtools.is_some_and(|r| r.contains(x, y)) {
+            let n = if lines { dy } else { dy / devtools::LINE_H };
+            let total = self.devtools_lines().len();
+            if let Some(d) = self.devtools.as_mut() {
+                let by = n.round() as i64;
+                d.scroll = (d.scroll as i64 + by).clamp(0, total.saturating_sub(1) as i64) as usize;
+            }
+            self.frame_dirty = true;
+            return;
+        }
         if self.page_point(x, y).is_some() {
             self.send_page_event(
                 event::SCROLL,
@@ -1957,14 +2435,26 @@ impl Shell {
     /// consumed it; otherwise it went to the page.
     pub fn key(&mut self, code: i32, down: bool, modifiers: i32, repeat: bool) -> bool {
         self.modifiers = modifiers;
-        let ctrl = modifiers & modifier::CTRL != 0 || modifiers & modifier::META != 0;
-        let shift = modifiers & modifier::SHIFT != 0;
         let alt = modifiers & modifier::ALT != 0;
+        // Ctrl with Alt is AltGr on Windows and X11 (a character, not a
+        // shortcut: AltGr+0 is `}` and AltGr+`+` is `\` on a Swedish
+        // keyboard); Meta is Cmd on macOS.
+        let ctrl = modifiers & modifier::CTRL != 0 && !alt || modifiers & modifier::META != 0;
+        let shift = modifiers & modifier::SHIFT != 0;
         if down {
             match (code, ctrl, alt) {
                 (hid::L, true, _) => {
+                    self.blur_find();
                     self.address.focus_all();
                     self.frame_dirty = true;
+                    return true;
+                }
+                (hid::F, true, _) => {
+                    self.open_find();
+                    return true;
+                }
+                (hid::F12, _, _) => {
+                    self.toggle_devtools();
                     return true;
                 }
                 (hid::T, true, _) => {
@@ -2016,9 +2506,787 @@ impl Shell {
             }
             return true;
         }
+        if self.find_focused() {
+            if down {
+                self.find_key(code, ctrl, shift);
+            }
+            return true;
+        }
+        if down && ctrl && !alt {
+            match code {
+                // Paste: the clipboard reaches the page as typed text.
+                hid::V => {
+                    self.paste_into_page();
+                    return true;
+                }
+                // Select all: every text node of the page (SPEC-10.2.2),
+                // unless a field has focus (its own select-all), or the
+                // page has no text.
+                hid::A if !self.focus_in_field() && self.select_all() => return true,
+                // Copy or cut: the host's selection when there is one
+                // (SPEC-10.2.2; text in the page cannot be cut, so Ctrl+X
+                // copies it), else a copy gesture for the page (SPEC-8.2.4).
+                hid::C | hid::X => {
+                    let text = self.selected_text();
+                    if !text.is_empty() {
+                        self.config.clipboard.write(&text);
+                        return true;
+                    }
+                    self.copy_gesture(code, modifiers, repeat);
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        if down && code == key::ESCAPE {
+            // Escape clears the selection and still reaches the page
+            // (SPEC-10.3.1).
+            self.clear_selection();
+        }
         let kind = if down { event::KEY_DOWN } else { event::KEY_UP };
         self.send_page_event(kind, code, modifiers, i32::from(repeat && down), 0);
         false
+    }
+
+    /// The host's selection in the active page as the clipboard gets it
+    /// (SPEC-10.2.2): the logical strings of the selected text nodes, in
+    /// document order, `\n` between nodes; empty when nothing is selected.
+    pub fn selected_text(&self) -> String {
+        self.tabs
+            .get(self.active)
+            .map(|t| selection::selected_text(&t.sem, &t.selection))
+            .unwrap_or_default()
+    }
+
+    /// The active page's selection.
+    pub fn selection(&self) -> Selection {
+        self.tabs
+            .get(self.active)
+            .map(|t| t.selection.clone())
+            .unwrap_or_default()
+    }
+
+    /// Forget the active page's selection.
+    pub fn clear_selection(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if tab.selection != Selection::default() {
+                tab.selection.clear();
+                self.frame_dirty = true;
+            }
+        }
+    }
+
+    /// Select every text node of the active page (Ctrl+A); false when it
+    /// has none.
+    pub fn select_all(&mut self) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        let all = selection::all(&tab.sem);
+        if all.is_empty() {
+            return false;
+        }
+        tab.selection = all;
+        self.frame_dirty = true;
+        true
+    }
+
+    /// True when the node with keyboard focus is a text field, whose own
+    /// keys Ctrl+A belongs to.
+    fn focus_in_field(&self) -> bool {
+        self.tabs.get(self.active).is_some_and(|t| {
+            t.focus.is_some_and(|f| {
+                t.sem
+                    .iter()
+                    .any(|n| n.id == f && n.role == vy_abi::role::TEXTBOX)
+            })
+        })
+    }
+
+    /// The primary button went down or up at page point `(px, py)`: a
+    /// press on a text node starts a selection there (Shift extends the
+    /// one there is), a press anywhere else clears it; the release ends
+    /// the drag. The page gets the pointer events all the same.
+    fn select_press(&mut self, down: bool, px: f32, py: f32) {
+        let shift = self.modifiers & modifier::SHIFT != 0;
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let before = tab.selection.clone();
+        if !down {
+            tab.selection.dragging = false;
+            if tab.selection.is_empty() {
+                tab.selection.clear();
+            }
+        } else if shift && tab.selection.anchor.is_some() {
+            tab.selection.focus = caret_at(tab, px, py, true).or(tab.selection.focus);
+            tab.selection.dragging = true;
+        } else if let Some(c) = caret_at(tab, px, py, false) {
+            tab.selection = Selection {
+                anchor: Some(c),
+                focus: Some(c),
+                dragging: true,
+            };
+        } else {
+            tab.selection.clear();
+        }
+        if tab.selection != before {
+            self.frame_dirty = true;
+        }
+    }
+
+    /// The pointer moved to page point `(px, py)`: a drag moves the
+    /// selection's focus to the text under it, or the nearest.
+    fn select_drag(&mut self, px: f32, py: f32) {
+        let held = self.buttons & vy_abi::button::mask(vy_abi::button::PRIMARY) != 0;
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if !(tab.selection.dragging && held) {
+            return;
+        }
+        if let Some(c) = caret_at(tab, px, py, true) {
+            if tab.selection.focus != Some(c) {
+                tab.selection.focus = Some(c);
+                self.frame_dirty = true;
+            }
+        }
+    }
+
+    /// Ctrl+V with keyboard focus in the page: the clipboard's text goes
+    /// to the page as `TEXT_INPUT`, exactly as if typed (SPEC-5.1.6), in
+    /// chunks of `clipboard::PASTE_CHUNK_BYTES` with `\n` line endings;
+    /// the page routes it to its focused field. No capability is
+    /// involved: it is the user's input.
+    fn paste_into_page(&mut self) {
+        let Some(text) = self.config.clipboard.read() else {
+            return;
+        };
+        let now = self.now_ms();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if !tab.running() {
+            return;
+        }
+        for chunk in clipboard::paste_chunks(&text) {
+            tab.send(&ToTab::TextInput {
+                text: chunk,
+                clock_ms: now,
+            });
+        }
+        tab.tick_due = true;
+    }
+
+    /// Ctrl+C or Ctrl+X with keyboard focus in the page: the key goes to
+    /// the page as `KEY_DOWN`, and a `clipboard_write` while the page
+    /// handles it succeeds without the capability (SPEC-8.2.4), once.
+    fn copy_gesture(&mut self, code: i32, modifiers: i32, repeat: bool) {
+        let now = self.now_ms();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if tab.running() {
+                tab.copy_gesture_ms = Some(now);
+                tab.send(&ToTab::CopyGesture);
+            }
+        }
+        self.send_page_event(event::KEY_DOWN, code, modifiers, i32::from(repeat), 0);
+    }
+
+    // ---- accessibility (SPEC-10.2.1) -------------------------------------
+
+    /// What the accessibility tree is made from now: the window, the
+    /// address field, and the active page's tree and focus.
+    pub fn a11y_snapshot(&self) -> a11y::Snapshot {
+        let tab = self.tabs.get(self.active);
+        let running = tab.filter(|t| t.state == State::Running);
+        a11y::Snapshot {
+            title: self.title(),
+            width: self.width,
+            height: self.height,
+            scale: self.scale,
+            address_rect: self.layout.address,
+            address: self.address.text().to_string(),
+            address_focused: self.address.focused(),
+            page: self.layout.page,
+            zoom: tab.map_or(1.0, |t| t.zoom),
+            page_title: tab
+                .map(|t| {
+                    if t.title.is_empty() {
+                        t.display.clone()
+                    } else {
+                        t.title.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            sem: running.map(|t| t.sem.clone()).unwrap_or_default(),
+            focus: running.and_then(|t| t.focus),
+            inaccessible: running.is_some_and(|t| t.has_tree == Some(false)),
+        }
+    }
+
+    /// Do what an assistive technology asked (SPEC-10.2.1); false when it
+    /// is not something the shell does (`SetValue`: the page owns its
+    /// values) or the node is not there.
+    pub fn a11y_action(&mut self, req: &accesskit::ActionRequest) -> bool {
+        match a11y::request(req) {
+            a11y::Request::FocusAddress => {
+                self.blur_find();
+                self.address.focus_all();
+                self.frame_dirty = true;
+                true
+            }
+            a11y::Request::Focus(id) => self.focus_node(id),
+            a11y::Request::Click(id) => self.activate_node(id),
+            a11y::Request::Unsupported => false,
+        }
+    }
+
+    /// Move the host's keyboard focus to node `id` of the active page the
+    /// way Tab moves it (SPEC-10.3.1): `FOCUS` out for the node that had
+    /// it and in for this one, both with `c = 1`; the tab's runtime takes
+    /// a delivered `FOCUS` as its own focus too. Only a focusable node
+    /// (SPEC-10.3.2); keys go to the page afterwards.
+    pub fn focus_node(&mut self, id: i32) -> bool {
+        let now = self.now_ms();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        let focusable = tab
+            .sem
+            .iter()
+            .any(|n| n.id == id && vy_abi::role::is_focusable(n.role));
+        if !tab.running() || !focusable {
+            return false;
+        }
+        if tab.focus != Some(id) {
+            let focus = |a: i32, b: i32| ToTab::Event {
+                kind: event::FOCUS,
+                a,
+                b,
+                c: 1,
+                d: 0,
+                clock_ms: now,
+            };
+            if let Some(old) = tab.focus {
+                tab.send(&focus(old, 0));
+            }
+            tab.send(&focus(id, 1));
+            tab.focus = Some(id);
+            tab.tick_due = true;
+        }
+        self.address.blur();
+        self.blur_find();
+        self.frame_dirty = true;
+        true
+    }
+
+    /// Press and release the primary button at the centre of node `id` of
+    /// the active page, an assistive technology's click: the page gets
+    /// `POINTER_DOWN` and `POINTER_UP` there (and with them the focus
+    /// change a press makes, SPEC-10.3.1), and a link the page registered
+    /// under that point is followed as for a click.
+    pub fn activate_node(&mut self, id: i32) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let Some(n) = tab.sem.iter().find(|n| n.id == id) else {
+            return false;
+        };
+        if !tab.running() || !(n.x.is_finite() && n.y.is_finite()) {
+            return false;
+        }
+        let (cx, cy) = (n.x + n.w / 2.0, n.y + n.h / 2.0);
+        let link = tab.link_at(cx, cy).map(|l| l.url.clone());
+        let primary = vy_abi::button::PRIMARY;
+        self.send_page_event(event::POINTER_DOWN, x100(cx), x100(cy), primary, 0);
+        self.send_page_event(event::POINTER_UP, x100(cx), x100(cy), primary, 0);
+        if let Some(url) = link {
+            self.follow_link(&url);
+        }
+        true
+    }
+
+    /// The chrome's display list for the current state (SPEC-9.6.1).
+    pub fn chrome_display_list(&mut self) -> Vec<u8> {
+        self.draw_chrome().0
+    }
+
+    // ---- devtools (F12, SPEC-11.4.1) --------------------------------------
+
+    /// Open or close the devtools panel; the page area narrows or widens
+    /// and the page gets its new size.
+    pub fn toggle_devtools(&mut self) {
+        self.devtools = match self.devtools.take() {
+            Some(_) => None,
+            None => Some(Devtools {
+                pane: Pane::DisplayList,
+                scroll: 0,
+                selected_op: None,
+                status: String::new(),
+                hits: Vec::new(),
+                cache: None,
+            }),
+        };
+        self.relayout();
+        self.show_active();
+        self.frame_dirty = true;
+    }
+
+    /// The open pane, while the panel is open.
+    pub fn devtools_pane(&self) -> Option<Pane> {
+        self.devtools.as_ref().map(|d| d.pane)
+    }
+
+    /// Show `pane`.
+    pub fn set_devtools_pane(&mut self, pane: Pane) {
+        if let Some(d) = self.devtools.as_mut() {
+            if d.pane != pane {
+                d.pane = pane;
+                d.scroll = 0;
+            }
+        }
+        self.frame_dirty = true;
+    }
+
+    /// The panel's hit rectangles as last drawn, in window coordinates.
+    pub fn devtools_hits(&self) -> Vec<(Rect, chrome::DevHit)> {
+        self.devtools
+            .as_ref()
+            .map(|d| d.hits.clone())
+            .unwrap_or_default()
+    }
+
+    /// Where recordings go: `recordings` in the data directory.
+    pub fn recordings_dir(&self) -> PathBuf {
+        self.config.data_dir.join("recordings")
+    }
+
+    /// The open pane's lines for the active tab.
+    pub fn devtools_lines(&self) -> Vec<devtools::Line> {
+        let Some(d) = &self.devtools else {
+            return Vec::new();
+        };
+        let tab = self.tabs.get(self.active);
+        match d.pane {
+            Pane::DisplayList => devtools::display_list_lines(
+                tab.map_or(&[][..], |t| &t.display_list),
+                d.selected_op,
+            ),
+            Pane::Semantic => {
+                devtools::tree_lines(tab.map_or(&[][..], |t| &t.sem), tab.and_then(|t| t.focus))
+            }
+            Pane::Log => {
+                let logs: Vec<(u64, String)> = tab
+                    .map(|t| t.logs.iter().cloned().collect())
+                    .unwrap_or_default();
+                devtools::log_lines(&logs)
+            }
+            Pane::Recording => devtools::recording_lines(
+                tab.and_then(|t| t.record.as_deref()),
+                self.config.exe.is_some()
+                    && tab.is_some_and(|t| t.running() && t.source.is_some() && t.replay.is_none()),
+                &devtools::list_recordings(&self.recordings_dir()),
+                &d.status,
+            ),
+            Pane::Studio => devtools::studio_lines(self.live_reload),
+        }
+    }
+
+    /// Do what a line of the panel says.
+    pub fn devtools_run(&mut self, cmd: Command) {
+        match cmd {
+            Command::SelectOp(i) => {
+                if let Some(d) = self.devtools.as_mut() {
+                    d.selected_op = (d.selected_op != Some(i)).then_some(i);
+                }
+            }
+            Command::StartRecording => self.start_recording(),
+            Command::StopRecording => self.stop_recording(),
+            Command::Replay(path) => {
+                self.open_replay(path);
+            }
+            Command::ToggleLiveReload => {
+                self.live_reload = !self.live_reload;
+                self.next_live_check = self.now_ms();
+            }
+            Command::OpenStudio => {
+                if let Ok(source) = Source::parse(devtools::STUDIO_ADDRESS) {
+                    self.open_tab(Some(source));
+                }
+            }
+        }
+        self.frame_dirty = true;
+    }
+
+    fn set_devtools_status(&mut self, status: String) {
+        if let Some(d) = self.devtools.as_mut() {
+            d.status = status;
+        }
+    }
+
+    /// Record the active tab's session (SPEC-11.4.1): the page is loaded
+    /// again in a process started with `--record`, so the file holds the
+    /// whole inbound stream from the load on.
+    fn start_recording(&mut self) {
+        let dir = self.recordings_dir();
+        let Some(id) = self.active_tab() else {
+            return;
+        };
+        let source = self.tab(id).and_then(|t| t.source.clone());
+        let (Some(source), true) = (source, self.config.exe.is_some()) else {
+            self.set_devtools_status("Inspelning kräver en sida i en egen flikprocess.".into());
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_devtools_status(format!("Kan inte skapa {}: {e}", dir.display()));
+            return;
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut path = dir.join(format!("vy-{secs}-{id}.vyrec"));
+        let mut n = 1;
+        while path.exists() {
+            path = dir.join(format!("vy-{secs}-{id}-{n}.vyrec"));
+            n += 1;
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            tab.record = Some(path.clone());
+        }
+        self.set_devtools_status(format!("Spelar in till {}", path.display()));
+        self.navigate_tab(id, source, false);
+    }
+
+    /// Stop recording: the file is complete.
+    fn stop_recording(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let Some(path) = tab.record.take() else {
+            return;
+        };
+        tab.send(&ToTab::StopRecording);
+        self.set_devtools_status(format!("Sparad: {}", path.display()));
+    }
+
+    /// The file the active tab records to, while it does.
+    pub fn recording(&self) -> Option<PathBuf> {
+        self.tabs.get(self.active).and_then(|t| t.record.clone())
+    }
+
+    /// Replay a recording in a new tab (SPEC-11.4.1): a tab process started
+    /// with `--replay` reads its whole inbound stream from the file and
+    /// produces the session's frames again; the last one stays.
+    pub fn open_replay(&mut self, path: PathBuf) -> Option<TabId> {
+        let Some(exe) = self.config.exe.clone() else {
+            self.set_devtools_status("Uppspelning kräver en flikprocess.".into());
+            return None;
+        };
+        let id = self.open_tab(None);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let sink = self.inbox_tx.clone();
+        let waker = self.config.waker.clone();
+        let tab = find_tab(&mut self.tabs, id)?;
+        tab.generation += 1;
+        let generation = tab.generation;
+        let forward = move |tab_id: TabId, inbound: Inbound| {
+            let ok = sink
+                .send(Incoming::Tab(tab_id, generation, inbound))
+                .is_ok();
+            waker.wake();
+            ok
+        };
+        tab.display = name.clone();
+        tab.title = format!("Uppspelning: {name}");
+        tab.replay = Some(path.clone());
+        match process::spawn_process(&exe, id, forward, None, Some(&path)) {
+            Ok(conn) => {
+                tab.conn = Some(conn);
+                tab.state = State::Loading;
+            }
+            Err(e) => tab.state = State::Gone(format!("Uppspelningen kunde inte startas: {e}")),
+        }
+        self.address.set_committed(&name);
+        self.address.blur();
+        self.frame_dirty = true;
+        Some(id)
+    }
+
+    /// A tab's title as the strip shows it.
+    pub fn tab_title(&self, id: TabId) -> String {
+        self.tab(id).map(|t| t.title.clone()).unwrap_or_default()
+    }
+
+    /// True while live reload of localhost pages is on.
+    pub fn live_reload(&self) -> bool {
+        self.live_reload
+    }
+
+    /// Live reload (devtools "Studio"): every `devtools::LIVE_RELOAD_MS`
+    /// on the shell's clock, ask the server of each running localhost page
+    /// whether it changed, with a conditional GET (SPEC-7.3.2); the loader
+    /// answers and [`Shell::handle`] reloads a page that changed. The
+    /// window calls this when [`Shell::poll_in`] says it is due.
+    pub fn poll(&mut self) {
+        if !self.live_reload {
+            return;
+        }
+        let now = self.now_ms();
+        if now < self.next_live_check {
+            return;
+        }
+        self.next_live_check = now + devtools::LIVE_RELOAD_MS;
+        for tab in &mut self.tabs {
+            let Some(Source::Address(address)) = &tab.source else {
+                continue;
+            };
+            if tab.running() && tab.is_localhost && address.is_localhost() && !tab.check_pending {
+                tab.check_pending = true;
+                let _ = self.loader.send(Job::Check(Check {
+                    tab: tab.id,
+                    generation: tab.generation,
+                    address: address.clone(),
+                }));
+            }
+        }
+    }
+
+    /// How long until [`Shell::poll`] has something to do; `None` while
+    /// live reload is off.
+    pub fn poll_in(&self) -> Option<std::time::Duration> {
+        self.live_reload.then(|| {
+            std::time::Duration::from_millis((self.next_live_check - self.now_ms()).max(0) as u64)
+        })
+    }
+
+    /// A live-reload answer: the first sets what the page is; a different
+    /// one later reloads the tab.
+    fn live_checked(&mut self, id: TabId, generation: u64, result: Result<[u8; 32], String>) {
+        let Some(tab) = find_tab(&mut self.tabs, id) else {
+            return;
+        };
+        if tab.generation != generation {
+            return;
+        }
+        tab.check_pending = false;
+        let Ok(version) = result else {
+            return;
+        };
+        match tab.live_version {
+            None => tab.live_version = Some(version),
+            Some(v) if v != version => {
+                tab.log("[host info] live reload: the page changed on its server".into());
+                if let Some(source) = tab.source.clone() {
+                    self.navigate_tab(id, source, false);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    // ---- find on page (Ctrl+F) -------------------------------------------
+
+    /// Open the find bar, or focus it and select its query.
+    pub fn open_find(&mut self) {
+        self.address.blur();
+        let f = self.find.get_or_insert_with(Find::new);
+        f.field.focus_all();
+        self.refresh_find();
+        self.frame_dirty = true;
+    }
+
+    /// Close the find bar; its highlights go with it.
+    pub fn close_find(&mut self) {
+        if self.find.take().is_some() {
+            self.frame_dirty = true;
+        }
+    }
+
+    /// True while the find bar is open.
+    pub fn find_open(&self) -> bool {
+        self.find.is_some()
+    }
+
+    /// What the find bar's label says ("3 av 7").
+    pub fn find_label(&self) -> String {
+        self.find
+            .as_ref()
+            .map(|f| find::label(&f.query(), f.current, f.matches.len()))
+            .unwrap_or_default()
+    }
+
+    /// The current match and the number of matches.
+    pub fn find_status(&self) -> (Option<find::Match>, usize) {
+        self.find.as_ref().map_or((None, 0), |f| {
+            (
+                f.current.and_then(|i| f.matches.get(i).copied()),
+                f.matches.len(),
+            )
+        })
+    }
+
+    /// Enter (next) or Shift+Enter (previous) in the find bar, wrapping.
+    pub fn find_step(&mut self, forward: bool) {
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        f.current = find::step(f.current, f.matches.len(), forward);
+        self.find_scroll_start();
+        self.frame_dirty = true;
+    }
+
+    fn find_focused(&self) -> bool {
+        self.find.as_ref().is_some_and(|f| f.field.focused())
+    }
+
+    fn blur_find(&mut self) {
+        if let Some(f) = self.find.as_mut() {
+            f.field.blur();
+        }
+    }
+
+    /// A key in the focused find bar: Enter and Shift+Enter cycle, Escape
+    /// closes, the rest edits the query as in the address bar.
+    fn find_key(&mut self, code: i32, ctrl: bool, shift: bool) {
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        let field = &mut f.field;
+        match code {
+            key::ENTER => {
+                self.find_step(!shift);
+                return;
+            }
+            key::ESCAPE => {
+                self.close_find();
+                return;
+            }
+            hid::LEFT => field.edit(Edit::Left {
+                select: shift,
+                word: ctrl,
+            }),
+            hid::RIGHT => field.edit(Edit::Right {
+                select: shift,
+                word: ctrl,
+            }),
+            hid::HOME => field.edit(Edit::Home { select: shift }),
+            hid::END => field.edit(Edit::End { select: shift }),
+            hid::BACKSPACE => field.edit(Edit::Backspace { word: ctrl }),
+            hid::DELETE => field.edit(Edit::Delete { word: ctrl }),
+            hid::A if ctrl => field.edit(Edit::SelectAll),
+            hid::C if ctrl => {
+                let selected = field.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                }
+            }
+            hid::X if ctrl => {
+                let selected = field.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                    field.insert("");
+                }
+            }
+            hid::V if ctrl => {
+                if let Some(paste) = self.config.clipboard.read() {
+                    field.insert(clipboard::truncate(
+                        &paste,
+                        clipboard::MAX_ADDRESS_PASTE_BYTES,
+                    ));
+                }
+            }
+            _ => return,
+        }
+        self.find_edited();
+    }
+
+    /// The query may have changed: keep it when the field loses focus,
+    /// search again.
+    fn find_edited(&mut self) {
+        if let Some(f) = self.find.as_mut() {
+            let q = f.field.text().to_string();
+            f.field.set_committed(&q);
+        }
+        self.refresh_find();
+        self.frame_dirty = true;
+    }
+
+    /// Search the active page's tree again when the page drew, the tab
+    /// changed or the query did. A new query starts at the first match in
+    /// view and scrolls towards it; a new frame of the same page keeps the
+    /// current match and continues a scroll under way.
+    fn refresh_find(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        let query = f.query();
+        let key = (tab.id, tab.frames, query.clone());
+        if f.key.as_ref() == Some(&key) {
+            return;
+        }
+        let fresh = f.key.as_ref().is_none_or(|k| k.0 != key.0 || k.2 != key.2);
+        let old = f.current.and_then(|i| f.matches.get(i).copied());
+        f.matches = find::search(&tab.sem, &query);
+        f.current = if fresh {
+            find::first_visible(&tab.sem, &f.matches)
+        } else {
+            find::carry(old, &f.matches)
+        };
+        f.key = Some(key);
+        let scrolling = f.scrolling;
+        self.frame_dirty = true;
+        if fresh {
+            self.find_scroll_start();
+        } else if scrolling {
+            self.find_scroll();
+        }
+    }
+
+    fn find_scroll_start(&mut self) {
+        if let Some(f) = self.find.as_mut() {
+            f.scroll_steps = 0;
+            f.scrolling = true;
+        }
+        self.find_scroll();
+    }
+
+    /// Bring the current match towards the middle of the page area with a
+    /// synthetic `SCROLL` (the page owns scrolling and the ABI is frozen):
+    /// `dy` is the node's middle minus the viewport's, in logical pixels.
+    /// One event per frame the page answers with, at most
+    /// `find::MAX_SCROLL_STEPS` per match; a page that does not scroll that
+    /// way is left alone after that. A heuristic, documented as such.
+    fn find_scroll(&mut self) {
+        let page_h = self.layout.page.h;
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if !tab.running() {
+            return;
+        }
+        let view_h = page_h / tab.zoom;
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        let node = f
+            .current
+            .and_then(|i| f.matches.get(i))
+            .and_then(|m| tab.sem.get(m.index));
+        let dy = match node.and_then(|n| find::scroll_delta(n, view_h)) {
+            Some(dy) if f.scrolling && f.scroll_steps < find::MAX_SCROLL_STEPS => dy,
+            _ => {
+                f.scrolling = false;
+                return;
+            }
+        };
+        f.scroll_steps += 1;
+        self.send_page_event(event::SCROLL, 0, x100(dy), 0, 0);
     }
 
     fn address_key(&mut self, code: i32, ctrl: bool, shift: bool) {
@@ -2042,14 +3310,26 @@ impl Shell {
             hid::BACKSPACE => self.address.edit(Edit::Backspace { word: ctrl }),
             hid::DELETE => self.address.edit(Edit::Delete { word: ctrl }),
             hid::A if ctrl => self.address.edit(Edit::SelectAll),
-            hid::C if ctrl => self.clipboard = self.address.selected_text().as_bytes().to_vec(),
+            hid::C if ctrl => {
+                let selected = self.address.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                }
+            }
             hid::X if ctrl => {
-                self.clipboard = self.address.selected_text().as_bytes().to_vec();
-                self.address.insert("");
+                let selected = self.address.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                    self.address.insert("");
+                }
             }
             hid::V if ctrl => {
-                let paste = String::from_utf8_lossy(&self.clipboard).into_owned();
-                self.address.insert(&paste);
+                if let Some(paste) = self.config.clipboard.read() {
+                    self.address.insert(clipboard::truncate(
+                        &paste,
+                        clipboard::MAX_ADDRESS_PASTE_BYTES,
+                    ));
+                }
             }
             _ => return,
         }
@@ -2061,6 +3341,13 @@ impl Shell {
         if self.address.focused() {
             self.address.insert(text);
             self.frame_dirty = true;
+            return;
+        }
+        if self.find_focused() {
+            if let Some(f) = self.find.as_mut() {
+                f.field.insert(text);
+            }
+            self.find_edited();
             return;
         }
         let now = self.now_ms();
@@ -2088,6 +3375,77 @@ impl Shell {
     }
 }
 
+/// Whether a plain-http `url` (SPEC-7.1.3: loopback only) may be fetched
+/// for a page at `page_origin` (`vy://host[:port]`): only when its
+/// authority is the page's own and that is a loopback host. No userinfo.
+/// The same rule as `vy_runtime::plain_http_allowed` on the m4/dev branch;
+/// the call in `Tab::request_verdict` switches to it at merge.
+pub fn plain_http_allowed(url: &str, page_origin: Option<&str>) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = rest[..end].to_ascii_lowercase();
+    let Some(page) = page_origin.and_then(|o| o.strip_prefix("vy://")) else {
+        return false;
+    };
+    if authority.is_empty() || authority.contains('@') || authority != page.to_ascii_lowercase() {
+        return false;
+    }
+    let host = if authority.starts_with('[') {
+        authority.split_inclusive(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// The selection caret for page point `(px, py)` in `tab`: in the text
+/// node under it, or with `nearest` the closest one, at glyph granularity
+/// where the frame draws the node's text in one run (SPEC-10.2.2).
+fn caret_at(tab: &mut Tab, px: f32, py: f32, nearest: bool) -> Option<Caret> {
+    let order = selection::order(&tab.sem);
+    let i = selection::node_at(&tab.sem, &order, px, py).or_else(|| {
+        nearest
+            .then(|| selection::nearest(&tab.sem, &order, px, py))
+            .flatten()
+    })?;
+    let runs = selection::runs(&tab.display_list);
+    let node = &tab.sem[i];
+    let run = selection::run_for(node, &runs);
+    let offset = selection::offset_at(&mut tab.text, node, run, px, py);
+    Some(Caret {
+        id: node.id,
+        offset,
+    })
+}
+
+/// Let go of `tab`'s process, keeping what its storage answer needs (see
+/// [`Retired`]). `Shutdown` is the flush: the tab calls `vy_suspend`,
+/// answers with [`ToShell::Storage`] and leaves; `TabConnection::shutdown`
+/// waits for the process to end (at most 500 ms, then it is killed) and
+/// for its reader, so the answer is in the inbox when this returns, ahead
+/// of anything the tab's next page brings, which is how a reload of the
+/// same origin reads what the previous process saved.
+fn retire_process(tab: &mut Tab, retired: &mut VecDeque<Retired>) {
+    let Some(conn) = tab.conn.take() else {
+        return;
+    };
+    if let Some(origin) = tab.origin.clone() {
+        if retired.len() == MAX_RETIRED {
+            retired.pop_front();
+        }
+        retired.push_back(Retired {
+            tab: tab.id,
+            generation: tab.generation,
+            origin,
+            storage_granted: tab.capabilities().has(cap::STORAGE),
+            quota: tab.storage_quota_bytes,
+        });
+    }
+    conn.shutdown();
+}
+
 /// The tab with `id` among `tabs`.
 fn find_tab(tabs: &mut [Tab], id: TabId) -> Option<&mut Tab> {
     tabs.iter_mut().find(|t| t.id == id)
@@ -2102,6 +3460,16 @@ fn page_size(page: Rect, zoom: f32, scale: f32) -> (u32, u32, f32) {
     )
 }
 
+/// A rectangle in page coordinates (the module's logical pixels) as
+/// physical window pixels: `(x, y, w, h)`.
+fn page_rect_physical(page: Rect, zoom: f32, scale: f32, r: Rect) -> (i64, i64, i64, i64) {
+    let x0 = ((page.x + r.x * zoom) * scale).round() as i64;
+    let y0 = ((page.y + r.y * zoom) * scale).round() as i64;
+    let x1 = ((page.x + r.right() * zoom) * scale).round() as i64;
+    let y1 = ((page.y + r.bottom() * zoom) * scale).round() as i64;
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
 fn x100(v: f32) -> i32 {
     (v * 100.0).round() as i32
 }
@@ -2113,6 +3481,8 @@ pub mod hid {
     pub const A: i32 = 0x04;
     /// C.
     pub const C: i32 = 0x06;
+    /// F.
+    pub const F: i32 = 0x09;
     /// L.
     pub const L: i32 = 0x0F;
     /// T.
@@ -2133,6 +3503,8 @@ pub mod hid {
     pub const EQUAL: i32 = 0x2E;
     /// F5.
     pub const F5: i32 = 0x3E;
+    /// F12.
+    pub const F12: i32 = 0x45;
     /// Home.
     pub const HOME: i32 = 0x4A;
     /// Delete forward.
@@ -2149,4 +3521,66 @@ pub mod hid {
     pub const KP_PLUS: i32 = 0x57;
     /// Keypad 0.
     pub const KP_0: i32 = 0x62;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPEC-5.2.8, SPEC-7.1.3, SPEC-2.1.4: a plain-http request goes only
+    /// to the page's own loopback origin: not to another local port, not
+    /// from a remote page, not with userinfo, not to a non-loopback host;
+    /// the main process refuses the rest with `E_ORIGIN` before anything
+    /// reaches the loader.
+    #[test]
+    fn spec_5_2_8_plain_http_only_to_own_loopback_origin() {
+        let own = Some("vy://localhost:8081");
+        assert!(plain_http_allowed("http://localhost:8081/_dev/x", own));
+        assert!(plain_http_allowed("http://LOCALHOST:8081", own));
+        assert!(!plain_http_allowed("http://localhost:9000/", own));
+        assert!(!plain_http_allowed("http://127.0.0.1:8081/", own));
+        assert!(!plain_http_allowed(
+            "http://localhost:8081@evil.example/",
+            own
+        ));
+        assert!(!plain_http_allowed("https://localhost:8081/", own));
+        assert!(!plain_http_allowed("http://localhost:8081/", None));
+        assert!(!plain_http_allowed(
+            "http://localhost:8081/",
+            Some("vy://evil.example")
+        ));
+        assert!(!plain_http_allowed(
+            "http://evil.example/",
+            Some("vy://evil.example")
+        ));
+        assert!(plain_http_allowed(
+            "http://[::1]:7000/a",
+            Some("vy://[::1]:7000")
+        ));
+        assert!(plain_http_allowed(
+            "http://127.0.0.1/",
+            Some("vy://127.0.0.1")
+        ));
+        // In the gate: a remote page with `net` and a loopback origin in its
+        // list still cannot reach localhost.
+        let mut tab = Tab::new(1);
+        tab.caps = vec![Resolved {
+            name: "net",
+            granted: true,
+            ask: false,
+        }];
+        tab.net_origins = vec!["http://localhost:8081".into(), "https://api.example".into()];
+        tab.origin = Some("vy://evil.example".into());
+        assert_eq!(
+            tab.request_verdict("http://localhost:8081/secret"),
+            Err(vy_abi::err::E_ORIGIN)
+        );
+        assert_eq!(tab.request_verdict("https://api.example/x"), Ok(()));
+        tab.origin = Some("vy://localhost:8081".into());
+        assert_eq!(
+            tab.request_verdict("http://localhost:9000/"),
+            Err(vy_abi::err::E_ORIGIN),
+            "another local port"
+        );
+    }
 }

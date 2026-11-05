@@ -73,6 +73,39 @@ pub fn blend(dst: &mut RgbaImage, src: &RgbaImage, x: i64, y: i64) {
     }
 }
 
+/// Blend a rectangle of colour `rgba` (`0xRRGGBBAA`, straight alpha) over
+/// `dst` at `(x, y, w, h)` physical pixels, cut to `dst` and to `clip`
+/// (left, top, width, height): the shell's overlays on the page area
+/// (the selection, find matches, the devtools outline).
+pub fn fill_blend(
+    dst: &mut RgbaImage,
+    rect: (i64, i64, i64, i64),
+    rgba: u32,
+    clip: (i64, i64, i64, i64),
+) {
+    let (x, y, w, h) = rect;
+    let (cx, cy, cw, ch) = clip;
+    let x0 = x.max(cx).max(0);
+    let y0 = y.max(cy).max(0);
+    let x1 = (x + w).min(cx + cw).min(i64::from(dst.width));
+    let y1 = (y + h).min(cy + ch).min(i64::from(dst.height));
+    let a = rgba & 0xFF;
+    if x1 <= x0 || y1 <= y0 || a == 0 {
+        return;
+    }
+    let src = [(rgba >> 24) & 0xFF, (rgba >> 16) & 0xFF, (rgba >> 8) & 0xFF];
+    for row in y0..y1 {
+        for col in x0..x1 {
+            let d = ((row as usize) * dst.width as usize + col as usize) * 4;
+            for (c, sv) in src.iter().enumerate() {
+                let dv = u32::from(dst.data[d + c]);
+                dst.data[d + c] = ((sv * a + dv * (255 - a) + 127) / 255) as u8;
+            }
+            dst.data[d + 3] = 255;
+        }
+    }
+}
+
 /// The frame as `0x00RRGGBB` words, which is what `softbuffer` presents.
 pub fn to_xrgb(img: &RgbaImage, out: &mut [u32]) {
     for (px, dst) in img.data.chunks_exact(4).zip(out.iter_mut()) {

@@ -14,6 +14,7 @@
 //! (SPEC-2.1.5).
 
 use crate::address::AddressField;
+use crate::devtools::{self, Line, Pane};
 use crate::markdown::Block;
 use crate::process::TabId;
 use vy_abi::{font, weight};
@@ -52,6 +53,21 @@ const BUTTON_INK: u32 = 0xFFFF_FFFF;
 const BUTTON_PLAIN: u32 = 0xDAD8_D1FF;
 const PAGE_BG: u32 = 0xFFFF_FFFF;
 const STATUS_BG: u32 = 0x2221_1FE6;
+/// The host's text selection over the page area (SPEC-10.2.2): the
+/// chrome's accent, translucent.
+pub const SELECTION_OVERLAY: u32 = 0x2F5B_D660;
+/// Find matches over the page area.
+pub const FIND_MATCH: u32 = 0xF2C9_4C80;
+/// The current find match.
+pub const FIND_CURRENT: u32 = 0xEE7F_1AB0;
+/// The op selected in devtools, outlined over the page.
+pub const OUTLINE: u32 = 0xD633_6CFF;
+/// Its fill.
+pub const OUTLINE_FILL: u32 = 0xD633_6C30;
+/// Width of the find bar.
+pub const FIND_W: f32 = 380.0;
+/// Height of the find bar.
+pub const FIND_H: f32 = 36.0;
 
 /// A rectangle in logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -151,6 +167,11 @@ pub struct View<'a> {
     pub page: PageView<'a>,
     /// Font scale of the page (Ctrl+Plus/Minus); shown when not 1.
     pub zoom: f32,
+    /// The find bar is open (Ctrl+F).
+    pub find: bool,
+    /// The devtools panel is open (F12): it takes the right of the
+    /// window beside the page area.
+    pub devtools: bool,
 }
 
 /// Where everything ended up, for hit testing.
@@ -185,6 +206,28 @@ pub struct Layout {
     pub deny: Option<Rect>,
     /// "Öppna externt" in an error view.
     pub external: Option<Rect>,
+    /// The find bar, over the top right of the page area: what is under
+    /// it is the shell's.
+    pub find: Option<Rect>,
+    /// The find bar's text field.
+    pub find_field: Option<Rect>,
+    /// Previous match.
+    pub find_prev: Option<Rect>,
+    /// Next match.
+    pub find_next: Option<Rect>,
+    /// Close the bar.
+    pub find_close: Option<Rect>,
+    /// The devtools panel (F12), right of the page area.
+    pub devtools: Option<Rect>,
+}
+
+/// What a point in the devtools panel is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevHit {
+    /// A pane's tab.
+    Pane(Pane),
+    /// Line `n` of the pane's lines.
+    Line(usize),
 }
 
 /// The chrome's text styles, registered once per text engine.
@@ -205,6 +248,9 @@ pub struct Styles {
     heading2: u16,
     heading3: u16,
     status: u16,
+    mono: u16,
+    mono_strong: u16,
+    mono_button: u16,
 }
 
 impl Styles {
@@ -235,6 +281,15 @@ impl Styles {
             heading2: s(20.0, weight::BOLD, INK),
             heading3: s(16.0, weight::BOLD, INK),
             status: s(12.0, weight::NORMAL, BUTTON_INK),
+            mono: text
+                .style(font::MONO, 11.0, weight::NORMAL, INK)
+                .expect("the chrome's styles fit the table"),
+            mono_strong: text
+                .style(font::MONO, 11.0, weight::BOLD, INK)
+                .expect("the chrome's styles fit the table"),
+            mono_button: text
+                .style(font::MONO, 11.0, weight::NORMAL, ACCENT)
+                .expect("the chrome's styles fit the table"),
         }
     }
 }
@@ -485,7 +540,17 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
         let _ = dl.rect(0.0, y - LOADING_H, w * 0.35, LOADING_H, 0.0, ACCENT);
     }
     layout.chrome_h = y;
-    layout.page = Rect::new(0.0, y, w, (h - y).max(0.0));
+    let panel_w = if view.devtools {
+        devtools::PANEL_W.min(w * 0.5)
+    } else {
+        0.0
+    };
+    layout.page = Rect::new(0.0, y, (w - panel_w).max(1.0), (h - y).max(0.0));
+    if view.devtools {
+        let r = Rect::new(w - panel_w, y, panel_w, (h - y).max(0.0));
+        layout.devtools = Some(r);
+        let _ = dl.rect(r.x, r.y, r.w, r.h, 0.0, CHROME_BG);
+    }
     let page = layout.page;
     // The capability question lies over the top of the page area and
     // moves nothing: its pixels come from `draw_dialog`, composited after
@@ -506,6 +571,21 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
             deny.w,
             deny.h,
         ));
+    }
+
+    // The find bar lies over the top right of the page area (below the
+    // question, if there is one); its pixels come from `draw_find`.
+    if view.find {
+        let fw = FIND_W.min(page.w - 16.0).max(160.0);
+        let top = page.y + 8.0 + if view.ask.is_some() { DIALOG_H } else { 0.0 };
+        let bar = Rect::new(page.right() - fw - 8.0, top, fw, FIND_H);
+        let parts = find_parts(fw);
+        let at = |r: Rect| Rect::new(bar.x + r.x, bar.y + r.y, r.w, r.h);
+        layout.find = Some(bar);
+        layout.find_field = Some(at(parts.0));
+        layout.find_prev = Some(at(parts.2));
+        layout.find_next = Some(at(parts.3));
+        layout.find_close = Some(at(parts.4));
     }
 
     // The page area, when the shell draws it.
@@ -612,6 +692,160 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
     (dl.bytes().to_vec(), layout)
 }
 
+/// The find bar's field, label, previous, next and close, in the bar's
+/// own coordinates for a bar `w` wide.
+fn find_parts(w: f32) -> (Rect, Rect, Rect, Rect, Rect) {
+    let close = Rect::new(w - 32.0, 6.0, 24.0, 24.0);
+    let next = Rect::new(w - 60.0, 6.0, 24.0, 24.0);
+    let prev = Rect::new(w - 88.0, 6.0, 24.0, 24.0);
+    let label = Rect::new(prev.x - 92.0, 6.0, 88.0, 24.0);
+    let field = Rect::new(8.0, 5.0, (label.x - 12.0).max(20.0), 26.0);
+    (field, label, prev, next, close)
+}
+
+/// The find bar (Ctrl+F) `width` wide: its own display list, `(bytes,
+/// width, height)` in logical pixels, composited over the page area after
+/// the page and its highlights. Opaque, so a page cannot draw a fake one.
+pub fn draw_find(
+    text: &mut TextEngine,
+    styles: &Styles,
+    field: &AddressField,
+    label: &str,
+    width: f32,
+) -> (Vec<u8>, f32, f32) {
+    let (w, h) = (width.max(1.0), FIND_H);
+    let (f, l, prev, next, close) = find_parts(w);
+    let mut dl = DisplayList::new();
+    dl.begin().expect("fresh list");
+    let _ = dl.rect(0.0, 0.0, w, h, 6.0, RULE);
+    let _ = dl.rect(1.0, 1.0, w - 2.0, h - 2.0, 5.0, CHROME_BG);
+    let _ = dl.rect(f.x, f.y, f.w, f.h, 4.0, RULE);
+    let _ = dl.rect(f.x + 1.0, f.y + 1.0, f.w - 2.0, f.h - 2.0, 3.0, FIELD_BG);
+    let tx = f.x + 6.0;
+    let line_h = 13.0 * vy_render::text::LINE_HEIGHT_FACTOR;
+    let ty = f.y + (f.h - line_h) / 2.0;
+    let shown = field.text();
+    let _ = dl.clip_push(tx, f.y + 1.0, f.w - 10.0, f.h - 2.0, 0.0);
+    if field.focused() {
+        if let Some((a, b)) = field.selection() {
+            let x0 = text.caret(styles.ui, shown, a).map_or(0.0, |c| c.0);
+            let x1 = text.caret(styles.ui, shown, b).map_or(0.0, |c| c.0);
+            let _ = dl.rect(tx + x0, ty, x1 - x0, line_h, 2.0, SELECTION);
+        }
+    }
+    if shown.is_empty() {
+        let _ = dl.text(tx, ty, 0.0, styles.small_muted, "Sök på sidan".as_bytes());
+    } else {
+        let _ = dl.text(tx, ty, 0.0, styles.ui, shown.as_bytes());
+    }
+    if field.focused() {
+        let cx = text
+            .caret(styles.ui, shown, field.caret())
+            .map_or(0.0, |c| c.0);
+        let _ = dl.rect(tx + cx, ty + 1.0, 1.0, line_h - 2.0, 0.0, INK);
+    }
+    let _ = dl.clip_pop();
+    let label = fit(text, styles.small_muted, label, l.w);
+    centred_text(&mut dl, text, styles.small_muted, l, &label);
+    for (r, glyph) in [(prev, "‹"), (next, "›"), (close, "×")] {
+        let _ = dl.rect(r.x, r.y, r.w, r.h, 4.0, TAB_INACTIVE);
+        centred_both(&mut dl, text, styles.ui_bold, r, glyph);
+    }
+    dl.end().expect("balanced list");
+    (dl.bytes().to_vec(), w, h)
+}
+
+/// The devtools panel (F12, SPEC-11.4.1) `w` × `h`: the pane tabs on top,
+/// then `lines` from `scroll` on, as many as fit. Its own display list,
+/// `(bytes, hits)` with the hit rectangles in the panel's coordinates;
+/// composited into the panel's place beside the page area.
+pub fn draw_devtools(
+    text: &mut TextEngine,
+    styles: &Styles,
+    pane: Pane,
+    lines: &[Line],
+    scroll: usize,
+    size: (f32, f32),
+) -> (Vec<u8>, Vec<(Rect, DevHit)>) {
+    let (w, h) = (size.0.max(1.0), size.1.max(1.0));
+    let mut dl = DisplayList::new();
+    dl.begin().expect("fresh list");
+    let mut hits = Vec::new();
+    let _ = dl.rect(0.0, 0.0, w, h, 0.0, FIELD_BG);
+    let _ = dl.rect(0.0, 0.0, 1.0, h, 0.0, RULE);
+    let _ = dl.rect(1.0, 0.0, w - 1.0, devtools::HEADER_H, 0.0, CHROME_BG);
+    let _ = dl.rect(1.0, devtools::HEADER_H - 1.0, w - 1.0, 1.0, 0.0, RULE);
+    let mut x = 6.0;
+    for p in Pane::ALL {
+        let style = if p == pane {
+            styles.ui_bold
+        } else {
+            styles.small
+        };
+        let size = text.measure(style, 0.0, p.label()).unwrap_or_default();
+        let r = Rect::new(x, 4.0, size.w + 14.0, devtools::HEADER_H - 8.0);
+        if p == pane {
+            let _ = dl.rect(r.x, r.y, r.w, r.h, 4.0, TAB_ACTIVE);
+        }
+        centred_both(&mut dl, text, style, r, p.label());
+        hits.push((r, DevHit::Pane(p)));
+        x += r.w + 2.0;
+    }
+    let top = devtools::HEADER_H + 4.0;
+    let fit_n = ((h - top) / devtools::LINE_H).floor().max(0.0) as usize;
+    let _ = dl.clip_push(1.0, top, w - 2.0, h - top, 0.0);
+    for (k, (i, line)) in lines
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(fit_n)
+        .enumerate()
+    {
+        let r = Rect::new(
+            1.0,
+            top + k as f32 * devtools::LINE_H,
+            w - 2.0,
+            devtools::LINE_H,
+        );
+        let style = if line.command.is_some() {
+            styles.mono_button
+        } else if line.strong {
+            styles.mono_strong
+        } else {
+            styles.mono
+        };
+        if line.strong && line.command.is_some() {
+            let _ = dl.rect(r.x, r.y, r.w, r.h, 0.0, SELECTION);
+        }
+        let _ = dl.text(r.x + 7.0, r.y + 1.0, 0.0, style, line.text.as_bytes());
+        hits.push((r, DevHit::Line(i)));
+    }
+    let _ = dl.clip_pop();
+    if lines.len() > scroll + fit_n {
+        let more = format!("↓ {} rader till", lines.len() - scroll - fit_n);
+        let size = text
+            .measure(styles.small_muted, 0.0, &more)
+            .unwrap_or_default();
+        let _ = dl.rect(
+            w - size.w - 16.0,
+            h - 20.0,
+            size.w + 12.0,
+            18.0,
+            4.0,
+            CHROME_BG,
+        );
+        let _ = dl.text(
+            w - size.w - 10.0,
+            h - 19.0,
+            0.0,
+            styles.small_muted,
+            more.as_bytes(),
+        );
+    }
+    dl.end().expect("balanced list");
+    (dl.bytes().to_vec(), hits)
+}
+
 /// "Tillåt" and "Neka" within a question `w` wide, in its own coordinates.
 fn dialog_buttons(w: f32) -> (Rect, Rect) {
     (
@@ -713,6 +947,8 @@ mod tests {
             ask: None,
             page: PageView::Page,
             zoom: 1.0,
+            find: false,
+            devtools: false,
         }
     }
 

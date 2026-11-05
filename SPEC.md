@@ -133,6 +133,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-8.2.1]** Capabilities i 1.0 är en map från namn till objekt: `net` {origins: lista med ≤ 16 origins}, `storage` {quota_kb ≤ 16384}, `clipboard` {}, `hires_time` {}, `ime` {}, `persist_frame` {}.
 - **[SPEC-8.2.2]** En capability som inte står i manifestet kan inte beviljas i efterhand.
 - **[SPEC-8.2.3]** Standardpolicy: `net` för egen origin, `storage` upp till 1 MB och `ime` beviljas automatiskt; `clipboard` och `persist_frame` efter fråga; `hires_time` nekas som standard.
+- **[SPEC-8.2.4]** Skrivning till urklippet beviljas implicit under en kopieringsgest: ett `clipboard_write` medan sidan hanterar det `KEY_DOWN` för Ctrl+C eller Ctrl+X som värden levererat till den lyckas utan capability `clipboard` (en skrivning på användarens egen begäran läcker inget); utanför gesten kräver `clipboard_write`, och alltid `clipboard_read`, capabilityn enligt SPEC-5.2.12 och SPEC-5.3.1.
 - **[SPEC-8.3.1]** `fallback` visas när modulen avvisas eller fönstret är mindre än `min_size`.
 
 ## 9. Säkerhetsmodell
