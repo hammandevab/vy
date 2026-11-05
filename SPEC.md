@@ -1,6 +1,6 @@
-# Vy – specifikation 1.0 (utkast, M0)
+# Vy – specifikation 1.0
 
-Version 0.3 · 2026-11-05 · Status: ABI-kandidat inför frysning
+Version 1.0-rc · 2026-11-05 · Status: ABI 1.0 fryst sedan M2 (SPEC-5.3.5 gäller: §5, bilaga A och C ändras inte inom 1.x; nya importer, event-typer och opkoder får nya nummer i 1.x, befintliga byts aldrig)
 
 Varje normativ mening har ett id på formen `SPEC-<avsnitt>.<del>.<löpnummer>`. Ett id ändras aldrig;
 en mening som utgår behåller sitt id med texten *utgått*. Varje id ska refereras av minst ett test
@@ -197,15 +197,17 @@ Referensmaskin: bärbar dator från 2020 med integrerad grafik, 8 GB RAM, 50 Mbi
 
 ## 14. Färdplan
 
-Se `CLAUDE.md`. M0 (spec, testskal, CI) → M1 (headless) → M2 (ABI-frys, referenssidor) → M3 (klient) → M4 (härdning) → M5 (1.0).
+Se `CLAUDE.md`. M0 (spec, testskal, CI) ✓ → M1 (headless) ✓ → M2 (ABI-frys, referenssidor) ✓ → M3 (klient, server) → M4 (härdning) → M5 (1.0).
 
-## 15. Öppna frågor
+## 15. Avgjorda frågor
 
-- [ ] `dl_path`: SVG-path-syntax eller binär kommandolista? Lutar åt binär.
-- [ ] Delad typsnittscache över origins? Lutar åt nej.
-- [ ] Core wasm eller component model? Avgörs av mätning i M1.
-- [ ] `fallback` som hela sidan (Markdown-sida utan modul)? Lutar åt ja i 1.1.
-- [ ] Transparenslogg för nycklar: vem driver den?
+Inga öppna frågor återstår inför frysningen (M2-grinden). Besluten, med motivering i granskning 0002 och 0003:
+
+- `dl_path` tar en binär kommandolista (bilaga C, SPEC-C.1.2), inte SVG-syntax.
+- Ingen delad typsnittscache över origins; cachen är per origin som all annan lagring (SPEC-9.5.1).
+- Core wasm, inte component model, i 1.0 (SPEC-4.1.4); mätt i M1, omprövas tidigast i 2.0.
+- `fallback` som hel sida utan modul kommer i 1.1 (§16).
+- Transparensloggen för nycklar drivs av projektet i första instans och specas speglingsbar (§17, M4).
 
 ## 16. Möjliggörare (1.1 och framåt)
 

@@ -14,6 +14,13 @@ och körs i en sandbox. Ingen HTML, ingen CSS, ingen JavaScript-motor.
    En klient som passerar sviten är en Vy-klient. Inget annat krävs eller räcker.
 3. **Koden** – får skrivas om helt så länge 1 och 2 är gröna.
 
+## ABI 1.0 är fryst
+
+Sedan M2 gäller SPEC-5.3.5: inget i SPEC §5, bilaga A eller bilaga C får ändras. `docs/ABI-1.0.md`
+genereras ur `vy-abi` och ett test fäller bygget om listningen glider. En ny import, event-typ eller
+opkod är en 1.x-utökning med nytt nummer, egen hotanalys i `docs/reviews/` och ett `spec:`-commit;
+en ändrad signatur är 2.0. Allt annat (SDK, verktyg, klient, server) får ändras fritt.
+
 ## Sex principer (SPEC §2) – när två kolliderar vinner den som står högre
 
 1. Maskinen är den primära författaren. Ett kanoniskt sätt att göra varje sak. Inga alias.
@@ -59,9 +66,9 @@ aldrig koden. Skriv den för en läsare som har fem minuter.
 
 | | Leverans | Grind |
 | --- | --- | --- |
-| M0 | numrerad spec, testskal, CI, `hello` bygger till wasm | spec granskad av ägaren |
-| M1 | `vy-runtime`, `vy-dl`, `vy-render`, `vy-cli render` till PNG | 20 guldbilder gröna på Linux + macOS |
-| M2 | Rust-SDK, tio referenssidor | ABI 1.0 fryst, inga öppna frågor i SPEC §15 |
+| M0 ✓ | numrerad spec, testskal, CI, `hello` bygger till wasm | spec granskad av ägaren |
+| M1 ✓ | `vy-runtime`, `vy-dl`, `vy-render`, `vy-cli render` till PNG | 20 guldbilder gröna på Linux + macOS |
+| M2 ✓ | Rust-SDK, tio referenssidor | ABI 1.0 fryst, inga öppna frågor i SPEC §15 |
 | M3 | `vy-shell`, `vy-proto`, processisolering | prestandabudget SPEC §13 hållen |
 | M4 | signering, semantiskt träd, devtools, fuzz, macOS + Windows | hotanalys klar, extern sandbox-granskning |
 | M5 | reproducerbara byggen, publicerad svit, SDK-docs | utomstående agent publicerar en sida på < 1 h |
