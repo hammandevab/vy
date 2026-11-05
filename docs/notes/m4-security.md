@@ -17,8 +17,9 @@ M4-spåren kan ha valt samma nummer, så de kan behöva numreras om vid merge.
 | 2 | Rotation end-to-end, pensionering av den gamla nyckeln (SPEC-7.4.4, ny 7.4.6) | klart |
 | 3 | Transparenslogg (ny §7.6, SPEC-7.6.1–7.6.3) | klart |
 | 4 | OS-sandlåda för flikprocessen (SPEC-9.1.1, 9.1.2, 11.2.2, ny 9.1.3) | klart (Linux provat, Windows/macOS typkontrollerat) |
-| 5 | Resursgränser (SPEC-9.3.1) och isolering per origin (SPEC-9.5.1) | – |
-| 6 | Fuzzning | – |
+| 5 | Resursgränser (SPEC-9.3.1) och isolering per origin (SPEC-9.5.1) | klart |
+| 6 | Fuzzning | klart (cargo-fuzz-mål och nattjobb; lokalt bara den stabila mutationsvägen) |
+| – | Flikprocesser från den körande avbilden (`self_exe`, koordinatorns uppdrag) | klart |
 
 ## Steg 1 – DNS TXT (SPEC-7.4.2, SPEC-7.4.5)
 
@@ -289,15 +290,201 @@ att någon kört den på en riktig maskin (spec-fråga 57).
   filter_layout` (filtrets hopp); alla befintliga flikprocesstester (`spec_9_1_1`, `spec_11_2_1`,
   `spec_11_4_1` utan inspelning, `spec_13_3_1`, skalfallen i sviten) kör sandlådade.
 
+## Steg 5 – resursgränser (SPEC-9.3.1) och isolering per origin (SPEC-9.5.1)
+
+Läget före: `memory_max` (wasmtimes tillväxtgräns), 8 ms-bränslet med `KIND_BUDGET` och tvingad
+`vy_suspend`, 64 öppna anrop (`E_RATE`, `vy_abi::limits::MAX_OPEN_FETCHES`) och `quota_kb`
+(`E_QUOTA`) fanns i värden och var testade var för sig; 256 MB/min fanns bara i huvudprocessen
+och räknade svaret först efter att det levererats; huvudprocessen hade ingen gräns för antalet
+anrop i luften (granskning 0004 fynd 7).
+
+- **Värden (vy-runtime, sidans sida).** URL + begärans kropp räknas vid `fetch_begin`, svarets
+  kropp vid `FETCH_DONE`, per minut av sidans klocka (`NET_BYTES_PER_MINUTE`, exporterad). Ett
+  anrop som inte ryms är `E_RATE` och görs aldrig; ett svar som inte ryms levereras som
+  `FETCH_DONE` med `b = E_RATE` och ingen kropp och stänger anropet (som `E_TOO_LARGE` över 64
+  MB). Ingen ändring i ABI:t: `E_RATE` är redan koden för "för många" (SPEC-5.2.7).
+- **Huvudprocessen (vy-shell, förtroendegränsen).** `netlimit::NetBudget` per flik: högst 64 i
+  luften och 256 MB per minut av skalets klocka; det 65:e anropet och byte över minuten nekas med
+  `E_RATE` innan laddaren ser dem, ett svar över minuten levereras utan kropp. Byte-fönstret
+  följer fliken över navigeringar (en sida kan inte nollställa det genom att ladda om sig), antalet
+  i luften följer sidan. `shell.rs` sätter dessutom Windows-jobbets minnestak efter sidans
+  `memory_max` (`TabConnection::limit_memory`).
+- **Per origin.** Lagringen på disk är per origin sedan M3 (`storage.rs`, SHA-256-namngiven fil,
+  `spec_9_5_2_storage_is_per_origin_on_disk`); grants och förtroende är per origin i vy-proto och
+  skalet. `spec_9_5_1_per_origin_isolation` bevisar värdens del: varje sidinstans har sin egen
+  `Storage`, en nyckel som en origin skriver finns inte för en annan, och en senare instans av
+  samma origin läser det den fått.
+
+Un-ignorerade: `spec_9_3_1_resource_limits` (alla fem gränserna på en gång, 256 MB/min med fyra
+svar à 64 MB och en minut framåt på klockan) och `spec_9_5_1_per_origin_isolation`. Nytt:
+`spec_9_3_1_main_process_net_limits`. Kvar ignorerat i vy-runtime: `spec_6_2_2_idle_is_free`
+(bevisas på skalnivå av SPEC-13.3.2-testet).
+
+### Hotbild – resursgränser
+
+- **Vad.** Ingen ny yta; två räknare (värd och huvudprocess) framför en befintlig.
+- **Vem kan missbruka.** En sida som vill göra klienten till en nedladdnings- eller
+  överbelastningsmaskin (mot sin egen origin eller en origin den fått i `net`), eller en
+  komprometterad flikprocess som skickar `FetchRequest` förbi sin egen värd.
+- **Hur begränsas det.** Huvudprocessen räknar själv och litar inte på flikens räkning; en
+  sida kan inte nollställa minuten genom navigering; svaret räknas *innan* det levereras.
+- **Test som bevisar begränsningen.** `spec_9_3_1_resource_limits`,
+  `spec_9_3_1_main_process_net_limits`, `spec_5_2_8_main_process_gates_page_requests` (oförändrat
+  grönt).
+
+## Flikprocesser startas från den körande avbilden (`process::self_exe`)
+
+Koordinatorns uppdrag efter fyndet att `target/debug/<bin>` delades mellan arbetskopior: samma
+fel finns i produkten. En `vy-shell` som byts ut på disk medan den kör (en uppdatering) startade
+nya flikar från den nya binären, kanske med ett annat IPC-protokoll. `self_exe()` ger
+`/proc/self/exe` på Linux (barnet exekverar den innan det fått en egen avbild, så den namnger
+förälderns inod) och `current_exe()` annars: Windows låter inte en körande binär ersättas (bara
+byta namn, och namnbytet behåller avbilden); på macOS står risken kvar. Används vid
+`tab_executable`, i fönstret, i `--screenshot` och i vy-cli:s konformanskörare.
+
+**Hotbild.** *Vad:* vilken binär en flikprocess blir. *Vem kan missbruka:* den som kan skriva över
+binären medan klienten kör (en uppdaterare, en installation, en annan användare med skrivrätt
+till katalogen) fick nya flikar att köra sin kod utan omstart av skalet. *Hur begränsas det:* nya
+flikar kör alltid skalets egen avbild. *Test:* `spec_9_1_1_tabs_start_the_running_image` – en
+kopia av testbinären byts mot ett skript medan den kör, och barnet den sedan startar är
+fortfarande originalet; testet faller utan fixen (provat).
+
+## Steg 6 – fuzzning
+
+`fuzz/` är en egen cargo-workspace (en `[workspace]`-tabell, alltså inte medlem i huvudytan och
+inte byggd av `cargo test --workspace`) med cargo-fuzz-målen `manifest` (kanonisk CBOR med
+omkodningskontroll, nyckelloggens post och textform, paketet), `display_list`, `ipc` (båda
+riktningarna, ett accepterat meddelande kodar om till samma byte, ramläsaren), `address`
+(`vy://` med rundtur genom texten, URL-upplösning), `png`, `markdown` och `dns` (svarstolken med
+id ur de två första byten, frågebyggaren). Ingångarna ligger i `fuzz/src/entry.rs`.
+
+**Stabil väg.** `crates/vy-shell/tests/fuzz_regressions.rs` inkluderar samma `entry.rs` (`#[path]`)
+och kör (a) varje fil i `fuzz/corpus/<mål>/` och `fuzz/artifacts/<mål>/`, (b) 250 deterministiska
+mutationer (bitflipp, extrema byte, trunkering, dubblering, insättning) av de sex första seeds per
+mål. En krasch som nattjobbet hittar läggs in under `fuzz/artifacts/<mål>/` i samma commit som
+fixen och är därefter en grind i `cargo test`. `VY_FUZZ_SMOKE_ROUNDS` och `VY_FUZZ_SMOKE_SEED`
+kör fler; `VY_WRITE_FUZZ_SEEDS=1` skriver om de 49 seeds (de elva manifesten signerade med en
+testnyckel, hello-paketet, en logg, display lists från hello/shop/text/dashboard, elva
+IPC-meddelanden, fem adresser, de två minsta PNG:erna i gallery, elva reservtexter, två DNS-svar).
+
+**Nattjobbet.** `.github/workflows/fuzz.yml`: kl. 02:17 UTC och manuellt (`seconds`), en matris
+med sju mål, `RUSTUP_TOOLCHAIN=nightly` förbi `rust-toolchain.toml`, `cargo install cargo-fuzz`,
+`cargo fuzz run --fuzz-dir fuzz <mål> fuzz/corpus/<mål> -- -max_total_time=300 -rss_limit_mb=2048
+-timeout=10`, krascher som artefakt. Inte kört (ingen CI härifrån); YAML:en parsar.
+
+**Lokalt.** Ingen libFuzzer-körning: nightly + ASan-bygge av hela trädet (wasmtime) hade tagit
+flera GB på en disk med 7–15 GB fritt delat av fyra spår. I stället körde mutationspasset
+3 × 30 000 runder per seed (~3,6 M indata): **ett fynd**, se nedan, inget annat.
+
+**Fynd.** `KeyLog::parse` (mitt eget, steg 3) skar loggraden med `&s[i..i + 2]` och panikade på
+ett tecken över en byte – nåbart från varje origin som serverar en logg, vid första besöket.
+Fixat i en egen commit (hex läses som byte); regressionsfallet står i
+`spec_7_6_1_log_format_and_chain` och som `fuzz/artifacts/manifest/log-multibyte-hex`.
+
+## Checklista för den externa sandlådegranskningen (utkast)
+
+För en granskare utifrån som ska försöka bryta processgränsen och förtroendekedjan. Varje punkt:
+vad som ska försökas, hur, vad som räknas som fynd.
+
+1. **Ut ur wasmtime.** Anta en kodkörning i flikprocessen (skriv en liten Rust-binär som länkar
+   `vy_shell::sandbox`, kör `lockdown` och sedan valfria anrop – eller använd
+   `vy-shell --tab --sandbox-probe` som mall). Försök: öppna, `stat`a eller `readlink`a filer,
+   `openat2`, `io_uring_setup`, `socket`/`socketpair`, `connect` till en abstrakt unix-socket,
+   `execve`/`execveat`, `fork`/`vfork`/`clone` utan `CLONE_THREAD`, `clone3`, `ptrace`,
+   `process_vm_writev`, `kill`/`tgkill` mot skalets pid, `prctl`, `personality`, `userfaultfd`,
+   `perf_event_open`, `bpf`, `memfd_create` + `execveat`, `mmap` av ett ärvt fd. Fynd: något
+   som lyckas utöver tillåtelselistan i `sandbox.rs`.
+2. **Ärvda handtag.** Starta skalet under en process som läcker fd utan `O_CLOEXEC` (t.ex. en
+   X11-/Wayland-anslutning, en socket) och se om fliken har dem (`ls -l /proc/<flik>/fd`).
+   Windows: `handle.exe -p <flik>` – i strict ska bara rören och NUL finnas. Fynd: något utöver
+   0, 1, 2 (+ memfd från wasmtime).
+3. **Windows standardläge.** Bekräfta låg integritet och jobbet (Process Explorer). Försök från
+   fliken: skriva i `%USERPROFILE%`, `%LOCALAPPDATA%` (m4/perf:s kompileringscache), HKCU;
+   starta en process (jobbets gräns 1); läsa användarens filer och öppna en socket – **väntat
+   möjligt i standard**, nekat i strict. Fynd: skrivning eller process.
+4. **Windows strict (AppContainer).** Med `VY_SANDBOX=strict` och binären under Program Files:
+   flikprocessen i AppContainern `vy.tab`, inga capabilities; försök filer, nät, named pipes,
+   COM/RPC, `\Device\Afd`, andra processers handtag. Fynd: allt som lyckas; och om strict
+   tyst faller tillbaka till standard när det borde fungera.
+5. **macOS.** Kör sonden; bekräfta att `sandbox_init` tog profilen (raden `sandbox:`); prova
+   Mach-tjänster (`bootstrap_look_up`), filer, nät. Fynd: allt som lyckas utöver signaler och
+   process-info till sig själv.
+6. **Huvudprocessen som motpart.** Skicka fientliga `ToShell`-ramar från en egen flikprocess
+   (IPC-avkodaren är fuzzad, `ipc`-målet): `FetchRequest` utan `net`, till främmande origin, fler
+   än 64 i luften, över 256 MB/min; `Storage` över kvoten; `Navigate` till `file:`, `http:`,
+   en lokal sökväg. Fynd: något som når nätet eller disken utan att huvudprocessen beslutat det.
+7. **Loopback-regeln (m4/dev).** En sida från en *icke*-loopback-origin får aldrig nå en
+   loopback-origin: varken via `fetch_begin` (`net`-origins som `https://127.0.0.1:…`,
+   `localhost`, `[::1]`, `0.0.0.0`, `127.1`, decimala och oktala IP-former, DNS-namn som pekar på
+   127.0.0.1 – DNS-rebinding), via omdirigeringar, via `module.url`/`resources[].url` i
+   manifestet, eller via `navigate`. Bara en sida vars *egen* adress är loopback får tala http mot
+   sin egen loopback-origin (SPEC-7.1.3, granskning 0003 fynd 5). Fynd: varje väg dit från en
+   fjärrsida.
+8. **Förtroendekedjan.** Första besök: förfalskade UDP-svar (fel id, fel fråga, trunkerat,
+   CNAME-kedjor till främmande namn), en resolver som svarar SERVFAIL eller långsamt; rotation
+   utan att nyckeln står i vy-key eller loggen; en logg som skrivits om, tagits bort eller visar
+   olika innehåll för olika klienter (split view, spec-fråga 56); `next_key_id`-injektion i
+   nyckelförrådet. Fynd: förtroende utan att både vy-key, DNS (och loggen när den finns) stämmer.
+9. **Uppdatering under körning.** Byt `vy-shell` på disk medan den kör och öppna en ny flik
+   (Linux: ska vara den gamla avbilden; macOS: känd risk; Windows: går inte att byta).
+10. **Resurser.** En sida som allokerar till `memory_max`, bränner bränsle, öppnar 64 anrop,
+    fyller minuten, skriver till kvoten – och samtidigt i tio flikar: skalet ska förbli
+    responsivt och huvudprocessens minne begränsat.
+
+## Tester, backlogg och spec
+
+**Ignorerade → gröna:** `spec_7_4_2_dns_txt_must_agree` (vy-proto), `spec_9_3_1_resource_limits`
+och `spec_9_5_1_per_origin_isolation` (vy-runtime). Backloggen 19 → 16. Två tester infördes som
+ignorerade i sina `spec:`-commits och un-ignorerades i nästa: `spec_7_6_2_7_6_3_key_log_checked_at_key_decisions`,
+`spec_9_1_3_tab_sandbox`.
+
+**Nya tester:** `spec_7_4_5_dns_txt_record_form` (vy-manifest), `dns::tests::spec_7_4_2_txt_wire_format`,
+`dns::tests::resolv_conf_nameservers`, `dns::tests::system_resolver_udp_then_tcp` (vy-proto),
+`spec_7_4_5_dns_records_for_the_operator` (vy-serve), `spec_7_6_1_log_format_and_chain`,
+`spec_7_6_1_log_served`, `spec_7_6_1_log_append`, `sandbox::tests::probe_text_lists_attempts`,
+`sandbox::platform::tests::filter_layout`, `spec_9_3_1_main_process_net_limits`,
+`process::tests::spec_9_1_1_tabs_start_the_running_image` (med hjälptestet `self_exe_child_stage`,
+tomt i en vanlig körning), `fuzz_corpora_replay`, `fuzz_mutation_smoke`. Utökade:
+`spec_7_4_4_key_rotation`, `keys::tests::pins_and_successors_persist`; tre tester som räknar
+förfrågningar vid första besök räknar nu loggen.
+
+**Spec-id:** 132 → 138 (7.4.5, 7.4.6, 7.6.1, 7.6.2, 7.6.3, 9.1.3), alla spårade; inget i §5,
+bilaga A eller C rört. Formen på `spec:`-commits: de tre första (7.4.5, 7.4.6, 7.6.1) bär
+specmeningen tillsammans med koden och testet som refererar den, som de tidigare `spec:`-commitsen
+i historiken; de två sista (7.6.2–7.6.3, 9.1.3) är bara SPEC.md plus ett ignorerat test som
+refererar id:t, och implementationen un-ignorerar det i nästa commit.
+
+**Grindar vid sista commit:** fmt, clippy (även `--target x86_64-pc-windows-msvc` och
+`aarch64-apple-darwin` för vy-shell, vy-cli, vy-proto), `cargo test --workspace` 271 gröna / 16
+ignorerade (vy-render-benchens 1 s-tak föll under last och gick igenom ensam), spec_trace 138/138,
+modulbygge + check-abi + test_modules, konformans 55/55 à 0,000 %. Storlek (SPEC-12.3.1):
+`cargo build --release -p vy-shell` här gav 26,9 MB *ostrippad* – den lokala
+`.cargo/config.toml` (koordinatorns, `codegen-units = 14` per arbetsytecrate i release) verkar
+göra att `strip = true` inte slår igenom; samma binär strippad är 22,1 MB (main: 21,8 MB med
+repots egen profil). Grenens tillägg (DNS, logg, sandlåda) är alltså ~0,3 MB eller mindre;
+CI bygger utan den lokala filen.
+
+## Kvar
+
+- Windows strict (AppContainer) och macOS-profilen är bara typkontrollerade; Windows standard
+  stoppar inte läsning och nät (spec-fråga 57).
+- Ingen libFuzzer-körning lokalt; nattjobbet har aldrig kört.
+- Skalet visar inte `Fetched::restriction()` (m4/ux).
+- `limit_memory` tar sidans `memory_max` vid spawn; ingen gräns på Linux/macOS utöver wasmtimes
+  egen (RLIMIT_AS skulle bryta wasmtimes reserverade adressrymd).
+- Split view i loggen (spec-fråga 56) och Railway-domänen (steg 1).
+
 ## Byggmiljön (för den som tar över)
 
-- `target/` är delad mellan fyra arbetsträd. Cargos metadatahash för en sökvägscrate räknas
-  relativt arbetsytans rot, så samma crate i två arbetsträd fick samma artefakt och ett träd
-  kunde länka ett annat träds bygge (observerat: vy-proto länkade en vy-manifest utan de nya
-  funktionerna). Koordinatorn har sedan 19:31 lagt en ospårad `.cargo/config.toml` per
-  arbetsträd med unika profilvärden per arbetsytecrate (`strip = "debuginfo"`,
-  `codegen-units`), så hasharna skiljer sig. Checka inte in den filen (den står i
-  `.git/info/exclude`).
+- `target/` var först delad mellan fyra arbetsträd. Cargos metadatahash för en sökvägscrate
+  räknas relativt arbetsytans rot, så samma crate i två arbetsträd fick samma artefakt och ett
+  träd kunde länka ett annat träds bygge (observerat: vy-proto länkade en vy-manifest utan de nya
+  funktionerna); de upplyfta binärerna `target/debug/vy-shell`, `vy-cli` delades också, även
+  medan `cargo test` körde (observerat: konformansens skalfall 15–87 % fel, sandlådetestet fick
+  en annan arbetskopias vy-shell). Koordinatorn gav varje arbetsträd en ospårad
+  `.cargo/config.toml` (19:31; checka inte in den) och sedan 22:16 en egen target-katalog
+  (`target` → `/home/claude/vy-target-security`). Röda tester före 22:16 som startade en binär
+  är omkörda. `target/wasm` byggs med `tools/build_modules.sh` i den nya katalogen.
 - `spec_5_3_3_bench_32_rounded_clips_2000_rects` i `vy-render` (1 s-tak i debug) faller när
   maskinen är lastad (lastmedel ~5 på 2 CPU:er med fyra agenter) och går igenom ensam
   (`--test-threads=1`). Inte rört här; m4/perf äger testet.
@@ -321,6 +508,16 @@ unika rader på Linux, 72 för Windows-målet; inget nytt i `Cargo.lock` utom de
 - `crates/vy-serve/src/lib.rs` (m4/dev lägger till funktioner): ny route
   `/.well-known/vy-dns`, `Site::dns_zone_lines`, `pub fn is_loopback_host`, fältet `keys` i
   `Site` och en doc-rad på `Stats::keys`. Inga publika namn ändrade eller borttagna.
+- **Steg 5 och självstart:** `crates/vy-runtime/src/host.rs` och `lib.rs` (m4/perf):
+  `NET_BYTES_PER_MINUTE`, `Host::net_admit`, ett fält `net_minute`, en kontroll i
+  `fetch_begin` och en gren i `deliver_fetch` (omstrukturerad utan att ändra beteendet för
+  övriga svar). `crates/vy-shell/src/shell.rs` (m4/ux): `net_window` är nu
+  `netlimit::NetBudget` (fältet, initieringen, `fetch_for`, svarsgrenen, nollställning vid
+  navigering), konstanten `NET_BYTES_PER_MINUTE` borttagen därifrån, och `limit_memory` efter
+  spawn. Ny fil `src/netlimit.rs`, `pub mod netlimit;` i `lib.rs`. `window.rs:175` och
+  `main.rs` (`--screenshot`) och `crates/vy-cli/src/conformance.rs` (`tab_executable`): en rad
+  var, `self_exe()`.
+- **Steg 6:** ny fil `crates/vy-shell/tests/fuzz_regressions.rs` (läser `fuzz/src/entry.rs`).
 - `crates/vy-shell/Cargo.toml` (m4/ux): `libc` för unix och fler windows-sys-features (samma
   crates som fanns). `src/lib.rs`: `pub mod sandbox;`. `src/main.rs`: `--tab` tar
   `--sandbox-probe` och låser innan `tab::main`. `crates/vy-cli/src/main.rs` (m4/perf): samma
@@ -349,12 +546,12 @@ unika rader på Linux, 72 för Windows-målet; inget nytt i `Cargo.lock` utom de
 54. **SPEC-7.4.5 – väntetid.** Ett uppslag som inte svarar tar upp till 6 s och sker i skalets
     laddartråd (som är seriell, granskning 0004 fynd 7). Bör specen ge en tidsgräns, och bör
     sidan visas i begränsat läge medan uppslaget pågår?
+55. **SPEC-7.4.5 – IP-literaler.** `vy://192.0.2.1/` frågar `_vy.192.0.2.1` och faller till
+    begränsat läge. Det finns ingen DNS-zon för en adress; ska IP-adresser (utom loopback) vara
+    otillåtna i `vy://`, eller alltid begränsade?
 56. **§7.6 – split view.** En server kan visa olika loggar för olika klienter. Bara speglar som
     jämför huvuden upptäcker det; ska 1.0 ha en mekanism (en andra källa för huvudet, t.ex. ett
     huvud i DNS bredvid TXT-posten), eller räcker det att formatet är speglingsbart?
 57. **SPEC-9.1.3 på Windows.** Standardläget hindrar skrivning och barnprocesser men inte läsning
     och nätverk; AppContainern (strict) hindrar allt men är inte provad. Bör meningen gälla
     strict, och standard bli strict när en människa kört det?
-55. **SPEC-7.4.5 – IP-literaler.** `vy://192.0.2.1/` frågar `_vy.192.0.2.1` och faller till
-    begränsat läge. Det finns ingen DNS-zon för en adress; ska IP-adresser (utom loopback) vara
-    otillåtna i `vy://`, eller alltid begränsade?
