@@ -4,6 +4,7 @@
 #![deny(missing_docs)]
 
 pub mod abi_doc;
+pub mod bench;
 pub mod conformance;
 
 use anyhow::{anyhow, bail, Context, Result};

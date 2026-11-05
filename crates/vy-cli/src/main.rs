@@ -1,6 +1,7 @@
 //! `vy-cli`: headless tools for the Vy client.
 //!
-//! M0 shipped `check-abi`; M1 adds `render` and `conformance`; `bench` arrives with M3.
+//! M0 shipped `check-abi`; M1 added `render` and `conformance`; M3 adds `bench`
+//! and `--tab` (this binary as a tab process of the headless shell).
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ fn usage() -> ExitCode {
          [--resource <file> [--resource-size WxH]].. [--dump-semantic <json>]\n  \
          vy-cli conformance [--update] [--root <dir>]\n  \
          vy-cli abi-dump      (the frozen ABI 1.0 listing, docs/ABI-1.0.md)\n  \
-         vy-cli bench         (M3)"
+         vy-cli bench [--iterations N] [--root <dir>]   (SPEC §13, headless, informational)"
     );
     ExitCode::from(2)
 }
@@ -40,10 +41,7 @@ fn main() -> ExitCode {
             print!("{}", vy_cli::abi_doc::abi_listing());
             return ExitCode::SUCCESS;
         }
-        Some("bench") => {
-            eprintln!("bench: not implemented before M3 (see CLAUDE.md)");
-            return ExitCode::from(2);
-        }
+        Some("bench") => bench(&args[1..]),
         _ => return usage(),
     };
     match result {
@@ -193,6 +191,21 @@ fn render(args: &[String]) -> Result<ExitCode> {
             String::new()
         }
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn bench(args: &[String]) -> Result<ExitCode> {
+    let a = Args::parse(args, &["iterations", "root"], &[])?;
+    let n: usize = a.value("iterations").unwrap_or("20").parse()?;
+    if n == 0 {
+        bail!("--iterations must be at least 1");
+    }
+    let root = find_root(a.value("root"))?;
+    if cfg!(debug_assertions) {
+        println!("(debug-bygge: talen är inte budgetens; kör med --release för SPEC §13)");
+    }
+    let rows = vy_cli::bench::run(&root, n)?;
+    print!("{}", vy_cli::bench::table(&rows));
     Ok(ExitCode::SUCCESS)
 }
 
