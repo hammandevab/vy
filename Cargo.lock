@@ -1661,6 +1661,10 @@ version = "0.1.0"
 dependencies = [
  "tiny_http",
  "vy-manifest",
+ "vy-proto",
+ "vy-publish",
+ "vy-runtime",
+ "wat",
 ]
 
 [[package]]

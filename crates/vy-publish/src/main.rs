@@ -11,6 +11,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
          vy-publish keygen --out <dev.key>\n  \
+         vy-publish pubkey --key <dev.key> [--out <dev.key.pub>]\n  \
          vy-publish build --manifest <draft.json> --module <module.wasm> --key <dev.key> --out <page.vyp> [--resource <file>]...\n  \
          vy-publish inspect <page.vyp> [--public-key <dev.key.pub>]"
     );
@@ -21,6 +22,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("keygen") => cmd_keygen(&args[1..]),
+        Some("pubkey") => cmd_pubkey(&args[1..]),
         Some("build") => cmd_build(&args[1..]),
         Some("inspect") => cmd_inspect(&args[1..]),
         _ => return usage(),
@@ -87,6 +89,24 @@ fn cmd_keygen(args: &[String]) -> Result<ExitCode, String> {
     println!("public: {}", key.public());
     println!("seed:   {out} (keep private, never commit)");
     println!("pub:    {}", pub_path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_pubkey(args: &[String]) -> Result<ExitCode, String> {
+    let a = Args::parse(args, &["key", "out"])?;
+    let Some(key_path) = a.value("key") else {
+        return Ok(usage());
+    };
+    let key = read_key(Path::new(key_path)).map_err(|e| e.to_string())?;
+    let text = vy_manifest::key_file(&[key.public()]);
+    match a.value("out") {
+        Some(out) => {
+            std::fs::write(out, &text).map_err(|e| format!("{out}: {e}"))?;
+            println!("key_id: {}", key.public().key_id());
+            println!("pub:    {out}");
+        }
+        None => print!("{text}"),
+    }
     Ok(ExitCode::SUCCESS)
 }
 

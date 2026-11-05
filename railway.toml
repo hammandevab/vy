@@ -1,0 +1,13 @@
+# Railway: bygg med Dockerfile i repots rot och kör vy-serve.
+# Railway sätter PORT och RAILWAY_PUBLIC_DOMAIN; vy-serve läser båda, så
+# vy://-länkarna i HTML-reserven pekar på tjänstens publika domän utan
+# ytterligare konfiguration. Sätt VY_HOST_NAME för en egen domän.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/hello"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
