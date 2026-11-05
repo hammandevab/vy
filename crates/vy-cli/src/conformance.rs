@@ -3,14 +3,16 @@
 //! `conformance/cases.toml` lists cases; each renders a module at a size and
 //! scale and compares the pixels with `conformance/golden/<name>.png`. A case
 //! may also name a semantic tree under `conformance/semantic/`, grant
-//! capabilities to the headless host and replay input events before the
-//! final frame, so focus, hover and scroll states are testable.
+//! capabilities to the headless host, declare canned responses for
+//! `fetch_begin`, and replay input and host events before the final frame,
+//! so focus, hover, scroll, paused, reflowed, persisted and delivered
+//! states are testable.
 
-use crate::{render, RenderRequest, ScriptedEvent};
+use crate::{render, CannedResponse, RenderRequest, ScriptedEvent, Step};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use vy_manifest::Manifest;
+use vy_manifest::{Capability, Manifest};
 use vy_render::{diff_ratio, Resource, RgbaImage};
 use vy_runtime::{Capabilities, SemNode};
 
@@ -38,8 +40,10 @@ pub struct Case {
     pub semantic: Option<String>,
     /// Capabilities the headless host grants (SPEC-8.2.1).
     pub capabilities: Capabilities,
-    /// Events replayed after the first frame.
-    pub events: Vec<ScriptedEvent>,
+    /// Steps replayed after the first frame.
+    pub events: Vec<Step>,
+    /// Responses the headless host answers `fetch_begin` with (SPEC-5.2.7).
+    pub fetch: Vec<CannedResponse>,
     /// Package resources as paths relative to the repository root;
     /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1), with the
     /// size the manifest declares for an image when the case states it
@@ -257,8 +261,32 @@ fn parse_resource(entry: &str, line: usize) -> Result<CaseResource> {
     })
 }
 
-/// One event from its inline table: `kind` plus the arguments of that kind.
-fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
+/// One canned response from `{url, status, body}`.
+fn parse_fetch(table: &str, line: usize) -> Result<CannedResponse> {
+    let pairs = parse_table(table, line)?;
+    let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    for (k, _) in &pairs {
+        if !["url", "status", "body"].contains(&k.as_str()) {
+            bail!("line {line}: fetch has no key {k:?}");
+        }
+    }
+    let url = get("url")
+        .ok_or_else(|| anyhow!("line {line}: fetch needs url"))?
+        .str("url", line)?
+        .to_string();
+    let status = get("status").map_or(Ok(200), |v| v.int("status", line))?;
+    let status =
+        i32::try_from(status).with_context(|| format!("line {line}: status out of range"))?;
+    let body = get("body")
+        .map_or(Ok(""), |v| v.str("body", line))?
+        .as_bytes()
+        .to_vec();
+    Ok(CannedResponse { url, status, body })
+}
+
+/// One step from its inline table: `kind` plus the arguments of that kind,
+/// and `after_frames` for any kind.
+fn parse_event(table: &str, line: usize) -> Result<Step> {
     let pairs = parse_table(table, line)?;
     let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
     let num = |key: &str, default: f64| -> Result<f32> {
@@ -274,22 +302,39 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
     };
     let kind = need("kind")?.str("kind", line)?;
     let known: &[&str] = match kind {
-        "pointer_move" => &["kind", "x", "y", "buttons", "modifiers"],
-        "pointer_down" | "pointer_up" => &["kind", "x", "y", "button", "modifiers"],
-        "pointer_leave" => &["kind"],
-        "scroll" => &["kind", "dx", "dy", "lines", "modifiers"],
-        "key_down" => &["kind", "code", "modifiers", "repeat"],
-        "key_up" => &["kind", "code", "modifiers"],
-        "text_input" => &["kind", "text"],
-        "focus" => &["kind", "node", "gained", "keyboard"],
+        "pointer_move" => &["x", "y", "buttons", "modifiers"],
+        "pointer_down" | "pointer_up" => &["x", "y", "button", "modifiers"],
+        "pointer_leave" | "budget" | "suspend" | "reinit" | "fetch_done" => &[],
+        "scroll" => &["dx", "dy", "lines", "modifiers"],
+        "key_down" => &["code", "modifiers", "repeat"],
+        "key_up" => &["code", "modifiers"],
+        "text_input" => &["text"],
+        "focus" => &["node", "gained", "keyboard"],
+        "visibility" => &["visible"],
+        "resize" => &["width", "height", "scale"],
         other => bail!("line {line}: unknown event kind {other:?}"),
     };
     for (k, _) in &pairs {
-        if !known.contains(&k.as_str()) {
+        if !(k == "kind" || k == "after_frames" || known.contains(&k.as_str())) {
             bail!("line {line}: event {kind} has no key {k:?}");
         }
     }
-    Ok(match kind {
+    let after_frames = match get("after_frames") {
+        None => None,
+        Some(v) => Some(
+            u32::try_from(v.int("after_frames", line)?).with_context(|| {
+                format!("line {line}: after_frames must be a non-negative integer")
+            })?,
+        ),
+    };
+    let side = |key: &str| -> Result<u32> {
+        let v = need(key)?.int(key, line)?;
+        u32::try_from(v)
+            .ok()
+            .filter(|v| *v > 0)
+            .ok_or_else(|| anyhow!("line {line}: {key} must be a positive integer"))
+    };
+    let event = match kind {
         "pointer_move" => ScriptedEvent::PointerMove {
             x: need("x")?.num("x", line)? as f32,
             y: need("y")?.num("y", line)? as f32,
@@ -325,19 +370,35 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
             modifiers: int("modifiers", 0)?,
         },
         "text_input" => ScriptedEvent::TextInput(need("text")?.str("text", line)?.to_string()),
-        _ => ScriptedEvent::Focus {
+        "focus" => ScriptedEvent::Focus {
             node: need("node")?.int("node", line)? as i32,
             gained: get("gained").map_or(Ok(true), |v| v.bool("gained", line))?,
             keyboard: get("keyboard").map_or(Ok(true), |v| v.bool("keyboard", line))?,
         },
+        "visibility" => ScriptedEvent::Visibility {
+            visible: need("visible")?.bool("visible", line)?,
+        },
+        "budget" => ScriptedEvent::Budget,
+        "resize" => ScriptedEvent::Resize {
+            width: side("width")?,
+            height: side("height")?,
+            scale: num("scale", 1.0)?,
+        },
+        "suspend" => ScriptedEvent::Suspend,
+        "reinit" => ScriptedEvent::Reinit,
+        _ => ScriptedEvent::FetchDone,
+    };
+    Ok(Step {
+        event,
+        after_frames,
     })
 }
 
 /// Parse the restricted TOML used by `cases.toml`: `[[case]]` tables holding
 /// `key = value` lines with quoted strings, numbers, booleans, arrays of
 /// strings (`capabilities`), arrays of strings or `{path, w, h}` tables
-/// (`resources`) and arrays of inline tables (`events`, which may span
-/// lines); `#` comments.
+/// (`resources`) and arrays of inline tables (`events` and `fetch`, which
+/// may span lines); `#` comments.
 ///
 /// This is deliberately not a TOML parser (CLAUDE.md: no dependency for what
 /// fits in 200 lines); anything outside the subset is an error.
@@ -352,8 +413,9 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         frames: Option<u32>,
         semantic: Option<String>,
         capabilities: Capabilities,
-        events: Vec<ScriptedEvent>,
+        events: Vec<Step>,
         resources: Vec<CaseResource>,
+        fetch: Vec<CannedResponse>,
     }
     fn finish(d: Draft, line: usize) -> Result<Case> {
         let name = d
@@ -376,6 +438,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             capabilities: d.capabilities,
             events: d.events,
             resources: d.resources,
+            fetch: d.fetch,
             name,
         })
     }
@@ -452,6 +515,12 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                 d.resources = parse_array(value, line)?
                     .into_iter()
                     .map(|e| parse_resource(e, line))
+                    .collect::<Result<_>>()?;
+            }
+            "fetch" => {
+                d.fetch = parse_array(value, line)?
+                    .into_iter()
+                    .map(|e| parse_fetch(e, line))
                     .collect::<Result<_>>()?;
             }
             other => bail!("line {line}: unknown key {other:?}"),
@@ -584,16 +653,28 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // What the manifest grants shapes the host (SPEC-5.2.8, SPEC-9.3.1).
+    let net_origins = match manifest.capabilities.get("net") {
+        Some(Capability::Net { origins }) => origins.clone(),
+        _ => Vec::new(),
+    };
+    let storage_quota_bytes = match manifest.capabilities.get("storage") {
+        Some(Capability::Storage { quota_kb }) => u64::from(*quota_kb) * 1024,
+        _ => vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES,
+    };
     let req = RenderRequest {
         wasm: &wasm,
         width: case.width,
         height: case.height,
         scale: case.scale,
         frames: case.frames,
-        memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
+        memory_max_pages: manifest.memory_max,
         capabilities: case.capabilities,
         resources: &resources,
         events: &case.events,
+        fetch: &case.fetch,
+        net_origins: &net_origins,
+        storage_quota_bytes,
     };
     let out = render(&req)?;
     if let Some(problem) = ime_requirement(&out.semantic, &manifest) {
@@ -803,14 +884,35 @@ events = [                                      # comment after the bracket
   {kind = "scroll", dy = -120, lines = false},
   {kind = "focus", node = 12, gained = false, keyboard = false},
   {kind = "focus", node = 13},
+  {kind = "visibility", visible = false, after_frames = 20},
+  {kind = "visibility", visible = true},
+  {kind = "budget", after_frames = 0},
+  {kind = "resize", width = 400, height = 700, scale = 1.5},
+  {kind = "suspend"}, {kind = "reinit"}, {kind = "fetch_done"},
 ]
 resources = ["modules/shop/assets/01.png", {path = "modules/shop/assets/02.png", w = 240, h = 240}]
+fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"}, {url = "https://chat.example/x"}]
 "#;
         let cases = parse_cases(text).unwrap();
         assert_eq!(cases.len(), 1);
         let c = &cases[0];
         assert!(c.capabilities.ime && c.capabilities.storage && !c.capabilities.net);
-        assert_eq!(c.frames, 11, "1 + 10 events");
+        assert_eq!(c.frames, 18, "1 + 17 events");
+        assert_eq!(
+            c.fetch,
+            vec![
+                CannedResponse {
+                    url: "https://chat.example/api/messages".into(),
+                    status: 201,
+                    body: b"ok".to_vec()
+                },
+                CannedResponse {
+                    url: "https://chat.example/x".into(),
+                    status: 200,
+                    body: Vec::new()
+                }
+            ]
+        );
         assert_eq!(
             c.resources,
             vec![
@@ -824,8 +926,15 @@ resources = ["modules/shop/assets/01.png", {path = "modules/shop/assets/02.png",
                 }
             ]
         );
+        let after: Vec<Option<u32>> = c.events.iter().map(|s| s.after_frames).collect();
+        assert_eq!(after[..10], [None; 10]);
         assert_eq!(
-            c.events,
+            after[10..],
+            [Some(20), None, Some(0), None, None, None, None]
+        );
+        let events: Vec<ScriptedEvent> = c.events.iter().map(|s| s.event.clone()).collect();
+        assert_eq!(
+            events,
             vec![
                 ScriptedEvent::PointerDown {
                     x: 100.0,
@@ -872,10 +981,32 @@ resources = ["modules/shop/assets/01.png", {path = "modules/shop/assets/02.png",
                     gained: true,
                     keyboard: true
                 },
+                ScriptedEvent::Visibility { visible: false },
+                ScriptedEvent::Visibility { visible: true },
+                ScriptedEvent::Budget,
+                ScriptedEvent::Resize {
+                    width: 400,
+                    height: 700,
+                    scale: 1.5
+                },
+                ScriptedEvent::Suspend,
+                ScriptedEvent::Reinit,
+                ScriptedEvent::FetchDone,
             ]
         );
         let base = "[[case]]\nname = \"x\"\nmodule = \"m\"\nwidth = 1\nheight = 1\n";
         for bad in [
+            "events = [{kind = \"visibility\"}]",
+            "events = [{kind = \"visibility\", visible = 1}]",
+            "events = [{kind = \"budget\", x = 1}]",
+            "events = [{kind = \"resize\", width = 0, height = 1}]",
+            "events = [{kind = \"resize\", width = 1}]",
+            "events = [{kind = \"suspend\", after_frames = -1}]",
+            "events = [{kind = \"reinit\", after_frames = \"x\"}]",
+            "fetch = [{status = 200}]",
+            "fetch = [{url = \"x\", foo = 1}]",
+            "fetch = [{url = \"x\", status = \"ok\"}]",
+            "fetch = \"x\"",
             "capabilities = [\"file\"]",
             "capabilities = \"ime\"",
             "events = [{kind = \"tap\", x = 1, y = 1}]",
@@ -902,6 +1033,7 @@ resources = ["modules/shop/assets/01.png", {path = "modules/shop/assets/02.png",
         ))
         .unwrap();
         assert_eq!(explicit[0].frames, 1, "explicit frames wins");
+        assert_eq!(explicit[0].events[0].after_frames, None);
     }
 
     /// SPEC-10.4.2, SPEC-8.2.2: a page with input fields whose manifest does
@@ -990,15 +1122,10 @@ resources = ["modules/shop/assets/01.png", {path = "modules/shop/assets/02.png",
         let wasm = fs::read(root().join("target/wasm/form.wasm")).unwrap();
         let logs = |caps: Capabilities| {
             let req = RenderRequest {
-                wasm: &wasm,
-                width: 800,
-                height: 600,
-                scale: 1.0,
-                frames: no_ime.frames,
-                memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
                 capabilities: caps,
-                resources: &[],
+                frames: no_ime.frames,
                 events: &no_ime.events,
+                ..RenderRequest::new(&wasm, 800, 600)
             };
             let out = render(&req).unwrap();
             assert_eq!(out.semantic[3].text, "Anna Lind", "the page still ran");

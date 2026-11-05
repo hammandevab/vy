@@ -492,6 +492,27 @@ fn spec_5_3_3_frame_budget() {
     assert!(rt.is_suspended());
     assert!(matches!(rt.frame_with_dt(0), Err(Error::Suspended)));
 
+    // A forced breach (the conformance suite's simulation) takes the same
+    // path: warning, then final warning and suspend on the second in a row.
+    let mut rt = load(&budget_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.force_budget_breach();
+    rt.frame_with_dt(0).unwrap();
+    assert!(rt.last_frame().over_budget);
+    assert!(rt.last_frame().fuel < FRAME_BUDGET_FUEL, "it cost nothing");
+    assert_eq!(module_logs(&rt), vec!["budget"]);
+    rt.frame_with_dt(0).unwrap();
+    assert!(!rt.last_frame().over_budget, "one frame only");
+    rt.force_budget_breach();
+    rt.frame_with_dt(0).unwrap();
+    rt.force_budget_breach();
+    rt.frame_with_dt(0).unwrap();
+    assert!(rt.is_suspended());
+    assert_eq!(
+        module_logs(&rt),
+        vec!["budget", "budget", "budget", "final", "suspend"]
+    );
+
     // Hard limit: the frame is aborted and counts as a breach.
     let mut rt = load(&budget_module());
     rt.init(10, 10, 1.0).unwrap();

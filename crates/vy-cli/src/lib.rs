@@ -7,16 +7,17 @@ pub mod conformance;
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use vy_abi::event as kind;
 use vy_render::RgbaImage;
-use vy_runtime::{Capabilities, LogEntry, Options, Runtime, SemNode};
+use vy_runtime::{Capabilities, LogEntry, Options, Runtime, SemNode, Storage};
 
-pub use vy_runtime::{check_abi_bytes, AbiReport, Resource};
+pub use vy_runtime::{check_abi_bytes, AbiReport, CannedResponse, Resource};
 
-/// An input event replayed before the final frame (SPEC-5.1.3, SPEC-A.2.1),
-/// in logical pixels. The minimal subset a conformance case needs to reach a
-/// focus, hover or scroll state; the shell delivers the rest in M3.
+/// An input or host event replayed before the final frame (SPEC-5.1.3,
+/// SPEC-A.2.1), in logical pixels: what a conformance case needs to reach a
+/// focus, hover, scroll, paused, reflowed or persisted state. The shell
+/// delivers the same events from a window in M3.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptedEvent {
     /// `POINTER_MOVE`.
@@ -83,8 +84,8 @@ pub enum ScriptedEvent {
     },
     /// `TEXT_INPUT` through `vy_alloc` (SPEC-5.1.6).
     TextInput(String),
-    /// `FOCUS` as the host's focus order would deliver it (SPEC-10.3.1); the
-    /// headless host keeps no focus order, so a case names the node itself.
+    /// `FOCUS` set directly on a node (SPEC-10.3.1): the host's focus moves
+    /// there as if its own order had reached it.
     Focus {
         /// Semantic node id.
         node: i32,
@@ -93,10 +94,62 @@ pub enum ScriptedEvent {
         /// True when the change came from the keyboard.
         keyboard: bool,
     },
+    /// `VISIBILITY`: the tab is hidden or shown (SPEC-6.2.1); hidden, no
+    /// frames run until it is shown again.
+    Visibility {
+        /// True when shown.
+        visible: bool,
+    },
+    /// The next frame is reported as over its budget (SPEC-5.3.3) whatever
+    /// it costs: the module gets `BUDGET`, and a second in a row suspends
+    /// it, after which the case runs no more frames or events.
+    Budget,
+    /// `vy_resize` (SPEC-5.1.4); the final image has the last size.
+    Resize {
+        /// New logical width.
+        width: u32,
+        /// New logical height.
+        height: u32,
+        /// New scale.
+        scale: f32,
+    },
+    /// `vy_suspend` (SPEC-5.1.5): the page may write its state away.
+    Suspend,
+    /// A fresh instance of the module with the storage the old one saved
+    /// (SPEC-5.2.9): `vy_init` again at the current size, as after the tab
+    /// was evicted and reopened; the old instance's logs are kept.
+    Reinit,
+    /// `FETCH_DONE` for the oldest request still waiting for it, answered
+    /// from the case's canned responses (SPEC-5.2.7); an error when no
+    /// request is waiting.
+    FetchDone,
+}
+
+/// One scripted step: an event, and how many frames may run before it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    /// The event.
+    pub event: ScriptedEvent,
+    /// Most frames to run between the previous step (or `vy_init`) and
+    /// this event, while the module keeps asking for them; `None` runs
+    /// until it stops asking or the ceiling is reached. This is how a case
+    /// reaches a page mid-animation: `after_frames = 20` on a `visibility`
+    /// event pauses a game twenty frames after the serve.
+    pub after_frames: Option<u32>,
+}
+
+impl From<ScriptedEvent> for Step {
+    fn from(event: ScriptedEvent) -> Self {
+        Self {
+            event,
+            after_frames: None,
+        }
+    }
 }
 
 impl ScriptedEvent {
-    /// Deliver to the runtime; true when the module asked for a redraw.
+    /// Deliver an input event to the runtime; true when the module asked
+    /// for a redraw. The host-side events are the runner's (see [`render`]).
     fn deliver(&self, rt: &mut Runtime) -> Result<bool, vy_runtime::Error> {
         let x100 = |v: f32| (v * 100.0).round() as i32;
         match self {
@@ -149,6 +202,21 @@ impl ScriptedEvent {
                 i32::from(*keyboard),
                 0,
             ),
+            Self::Visibility { visible } => {
+                rt.event(kind::VISIBILITY, i32::from(*visible), 0, 0, 0)
+            }
+            Self::Budget => {
+                rt.force_budget_breach();
+                Ok(false)
+            }
+            Self::Suspend => rt.suspend().map(|_| false),
+            Self::FetchDone => match rt.fetch_done()? {
+                Some(redraw) => Ok(redraw),
+                None => Ok(false),
+            },
+            Self::Resize { .. } | Self::Reinit => {
+                unreachable!("handled by the runner, which owns the size and the instance")
+            }
         }
     }
 }
@@ -195,9 +263,15 @@ pub struct RenderRequest<'a> {
     /// (SPEC-4.5.1), each with the size the manifest declares when known
     /// (SPEC-8.1.2).
     pub resources: &'a [Resource],
-    /// Events delivered after the first frame, in order; each one the module
+    /// Steps taken after the first frame, in order; each event the module
     /// answers with a redraw gets a frame while `frames` allows (SPEC-6.2.1).
-    pub events: &'a [ScriptedEvent],
+    pub events: &'a [Step],
+    /// Responses the headless host serves for `fetch_begin` (SPEC-5.2.7).
+    pub fetch: &'a [CannedResponse],
+    /// Origins the manifest lists under `net` (SPEC-5.2.8); empty skips the gate.
+    pub net_origins: &'a [String],
+    /// Storage quota in bytes (SPEC-9.3.1): the manifest's `quota_kb` × 1024.
+    pub storage_quota_bytes: u64,
 }
 
 impl<'a> RenderRequest<'a> {
@@ -214,6 +288,9 @@ impl<'a> RenderRequest<'a> {
             capabilities: Capabilities::default(),
             resources: &[],
             events: &[],
+            fetch: &[],
+            net_origins: &[],
+            storage_quota_bytes: vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES,
         }
     }
 }
@@ -229,10 +306,12 @@ pub struct RenderOutput {
     pub semantic_json: String,
     /// Semantic tree of the last frame.
     pub semantic: Vec<SemNode>,
-    /// Module and host log lines.
+    /// Module and host log lines, across a `reinit`.
     pub logs: Vec<LogEntry>,
     /// Frames actually run: 1 to `RenderRequest::frames` (SPEC-6.2.1).
     pub frames_run: u32,
+    /// True when the module was force-suspended by the budget (SPEC-5.3.3).
+    pub suspended: bool,
 }
 
 /// Physical pixel size of a logical size at `scale`.
@@ -249,81 +328,152 @@ pub fn physical(width: u32, height: u32, scale: f32) -> (u32, u32) {
 /// `vy_frame` is called only while the runtime wants a frame (SPEC-6.2.1):
 /// once after init, after each scripted event the module answered with a
 /// redraw, and after each frame that called `request_frame`, up to `frames`
-/// in all.
+/// in all, and never after a forced suspend (SPEC-5.3.3). Before each step
+/// the frames run are capped by its `after_frames`. A `resize` changes the
+/// size the final image has; a `reinit` replaces the instance with a fresh
+/// one that starts with the old one's storage.
 pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     if req.frames == 0 {
         bail!("frames must be at least 1");
     }
-    if !(req.scale.is_finite() && req.scale > 0.0 && req.scale <= 8.0) {
-        bail!("scale must be in (0, 8]");
-    }
-    let hash = vy_runtime::sha256(req.wasm);
-    let options = Options {
-        memory_max_pages: req.memory_max_pages,
-        capabilities: req.capabilities,
-        resources: req.resources.to_vec(),
-        ..Options::default()
-    };
-    let mut rt = Runtime::load(req.wasm, &hash, options).map_err(|e| anyhow!("{e}"))?;
-    rt.init(req.width, req.height, req.scale)
-        .map_err(|e| anyhow!("{e}"))?;
-    let mut display_list = Vec::new();
-    let mut frames_run = 0;
-    let mut run_frames = |rt: &mut Runtime, display_list: &mut Vec<u8>| -> Result<()> {
-        while frames_run < req.frames && rt.wants_frame() {
-            *display_list = rt
-                .frame()
-                .map_err(|e| anyhow!("frame {}: {e}", frames_run + 1))?
-                .to_vec();
-            frames_run += 1;
+    let check_scale = |scale: f32| -> Result<()> {
+        if !(scale.is_finite() && scale > 0.0 && scale <= 8.0) {
+            bail!("scale must be in (0, 8]");
         }
         Ok(())
     };
-    run_frames(&mut rt, &mut display_list)?;
-    for (i, ev) in req.events.iter().enumerate() {
-        ev.deliver(&mut rt)
-            .map_err(|e| anyhow!("event {}: {e}", i + 1))?;
-        run_frames(&mut rt, &mut display_list)?;
+    check_scale(req.scale)?;
+    let hash = vy_runtime::sha256(req.wasm);
+    let load = |storage: Storage| -> Result<Runtime> {
+        let options = Options {
+            memory_max_pages: req.memory_max_pages,
+            capabilities: req.capabilities,
+            resources: req.resources.to_vec(),
+            storage,
+            storage_quota_bytes: req.storage_quota_bytes,
+            fetch: req.fetch.to_vec(),
+            net_origins: req.net_origins.to_vec(),
+        };
+        Runtime::load(req.wasm, &hash, options).map_err(|e| anyhow!("{e}"))
+    };
+    let (mut width, mut height, mut scale) = (req.width, req.height, req.scale);
+    let mut rt = load(Storage::new())?;
+    rt.init(width, height, scale).map_err(|e| anyhow!("{e}"))?;
+    let mut display_list = Vec::new();
+    let mut frames_run = 0;
+    let mut earlier_logs: Vec<LogEntry> = Vec::new();
+    let mut run_frames =
+        |rt: &mut Runtime, display_list: &mut Vec<u8>, cap: Option<u32>| -> Result<()> {
+            let mut ran = 0;
+            while frames_run < req.frames
+                && rt.wants_frame()
+                && !rt.is_suspended()
+                && cap.is_none_or(|c| ran < c)
+            {
+                *display_list = rt
+                    .frame()
+                    .map_err(|e| anyhow!("frame {}: {e}", frames_run + 1))?
+                    .to_vec();
+                frames_run += 1;
+                ran += 1;
+            }
+            Ok(())
+        };
+    let mut steps = req.events.iter().enumerate().peekable();
+    loop {
+        let cap = steps.peek().and_then(|(_, s)| s.after_frames);
+        run_frames(&mut rt, &mut display_list, cap)?;
+        let Some((i, step)) = steps.next() else {
+            break;
+        };
+        if rt.is_suspended() {
+            bail!(
+                "event {}: the module is suspended after two budget breaches (SPEC-5.3.3)",
+                i + 1
+            );
+        }
+        match &step.event {
+            ScriptedEvent::Resize {
+                width: w,
+                height: h,
+                scale: s,
+            } => {
+                check_scale(*s)?;
+                (width, height, scale) = (*w, *h, *s);
+                rt.resize(width, height, scale)
+                    .map_err(|e| anyhow!("event {}: {e}", i + 1))?;
+            }
+            ScriptedEvent::Reinit => {
+                earlier_logs.extend(rt.logs().iter().cloned());
+                let storage = rt.take_storage();
+                rt = load(storage)?;
+                rt.init(width, height, scale)
+                    .map_err(|e| anyhow!("event {}: reinit: {e}", i + 1))?;
+            }
+            ScriptedEvent::FetchDone if rt.pending_fetches() == 0 => {
+                bail!(
+                    "event {}: fetch_done with no request waiting for FETCH_DONE",
+                    i + 1
+                );
+            }
+            other => {
+                other
+                    .deliver(&mut rt)
+                    .map_err(|e| anyhow!("event {}: {e}", i + 1))?;
+            }
+        }
     }
     debug_assert!(frames_run >= 1, "init wants the first frame");
-    let (pw, ph) = physical(req.width, req.height, req.scale);
+    let (pw, ph) = physical(width, height, scale);
     let (text, images) = rt.raster_parts();
-    let image = vy_render::render(&display_list, pw, ph, req.scale, text, images)
+    let image = vy_render::render(&display_list, pw, ph, scale, text, images)
         .map_err(|e| anyhow!("{e}"))?;
+    earlier_logs.extend(rt.logs().iter().cloned());
     Ok(RenderOutput {
         image,
         display_list,
         semantic_json: rt.semantic_tree_json(),
         semantic: rt.semantic_tree().to_vec(),
-        logs: rt.logs().to_vec(),
+        logs: earlier_logs,
         frames_run,
+        suspended: rt.is_suspended(),
     })
 }
 
+/// What `vy-cli render` renders a module file with.
+#[derive(Clone, Debug)]
+pub struct FileRender {
+    /// Logical width.
+    pub width: u32,
+    /// Logical height.
+    pub height: u32,
+    /// Scale (SPEC-6.3.1).
+    pub scale: f32,
+    /// Most frames to run (SPEC-6.2.1).
+    pub frames: u32,
+    /// Capabilities granted (`--grant`).
+    pub capabilities: Capabilities,
+    /// Resources by id (`--resource`, `--resource-size`; SPEC-4.5.1).
+    pub resources: Vec<Resource>,
+    /// Where to write the semantic tree (`--dump-semantic`, SPEC-10.2.3).
+    pub dump_semantic: Option<PathBuf>,
+}
+
 /// `render` for a module file; writes the PNG and optionally the semantic JSON.
-#[allow(clippy::too_many_arguments)]
-pub fn render_to_files(
-    module: &str,
-    out: &Path,
-    width: u32,
-    height: u32,
-    scale: f32,
-    frames: u32,
-    capabilities: Capabilities,
-    dump_semantic: Option<&Path>,
-) -> Result<RenderOutput> {
+pub fn render_to_files(module: &str, out: &Path, settings: &FileRender) -> Result<RenderOutput> {
     if module.starts_with("vy://") {
         bail!("fetching vy:// addresses arrives in M3; give a .wasm file");
     }
     let wasm = fs::read(module).with_context(|| format!("reading {module}"))?;
-    let mut req = RenderRequest::new(&wasm, width, height);
-    req.scale = scale;
-    req.frames = frames;
-    req.capabilities = capabilities;
+    let mut req = RenderRequest::new(&wasm, settings.width, settings.height);
+    req.scale = settings.scale;
+    req.frames = settings.frames;
+    req.capabilities = settings.capabilities;
+    req.resources = &settings.resources;
     let output = render(&req)?;
     fs::write(out, output.image.encode_png()?)
         .with_context(|| format!("writing {}", out.display()))?;
-    if let Some(path) = dump_semantic {
+    if let Some(path) = &settings.dump_semantic {
         fs::write(path, &output.semantic_json)
             .with_context(|| format!("writing {}", path.display()))?;
     }
@@ -403,12 +553,15 @@ mod tests {
         render_to_files(
             wasm_path.to_str().unwrap(),
             &png,
-            800,
-            600,
-            1.0,
-            1,
-            Capabilities::default(),
-            Some(&json),
+            &FileRender {
+                width: 800,
+                height: 600,
+                scale: 1.0,
+                frames: 1,
+                capabilities: Capabilities::default(),
+                resources: Vec::new(),
+                dump_semantic: Some(json.clone()),
+            },
         )
         .unwrap();
         assert_eq!(fs::read_to_string(&json).unwrap(), expected);
@@ -552,6 +705,7 @@ mod tests {
                 modifiers: 0,
             },
         ];
+        let events: Vec<Step> = events.into_iter().map(Step::from).collect();
         let rects = |out: &RenderOutput| vy_dl::decode(&out.display_list).unwrap().len();
         let mut req = RenderRequest::new(&wasm, 8, 8);
         req.events = &events;
@@ -584,7 +738,10 @@ mod tests {
             modifiers: 0,
             repeat: false,
         };
-        let events = [tab.clone(), tab.clone(), tab];
+        let events: Vec<Step> = [tab.clone(), tab.clone(), tab]
+            .into_iter()
+            .map(Step::from)
+            .collect();
         let mut req = RenderRequest::new(&wasm, 1280, 800);
         req.events = &events;
         req.frames = 4;
@@ -623,6 +780,222 @@ mod tests {
         .unwrap();
         assert_eq!((pw, ph), (golden.width, golden.height));
         assert_eq!(out.image, golden, "the golden is the module's own drawing");
+    }
+
+    fn module(name: &str) -> Vec<u8> {
+        fs::read(root().join(format!("target/wasm/{name}.wasm"))).unwrap()
+    }
+
+    fn key(code: i32) -> ScriptedEvent {
+        ScriptedEvent::KeyDown {
+            code,
+            modifiers: 0,
+            repeat: false,
+        }
+    }
+
+    fn after(event: ScriptedEvent, frames: u32) -> Step {
+        Step {
+            event,
+            after_frames: Some(frames),
+        }
+    }
+
+    const SPACE: i32 = 0x2C;
+
+    /// SPEC-5.1.4, SPEC-11.3.1: a scripted `resize` reaches the module as
+    /// `vy_resize` and the final image has the new size; the document page
+    /// reflows so completely that pixels and tree equal a fresh instance
+    /// started at that size.
+    #[test]
+    fn spec_5_1_4_resize_step_reflows_like_a_fresh_init() {
+        let wasm = module("document");
+        let steps = [Step::from(ScriptedEvent::Resize {
+            width: 400,
+            height: 700,
+            scale: 1.0,
+        })];
+        let mut req = RenderRequest::new(&wasm, 1280, 800);
+        req.events = &steps;
+        req.frames = 2;
+        let resized = render(&req).unwrap();
+        assert_eq!(resized.frames_run, 2, "a window change wants a frame");
+        assert_eq!((resized.image.width, resized.image.height), (400, 700));
+        let fresh = render(&RenderRequest::new(&wasm, 400, 700)).unwrap();
+        assert_eq!(resized.image, fresh.image);
+        assert_eq!(resized.semantic_json, fresh.semantic_json);
+    }
+
+    /// SPEC-6.2.1, SPEC-5.1.2, SPEC-A.2.1: `after_frames` caps the frames
+    /// before a step; a hidden tab runs no frames however much the game
+    /// asks; shown again it draws once (the pause overlay) with `dt_ms` 0.
+    #[test]
+    fn spec_6_2_1_visibility_step_runs_no_frames_hidden() {
+        let wasm = module("game");
+        let steps = [
+            Step::from(key(SPACE)),
+            after(ScriptedEvent::Visibility { visible: false }, 20),
+            Step::from(ScriptedEvent::Visibility { visible: true }),
+        ];
+        let mut req = RenderRequest::new(&wasm, 800, 600);
+        req.events = &steps;
+        req.frames = 100;
+        let out = render(&req).unwrap();
+        assert_eq!(
+            out.frames_run,
+            1 + 20 + 1,
+            "init, twenty in flight, one for the overlay; none while hidden"
+        );
+        assert!(out.semantic.iter().any(|n| n.text.starts_with("Pausad")));
+        assert!(
+            out.semantic.iter().any(|n| n.text.contains("0,3 s")),
+            "20 frames of 16 ms"
+        );
+        assert!(out.logs.iter().any(|l| l.message == "game: hidden, paused"));
+    }
+
+    /// SPEC-5.3.3: a `budget` step makes the next frame a reported breach:
+    /// the game gets `KIND_BUDGET` and drops detail; two in a row suspend
+    /// the module, after which no frame runs and a further event is an
+    /// error rather than a call into a suspended module.
+    #[test]
+    fn spec_5_3_3_budget_step_delivers_kind_budget() {
+        let wasm = module("game");
+        let steps = [Step::from(key(SPACE)), after(ScriptedEvent::Budget, 10)];
+        let mut req = RenderRequest::new(&wasm, 800, 600);
+        req.events = &steps;
+        req.frames = 30;
+        let out = render(&req).unwrap();
+        assert_eq!(
+            out.frames_run, 30,
+            "the ceiling; one breach does not stop it"
+        );
+        assert!(!out.suspended);
+        assert!(out
+            .logs
+            .iter()
+            .any(|l| l.message == "game: 9 ms frame, dropping stars and trail"));
+
+        let twice = [
+            Step::from(key(SPACE)),
+            after(ScriptedEvent::Budget, 5),
+            after(ScriptedEvent::Budget, 1),
+        ];
+        req.events = &twice;
+        let out = render(&req).unwrap();
+        assert!(
+            out.suspended,
+            "second consecutive breach: forced vy_suspend"
+        );
+        assert_eq!(
+            out.frames_run,
+            1 + 5 + 1 + 1,
+            "init, five, the first breach, the second; none after the suspend"
+        );
+        let too_late = [
+            Step::from(key(SPACE)),
+            after(ScriptedEvent::Budget, 5),
+            after(ScriptedEvent::Budget, 1),
+            Step::from(key(SPACE)),
+        ];
+        req.events = &too_late;
+        let err = render(&req).unwrap_err().to_string();
+        assert!(err.contains("SPEC-5.3.3"), "{err}");
+    }
+
+    /// SPEC-5.2.9, SPEC-5.1.5, SPEC-5.1.1: a `reinit` step starts a fresh
+    /// instance with the storage the old one saved on change and in
+    /// `vy_suspend`, so the settings page comes back with its values; the
+    /// logs of both instances are kept.
+    #[test]
+    fn spec_5_2_9_reinit_step_keeps_storage() {
+        let wasm = module("settings");
+        let press = |x: f32, y: f32| ScriptedEvent::PointerDown {
+            x,
+            y,
+            button: 1,
+            modifiers: 0,
+        };
+        let steps: Vec<Step> = [
+            press(354.0, 156.0),
+            press(354.0, 200.0),
+            ScriptedEvent::Suspend,
+            ScriptedEvent::Reinit,
+        ]
+        .into_iter()
+        .map(Step::from)
+        .collect();
+        let mut req = RenderRequest::new(&wasm, 800, 600);
+        req.capabilities = Capabilities::from_names(["storage"]).unwrap();
+        req.events = &steps;
+        req.frames = 10;
+        let out = render(&req).unwrap();
+        let status = out
+            .semantic
+            .iter()
+            .find(|n| n.text.contains("laddade"))
+            .unwrap();
+        assert_eq!(status.text, "Sparade inställningar laddade.");
+        assert!(out.semantic.iter().any(|n| n.text == "Mörkt tema: på"));
+        assert!(out.semantic.iter().any(|n| n.text == "Kompakt läge: på"));
+        assert_eq!(
+            out.logs
+                .iter()
+                .filter(|l| l.message == "settings: init")
+                .count(),
+            2,
+            "both instances logged their init"
+        );
+        // Without storage the second instance starts from the defaults.
+        req.capabilities = Capabilities::default();
+        let out = render(&req).unwrap();
+        assert!(out
+            .semantic
+            .iter()
+            .any(|n| n.text.starts_with("Lagring otillgänglig (E_DENIED)")));
+        assert!(out.semantic.iter().any(|n| n.text == "Mörkt tema: av"));
+    }
+
+    /// SPEC-5.2.7, SPEC-A.2.1: with a canned response `fetch_begin` is
+    /// answered, a `fetch_done` step delivers `FETCH_DONE` and the chat page
+    /// marks the message delivered after reading the body to its end; a
+    /// `fetch_done` with nothing waiting is an error in the case.
+    #[test]
+    fn spec_5_2_7_fetch_done_step() {
+        let wasm = module("chat");
+        let canned = [CannedResponse {
+            url: "https://chat.example/api/messages".into(),
+            status: 200,
+            body: b"ok".to_vec(),
+        }];
+        let origins = ["https://chat.example".to_string()];
+        let steps: Vec<Step> = [
+            key(vy_abi::key::TAB),
+            ScriptedEvent::TextInput("Hej".into()),
+            key(vy_abi::key::ENTER),
+            ScriptedEvent::FetchDone,
+        ]
+        .into_iter()
+        .map(Step::from)
+        .collect();
+        let mut req = RenderRequest::new(&wasm, 800, 600);
+        req.capabilities = Capabilities::from_names(["ime", "net"]).unwrap();
+        req.fetch = &canned;
+        req.net_origins = &origins;
+        req.events = &steps;
+        req.frames = 10;
+        let out = render(&req).unwrap();
+        assert!(out
+            .semantic
+            .iter()
+            .any(|n| n.text.ends_with("levererat: Hej")));
+        assert!(out
+            .logs
+            .iter()
+            .any(|l| l.message == "chat: delivered, read 2 of 2 bytes"));
+        req.fetch = &[];
+        let err = render(&req).unwrap_err().to_string();
+        assert!(err.contains("fetch_done with no request waiting"), "{err}");
     }
 
     /// SPEC-13.1.4: compiling a 300 KB module takes at most 60 ms, P95 over

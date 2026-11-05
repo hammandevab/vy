@@ -246,6 +246,9 @@ pub struct Runtime {
     /// The semantic node that holds keyboard focus, as the host sees it
     /// (SPEC-10.3.1).
     focus: Option<i32>,
+    /// The next frame is reported as over budget whatever it cost
+    /// ([`Runtime::force_budget_breach`]).
+    force_breach: bool,
 }
 
 impl Runtime {
@@ -332,6 +335,7 @@ impl Runtime {
             dt_reset: true,
             visible: true,
             focus: None,
+            force_breach: false,
         })
     }
 
@@ -506,7 +510,8 @@ impl Runtime {
             Err((e, used)) => (Err(e), used),
         };
         let aborted = matches!(result, Err(Error::OverBudget { .. }));
-        let over = aborted || used > FRAME_BUDGET_FUEL;
+        let forced = std::mem::take(&mut self.force_breach);
+        let over = aborted || used > FRAME_BUDGET_FUEL || forced;
         self.last_frame = FrameStats {
             fuel: used,
             host_fuel,
@@ -515,7 +520,11 @@ impl Runtime {
         };
         if over {
             self.budget_streak += 1;
-            let used_ms = used.div_ceil(FUEL_PER_MS) as i32;
+            let used_ms = if forced {
+                limits::FRAME_BUDGET_MS as i32 + 1
+            } else {
+                used.div_ceil(FUEL_PER_MS) as i32
+            };
             let last = self.budget_streak >= 2;
             // Delivered on the host's own fuel; a module that misbehaves here is simply stopped.
             let ev = self.exports.event.clone();
@@ -640,6 +649,14 @@ impl Runtime {
             self.host_mut().wants_frame = true;
         }
         Ok(redraw)
+    }
+
+    /// Report the next `vy_frame` as over its 8 ms budget whatever it
+    /// actually costs (SPEC-5.3.3): the same `KIND_BUDGET`, streak and
+    /// forced `vy_suspend` as a real breach, with `a = 9`. For the
+    /// conformance suite, whose modules are too small to breach for real.
+    pub fn force_budget_breach(&mut self) {
+        self.force_breach = true;
     }
 
     /// The semantic node the host holds keyboard focus on (SPEC-10.3.1).

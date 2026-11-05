@@ -2,7 +2,7 @@
 //!
 //! M0 shipped `check-abi`; M1 adds `render` and `conformance`; `bench` arrives with M3.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -10,7 +10,8 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
          vy-cli check-abi <module.wasm>\n  \
-         vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--grant cap,..] [--dump-semantic <json>]\n  \
+         vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--grant cap,..]\n           \
+         [--resource <file> [--resource-size WxH]].. [--dump-semantic <json>]\n  \
          vy-cli conformance [--update] [--root <dir>]\n  \
          vy-cli bench         (M3)"
     );
@@ -95,7 +96,16 @@ fn check_abi(args: &[String]) -> Result<ExitCode> {
 fn render(args: &[String]) -> Result<ExitCode> {
     let a = Args::parse(
         args,
-        &["out", "size", "scale", "frames", "grant", "dump-semantic"],
+        &[
+            "out",
+            "size",
+            "scale",
+            "frames",
+            "grant",
+            "dump-semantic",
+            "resource",
+            "resource-size",
+        ],
         &[],
     )?;
     let (Some(module), Some(out), Some(size)) =
@@ -117,17 +127,37 @@ fn render(args: &[String]) -> Result<ExitCode> {
         .unwrap_or_default();
     let capabilities = vy_runtime::Capabilities::from_names(names)
         .map_err(|n| anyhow!("--grant: unknown capability {n:?} (SPEC-8.2.1)"))?;
-    let dump = a.value("dump-semantic").map(PathBuf::from);
-    let output = vy_cli::render_to_files(
-        module,
-        Path::new(out),
+    // `--resource <file>` in order gives resource ids 1, 2, .. (SPEC-4.5.1);
+    // `--resource-size WxH` states the manifest's size for the one before it
+    // (SPEC-8.1.2).
+    let mut resources: Vec<vy_cli::Resource> = Vec::new();
+    for (name, value) in &a.flags {
+        let value = value.as_deref().unwrap_or_default();
+        match name.as_str() {
+            "resource" => {
+                let bytes =
+                    std::fs::read(value).with_context(|| format!("reading resource {value}"))?;
+                resources.push(vy_cli::Resource::new(bytes));
+            }
+            "resource-size" => {
+                let last = resources
+                    .last_mut()
+                    .ok_or_else(|| anyhow!("--resource-size must follow a --resource"))?;
+                last.pixels = Some(vy_cli::parse_size(value)?);
+            }
+            _ => {}
+        }
+    }
+    let settings = vy_cli::FileRender {
         width,
         height,
         scale,
         frames,
         capabilities,
-        dump.as_deref(),
-    )?;
+        resources,
+        dump_semantic: a.value("dump-semantic").map(PathBuf::from),
+    };
+    let output = vy_cli::render_to_files(module, Path::new(out), &settings)?;
     for log in &output.logs {
         eprintln!("[{:?} {}] {}", log.source, log.level, log.message);
     }
