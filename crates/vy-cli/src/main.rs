@@ -15,7 +15,7 @@ fn usage() -> ExitCode {
          [--resource <file> [--resource-size WxH]].. [--dump-semantic <json>]\n  \
          vy-cli conformance [--update] [--root <dir>]\n  \
          vy-cli abi-dump      (the frozen ABI 1.0 listing, docs/ABI-1.0.md)\n  \
-         vy-cli bench [--iterations N] [--root <dir>]   (SPEC §13, headless, informational)"
+         vy-cli bench [--runs N] [--only <row-prefix>] [--json] [--root <dir>]   (SPEC §13, headless)"
     );
     ExitCode::from(2)
 }
@@ -195,17 +195,29 @@ fn render(args: &[String]) -> Result<ExitCode> {
 }
 
 fn bench(args: &[String]) -> Result<ExitCode> {
-    let a = Args::parse(args, &["iterations", "root"], &[])?;
-    let n: usize = a.value("iterations").unwrap_or("20").parse()?;
-    if n == 0 {
-        bail!("--iterations must be at least 1");
+    let a = Args::parse(args, &["runs", "only", "root"], &["json"])?;
+    let runs: usize = a
+        .value("runs")
+        .map(str::parse)
+        .transpose()?
+        .unwrap_or(vy_cli::bench::DEFAULT_RUNS);
+    if runs == 0 {
+        bail!("--runs must be at least 1");
     }
     let root = find_root(a.value("root"))?;
-    if cfg!(debug_assertions) {
+    let selection = vy_cli::bench::Selection {
+        runs,
+        only: a.value("only"),
+    };
+    if cfg!(debug_assertions) && !a.has("json") {
         println!("(debug-bygge: talen är inte budgetens; kör med --release för SPEC §13)");
     }
-    let rows = vy_cli::bench::run(&root, n)?;
-    print!("{}", vy_cli::bench::table(&rows));
+    let rows = vy_cli::bench::run(&root, &selection)?;
+    if a.has("json") {
+        print!("{}", vy_cli::bench::Report::new(runs, rows).to_json());
+    } else {
+        print!("{}", vy_cli::bench::table(&rows));
+    }
     Ok(ExitCode::SUCCESS)
 }
 

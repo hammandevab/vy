@@ -327,6 +327,27 @@ pub fn physical(width: u32, height: u32, scale: f32) -> (u32, u32) {
     )
 }
 
+/// A module driven through a request's frames and events, before the last
+/// frame is rasterized: what `render` has in hand when it calls
+/// `vy_render::render`, and what `vy-cli bench` times the rasterization of.
+pub(crate) struct Driven {
+    /// The instance, holding the text engine and image cache the
+    /// display list refers to.
+    pub rt: Runtime,
+    /// Display list bytes of the last frame.
+    pub display_list: Vec<u8>,
+    /// Logical width after any `resize`.
+    pub width: u32,
+    /// Logical height after any `resize`.
+    pub height: u32,
+    /// Scale after any `resize`.
+    pub scale: f32,
+    /// Frames run.
+    pub frames_run: u32,
+    /// Logs of instances replaced by a `reinit`.
+    pub earlier_logs: Vec<LogEntry>,
+}
+
 /// Load, init and run up to `frames` frames of a module, then rasterize the
 /// last one (SPEC-11.3.1). No window, no wall clock, no system fonts.
 ///
@@ -338,6 +359,40 @@ pub fn physical(width: u32, height: u32, scale: f32) -> (u32, u32) {
 /// size the final image has; a `reinit` replaces the instance with a fresh
 /// one that starts with the old one's storage.
 pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
+    let Driven {
+        mut rt,
+        display_list,
+        width,
+        height,
+        scale,
+        frames_run,
+        mut earlier_logs,
+    } = drive(req)?;
+    let (pw, ph) = physical(width, height, scale);
+    let (text, images) = rt.raster_parts();
+    let rendered = vy_render::render(&display_list, pw, ph, scale, text, images)
+        .map_err(|e| anyhow!("{e}"))?;
+    // A frame the rasterizer could not finish is a budget breach like a
+    // slow `vy_frame` (SPEC-5.3.3): the module hears about it the same way.
+    rt.raster_report(&rendered.report)
+        .map_err(|e| anyhow!("after the last frame: {e}"))?;
+    let image = rendered.image;
+    earlier_logs.extend(rt.logs().iter().cloned());
+    Ok(RenderOutput {
+        image,
+        raster: rendered.report,
+        display_list,
+        semantic_json: rt.semantic_tree_json(),
+        semantic: rt.semantic_tree().to_vec(),
+        logs: earlier_logs,
+        frames_run,
+        suspended: rt.is_suspended(),
+    })
+}
+
+/// The frames and events of `render`, up to but not including the
+/// rasterization of the last frame.
+pub(crate) fn drive(req: &RenderRequest<'_>) -> Result<Driven> {
     if req.frames == 0 {
         bail!("frames must be at least 1");
     }
@@ -430,25 +485,14 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         }
     }
     debug_assert!(frames_run >= 1, "init wants the first frame");
-    let (pw, ph) = physical(width, height, scale);
-    let (text, images) = rt.raster_parts();
-    let rendered = vy_render::render(&display_list, pw, ph, scale, text, images)
-        .map_err(|e| anyhow!("{e}"))?;
-    // A frame the rasterizer could not finish is a budget breach like a
-    // slow `vy_frame` (SPEC-5.3.3): the module hears about it the same way.
-    rt.raster_report(&rendered.report)
-        .map_err(|e| anyhow!("after the last frame: {e}"))?;
-    let image = rendered.image;
-    earlier_logs.extend(rt.logs().iter().cloned());
-    Ok(RenderOutput {
-        image,
-        raster: rendered.report,
+    Ok(Driven {
+        rt,
         display_list,
-        semantic_json: rt.semantic_tree_json(),
-        semantic: rt.semantic_tree().to_vec(),
-        logs: earlier_logs,
+        width,
+        height,
+        scale,
         frames_run,
-        suspended: rt.is_suspended(),
+        earlier_logs,
     })
 }
 

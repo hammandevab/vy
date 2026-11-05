@@ -4,6 +4,7 @@
 //! Headless and windowed rendering share this code path (SPEC-11.3.2).
 #![deny(missing_docs)]
 
+pub mod bench;
 pub mod image;
 pub mod raster;
 pub mod text;
@@ -13,7 +14,7 @@ pub use raster::{
     raster_budget_units, render, RasterReport, RenderError, Rendered, MASK_WEIGHT, OP_UNITS,
     PIPELINE_WEIGHT, RASTER_BUDGET_OVERDRAWS, RASTER_BUDGET_UNITS,
 };
-pub use text::{pack_x100, Size, TextEngine};
+pub use text::{pack_x100, CacheStats, Size, TextEngine};
 
 #[cfg(test)]
 mod tests {

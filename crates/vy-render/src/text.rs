@@ -155,12 +155,40 @@ pub struct Glyph<'a> {
     pub image: &'a SwashImage,
 }
 
+/// Hits and misses of the shaped-text cache (SPEC-13.2.3): a lookup is
+/// one `dl_text`, `text_measure` or rasterized run; a hit reuses the
+/// shaped and positioned glyphs, a miss shapes them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    /// Lookups answered from the cache.
+    pub hits: u64,
+    /// Lookups that shaped the text.
+    pub misses: u64,
+}
+
+impl CacheStats {
+    /// Hits plus misses.
+    pub fn lookups(&self) -> u64 {
+        self.hits + self.misses
+    }
+
+    /// Hits over lookups, 0 when there were none.
+    pub fn hit_rate(&self) -> f64 {
+        if self.lookups() == 0 {
+            0.0
+        } else {
+            self.hits as f64 / self.lookups() as f64
+        }
+    }
+}
+
 /// Shaping, layout and rasterization state for one module instance.
 pub struct TextEngine {
     font_system: FontSystem,
     swash: SwashCache,
     buffer: Buffer,
     styles: Vec<Style>,
+    stats: CacheStats,
 }
 
 impl Default for TextEngine {
@@ -188,7 +216,13 @@ impl TextEngine {
             swash: SwashCache::new(),
             buffer,
             styles: Vec::new(),
+            stats: CacheStats::default(),
         }
+    }
+
+    /// Hits and misses of the shaped-text cache so far (SPEC-13.2.3).
+    pub fn cache_stats(&self) -> CacheStats {
+        self.stats
     }
 
     /// `text_style`: register a style and return its id (1-based) or an ABI error.
@@ -239,6 +273,8 @@ impl TextEngine {
     }
 
     fn prepare(&mut self, style: Style, max_w: Option<f32>, text: &str) {
+        // No cache yet: every layout is a miss (M4 adds the cache).
+        self.stats.misses += 1;
         let buffer = &mut self.buffer;
         buffer.set_metrics(style.metrics());
         buffer.set_wrap(Wrap::WordOrGlyph);

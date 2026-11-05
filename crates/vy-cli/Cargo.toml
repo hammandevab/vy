@@ -22,6 +22,10 @@ vy-render.workspace = true
 vy-shell = { workspace = true, default-features = false }
 anyhow.workspace = true
 png.workspace = true
+# `bench --json` and its committed baselines (SPEC-12.2.3); both crates are
+# already in the tree through vy-manifest, so nothing new is pulled in.
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 wat.workspace = true

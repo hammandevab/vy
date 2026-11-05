@@ -62,7 +62,7 @@ jobs:
       # a debug build here, so the numbers only show that it runs
       # (`cargo run --release -p vy-cli -- bench` for the real ones).
       - name: Bench (informational)
-        run: cargo run -p vy-cli -- bench --iterations 3
+        run: cargo run -p vy-cli -- bench --runs 3
 
   platform:
     strategy:
