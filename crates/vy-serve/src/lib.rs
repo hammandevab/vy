@@ -183,6 +183,10 @@ pub struct RequestInfo {
     pub accept: Option<String>,
     /// `If-None-Match` header.
     pub if_none_match: Option<String>,
+    /// `X-Forwarded-Host` or `Host` header, used for the host in `vy://`
+    /// links when no host name was configured (SPEC-7.1.1: the address a
+    /// browser reached us on is the address a Vy client uses).
+    pub host: Option<String>,
 }
 
 /// What the router decided.
@@ -270,6 +274,7 @@ struct Blob {
 pub struct Site {
     dir: PathBuf,
     host_name: Mutex<String>,
+    host_fixed: bool,
     key_text: Option<String>,
     loaded: Mutex<HashMap<String, Arc<Loaded>>>,
     blobs: Mutex<HashMap<Hash, Blob>>,
@@ -351,6 +356,7 @@ impl Site {
         let site = Site {
             dir: config.dir.clone(),
             host_name: Mutex::new(config.host_name.clone().unwrap_or_default()),
+            host_fixed: config.host_name.is_some(),
             key_text,
             loaded: Mutex::new(HashMap::new()),
             blobs: Mutex::new(HashMap::new()),
@@ -393,6 +399,29 @@ impl Site {
 
     fn set_host_name(&self, name: String) {
         *self.host_name.lock().unwrap() = name;
+    }
+
+    /// The host written into `vy://` links for this request: the configured
+    /// name when one was given, else the request's own `Host` when it is a
+    /// plausible host name (letters, digits, `.`, `-`, `:`, brackets; no
+    /// spaces, no empty label), else the fallback `localhost:<port>`.
+    fn host_for(&self, req: &RequestInfo) -> String {
+        if !self.host_fixed {
+            if let Some(h) = req.host.as_deref() {
+                let h = h.trim();
+                let ok = !h.is_empty()
+                    && h.len() <= 253
+                    && h.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+                    })
+                    && !h.starts_with('.')
+                    && !h.starts_with('-');
+                if ok {
+                    return h.to_string();
+                }
+            }
+        }
+        self.host_name.lock().unwrap().clone()
     }
 
     fn package_path(&self, name: &str) -> PathBuf {
@@ -590,7 +619,7 @@ impl Site {
                     preview: self.preview_url(name),
                 })
                 .collect();
-            let html = html::index(&self.host_name.lock().unwrap(), &entries);
+            let html = html::index(&self.host_for(req), &entries);
             return (
                 Reply::new(200, html.into_bytes(), "text/html; charset=utf-8")
                     .header("Cache-Control", CACHE_CONTROL_PAGE)
@@ -618,7 +647,7 @@ impl Site {
         } else {
             let html = html::page(
                 &loaded.manifest,
-                &self.vy_address(path),
+                &self.vy_address(req, path),
                 &loaded.identity,
                 self.preview_url(&name).as_deref(),
             );
@@ -641,8 +670,8 @@ impl Site {
         )
     }
 
-    fn vy_address(&self, path: &str) -> String {
-        format!("vy://{}{path}", self.host_name.lock().unwrap())
+    fn vy_address(&self, req: &RequestInfo, path: &str) -> String {
+        format!("vy://{}{path}", self.host_for(req))
     }
 
     fn not_found(&self, path: &str, accept: &str) -> Reply {
@@ -791,6 +820,7 @@ fn serve_one(site: &Site, request: tiny_http::Request, log: bool) {
         url: request.url().to_string(),
         accept: header("Accept"),
         if_none_match: header("If-None-Match"),
+        host: header("X-Forwarded-Host").or_else(|| header("Host")),
     };
     let reply = site.reply(&info);
     if log {
@@ -887,6 +917,7 @@ mod tests {
             url: url.into(),
             accept: Some(accept.into()),
             if_none_match: None,
+            host: None,
         })
     }
 
@@ -942,6 +973,7 @@ mod tests {
             url: "/hello".into(),
             accept: Some(both.into()),
             if_none_match: Some(etag),
+            host: None,
         });
         assert_eq!(same.status, 304);
         assert!(same.body.is_empty());
@@ -951,6 +983,7 @@ mod tests {
             url: "/hello".into(),
             accept: Some(both.into()),
             if_none_match: None,
+            host: None,
         });
         assert_eq!(head.status, 200);
         assert!(head.body.is_empty());
@@ -1011,6 +1044,41 @@ mod tests {
 
     /// `/` lists every package for browsers, with manifest text escaped,
     /// and stays the `index` package for Vy clients.
+    /// SPEC-7.1.1: without a configured host name the `vy://` links use the
+    /// address the browser reached the server on (`X-Forwarded-Host`, then
+    /// `Host`); a configured name wins; a hostile header is ignored.
+    #[test]
+    fn host_in_links_follows_the_request_unless_configured() {
+        let (dir, _package, _key) = site_dir();
+        let with = |site: &Site, host: Option<&str>| {
+            let r = site.reply(&RequestInfo {
+                method: "GET".into(),
+                url: "/hello".into(),
+                accept: Some("text/html".into()),
+                if_none_match: None,
+                host: host.map(str::to_string),
+            });
+            String::from_utf8(r.body).unwrap()
+        };
+        let open = Site::open(&Config {
+            public_key_file: Some(dir.join("dev.key.pub")),
+            host_name: None,
+            ..Config::local(&dir)
+        })
+        .unwrap();
+        open.set_host_name("localhost:8080".into());
+        assert!(with(&open, None).contains("vy://localhost:8080/hello"));
+        assert!(with(&open, Some("vy-production.up.railway.app"))
+            .contains("vy://vy-production.up.railway.app/hello"));
+        assert!(with(&open, Some("exempel.se:8443")).contains("vy://exempel.se:8443/hello"));
+        for hostile in ["<script>", "a b", "", ".x", "-x", "x/y", "x\"y"] {
+            let html = with(&open, Some(hostile));
+            assert!(html.contains("vy://localhost:8080/hello"), "{hostile:?}");
+        }
+        let fixed = Site::open(&config(&dir)).unwrap();
+        assert!(with(&fixed, Some("evil.example")).contains("vy://vy.example/hello"));
+    }
+
     #[test]
     fn index_lists_packages() {
         let (dir, package, key) = site_dir();
@@ -1043,6 +1111,7 @@ mod tests {
             url: "/".into(),
             accept: Some("text/html".into()),
             if_none_match: None,
+            host: None,
         });
         assert_eq!((head.status, head.body.len()), (200, 0));
         let both = "application/vy-package+zstd, application/vy-manifest+cbor";
@@ -1088,6 +1157,7 @@ mod tests {
             url: "/_previews/hello.png?v=2".into(),
             accept: None,
             if_none_match: Some(etag),
+            host: None,
         });
         assert_eq!((same.status, same.body.len()), (304, 0));
 
@@ -1160,6 +1230,7 @@ mod tests {
             url: "/hello".into(),
             accept: None,
             if_none_match: None,
+            host: None,
         });
         assert_eq!(post.status, 405);
         // Without a key file the route is 404.
