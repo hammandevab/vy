@@ -122,11 +122,76 @@ fn spec_6_2_1_frame_only_on_request() {
     assert!(rt.wants_frame(), "resize wants a frame");
 }
 
-/// SPEC-6.2.2: an idle page consumes 0 module CPU.
+/// SPEC-6.2.2: an idle page consumes 0 module CPU. The host runs a frame
+/// only when one is wanted (SPEC-6.2.1), so a page that neither calls
+/// `request_frame` nor gets an event or a resize is never entered: a
+/// thousand ticks of the shell's loop after its first frame run no frame
+/// and spend no fuel. The same page animating (`request_frame` in every
+/// frame, switched on by an event) gets a frame, and spends fuel, on
+/// every tick, and is idle again as soon as it stops asking.
 #[test]
-#[ignore = "M3: shell scheduling"]
 fn spec_6_2_2_idle_is_free() {
-    todo!()
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "request_frame" (func $request_frame))
+            (memory (export "memory") 1)
+            (global $animate (mut i32) (i32.const 0))
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (local $i i32)
+                (drop (call $dl_begin))
+                (loop $work
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $work (i32.lt_u (local.get $i) (i32.const 1000))))
+                (drop (call $dl_end))
+                (if (global.get $animate) (then (call $request_frame)))
+                i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 200))
+                    (then (global.set $animate (local.get 1))))
+                i32.const 0)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 1024))"#
+    ));
+    let mut rt = load(&bytes);
+    rt.init(100, 100, 1.0).unwrap();
+    // The shell's loop: a frame on a tick only when one is wanted; the
+    // fuel of every frame it ran.
+    let ticks = |rt: &mut Runtime, n: usize| -> Vec<u64> {
+        let mut fuel = Vec::new();
+        for _ in 0..n {
+            if rt.wants_frame() {
+                rt.frame().unwrap();
+                fuel.push(rt.last_frame().fuel);
+            }
+        }
+        fuel
+    };
+    assert_eq!(ticks(&mut rt, 1).len(), 1, "the first frame after init");
+    assert!(rt.last_frame().fuel > 1000, "a frame costs fuel");
+    let frames = rt.frames();
+    assert!(ticks(&mut rt, 1000).is_empty(), "idle: never entered");
+    assert_eq!(rt.frames(), frames, "no vy_frame, so no fuel");
+
+    assert!(
+        !rt.event(200, 1, 0, 0, 0).unwrap(),
+        "the event asks for nothing"
+    );
+    assert!(ticks(&mut rt, 10).is_empty());
+    // A resize wants one frame; that frame starts the animation.
+    rt.resize(120, 100, 1.0).unwrap();
+    let fuel = ticks(&mut rt, 100);
+    assert_eq!(fuel.len(), 100, "animating: a frame on every tick");
+    assert!(fuel.iter().all(|&f| f > 1000));
+
+    rt.event(200, 0, 0, 0, 0).unwrap();
+    assert_eq!(ticks(&mut rt, 100).len(), 1, "the frame already asked for");
+    let frames = rt.frames();
+    assert!(ticks(&mut rt, 1000).is_empty(), "idle again");
+    assert_eq!(rt.frames(), frames);
 }
 
 /// SPEC-5.3.1, SPEC-2.1.4: a call without its capability returns E_DENIED, is logged,

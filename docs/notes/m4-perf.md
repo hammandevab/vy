@@ -318,9 +318,72 @@ katalogen men inte läsa nyckeln; inom samma konto ger det inget, så det vänta
   m4/security); (3) OS-sandlådan (m4/security) ger flikprocessen bara läsrätt till katalogen.
   Utan (3) ska (2) ändå vara `ReadOnly`, inte `ReadWrite`.
 
+## Steg 4: §13-testerna och regressionsgrinden (SPEC-12.2.3)
+
+**Mönstret.** §13 gäller release på referensmaskinen (P95 över 100 körningar). Varje §13-test
+skriver i ett debug-bygge ut att det är en release-budget och återvänder, så `cargo test
+--workspace` förblir grönt och snabbt; i release (`cargo test --release`, CI-jobbet `bench`) mäter
+det med samma kod som `vy-cli bench` (funktionerna i `bench.rs` delas) och hävdar budgeten. En
+budget som den här maskinen inte håller sänks inte: testet ignoreras med det uppmätta värdet i
+skälet, och ägaren avgör.
+
+| Test | Var | Mäter | Utfall här (release) |
+| --- | --- | --- | --- |
+| `spec_13_1_4_compile_time` | vy-cli | `hello` kallt; varje referensmodul ur kompileringscachen | P95 22 ms (≤ 60); träff P95 0,34–0,83 ms (0 ms) |
+| `spec_13_1_2_first_frame_cache_hit` | vy-cli | Enter till komponerad bild, lokal fil, flikprocess (`hello`, `text`) | P95 62 / 87 ms (≤ 100) |
+| `spec_13_1_3_first_frame_cold` | vy-cli | `text` byggd med `vy-publish`, serverad av `vy-serve` på loopback, ny HTTP-cache och nyckelförråd varje körning, ny flikprocess utan kompileringscache | P95 138 ms (≤ 400) |
+| `spec_13_2_1_raster_budget` | vy-render | `frame_2000` 1280 × 800, varm textmotor | P95 44–56 ms, P50 34–35 ms mot 2 ms: **ignorerat med värdet** |
+| `spec_13_2_2_input_latency` | vy-cli | pekarhändelse in i `dashboard`-fliken till komponerad bild | P95 7,4 ms (≤ 16) |
+| `spec_13_2_3_scroll_fps` | vy-cli | rullning av `text`, frame + rasterisering; textcachens missar | P95 2,4 ms (≤ 16,7); missar 2,6 % / 0 % (≤ 5) |
+| `spec_6_2_2_idle_is_free` | vy-runtime | skalets tickregel över en sida som bränner bränsle i `vy_frame` | 1 000 tomgångstick: 0 frames, 0 bränsle; animerande: en frame per tick; åter tomgång när den slutar be (alla byggen) |
+| `spec_12_2_3_perf_regression_gate` | vy-cli | jämförelsen och de incheckade baslinjerna | deterministiskt, alla byggen |
+
+**Regressionsgrinden (SPEC-12.2.3).** `vy-cli bench --compare <baslinje.json>` kör benchen och
+jämför varje rad med baslinjen för samma löparklass: en rad har regredierat när dess P50 är mer än
+5 % plus ett brusgolv över baslinjens (`REGRESSION_TOLERANCE` = 0,05; `NOISE_FLOOR_MS` = 0,5 ms,
+`NOISE_FLOOR_PERCENT` = 1 procentenhet), och då är slutkoden 1. P50, inte P95: på en delad
+CI-löpare är svansen grannarnas. Bara release-rapporter jämförs, bara rader båda har. Baslinjer
+ligger i `conformance/bench/<klass>.json` och ändras bara i ett eget `bench:`-commit
+(`a89bec0`: `build-vm.json`, den här maskinen). CI-jobbet `bench` (ubuntu) kör release-testerna
+sekventiellt och sedan grinden mot `conformance/bench/ubuntu.json`; finns den inte än laddas
+rapporten upp som artefakt med en notis – den första ubuntu-baslinjen är CI:s egen rapport,
+incheckad i ett `bench:`-commit. `spec_12_2_3_perf_regression_gate` prövar jämförelsen
+deterministiskt (4 % långsammare godtas, 11 % inte, under brusgolvet godtas, procent har eget
+golv, debug-rapporter vägras) och att varje incheckad baslinje är en release-rapport med §13-raderna;
+det testet kör i alla byggen.
+
+**Brusgolvet** är valt efter A/B-mätningarna här: kontrollrader som inte berördes av en ändring
+flyttade sig upp till 8–12 % mellan två hela körningar under olika last, men 1–2 % i
+interfolierad A/B. Grinden jämför en hel körning mot en baslinje, så 5 % + 0,5 ms skiljer bara
+ut verkliga regressioner när löparen är någorlunda tyst; en flaky grind är sämre än ingen, och
+löparklassen ska ha sin egen baslinje.
+
+SPEC-13.1.3 talar om en 300 KB-modul över 50 Mbit/30 ms; största referensmodulen är 31 KB och
+loopback har ingen fördröjning. 300 KB över referenslänken tar ≈ 48 ms överföring och några RTT
+(manifest, modul, nyckel: ≈ 90 ms), och kompileringen av 300 KB utan cache ≈ 10 × `text`:s 19 ms
+här – ungefär 138 + 90 + 170 ≈ 400 ms, alltså på gränsen. Med kompileringscachen i skalet (steg 3,
+ej inkopplad) försvinner kompileringen vid återbesök men inte vid kall hämtning. Spec-fråga 54.
+
+SPEC-13.2.1 (2 000 opkoder ≤ 2 ms) hålls inte: en CPU-rasterisering som ger guldbildernas byte
+behöver här 34 ms för ramen i sidornas proportioner, där en tredjedel är tiny-skias
+kantutjämnade banfyllning och resten glyfpixlar. Fem av elva referenssidor ligger under 2 ms
+(hello, text, form, list, chat), resten 2,3–10 ms. Vägen dit är GPU-rasteriseringen (SPEC-11.3.2,
+wgpu-vägen), som ändrar avrundningen och kräver nytt guldbyte (spec-fråga 41) – inte prestanda-
+arbete med samma byte. Spec-fråga 55.
+
 ## Spec-frågor
 
 53. **`net` med tom origin-lista.** SPEC-8.2.1 sätter ett tak (≤ 16) men inget golv, och
     SPEC-8.2.3 beviljar `net` "för egen origin" automatiskt. En tom lista namnger ingen origin;
     `vy-runtime` släpper nu ingenting igenom för den, men policyn beviljar ändå `net` och
     adressfältet visar det. Ska valideringen kräva minst en origin, eller policyn låta bli?
+54. **SPEC-13.1.3 utan 300 KB-modul och referenslänk.** Testet mäter den största referensmodulen
+    (31 KB) över loopback; en uppskattning för 300 KB över 50 Mbit/30 ms står i steg 4. Ska sviten
+    ha en syntetisk 300 KB-modul och en simulerad länk (fördröjning i `vy-serve`), eller räcker
+    uppskattningen tills referensmaskinen finns?
+55. **SPEC-13.2.1 på vilken maskin, med vilken rasterisering.** 2 ms för 2 000 opkoder hålls inte
+    med CPU-rasterisering som ger dagens guldbilder (34 ms här). Antingen gäller budgeten
+    GPU-vägen (och mäts när den finns), eller ramen räknas om (vilka 2 000 opkoder: de patologiska
+    listorna eller sidornas proportioner, `vy_render::bench`), eller budgeten höjs för CPU-vägen.
+    Testet är ignorerat med värdet.
+

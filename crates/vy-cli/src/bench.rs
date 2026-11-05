@@ -157,7 +157,7 @@ fn row_of(
     }
 }
 
-fn time_row(
+pub(crate) fn time_row(
     id: impl Into<String>,
     what: impl Into<String>,
     spec: &str,
@@ -492,7 +492,7 @@ fn mirror_styles(from: &mut TextEngine, into: &mut TextEngine) -> Result<()> {
 /// SCROLL event, frame and rasterization per step, the frame rasterized by
 /// a second text engine as the shell's main process does; the miss rates
 /// of the shaped-text cache on both sides over the whole sequence.
-fn scroll_sequence(root: &Path, sel: &Selection<'_>) -> Result<Vec<Row>> {
+pub(crate) fn scroll_sequence(root: &Path, sel: &Selection<'_>) -> Result<Vec<Row>> {
     let ids = [
         "scroll.text.frame",
         "scroll.text.miss",
@@ -640,7 +640,7 @@ fn tab_cold_start(exe: &Path, wasm: &[u8], runs: usize) -> Result<Row> {
 }
 
 /// Enter to the first composited frame, headless, for a local file.
-fn first_frame(exe: &Path, root: &Path, name: &str, runs: usize) -> Result<Row> {
+pub(crate) fn first_frame(exe: &Path, root: &Path, name: &str, runs: usize) -> Result<Row> {
     let source = vy_shell::page::Source::File {
         path: root.join(format!("target/wasm/{name}.wasm")),
         draft: Some(root.join(format!("conformance/manifests/{name}.json"))),
@@ -673,7 +673,7 @@ fn first_frame(exe: &Path, root: &Path, name: &str, runs: usize) -> Result<Row> 
 /// SPEC-13.2.2: a pointer event into a running tab, its frame back and
 /// rasterized into the composited image. The dashboard redraws on every
 /// hover change (the tooltip over the bars).
-fn input_to_pixel(exe: &Path, root: &Path, runs: usize) -> Result<Row> {
+pub(crate) fn input_to_pixel(exe: &Path, root: &Path, runs: usize) -> Result<Row> {
     let mut shell =
         vy_shell::headless::headless_shell(Some(exe.to_path_buf()), 1280.0, 900.0, 1.0)?;
     let tab = shell.open_tab(Some(vy_shell::page::Source::File {
@@ -752,6 +752,80 @@ pub fn run(root: &Path, sel: &Selection<'_>) -> Result<Vec<Row>> {
         }
     }
     Ok(rows)
+}
+
+/// Largest slowdown of a row's P50 over the baseline before it counts as
+/// a regression (SPEC-12.2.3: 5 %).
+pub const REGRESSION_TOLERANCE: f64 = 0.05;
+/// Added to the tolerance for rows in milliseconds: a row well under a
+/// millisecond moves by more than 5 % with the scheduler alone.
+pub const NOISE_FLOOR_MS: f64 = 0.5;
+/// Added to the tolerance for rows in percent (the text cache's misses),
+/// in percentage points.
+pub const NOISE_FLOOR_PERCENT: f64 = 1.0;
+
+/// A row slower than the baseline allows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Regression {
+    /// The row.
+    pub id: String,
+    /// The baseline's P50.
+    pub baseline: f64,
+    /// The P50 now.
+    pub now: f64,
+    /// The largest P50 the gate accepts.
+    pub limit: f64,
+    /// `ms` or `%`.
+    pub unit: String,
+}
+
+impl std::fmt::Display for Regression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: P50 {:.2} {} against {:.2} in the baseline (at most {:.2}, SPEC-12.2.3)",
+            self.id, self.now, self.unit, self.baseline, self.limit
+        )
+    }
+}
+
+/// SPEC-12.2.3: the rows of `now` whose P50 exceeds the baseline's by more
+/// than [`REGRESSION_TOLERANCE`] plus the noise floor of their unit. P50,
+/// not P95: on a shared CI runner the tail is the neighbours'. Rows only
+/// one report has are not compared. Both reports must come from release
+/// builds; the baseline is for one runner class and changes only in a
+/// `bench:` commit.
+pub fn compare(baseline: &Report, now: &Report) -> Result<Vec<Regression>> {
+    for (what, r) in [("baseline", baseline), ("report", now)] {
+        if r.profile != "release" {
+            return Err(anyhow!(
+                "the {what} is from a {} build; compare release builds",
+                r.profile
+            ));
+        }
+    }
+    let mut out = Vec::new();
+    for row in &now.rows {
+        let Some(base) = baseline.row(&row.id) else {
+            continue;
+        };
+        let floor = if row.unit == "%" {
+            NOISE_FLOOR_PERCENT
+        } else {
+            NOISE_FLOOR_MS
+        };
+        let limit = base.p50 * (1.0 + REGRESSION_TOLERANCE) + floor;
+        if row.p50 > limit {
+            out.push(Regression {
+                id: row.id.clone(),
+                baseline: base.p50,
+                now: row.p50,
+                limit,
+                unit: row.unit.clone(),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// The table as text.

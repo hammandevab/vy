@@ -15,7 +15,7 @@ fn usage() -> ExitCode {
          [--resource <file> [--resource-size WxH]].. [--dump-semantic <json>]\n  \
          vy-cli conformance [--update] [--root <dir>]\n  \
          vy-cli abi-dump      (the frozen ABI 1.0 listing, docs/ABI-1.0.md)\n  \
-         vy-cli bench [--runs N] [--only <row-prefix>] [--json] [--root <dir>]   (SPEC §13, headless)"
+         vy-cli bench [--runs N] [--only <row-prefix>] [--json] [--compare <baseline.json>] [--root <dir>]   (SPEC §13, headless; --compare: SPEC-12.2.3)"
     );
     ExitCode::from(2)
 }
@@ -195,7 +195,7 @@ fn render(args: &[String]) -> Result<ExitCode> {
 }
 
 fn bench(args: &[String]) -> Result<ExitCode> {
-    let a = Args::parse(args, &["runs", "only", "root"], &["json"])?;
+    let a = Args::parse(args, &["runs", "only", "root", "compare"], &["json"])?;
     let runs: usize = a
         .value("runs")
         .map(str::parse)
@@ -212,11 +212,29 @@ fn bench(args: &[String]) -> Result<ExitCode> {
     if cfg!(debug_assertions) && !a.has("json") {
         println!("(debug-bygge: talen är inte budgetens; kör med --release för SPEC §13)");
     }
+    let baseline = a
+        .value("compare")
+        .map(|p| -> Result<vy_cli::bench::Report> {
+            let text = std::fs::read_to_string(p).with_context(|| p.to_string())?;
+            vy_cli::bench::Report::from_json(&text)
+        })
+        .transpose()?;
     let rows = vy_cli::bench::run(&root, &selection)?;
+    let report = vy_cli::bench::Report::new(runs, rows);
     if a.has("json") {
-        print!("{}", vy_cli::bench::Report::new(runs, rows).to_json());
+        print!("{}", report.to_json());
     } else {
-        print!("{}", vy_cli::bench::table(&rows));
+        print!("{}", vy_cli::bench::table(&report.rows));
+    }
+    if let Some(baseline) = baseline {
+        let regressions = vy_cli::bench::compare(&baseline, &report)?;
+        for r in &regressions {
+            eprintln!("regression: {r}");
+        }
+        if !regressions.is_empty() {
+            return Ok(ExitCode::from(1));
+        }
+        eprintln!("no regression against the baseline (SPEC-12.2.3)");
     }
     Ok(ExitCode::SUCCESS)
 }

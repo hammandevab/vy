@@ -796,11 +796,40 @@ mod tests {
         assert_eq!(diff_ratio(&img, &img), 0.0);
     }
 
-    /// SPEC-13.2.1: 2 000 ops rasterize in <= 2 ms on the reference machine.
+    /// SPEC-13.2.1: 2 000 ops rasterize in <= 2 ms on the reference machine,
+    /// P95 over 100 runs (SPEC §13): the frame of `bench::frame_2000`, in
+    /// the reference pages' proportions, at 1280 × 800 with a warm text
+    /// engine, the same bytes `vy-cli bench` times as `raster.ops-2000`. A
+    /// release-mode budget: a debug build only reports.
     #[test]
-    #[ignore = "M3: bench"]
+    #[ignore = "M4: over budget on this machine: P95 44-56 ms in release (P50 34-35 ms), docs/notes/m4-perf.md"]
     fn spec_13_2_1_raster_budget() {
-        todo!()
+        if cfg!(debug_assertions) {
+            eprintln!("SPEC-13.2.1 is a release-mode budget; run with --release");
+            return;
+        }
+        let _serial = serial();
+        let mut t = TextEngine::new();
+        let frame = crate::bench::frame_2000(&mut t, 1280.0, 800.0);
+        let mut samples: Vec<_> = (0..100)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let r = raster::render(&frame.list, 1280, 800, 1.0, &mut t, &frame.images);
+                let took = start.elapsed();
+                assert!(!r.unwrap().report.truncated);
+                took
+            })
+            .collect();
+        samples.sort();
+        let p95 = samples[94];
+        eprintln!(
+            "SPEC-13.2.1: 2 000 ops in {p95:?} (P95, P50 {:?})",
+            samples[49]
+        );
+        assert!(
+            p95 <= std::time::Duration::from_millis(2),
+            "P95 {p95:?} over the 2 ms budget"
+        );
     }
 
     /// A list of `clips` nested rounded (or plain, radius 0) full-canvas

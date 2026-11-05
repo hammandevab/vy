@@ -2577,8 +2577,11 @@ dependencies = [
  "vy-abi",
  "vy-dl",
  "vy-manifest",
+ "vy-proto",
+ "vy-publish",
  "vy-render",
  "vy-runtime",
+ "vy-serve",
  "vy-shell",
  "wat",
 ]
