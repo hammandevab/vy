@@ -1,14 +1,16 @@
-//! `vy-dev`: scaffold a page project.
+//! `vy-dev`: `new` and `build` for a page project.
 
 use anyhow::{anyhow, bail, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use vy_dev::scaffold::{derive_name, Scaffold};
+use vy_dev::scaffold::{derive_name, lib_name, Scaffold};
+use vy_dev::{build_project, paths, Project};
 
 fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
-         vy-dev new <dir> [--name <name>] [--sdk <vy-checkout>]"
+         vy-dev new <dir> [--name <name>] [--sdk <vy-checkout>]\n  \
+         vy-dev build [<dir>] [--key <dev.key>] [--out <page.vyp>]"
     );
     ExitCode::from(2)
 }
@@ -17,6 +19,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("new") => cmd_new(&args[1..]),
+        Some("build") => cmd_build(&args[1..]),
         _ => return usage(),
     };
     match result {
@@ -94,8 +97,31 @@ fn cmd_new(args: &[String]) -> Result<ExitCode> {
     println!("  cargo build --release --target wasm32-unknown-unknown");
     println!(
         "  vy-cli render target/wasm32-unknown-unknown/release/{}.wasm --out preview.png --size 800x600",
-        vy_dev::scaffold::lib_name(&name)
+        lib_name(&name)
     );
+    println!("  vy-dev build      # the same, plus the manifest check and a signed package");
     println!("CLAUDE.md in the project has the whole loop.");
     Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_build(args: &[String]) -> Result<ExitCode> {
+    let a = Args::parse(args, &["key", "out"], &[])?;
+    let dir = a.positional.first().map(String::as_str).unwrap_or(".");
+    let project = Project::open(Path::new(dir))?;
+    let key_path = paths::key_path(a.value("key").map(Path::new))?;
+    let (key, created) = paths::load_or_create_key(&key_path)?;
+    if created {
+        eprintln!("new developer key: {}", key_path.display());
+    }
+    let out = a
+        .value("out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.scratch_dir().join(format!("{}.vyp", project.name)));
+    let outcome = build_project(&project, &key, &out, &mut |line| println!("{line}"));
+    if outcome.ok() {
+        println!("wrote {}", out.display());
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
 }

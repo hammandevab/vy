@@ -11,9 +11,11 @@ name = "vy-dev"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
-
-[dev-dependencies]
 vy-manifest.workspace = true
+vy-publish.workspace = true
+vy-serve.workspace = true
 # `check_abi_bytes`: the check `vy-cli check-abi` runs.
 vy-runtime.workspace = true
+tiny_http.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
