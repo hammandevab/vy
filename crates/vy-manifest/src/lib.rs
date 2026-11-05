@@ -7,6 +7,7 @@
 
 mod cbor;
 mod draft;
+mod log;
 mod manifest;
 mod package;
 mod policy;
@@ -14,6 +15,7 @@ mod sign;
 mod validate;
 
 pub use draft::{mime_for_path, Draft, DraftResource, ResourceInput};
+pub use log::{KeyLog, LogEntry, LOG_GENESIS, MAX_LOG_BYTES, MAX_LOG_HOST_BYTES};
 pub use manifest::{
     from_hex, hex, AbiVersion, Blob, CapabilityRequests, Empty, Entry, Hash, Manifest, MinSize,
     NetRequest, Resource, SigBytes, Signature, StorageRequest, MAX_FALLBACK_BYTES,

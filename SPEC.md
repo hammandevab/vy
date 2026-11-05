@@ -127,6 +127,12 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-7.4.6]** När ett manifest signerat med en nyckel som godtagits genom rotation (SPEC-7.4.4) har verifierats upphör alla nycklar som var pinnade för origin före rotationen att gälla; en sida som fortfarande är signerad med en sådan nyckel körs i begränsat läge.
 - **[SPEC-7.5.1]** Klienten skickar aldrig `Referer` och accepterar högst 3 omdirigeringar.
 
+### 7.6 Transparenslogg
+
+Loggen gör varje nyckel en utgivare tagit i bruk synlig i efterhand; den är en vanlig fil som vem som helst kan spegla och kontrollera utan att lita på servern (§17).
+
+- **[SPEC-7.6.1]** Utgivarens nyckellogg ligger på `https://<värd>/.well-known/vy-log`, är högst 1 MB och ändras bara genom att poster läggs till: en post per rad (tomma rader och rader som börjar med `#` är kommentarer), varje rad den kanoniska CBOR-kodningen (SPEC-4.1.3) som gemena hextecken av en map {host, key_id, key, published, prev_hash}, där `host` är originens värd med `:port` när porten inte är 443, `key` den publika nyckeln (32 byte), `key_id` dess nyckel-id (SPEC-8.1.1), `published` ett datum `ÅÅÅÅ-MM-DD` och `prev_hash` SHA-256 av föregående posts kodning, 32 nollbyte för den första; loggens huvud är SHA-256 av sista postens kodning.
+
 ## 8. Manifestet
 
 - **[SPEC-8.1.1]** Obligatoriska fält: `abi` (`"MAJOR.MINOR"`), `name` (≤ 80 tecken), `summary` (≤ 2 KB), `lang` (BCP 47), `module` {hash, size, url?}, `memory_max`, `published` (datum som text `ÅÅÅÅ-MM-DD`, ISO 8601), `sig` {key_id, bytes}; en hash är SHA-256, kodad som 32 byte i CBOR och som `sha256:<64 hex>` i JSON-formen, och ett nyckel-id är de 16 första hextecknen av SHA-256 över den publika nyckeln.
