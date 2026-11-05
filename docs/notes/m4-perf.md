@@ -371,6 +371,33 @@ kantutjämnade banfyllning och resten glyfpixlar. Fem av elva referenssidor ligg
 wgpu-vägen), som ändrar avrundningen och kräver nytt guldbyte (spec-fråga 41) – inte prestanda-
 arbete med samma byte. Spec-fråga 55.
 
+## Steg 5: `vy-publish build` vägrar en långsam modul utan `--allow-slow` (SPEC-13.4.1)
+
+`vy_publish::check_frames(&package)` kör modulen huvudlöst genom `vy-runtime` som en klient startar
+den: `vy_init` i 800 × 600, första framen, storleksändring till 1280 × 800 i skala 2, pekarrörelse,
+tryck och släpp i (400, 300), Enter ned och upp, rullning 120 px – varje steg följt av den frame
+det ber om – och upp till fem frames till medan sidan animerar. Varje frames bränsle (värdarbete
+inräknat) jämförs med `FRAME_BUDGET_FUEL` = `FUEL_PER_MS` × 8; bränsle är maskinoberoende, så
+domen är densamma på varje maskin och i debug som release. En frame som når den hårda gränsen
+räknas som minst den. Första frame över budget ger `BuildError::OverBudget { frame, fuel, budget }`:
+"frame 2 (after a resize to 1280 × 800 at scale 2) used 30 000 123 fuel (30.0 ms of logical time),
+over the budget of 8000000 (8 ms, SPEC-13.4.1); --allow-slow publishes it anyway".
+`vy-publish build` anropar den efter paketeringen: utan `--allow-slow` skrivs inget och slutkoden
+är 1, med flaggan en varning och paketet skrivs. Resurser följer med (bildstorlekar ur manifestet).
+
+| Test | Var | Visar |
+| --- | --- | --- |
+| `spec_13_4_1_sdk_refuses_slow_module` (var ignorerat "M2: sdk") | vy-cli | en modul som snurrar i första framen vägras med "frame 1 (first, 800 × 600 at scale 1)" och bränsle ≥ hårda gränsen; fem referenssidor publiceras |
+| `check_frames_names_the_slow_frame` | vy-publish | en modul som blir långsam först efter storleksändringen pekas ut som frame 2; under budget passerar |
+| `build_refuses_a_slow_module_without_allow_slow` (`tests/cli.rs`) | vy-publish | kommandoraden: vägran med frame och bränsle i stderr och inget paket; `--allow-slow` varnar och skriver |
+
+**Nya beroenden.** Inga nya externa crates (`Cargo.lock` får bara arbetsytecrates som
+beroenden). `vy-publish` beror nu på `vy-runtime` och `vy-abi`: 44 → 144 unika crates i dess träd
+(`cargo tree -p vy-publish -e normal`), i stort sett wasmtime och cranelift. Det är verktyget, inte
+klienten; att köra modulen är vad SPEC-13.4.1 kräver, och det finns ingen tolk att använda i
+stället (princip 6). `vy-cli` fick `vy-proto`, `vy-publish` och `vy-serve` som dev-beroenden
+(SPEC-13.1.3 och 13.4.1 i tester); dess normala träd är oförändrat 161 crates.
+
 ## Spec-frågor
 
 53. **`net` med tom origin-lista.** SPEC-8.2.1 sätter ett tak (≤ 16) men inget golv, och

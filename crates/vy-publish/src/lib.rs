@@ -30,6 +30,18 @@ pub enum BuildError {
     Package(PackageError),
     /// Entropy was not available.
     Entropy(String),
+    /// A frame of the publish-time run used more than the 8 ms budget
+    /// (SPEC-13.4.1); `vy-publish build --allow-slow` publishes anyway.
+    OverBudget {
+        /// Which frame ([`FrameCost::frame`]).
+        frame: String,
+        /// Fuel it used.
+        fuel: u64,
+        /// The budget, `vy_runtime::FRAME_BUDGET_FUEL`.
+        budget: u64,
+    },
+    /// The module could not be loaded or started for the publish-time run.
+    Run(String),
 }
 
 impl fmt::Display for BuildError {
@@ -46,6 +58,17 @@ impl fmt::Display for BuildError {
             Self::Io { path, error } => write!(f, "{}: {error}", path.display()),
             Self::Package(e) => write!(f, "{e}"),
             Self::Entropy(e) => write!(f, "no entropy for key generation: {e}"),
+            Self::OverBudget {
+                frame,
+                fuel,
+                budget,
+            } => write!(
+                f,
+                "{frame} used {fuel} fuel ({:.1} ms of logical time), over the budget of {budget} ({} ms, SPEC-13.4.1); --allow-slow publishes it anyway",
+                *fuel as f64 / vy_runtime::FUEL_PER_MS as f64,
+                budget / vy_runtime::FUEL_PER_MS
+            ),
+            Self::Run(e) => write!(f, "the module does not run: {e}"),
         }
     }
 }
@@ -193,6 +216,108 @@ pub fn inspect(bytes: &[u8], public_key: Option<&PublicKey>) -> Result<Inspectio
     })
 }
 
+/// One frame of the publish-time run and what it cost (SPEC-13.4.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameCost {
+    /// Which frame: its number and what came before it.
+    pub frame: String,
+    /// Fuel it consumed, host work included (`vy_runtime::FrameStats::fuel`).
+    pub fuel: u64,
+}
+
+/// The window of the publish-time run, then the one it is resized to.
+const CHECK_WINDOW: (u32, u32, f32) = (800, 600, 1.0);
+const CHECK_RESIZE: (u32, u32, f32) = (1280, 800, 2.0);
+/// Frames an animating page gets after the scripted steps.
+const CHECK_EXTRA_FRAMES: usize = 5;
+
+/// Run the package's module headless the way a client starts it, and
+/// return what each frame cost (SPEC-13.4.1): `vy_init` at 800 × 600, the
+/// first frame, a resize to 1280 × 800 at scale 2, a pointer move, press
+/// and release at (400, 300), Enter pressed and released and a scroll of
+/// 120 px, each followed by the
+/// frame it asks for, and up to five more frames while the page animates.
+/// Fuel is machine-independent (`vy_runtime::FUEL_PER_MS`), so the
+/// verdict is the same on every machine. Returns
+/// [`BuildError::OverBudget`] for the first frame over
+/// `vy_runtime::FRAME_BUDGET_FUEL` (8 ms of logical time), and
+/// [`BuildError::Run`] when the module does not load or start.
+pub fn check_frames(package: &Package) -> Result<Vec<FrameCost>, BuildError> {
+    use vy_abi::{event, key};
+    let manifest = &package.manifest;
+    let resources = package
+        .resources
+        .iter()
+        .zip(&manifest.resources)
+        .map(|(bytes, r)| vy_runtime::Resource {
+            bytes: bytes.clone(),
+            pixels: r.w.zip(r.h),
+        })
+        .collect();
+    let options = vy_runtime::Options {
+        memory_max_pages: manifest.memory_max,
+        resources,
+        ..vy_runtime::Options::default()
+    };
+    let run = |e: vy_runtime::Error| BuildError::Run(e.to_string());
+    let mut rt = vy_runtime::Runtime::load(&package.module, &manifest.module.hash.0, options)
+        .map_err(run)?;
+    let (w, h, s) = CHECK_WINDOW;
+    rt.init(w, h, s).map_err(run)?;
+    let mut costs: Vec<FrameCost> = Vec::new();
+    let mut frame = |rt: &mut vy_runtime::Runtime, after: &str| -> Result<bool, BuildError> {
+        if !rt.wants_frame() {
+            return Ok(false);
+        }
+        let n = costs.len() + 1;
+        let fuel = match rt.frame() {
+            Ok(_) => rt.last_frame().fuel,
+            // Stopped at the hard limit: at least that much.
+            Err(vy_runtime::Error::OverBudget { .. }) => vy_runtime::CALL_HARD_LIMIT_FUEL,
+            Err(e) => return Err(run(e)),
+        };
+        let cost = FrameCost {
+            frame: format!("frame {n} ({after})"),
+            fuel,
+        };
+        if fuel > vy_runtime::FRAME_BUDGET_FUEL {
+            return Err(BuildError::OverBudget {
+                frame: cost.frame,
+                fuel,
+                budget: vy_runtime::FRAME_BUDGET_FUEL,
+            });
+        }
+        costs.push(cost);
+        Ok(true)
+    };
+    frame(&mut rt, &format!("first, {w} × {h} at scale {s}"))?;
+    let (w, h, s) = CHECK_RESIZE;
+    rt.resize(w, h, s).map_err(run)?;
+    frame(
+        &mut rt,
+        &format!("after a resize to {w} × {h} at scale {s}"),
+    )?;
+    // SPEC-A.2.1: coordinates × 100, the primary button, no modifiers.
+    let steps = [
+        ("a pointer move", event::POINTER_MOVE, 40_000, 30_000, 0),
+        ("a pointer press", event::POINTER_DOWN, 40_000, 30_000, 1),
+        ("a pointer release", event::POINTER_UP, 40_000, 30_000, 1),
+        ("a key press", event::KEY_DOWN, key::ENTER, 0, 0),
+        ("a key release", event::KEY_UP, key::ENTER, 0, 0),
+        ("a scroll", event::SCROLL, 0, 12_000, 0),
+    ];
+    for (what, kind, a, b, c) in steps {
+        rt.event(kind, a, b, c, 0).map_err(run)?;
+        frame(&mut rt, &format!("after {what}"))?;
+    }
+    for _ in 0..CHECK_EXTRA_FRAMES {
+        if !frame(&mut rt, "animating")? {
+            break;
+        }
+    }
+    Ok(costs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +401,56 @@ mod tests {
         assert!(write_key(&path, &key).is_err(), "never overwrites a key");
         assert_ne!(keygen().unwrap().seed(), key.seed());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A module whose frames cost almost nothing until the window is wider
+    /// than 1 000 px, when each frame loops `iterations` times.
+    fn slow_after_resize(iterations: u32) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(module (memory (export "memory") 2)
+                (global $w (mut i32) (i32.const 0))
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
+                    (global.set $w (local.get 1)) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32)
+                    (local $i i32)
+                    (if (i32.gt_s (global.get $w) (i32.const 1000)) (then
+                        (loop $spin
+                            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                            (br_if $spin (i32.lt_u (local.get $i) (i32.const {iterations}))))))
+                    i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32) (global.set $w (local.get 0)))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+        ))
+        .unwrap()
+    }
+
+    /// SPEC-13.4.1: the publish-time run measures every frame in fuel; a
+    /// module under the budget passes with the cost of each frame, one over
+    /// it is refused with the frame named and its fuel.
+    #[test]
+    fn check_frames_names_the_slow_frame() {
+        let key = SigningKey::from_seed(&SEED);
+        let fast = build(&draft(), module(), vec![], &key).unwrap();
+        let costs = check_frames(&fast).unwrap();
+        assert_eq!(costs.len(), 2, "first frame and the resize: {costs:?}");
+        assert!(costs.iter().all(|c| c.fuel < vy_runtime::FRAME_BUDGET_FUEL));
+
+        let slow = build(&draft(), slow_after_resize(5_000_000), vec![], &key).unwrap();
+        match check_frames(&slow) {
+            Err(BuildError::OverBudget {
+                frame,
+                fuel,
+                budget,
+            }) => {
+                assert_eq!(frame, "frame 2 (after a resize to 1280 × 800 at scale 2)");
+                assert!(fuel > budget && budget == vy_runtime::FRAME_BUDGET_FUEL);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Under the budget after the resize too: passes.
+        let mild = build(&draft(), slow_after_resize(1_000), vec![], &key).unwrap();
+        assert_eq!(check_frames(&mild).unwrap().len(), 2);
     }
 }

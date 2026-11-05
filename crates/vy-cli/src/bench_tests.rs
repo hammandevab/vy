@@ -187,10 +187,67 @@ fn spec_13_2_3_scroll_fps() {
 }
 
 /// SPEC-13.4.1: SDK refuses to publish a module over budget without --allow-slow.
+/// `vy-publish build` runs the module headless (init, first frame, a
+/// resize, pointer, key and scroll events) and refuses a package whose
+/// frame uses more than the 8 ms fuel budget, naming the frame and the fuel
+/// (`--allow-slow` publishes it anyway; the command is tested in
+/// vy-publish's `tests/cli.rs`). Fuel, not time: the verdict is the same on
+/// every machine, in debug and in release. Every reference page passes.
 #[test]
-#[ignore = "M2: sdk"]
 fn spec_13_4_1_sdk_refuses_slow_module() {
-    todo!()
+    let key = vy_manifest::SigningKey::from_seed(&[0x13; 32]);
+    let root = bench::root().unwrap();
+    let draft = |name: &str| {
+        vy_manifest::Draft::from_json(
+            &std::fs::read_to_string(root.join(format!("conformance/manifests/{name}.json")))
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    // Slow from its first frame: two hundred million steps would be cut at
+    // the hard limit (64 ms); the check reports at least that much.
+    let slow = wat::parse_str(
+        r#"(module (memory (export "memory") 2)
+            (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+            (func (export "vy_frame") (param i32) (result i32)
+                (local $i i32)
+                (loop $spin
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $spin (i32.lt_u (local.get $i) (i32.const 200000000))))
+                i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+    )
+    .unwrap();
+    let package = vy_publish::build(&draft("hello"), slow, Vec::new(), &key).unwrap();
+    let err = vy_publish::check_frames(&package).unwrap_err();
+    let message = err.to_string();
+    match err {
+        vy_publish::BuildError::OverBudget {
+            frame,
+            fuel,
+            budget,
+        } => {
+            assert_eq!(frame, "frame 1 (first, 800 × 600 at scale 1)");
+            assert_eq!(budget, vy_runtime::FUEL_PER_MS * 8);
+            assert!(fuel >= vy_runtime::CALL_HARD_LIMIT_FUEL, "{fuel}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        message.contains("frame 1") && message.contains("--allow-slow"),
+        "{message}"
+    );
+
+    // The reference pages publish.
+    for name in ["hello", "text", "chat", "dashboard", "game"] {
+        let wasm = std::fs::read(root.join(format!("target/wasm/{name}.wasm"))).unwrap();
+        let package = vy_publish::build(&draft(name), wasm, Vec::new(), &key).unwrap();
+        let costs = vy_publish::check_frames(&package).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(costs.len() >= 2, "{name}: {costs:?}");
+    }
 }
 
 fn row(id: &str, unit: &str, p50: f64, p95: f64) -> Row {

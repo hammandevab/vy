@@ -13,6 +13,10 @@ path = "src/main.rs"
 [dependencies]
 vy-manifest.workspace = true
 getrandom.workspace = true
+# SPEC-13.4.1: `build` runs the module headless and refuses a frame over
+# the 8 ms fuel budget unless --allow-slow; workspace crates.
+vy-abi.workspace = true
+vy-runtime.workspace = true
 
 [dev-dependencies]
 wat.workspace = true
