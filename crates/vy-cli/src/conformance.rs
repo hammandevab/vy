@@ -782,7 +782,8 @@ pub fn tab_executable() -> Result<PathBuf> {
             }
         }
     }
-    Ok(exe)
+    // The running image, even if the file has been replaced meanwhile.
+    Ok(vy_shell::process::self_exe()?)
 }
 
 /// A shell case: the module and its draft through the headless shell,

@@ -172,7 +172,7 @@ impl ApplicationHandler<Wake> for App {
         });
         let data_dir = data_dir().unwrap_or_else(|| scratch_dir("data"));
         let config = Config {
-            exe: std::env::current_exe().ok(),
+            exe: crate::process::self_exe().ok(),
             data_dir,
             headless: false,
             opener: Box::new(SystemOpener),

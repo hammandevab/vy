@@ -124,8 +124,30 @@ pub struct TabConnection {
     reader: Option<JoinHandle<()>>,
 }
 
-/// Where `--tab` children are started from: this executable.
+/// Where `--tab` children are started from: this executable ([`self_exe`]).
 pub fn tab_executable() -> io::Result<PathBuf> {
+    self_exe()
+}
+
+/// A path that starts the image this process is running, even after the
+/// file it was started from has been replaced on disk (an update while
+/// the client runs): tab processes must speak the same IPC as their shell.
+///
+/// On Linux that is `/proc/self/exe`: the child execs it before it has its
+/// own image, so it names the parent's inode, whatever the path now holds.
+/// Windows does not let a running executable be replaced (it can only be
+/// renamed, and the rename keeps the image), so `current_exe` is the same
+/// file. On macOS `current_exe` is the path, and a replaced file there
+/// would start the new binary: a residual risk until tabs are started
+/// another way.
+pub fn self_exe() -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let proc_exe = Path::new("/proc/self/exe");
+        if proc_exe.exists() {
+            return Ok(proc_exe.to_path_buf());
+        }
+    }
     std::env::current_exe()
 }
 
@@ -443,5 +465,88 @@ pub fn wait_for(
             Ok(other) => others.push(other),
             Err(_) => return None,
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    const STAGE: &str = "VY_SELF_EXE_STAGE";
+    const MARK: &str = "self-exe: original image";
+
+    /// The child half of `spec_9_1_1_tabs_start_the_running_image`: a
+    /// no-op in the normal run. As stage 1 it waits for the parent's
+    /// signal (its own file has been replaced by then) and starts
+    /// [`self_exe`] as stage 2, which prints the mark only the original
+    /// test binary knows.
+    #[test]
+    fn self_exe_child_stage() {
+        match std::env::var(STAGE).as_deref() {
+            Ok("1") => {
+                let go = PathBuf::from(std::env::var("VY_SELF_EXE_GO").unwrap());
+                let start = Instant::now();
+                while !go.exists() && start.elapsed() < Duration::from_secs(20) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let out = Command::new(self_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "process::tests::self_exe_child_stage",
+                        "--nocapture",
+                    ])
+                    .env(STAGE, "2")
+                    .output()
+                    .unwrap();
+                print!("{}", String::from_utf8_lossy(&out.stdout));
+            }
+            Ok("2") => println!("{MARK}"),
+            _ => {}
+        }
+    }
+
+    /// SPEC-9.1.1, SPEC-11.2.2: a tab process is the shell's own image.
+    /// A copy of this test binary is started from a temporary path, the
+    /// file at that path is replaced by a script while it runs, and the
+    /// child it then starts through [`self_exe`] is still the original
+    /// image, not the script.
+    #[test]
+    fn spec_9_1_1_tabs_start_the_running_image() {
+        assert_eq!(self_exe().unwrap(), Path::new("/proc/self/exe"));
+        let dir = std::env::temp_dir().join(format!("vy-self-exe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("shell");
+        std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        let go = dir.join("go");
+        let child = Command::new(&copy)
+            .args([
+                "--exact",
+                "process::tests::self_exe_child_stage",
+                "--nocapture",
+            ])
+            .env(STAGE, "1")
+            .env("VY_SELF_EXE_GO", &go)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The update: a different file takes the path while the copy runs.
+        let script = dir.join("next");
+        std::fs::write(&script, "#!/bin/sh\necho replaced\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&script, &copy).unwrap();
+        std::fs::write(&go, b"").unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains(MARK), "{text}");
+        assert!(!text.contains("replaced"), "{text}");
+        let direct = Command::new(&copy).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&direct.stdout),
+            "replaced\n",
+            "the path did change"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

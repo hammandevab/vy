@@ -169,7 +169,7 @@ fn screenshot(args: &[String]) -> Result<(), String> {
         height: h as f32,
         scale,
         max_ticks: ticks.max(1),
-        exe: Some(std::env::current_exe().map_err(|e| e.to_string())?),
+        exe: Some(vy_shell::process::self_exe().map_err(|e| e.to_string())?),
         timeout: std::time::Duration::from_secs(60),
     };
     let image = vy_shell::headless::screenshot(source, &options)?;
