@@ -534,7 +534,7 @@ impl SettingsPage {
             row_h,
         );
         let text = format!("{}: {}", SWITCHES[i], if on { "på" } else { "av" });
-        let id = f.sem.checkbox(row, &text)?;
+        let id = f.sem.node(Role::Checkbox, row, &text)?;
         self.node_ids[Control::Switch(i).index()] = id.0;
         Ok(())
     }
@@ -670,10 +670,11 @@ impl App for SettingsPage {
                 let s = self.styles();
                 let ty = MARGIN - self.scroll;
                 let th = f.text(x, ty, w, s.title, TITLE)?.h;
-                f.sem.heading(Rect::new(x, ty, w, th), TITLE)?;
+                f.sem.node(Role::Heading, Rect::new(x, ty, w, th), TITLE)?;
                 let status = self.status_text();
                 let sh = f.text(x, ty + th + 4.0, w, s.status, &status)?.h;
-                f.sem.text(Rect::new(x, ty + th + 4.0, w, sh), &status)?;
+                f.sem
+                    .node(Role::Text, Rect::new(x, ty + th + 4.0, w, sh), &status)?;
 
                 for (c, card) in l.card.iter().enumerate() {
                     f.rect(*card, 10.0, p.card)?;
@@ -683,7 +684,8 @@ impl App for SettingsPage {
                         let hh = f
                             .text(card.x + PAD, hy, card.w - 2.0 * PAD, s.heading, SECTIONS[c])?
                             .h;
-                        f.sem.heading(
+                        f.sem.node(
+                            Role::Heading,
                             Rect::new(card.x + PAD, hy, card.w - 2.0 * PAD, hh),
                             SECTIONS[c],
                         )?;
@@ -716,7 +718,8 @@ impl App for SettingsPage {
                                         PREVIEW,
                                     )?
                                     .h;
-                                f.sem.text(
+                                f.sem.node(
+                                    Role::Text,
                                     Rect::new(l.preview.x, l.preview.y, l.preview.w, ph),
                                     PREVIEW,
                                 )?;
@@ -749,12 +752,13 @@ impl App for SettingsPage {
                     s.button,
                     RESET,
                 )?;
-                let id = f.sem.button(b, RESET)?;
+                let id = f.sem.node(Role::Button, b, RESET)?;
                 self.node_ids[Control::Reset.index()] = id.0;
 
                 let note = "Ändringar sparas direkt via state_put; vy_suspend sparar en gång till.";
                 let nh = f.text(x, l.status_y, w, s.status, note)?.h;
-                f.sem.text(Rect::new(x, l.status_y, w, nh), note)?;
+                f.sem
+                    .node(Role::Text, Rect::new(x, l.status_y, w, nh), note)?;
                 Ok(())
             })
         })

@@ -295,7 +295,8 @@ impl App for Game {
         f.group(Role::Main, window, "", |f| {
             // HUD: title left, score and clock right.
             let h = f.text(MARGIN, 14.0, 200.0, self.title, "Studs")?.h;
-            f.sem.heading(Rect::new(MARGIN, 14.0, 200.0, h), "Studs")?;
+            f.sem
+                .node(Role::Heading, Rect::new(MARGIN, 14.0, 200.0, h), "Studs")?;
             let hud = format!(
                 "Poäng {}  Bästa {}  {},{} s",
                 self.score,
@@ -306,7 +307,7 @@ impl App for Game {
             let hw = text_measure(self.hud, 0.0, &hud)?.w;
             let hx = self.window.width - MARGIN - hw;
             let hh = f.text(hx, 15.0, 0.0, self.hud, &hud)?.h;
-            f.sem.text(Rect::new(hx, 15.0, hw, hh), &hud)?;
+            f.sem.node(Role::Text, Rect::new(hx, 15.0, hw, hh), &hud)?;
 
             f.rect(court, 6.0, BORDER)?;
             f.rect(court.inset(2.0), 4.0, COURT)?;
@@ -338,12 +339,17 @@ impl App for Game {
                 f.rect(court.inset(2.0), 4.0, OVERLAY)?;
                 let tw = text_measure(self.big, 0.0, title)?.w;
                 let ty = court.y + court.h * 0.4;
-                let th = f.text(court.x + (court.w - tw) / 2.0, ty, 0.0, self.big, title)?.h;
+                let th = f
+                    .text(court.x + (court.w - tw) / 2.0, ty, 0.0, self.big, title)?
+                    .h;
                 let hw = text_measure(self.hint, 0.0, hint)?.w;
                 let hy = ty + th + 8.0;
-                let hh = f.text(court.x + (court.w - hw) / 2.0, hy, 0.0, self.hint, hint)?.h;
+                let hh = f
+                    .text(court.x + (court.w - hw) / 2.0, hy, 0.0, self.hint, hint)?
+                    .h;
                 let status = format!("{title}. {hint}");
-                f.sem.text(
+                f.sem.node(
+                    Role::Text,
                     Rect::new(
                         court.x + (court.w - tw.max(hw)) / 2.0,
                         ty,

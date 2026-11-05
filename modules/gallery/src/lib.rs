@@ -264,7 +264,7 @@ impl GalleryPage {
             f.rect(thumb, 0.0, THUMB_BG)?;
             f.image(thumb, Picture::resource(i), Picture::fit(i))
         })?;
-        f.sem.image(thumb, p.alt)?;
+        f.sem.node(Role::Image, thumb, p.alt)?;
         let cy = thumb.bottom() + 8.0;
         f.text(cell.x + 12.0, cy, cell.w - 24.0, self.caption, p.name)?;
         let detail = format!("{} · {} × {} px", Picture::fit_name(i), p.w, p.h);
@@ -276,7 +276,8 @@ impl GalleryPage {
             &detail,
         )?;
         let caption = format!("{}, {}", p.name, detail);
-        f.sem.text(
+        f.sem.node(
+            Role::Text,
             Rect::new(cell.x + 12.0, cy, cell.w - 24.0, CAPTION_H - 8.0),
             &caption,
         )?;
@@ -290,7 +291,7 @@ impl GalleryPage {
         f.rect(window, 0.0, BACKDROP)?;
         f.group(Role::Dialog, window, p.name, |f| {
             f.image(picture, Picture::resource(i), Fit::Contain)?;
-            f.sem.image(picture, p.alt)?;
+            f.sem.node(Role::Image, picture, p.alt)?;
             let title = format!("{} av {}: {}", i + 1, PICTURES.len(), p.name);
             f.text(caption.x, caption.y, caption.w, self.light_title, &title)?;
             let sub = format!(
@@ -298,7 +299,8 @@ impl GalleryPage {
                 p.alt, p.w, p.h
             );
             f.text(caption.x, caption.y + 24.0, caption.w, self.light_sub, &sub)?;
-            f.sem.text(caption, &format!("{title}. {sub}"))?;
+            f.sem
+                .node(Role::Text, caption, &format!("{title}. {sub}"))?;
             f.rect(button, 16.0, BUTTON_BG)?;
             let tw = text_measure(self.button, 0.0, "Stäng")?.w;
             f.text(
@@ -354,7 +356,8 @@ impl App for GalleryPage {
                 LINE,
             )?;
             let h = f.text(MARGIN, 18.0, 200.0, self.header, TITLE)?.h;
-            f.sem.heading(Rect::new(MARGIN, 18.0, 200.0, h), TITLE)?;
+            f.sem
+                .node(Role::Heading, Rect::new(MARGIN, 18.0, 200.0, h), TITLE)?;
             let sub = format!(
                 "{} bilder · cover, contain och stretch i tur och ordning · klicka för att öppna",
                 PICTURES.len()
@@ -366,7 +369,8 @@ impl App for GalleryPage {
                 0.0,
                 |f| f.text(sx, 25.0, 0.0, self.sub, &sub),
             )?;
-            f.sem.text(Rect::new(sx, 25.0, sw, 16.25), &sub)?;
+            f.sem
+                .node(Role::Text, Rect::new(sx, 25.0, sw, 16.25), &sub)?;
 
             f.clipped(below, 0.0, |f| {
                 f.group(Role::Region, below, "Bilder", |f| {

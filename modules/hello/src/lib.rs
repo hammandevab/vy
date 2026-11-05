@@ -53,14 +53,20 @@ impl App for Hello {
         let card_h = pad + title_h + 12.0 + body_h + pad;
         let card = Rect::new(margin, margin, card_w, card_h);
 
-        f.rect(Rect::new(0.0, 0.0, self.window.width, self.window.height), 0.0, BG)?;
+        f.rect(
+            Rect::new(0.0, 0.0, self.window.width, self.window.height),
+            0.0,
+            BG,
+        )?;
         f.rect(card, 12.0, CARD)?;
         f.group(Role::Main, card, "", |f| {
             let x = margin + pad;
             f.text(x, title_y, text_w, self.title, TITLE)?;
-            f.sem.heading(Rect::new(x, title_y, text_w, title_h), TITLE)?;
+            f.sem
+                .node(Role::Heading, Rect::new(x, title_y, text_w, title_h), TITLE)?;
             f.text(x, body_y, text_w, self.body, BODY)?;
-            f.sem.text(Rect::new(x, body_y, text_w, body_h), BODY)?;
+            f.sem
+                .node(Role::Text, Rect::new(x, body_y, text_w, body_h), BODY)?;
             Ok(())
         })
     }

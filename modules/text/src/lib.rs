@@ -162,17 +162,18 @@ impl App for TextPage {
                             Block::Title(t) => {
                                 f.text(col.x, y, col.w, style, t)?;
                                 let r = Rect::new(col.x, y, col.w, h);
-                                f.sem.heading(r, t)?;
+                                f.sem.node(Role::Heading, r, t)?;
                                 // A rule under the title.
                                 f.rect(Rect::new(col.x, y + h + 10.0, col.w, 1.0), 0.0, RULE)?;
                             }
                             Block::Heading(t) => {
                                 f.text(col.x, y, col.w, style, t)?;
-                                f.sem.heading(Rect::new(col.x, y, col.w, h), t)?;
+                                f.sem
+                                    .node(Role::Heading, Rect::new(col.x, y, col.w, h), t)?;
                             }
                             Block::Para(t) => {
                                 f.text(col.x, y, col.w, style, t)?;
-                                f.sem.text(Rect::new(col.x, y, col.w, h), t)?;
+                                f.sem.node(Role::Text, Rect::new(col.x, y, col.w, h), t)?;
                             }
                             Block::Quote(t) => {
                                 let outer = Rect::new(col.x, y, col.w, h);
@@ -181,8 +182,11 @@ impl App for TextPage {
                                 let tx = col.x + QUOTE_BAR + QUOTE_PAD;
                                 let tw = self.text_width(block);
                                 f.text(tx, y + QUOTE_PAD, tw, style, t)?;
-                                f.sem
-                                    .text(Rect::new(tx, y + QUOTE_PAD, tw, self.heights[i]), t)?;
+                                f.sem.node(
+                                    Role::Text,
+                                    Rect::new(tx, y + QUOTE_PAD, tw, self.heights[i]),
+                                    t,
+                                )?;
                             }
                         }
                     }

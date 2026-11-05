@@ -335,14 +335,14 @@ impl ShopPage {
         let url = format!("vy://shop.example/produkt/{}", p.slug);
         link_register(i as i32 + 1, card, &url)?;
         f.group(Role::ListItem, card, p.name, |f| {
-            f.sem.image(image, p.alt)?;
+            f.sem.node(Role::Image, image, p.alt)?;
             f.clipped(name, 0.0, |f| {
                 f.text(x, name_y, 0.0, self.name, p.name).map(|_| ())
             })?;
-            f.sem.link(name, p.name)?;
+            f.sem.node(Role::Link, name, p.name)?;
             let price_text = kr(p.price);
             f.text(x, price_y, w, self.price, &price_text)?;
-            f.sem.text(price, &price_text)?;
+            f.sem.node(Role::Text, price, &price_text)?;
             f.rect(button, 6.0, ACCENT)?;
             let tw = text_measure(self.button, 0.0, ADD)?.w;
             f.text(
@@ -352,8 +352,11 @@ impl ShopPage {
                 self.button,
                 ADD,
             )?;
-            f.sem
-                .button(button, &format!("Lägg {} i varukorgen", p.name))?;
+            f.sem.node(
+                Role::Button,
+                button,
+                &format!("Lägg {} i varukorgen", p.name),
+            )?;
             let qty = self.cart[i];
             if qty > 0 {
                 let label = format!("{qty} i korgen");
@@ -366,7 +369,7 @@ impl ShopPage {
                 );
                 f.rect(badge, 11.0, BADGE)?;
                 f.text(badge.x + 8.0, badge.y + 3.0, 0.0, self.badge, &label)?;
-                f.sem.text(badge, &label)?;
+                f.sem.node(Role::Text, badge, &label)?;
             }
             Ok(())
         })
@@ -385,11 +388,11 @@ impl ShopPage {
                 format!("{CART} ({})", self.count_label())
             };
             let h = f.text(x, y, w, self.heading, &heading)?.h;
-            f.sem.heading(Rect::new(x, y, w, h), &heading)?;
+            f.sem.node(Role::Heading, Rect::new(x, y, w, h), &heading)?;
             y += 24.0 + 12.0;
             if self.count() == 0 {
                 let h = f.text(x, y, w, self.muted, EMPTY)?.h;
-                f.sem.text(Rect::new(x, y, w, h), EMPTY)?;
+                f.sem.node(Role::Text, Rect::new(x, y, w, h), EMPTY)?;
                 y += ROW_H;
             } else {
                 f.group(Role::List, Rect::new(x, y, w, 0.0), "Rader", |f| {
@@ -432,8 +435,11 @@ impl ShopPage {
                 f.text(x, y, 0.0, style, label)?;
                 let vw = text_measure(style, 0.0, &value)?.w;
                 f.text(x + w - vw, y, 0.0, style, &value)?;
-                f.sem
-                    .text(Rect::new(x, y, w, ROW_H), &format!("{label}: {value}"))?;
+                f.sem.node(
+                    Role::Text,
+                    Rect::new(x, y, w, ROW_H),
+                    &format!("{label}: {value}"),
+                )?;
                 y += ROW_H;
             }
             let b = self.checkout_button(l);
@@ -447,12 +453,12 @@ impl ShopPage {
                 self.button,
                 CHECKOUT,
             )?;
-            f.sem.button(b, CHECKOUT)?;
+            f.sem.node(Role::Button, b, CHECKOUT)?;
             if enabled {
                 let c = self.clear_button(l);
                 let tw = text_measure(self.muted, 0.0, CLEAR)?.w;
                 f.text(c.x + (c.w - tw) / 2.0, c.y + 5.0, 0.0, self.muted, CLEAR)?;
-                f.sem.button(c, CLEAR)?;
+                f.sem.node(Role::Button, c, CLEAR)?;
             }
             Ok(())
         })
@@ -477,8 +483,11 @@ impl ShopPage {
                 f.text(MARGIN, b.y + 15.0, 0.0, self.body, &summary)
                     .map(|_| ())
             })?;
-            f.sem
-                .text(Rect::new(MARGIN, b.y, text_w.max(0.0), b.h), &summary)?;
+            f.sem.node(
+                Role::Text,
+                Rect::new(MARGIN, b.y, text_w.max(0.0), b.h),
+                &summary,
+            )?;
             let enabled = self.count() > 0;
             f.rect(c, 6.0, if enabled { ACCENT } else { ACCENT_DIM })?;
             let tw = text_measure(self.button, 0.0, CHECKOUT)?.w;
@@ -489,7 +498,7 @@ impl ShopPage {
                 self.button,
                 CHECKOUT,
             )?;
-            f.sem.button(c, CHECKOUT)?;
+            f.sem.node(Role::Button, c, CHECKOUT)?;
             if enabled {
                 let k = self.clear_button(l);
                 f.rect(k, 6.0, RULE)?;
@@ -501,7 +510,7 @@ impl ShopPage {
                     self.body,
                     "Töm",
                 )?;
-                f.sem.button(k, CLEAR)?;
+                f.sem.node(Role::Button, k, CLEAR)?;
             }
             Ok(())
         })
@@ -545,12 +554,14 @@ impl App for ShopPage {
                     TITLE,
                 )?
                 .h;
-            f.sem.heading(
+            f.sem.node(
+                Role::Heading,
                 Rect::new(MARGIN, 12.0, self.window.width - 2.0 * MARGIN, th),
                 TITLE,
             )?;
             let sh = f.text(MARGIN, 12.0 + th, 0.0, self.subtitle, SUBTITLE)?.h;
-            f.sem.text(
+            f.sem.node(
+                Role::Text,
                 Rect::new(MARGIN, 12.0 + th, self.window.width - 2.0 * MARGIN, sh),
                 SUBTITLE,
             )?;

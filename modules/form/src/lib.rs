@@ -278,10 +278,10 @@ impl App for FormPage {
             let w = l.card.w - 2.0 * PAD;
             let mut y = l.card.y + PAD;
             let h = f.text(x, y, w, self.title, TITLE)?.h;
-            f.sem.heading(Rect::new(x, y, w, h), TITLE)?;
+            f.sem.node(Role::Heading, Rect::new(x, y, w, h), TITLE)?;
             y += h + GAP;
             let h = f.text(x, y, w, self.help, HELP)?.h;
-            f.sem.text(Rect::new(x, y, w, h), HELP)?;
+            f.sem.node(Role::Text, Rect::new(x, y, w, h), HELP)?;
 
             self.draw_field(f, l.name, Focus::Name)?;
             self.draw_field(f, l.email, Focus::Email)?;
@@ -337,15 +337,18 @@ impl App for FormPage {
             let my = l.submit.bottom() + 16.0;
             if let Some(e) = self.error_text {
                 let h = f.text(x, my, w, self.error, e)?.h;
-                f.sem.text(Rect::new(x, my, w, h), e)?;
+                f.sem.node(Role::Text, Rect::new(x, my, w, h), e)?;
             } else if self.submitted {
                 let msg = self.message();
                 let h = self.message_h(w - 24.0);
                 let panel = Rect::new(x, my, w, h + 28.0);
                 f.rect(panel, 6.0, OK_BG)?;
                 f.text(x + 12.0, my + 14.0, w - 24.0, self.ok, &msg)?;
-                f.sem
-                    .text(Rect::new(x + 12.0, my + 14.0, w - 24.0, h), &msg)?;
+                f.sem.node(
+                    Role::Text,
+                    Rect::new(x + 12.0, my + 14.0, w - 24.0, h),
+                    &msg,
+                )?;
             }
             Ok(())
         })

@@ -15,8 +15,9 @@ egen kontroll.
   33:e klippet (SPEC-6.1.4), text över 65 535 byte (SPEC-9.3.2) – så sidan ser felet före loggen.
   `Frame::text` returnerar `Size` (bredd och höjd, SPEC-5.2.4); `Frame::clip_push(r, radius)` och
   `Frame::clipped(r, radius, |f| …)` klipper till en rektangel med hörnradie (SPEC-5.2.3).
-- `Frame::sem` bygger det semantiska trädet medan du ritar (SPEC-10.1.1): `heading`, `text`,
-  `button`, `textbox`, `checkbox`, `link`, `image`, eller `f.group(Role::Main, …, |f| …)` för nästning.
+- `Frame::sem` bygger det semantiska trädet medan du ritar (SPEC-10.1.1): `node(Role::Heading, r, text)`
+  för varje nod (ett sätt, SPEC-2.1.1), `node_with_id` för ett id sidan väljer, `begin`/`end` eller
+  `f.group(Role::Main, …, |f| …)` för nästning.
   Automatiska id är positiva; ett id sidan väljer med `node_with_id` är negativt (SPEC-5.2.13).
   Registrera hela trädet varje frame: värden äger fokus och går Tab-ordningen ur trädets
   fokuserbara noder (SPEC-10.3.1); sidan får `Event::Focus` och ritar ringen själv.
@@ -48,9 +49,9 @@ impl App for Page {
         let mut col = Column::new(area).padding(24.0).gap(12.0);
         f.group(Role::Main, area, "", |f| {
             let r = col.text(f, self.title, "Hej från Vy")?;
-            f.sem.heading(r, "Hej från Vy")?;
+            f.sem.node(Role::Heading, r, "Hej från Vy")?;
             let r = col.text(f, self.body, "Klicka var som helst.")?;
-            f.sem.text(r, "Klicka var som helst.")?;
+            f.sem.node(Role::Text, r, "Klicka var som helst.")?;
             let button = col.next(36.0);
             f.rect(button, 6.0, Color::rgb(0x1A, 0x1A, 0x2E))?;
             f.sem.node_with_id(-1, Role::Button, button, "Räkna")

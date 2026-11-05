@@ -128,8 +128,11 @@ impl App for TestApp {
         f.rect(area, 0.0, Color::rgb(255, 255, 255))?;
         f.group(Role::Main, area, "", |f| {
             let h = f.text(10.0, 10.0, area.w - 20.0, s, "Hej")?.h;
-            f.sem
-                .heading(Rect::new(10.0, 10.0, area.w - 20.0, h), "Hej")?;
+            f.sem.node(
+                Role::Heading,
+                Rect::new(10.0, 10.0, area.w - 20.0, h),
+                "Hej",
+            )?;
             Ok(())
         })
     }
@@ -347,8 +350,11 @@ fn spec_9_3_2_byte_caps_checked_locally() {
         Err(VyError::Arg)
     );
     assert_eq!(
-        f.sem
-            .text(Rect::default(), &over(limits::MAX_SEM_TEXT_BYTES)),
+        f.sem.node(
+            Role::Text,
+            Rect::default(),
+            &over(limits::MAX_SEM_TEXT_BYTES)
+        ),
         Err(VyError::Arg)
     );
     let mut p = Path::new();
@@ -617,7 +623,7 @@ fn spec_10_1_1_sem_ids_and_parents() {
     let r = Rect::new(0.0, 0.0, 10.0, 10.0);
     let main = sem.begin(Role::Main, r, "").unwrap();
     assert_eq!(main, NodeId(1));
-    assert_eq!(sem.heading(r, "H").unwrap(), NodeId(2));
+    assert_eq!(sem.node(Role::Heading, r, "H").unwrap(), NodeId(2));
     sem.group(Role::List, r, "", |sem| {
         assert_eq!(sem.node(Role::ListItem, r, "a")?, NodeId(4));
         assert_eq!(sem.node_with_id(-10, Role::ListItem, r, "b")?, NodeId(-10));
@@ -642,7 +648,7 @@ fn spec_10_1_1_sem_ids_and_parents() {
     sem.end();
     sem.end();
     assert_eq!(sem.parent(), 0, "extra end is harmless");
-    assert_eq!(sem.button(r, "Ok").unwrap(), NodeId(5));
+    assert_eq!(sem.node(Role::Button, r, "Ok").unwrap(), NodeId(5));
     assert_eq!(sem.count(), 6);
     mock::with(|h| {
         let tree: Vec<(i32, i32, i32)> =

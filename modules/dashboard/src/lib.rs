@@ -280,7 +280,7 @@ impl Dashboard {
         let delta = format!("{glyph}{}", t.delta);
         f.text(x, r.y + 76.0, w, style, &delta)?;
         let name = format!("{}: {}, {}", t.label, t.value, delta);
-        f.sem.text(r, &name)?;
+        f.sem.node(Role::Text, r, &name)?;
         Ok(())
     }
 
@@ -351,7 +351,7 @@ impl Dashboard {
             name.push_str(": ");
             name.push_str(l);
         }
-        f.sem.text(r, &name)?;
+        f.sem.node(Role::Text, r, &name)?;
         Ok(())
     }
 
@@ -411,7 +411,8 @@ impl Dashboard {
                 f.rect(Rect::new(hx - 4.0, hy - 4.0, 8.0, 8.0), 4.0, color)?;
             }
         }
-        f.sem.image(
+        f.sem.node(
+            Role::Image,
             plot,
             "Linjediagram: besök och återkommande besök per månad, januari till december, 0 till 30 000",
         )?;
@@ -475,7 +476,8 @@ impl Dashboard {
                 d,
             )?;
         }
-        f.sem.image(
+        f.sem.node(
+            Role::Image,
             plot,
             "Stapeldiagram: publicerade sidor per veckodag, måndag till söndag, 0 till 60",
         )?;
@@ -531,10 +533,14 @@ impl App for Dashboard {
         f.group(Role::Main, window, "", |f| {
             let w = self.window.width - 2.0 * MARGIN;
             let h = f.text(MARGIN, MARGIN, w, self.title, TITLE)?.h;
-            f.sem.heading(Rect::new(MARGIN, MARGIN, w, h), TITLE)?;
-            let sh = f.text(MARGIN, MARGIN + 32.0, w, self.subtitle, SUBTITLE)?.h;
             f.sem
-                .text(Rect::new(MARGIN, MARGIN + 32.0, w, sh), SUBTITLE)?;
+                .node(Role::Heading, Rect::new(MARGIN, MARGIN, w, h), TITLE)?;
+            let sh = f.text(MARGIN, MARGIN + 32.0, w, self.subtitle, SUBTITLE)?.h;
+            f.sem.node(
+                Role::Text,
+                Rect::new(MARGIN, MARGIN + 32.0, w, sh),
+                SUBTITLE,
+            )?;
             f.group(
                 Role::Region,
                 Rect::new(MARGIN, l.tiles[0].y, w, l.tiles[3].bottom() - l.tiles[0].y),

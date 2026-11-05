@@ -3,7 +3,10 @@
 //!
 //! `Sem` hands out ids in call order starting at 1, keeps a stack of open
 //! parents, and refuses locally what the host would: the 65 537th node is
-//! `DlFull` and a text over 4 KB is `Arg` (SPEC-9.3.2). Ids are stable across
+//! `DlFull` and a text over 4 KB is `Arg` (SPEC-9.3.2). There is one way
+//! to register a node (SPEC-2.1.1): [`Sem::node`] with its [`Role`], or
+//! [`Sem::node_with_id`] for an id the page chooses; [`Sem::begin`] and
+//! [`Sem::end`] (or [`Sem::group`]) nest parents. Ids are stable across
 //! frames as long as the draw order is, which is what `KIND_FOCUS` events
 //! rely on (SPEC-10.3.1); the host walks the focusable nodes in the order
 //! they were registered (SPEC-10.3.2), so register the whole tree every
@@ -185,40 +188,5 @@ impl Sem {
         let r = f(self);
         self.end();
         r
-    }
-
-    /// A `text` node.
-    pub fn text(&mut self, rect: Rect, text: &str) -> Result<NodeId, VyError> {
-        self.node(Role::Text, rect, text)
-    }
-
-    /// A `heading` node.
-    pub fn heading(&mut self, rect: Rect, text: &str) -> Result<NodeId, VyError> {
-        self.node(Role::Heading, rect, text)
-    }
-
-    /// A `link` node named `text`.
-    pub fn link(&mut self, rect: Rect, text: &str) -> Result<NodeId, VyError> {
-        self.node(Role::Link, rect, text)
-    }
-
-    /// A `button` node named `text`.
-    pub fn button(&mut self, rect: Rect, text: &str) -> Result<NodeId, VyError> {
-        self.node(Role::Button, rect, text)
-    }
-
-    /// A `textbox` node whose text is its current value.
-    pub fn textbox(&mut self, rect: Rect, value: &str) -> Result<NodeId, VyError> {
-        self.node(Role::Textbox, rect, value)
-    }
-
-    /// A `checkbox` node named `text`.
-    pub fn checkbox(&mut self, rect: Rect, text: &str) -> Result<NodeId, VyError> {
-        self.node(Role::Checkbox, rect, text)
-    }
-
-    /// An `image` node with alt text.
-    pub fn image(&mut self, rect: Rect, alt: &str) -> Result<NodeId, VyError> {
-        self.node(Role::Image, rect, alt)
     }
 }

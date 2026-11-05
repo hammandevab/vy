@@ -380,7 +380,7 @@ impl DocumentPage {
             f.text(r.x, r.y, 0.0, style, info.label)?;
             f.rect(Rect::new(r.x, r.bottom() - 1.0, r.w, 1.0), 0.0, ACCENT)?;
         }
-        let id = f.sem.link(r, info.label)?;
+        let id = f.sem.node(Role::Link, r, info.label)?;
         self.link_ids[i] = id.0;
         Ok(())
     }
@@ -507,7 +507,7 @@ impl App for DocumentPage {
                 if self.visible(self.layout.title) {
                     f.text(t.x, t.y, t.w, self.title, content::TITLE)?;
                 }
-                f.sem.heading(t, content::TITLE)?;
+                f.sem.node(Role::Heading, t, content::TITLE)?;
 
                 // Byline with the author as a link.
                 let by = self.layout.byline_y - scroll;
@@ -517,7 +517,8 @@ impl App for DocumentPage {
                     f.text(col_x, by, 0.0, self.byline, "Av ")?;
                     f.text(author.right(), by, 0.0, self.byline, content::BYLINE_TAIL)?;
                 }
-                f.sem.text(
+                f.sem.node(
+                    Role::Text,
                     byline_r,
                     &format!("Av {}{}", content::AUTHOR, content::BYLINE_TAIL),
                 )?;
@@ -549,7 +550,7 @@ impl App for DocumentPage {
                 if self.visible(self.layout.lead) {
                     f.text(lead.x, lead.y, lead.w, self.lead, content::LEAD)?;
                 }
-                f.sem.text(lead, content::LEAD)?;
+                f.sem.node(Role::Text, lead, content::LEAD)?;
 
                 // Body blocks, already placed in one or two columns.
                 for (i, b) in BODY.iter().enumerate() {
@@ -560,13 +561,13 @@ impl App for DocumentPage {
                             if on {
                                 f.text(r.x, r.y, r.w, self.h2, t)?;
                             }
-                            f.sem.heading(r, t)?;
+                            f.sem.node(Role::Heading, r, t)?;
                         }
                         Block::Para(t) => {
                             if on {
                                 f.text(r.x, r.y, r.w, self.body, t)?;
                             }
-                            f.sem.text(r, t)?;
+                            f.sem.node(Role::Text, r, t)?;
                         }
                     }
                 }
@@ -580,7 +581,7 @@ impl App for DocumentPage {
                 if self.visible(Rect::new(col_x, self.layout.notes_heading_y, col_w, 24.0)) {
                     f.text(col_x, hy, col_w, self.h2, content::NOTES_HEADING)?;
                 }
-                f.sem.heading(hr, content::NOTES_HEADING)?;
+                f.sem.node(Role::Heading, hr, content::NOTES_HEADING)?;
                 let first = self.layout.notes[0].y;
                 let last = self.layout.links[LINKS - 1].bottom();
                 let list = Rect::new(col_x, first - scroll, col_w, last - first);

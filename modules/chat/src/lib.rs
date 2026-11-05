@@ -512,18 +512,28 @@ impl App for ChatPage {
             let h = self.header();
             f.rect(h, 0.0, PANEL)?;
             f.rect(Rect::new(0.0, h.bottom() - 1.0, h.w, 1.0), 0.0, RULE)?;
-            let th = f.text(MARGIN, 10.0, h.w - 2.0 * MARGIN, self.title, TITLE)?.h;
-            f.sem
-                .heading(Rect::new(MARGIN, 10.0, h.w - 2.0 * MARGIN, th), TITLE)?;
+            let th = f
+                .text(MARGIN, 10.0, h.w - 2.0 * MARGIN, self.title, TITLE)?
+                .h;
+            f.sem.node(
+                Role::Heading,
+                Rect::new(MARGIN, 10.0, h.w - 2.0 * MARGIN, th),
+                TITLE,
+            )?;
             let status = if self.offline.is_some() {
                 format!("{MEMBERS} · offline")
             } else {
                 format!("{MEMBERS} · ansluten")
             };
             let sy = 10.0 + th;
-            let sh = f.text(MARGIN, sy, h.w - 2.0 * MARGIN, self.subtitle, &status)?.h;
-            f.sem
-                .text(Rect::new(MARGIN, sy, h.w - 2.0 * MARGIN, sh), &status)?;
+            let sh = f
+                .text(MARGIN, sy, h.w - 2.0 * MARGIN, self.subtitle, &status)?
+                .h;
+            f.sem.node(
+                Role::Text,
+                Rect::new(MARGIN, sy, h.w - 2.0 * MARGIN, sh),
+                &status,
+            )?;
 
             // Offline banner (SPEC-5.3.1: a refused import is not a failure).
             if let Some(e) = self.offline {
@@ -535,7 +545,7 @@ impl App for ChatPage {
                     f.text(MARGIN, b.y + 8.0, 0.0, self.banner, &text)
                         .map(|_| ())
                 })?;
-                f.sem.text(b, &text)?;
+                f.sem.node(Role::Text, b, &text)?;
             }
 
             // Thread.
