@@ -17,9 +17,15 @@
 FROM rust:1.97-slim-bookworm AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools \
-    && rm -rf /var/lib/apt/lists/* \
-    && rustup target add x86_64-unknown-linux-musl wasm32-unknown-unknown
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# rust-toolchain.toml pekar ut exakt 1.97.0; installera den verktygskedjan
+# (rustup show gör det) INNAN targets läggs till, annars hamnar musl-targetet
+# på bildens standardkedja och saknas när cargo byter till den pinnade.
+COPY rust-toolchain.toml ./
+RUN rustup show active-toolchain \
+    && rustup target add x86_64-unknown-linux-musl wasm32-unknown-unknown \
+    && rustup target list --installed
 COPY . .
 ENV CC_x86_64_unknown_linux_musl=musl-gcc
 # Servern som statisk binär; publiceringsverktygen körs bara här i bygget.
