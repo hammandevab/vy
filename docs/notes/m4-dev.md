@@ -4,7 +4,8 @@ Byggagentens noteringar för grenen `m4/dev` (från main `3bc0bcb`). Gransknings
 annan agent. Spåret: en användare startar `vy-dev` i en projektkatalog, öppnar Studio i Vy, skriver
 "gör en sida som …", och Claude Code bygger sidan, som visas i Vy.
 
-Rörda kataloger: `crates/vy-dev` (ny), `modules/studio` (ny), `conformance/manifests/studio.json`,
+Rörda kataloger: `crates/vy-dev` (ny), `modules/studio` (ny), `docs/DEVELOPING.md` (ny), ett
+icke-normativt stycke i SPEC §17, `conformance/manifests/studio.json`,
 fyra fall i `conformance/cases.toml` med guldbilder och två semantiska träd, `tools/fake_agent.sh`,
 `tools/fake_agent.ps1` och `tools/build_studio.sh` (nya),
 `docs/notes/m4-dev.md` (den här sidan), `Cargo.toml` (en medlemsrad), `Cargo.lock`, och utanför
@@ -17,10 +18,11 @@ formatraden i `conformance/cases.toml` och `conformance/README.md` (se *Berör a
 | --- | --- | --- |
 | 1 `vy-dev new` | `vy-dev new <dir> [--name <n>] [--sdk <vy-checkout>]` skriver ett sidprojekt: `Cargo.toml` på `vy-sdk` (sökväg till checkoutens `crates/vy-sdk` med `--sdk`, annars git-beroendet `https://github.com/hammandevab/vy`), `src/lib.rs` (text, räknare och en knapp med fokusring, `layout()`-mönstret, ett nativt test), `manifest.json` (utkast i formen av `conformance/manifests/*.json`, `published` = dagens datum), release-profilen från `modules/hello` (inget `.cargo/config.toml` finns där), `.gitignore` och en `CLAUDE.md` för en sidskrivande agent: loopen, reglerna, *Klart när*, ett API-sammandrag och SDK:ts README inbäddad (`include_str!`), så agenten inte behöver nätet. | `scaffold_builds_to_wasm_and_passes_check_abi` (bygger till wasm32 här utan varningar, `check_abi_bytes` OK, utkastet validerar mot modulen, första framen har fem semantiska noder, mallen är rustfmt-ren, projektets eget `cargo test` grönt), `api_summary_covers_the_sdk` (varje import, event och roll i SDK:t nämns i sammandraget), `writes_a_project`, `names`, `civil_dates` |
 | 2a `vy-dev build` | Byggkedjan som ett steg: `cargo build --release --target wasm32-unknown-unknown --message-format=json-render-diagnostics` (diagnostiken renderad på stderr = loggen, JSON på stdout namnger modulen var målkatalogen än ligger), ABI-kontrollen (`vy_runtime::check_abi_bytes`, samma kod som `vy-cli check-abi`), utkastet mot modulen och resurserna (`vy_publish::load_resources` + `vy_publish::build`: `memory_max`, bildstorlekar, signatur) och paketet skrivet atomärt (temporär fil + `rename`). Loggen strömmas rad för rad till den som anropar och hålls till de sista 64 KB. `vy-dev build [<dir>] [--key] [--out]` kör den från kommandoraden. Nyckeln: `--key`, annars `VY_DEV_KEY`, annars `<datakatalog>/dev.key` (samma katalog som `vy-shell`: `%APPDATA%\vy`, `~/Library/Application Support/vy`, `~/.config/vy`), skapad med `vy_publish::keygen`/`write_key` första gången. | `build_pipeline_signs_a_valid_package_and_reports_failures` (giltigt signerat paket; trasig källa och för litet `memory_max` ger fel med orsak i loggen och inget paket), `finds_the_module_among_cargo_messages`, `writes_atomically`, `log_keeps_the_tail`, `keys_are_made_once`, `opens_a_scaffold_and_fingerprints_it` |
-| 2 `vy-dev serve` | `vy-dev serve [<dir>] [--port 8080] [--studio-port 8081] [--key <dev.key>] [--agent-cmd <cmd>] [--quiet]`. Två `tiny_http`-servrar, båda på `127.0.0.1`: origin A `vy://localhost:8080/<namn>` är en `vy_serve::Site` över `target/vy-dev/site/` som öppnas på nytt efter varje lyckat bygge (blobbar från gamla byggen släpps), origin B `vy://localhost:8081/` är Studio (steg 5) och dev-API:t under `/_dev/`. Nyckeln och dess `.pub` (`/.well-known/vy-key` på båda) som i 2a; skapad nyckel skrivs ut. En byggtråd med kondvariabel kör kedjan vid start och på begäran; en bevakare läser källornas mtime och längd var 500 ms (`src/`, `res/`, `Cargo.toml`, `manifest.json`, utkastets resurser; inte `Cargo.lock`, som cargo själv skriver) och begär ett bygge när filerna stått still ett intervall och skiljer sig från vad förra bygget utgick från. Byggfel hamnar i byggloggen och statusen, sidan från senaste lyckade bygge serveras vidare. Manifest och paket får `Cache-Control: no-cache`. | `serve_builds_and_serves_two_origins` (start → bygge → signerat paket på A, nyckeln på båda, sidan finns inte på B och API:t inte på A, vakten nekar `Origin`, `Sec-Fetch-Site`, `Referer`, fel `Host` och `X-Forwarded-Host`-förfalskning, `POST /_dev/build` ger samma paket, en trasig källa ger `error` i tillståndet medan sidan finns kvar, en rättad källa byggs av bevakaren, `vy-dev build` från kommandoraden ger samma paket), `fresh_rewrites_cache_control_for_pages_only`, `loopback_hosts`, `guard_refuses_browsers_and_foreign_hosts` |
+| 2 `vy-dev serve` | `vy-dev serve [<dir>] [--port 8080] [--studio-port 8081] [--key <dev.key>] [--agent-cmd <cmd>] [--studio <studio.vyp>] [--quiet]`. Två `tiny_http`-servrar, båda på `127.0.0.1`: origin A `vy://localhost:8080/<namn>` är en `vy_serve::Site` över `target/vy-dev/site/` som öppnas på nytt efter varje lyckat bygge (blobbar från gamla byggen släpps), origin B `vy://localhost:8081/` är Studio (steg 5) och dev-API:t under `/_dev/`. Nyckeln och dess `.pub` (`/.well-known/vy-key` på båda) som i 2a; skapad nyckel skrivs ut. En byggtråd med kondvariabel kör kedjan vid start och på begäran; en bevakare läser källornas mtime och längd var 500 ms (`src/`, `res/`, `Cargo.toml`, `manifest.json`, utkastets resurser; inte `Cargo.lock`, som cargo själv skriver) och begär ett bygge när filerna stått still ett intervall och skiljer sig från vad förra bygget utgick från. Byggfel hamnar i byggloggen och statusen, sidan från senaste lyckade bygge serveras vidare. Manifest och paket får `Cache-Control: no-cache`. | `serve_builds_and_serves_two_origins` (start → bygge → signerat paket på A, nyckeln på båda, sidan finns inte på B och API:t inte på A, vakten nekar `Origin`, `Sec-Fetch-Site`, `Referer`, fel `Host` och `X-Forwarded-Host`-förfalskning, `POST /_dev/build` ger samma paket, en trasig källa ger `error` i tillståndet medan sidan finns kvar, en rättad källa byggs av bevakaren, `vy-dev build` från kommandoraden ger samma paket), `fresh_rewrites_cache_control_for_pages_only`, `hosts_must_name_the_api`, `guard_refuses_browsers_foreign_hosts_and_missing_tokens` |
 | 3 dev-API och agent | På origin B, varje väg med `token=<körningens nyckel>`: `GET /_dev/state` → `{name, address, build: {status, log, builds}, agent: {running, last_exit}, seq}`; `POST /_dev/build` → 202; `POST /_dev/agent` (kroppen = uppdraget, UTF-8, högst 64 KB) → 202, 409 när en agent redan kör, 400/413 för tomt, ogiltigt eller för långt, 500 med orsak när programmet inte startar; `POST /_dev/agent/stop` → `{stopped}`; `GET /_dev/agent/events?after=<seq>&wait=<ms>&raw=0&limit=<n>` → `{next, entries: [{seq, kind, text, status?}]}`, long-poll upp till 20 s. Agenten startas som `<cmd> -p --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cargo *),Bash(vy-cli *),Bash(vy-dev build*),Bash(ls *)"` i projektkatalogen med uppdraget på stdin, `vy-dev`s egen katalog först på `PATH` (där `vy-cli` ligger i en release) och `VY_DEV_KEY` satt. Kommandot: `--agent-cmd`, annars `VY_AGENT_CMD`, annars `claude`; på Windows slås ett namn utan filändelse upp med `PATHEXT` (på `PATH`, eller bredvid sig själv för en sökväg), så `claude.cmd` hittas. Utdata läses rad för rad in i en ringlogg (4 000 poster, 8 KB per post): varje rå rad (`raw`), assistentens text (`assistant`), verktygets namn och vad det rörde (`tool`, t.ex. `Edit src/lib.rs`), slutresultatet (`result`), start/stopp/exit (`agent`) och byggen (`build` med `status`). En agent i taget; när den avslutas begärs ett bygge; under tiden begär bevakaren inget. Stopp: `taskkill /T /F` på Windows, annars processträdet ur `ps` med `SIGTERM` och efter 1,5 s `SIGKILL`. | `agent_runs_streams_stops_and_triggers_a_build` med `tools/fake_agent.sh` (uppdraget kommer fram på stdin med exakt de fasta flaggorna, händelserna kommer som text och verktygsnamn utan råa rader, 409 under en körning, stopp avslutar agenten och dess barnprocess, exit bygger och agentens ändring syns i modulen på A, råa rader med `raw=1`, tom long-poll efter `wait`, `limit` ger de nyaste, exitkod 3 rapporteras), `an_agent_that_does_not_start_is_reported`, `commands_parse`, `finds_scripts_with_pathext`, `process_trees`, `stream_json_lines_become_entries`, `select_filters_raw_and_keeps_the_newest`, `sequence_and_cap` |
 | 4 Studio (`modules/studio`) | En vanlig ABI 1.0-sida på `vy-sdk` (60 KB wasm): rubrik med projektets namn, statuspiller (väntar / bygger / klar / fel), adressen till sidan under utveckling som länk (`link_register` + nod `link`), uppdragsfält (`textbox`, `ime_begin`/`ime_end` efter värdens fokus, en rad som rullar så slutet syns), **Kör** (blir **Stoppa** medan agenten arbetar) och **Bygg om**, en rad för vad senaste knappen gjorde, agentens logg (lista med assistentens text, verktygsnamn, resultat och bygghändelser; följer nyaste posten, `SCROLL` och Page Up/Down rullar) och byggloggen (svansen som får plats, felrader röda). Nätet: `GET /_dev/state` och `GET /_dev/agent/events` som long-poll (`wait=1000`, `raw=0`, `limit=200`) som ställs om så fort den svarar, `POST` för knapparna, alla mot sin egen origin med `fetch_begin` → `FETCH_DONE` → `fetch_poll` = 1 → `fetch_read` till 0. `storage` håller senaste uppdraget. Var API:t finns och körningens nyckel står i en platshållare (`VYDEV-STUDIO-CONFIG http://localhost:8081 000…`, 128 byte i en `static` som läses med volatila läsningar) som `vy-dev` skriver över före signering (steg 5). Utan `net` säger sidan det och väntar på `CAPABILITY`; tappad förbindelse visas och prövas igen efter 2 s. Egen JSON-läsare (`json.rs`, RFC 8259, djup ≤ 32). Manifestutkast `conformance/manifests/studio.json` (`ime`, `net` mot `http://localhost:8081`, `storage` 16 KB, `memory_max` 256). | Nativt: `reads_the_dev_api_answers`, `strings_unescape`, `refuses_what_is_not_json`, `config_placeholder_and_patched`, `spec_5_3_1_without_net_studio_says_so`, `answers_become_state_and_log`, `spec_10_1_1_the_tree_names_everything`, `spec_5_2_9_typing_and_the_kept_mission`, `layout_fits`. Konformans: `studio-800x600@1` (träd `studio`), `studio-800x600@1-running` (fokus, uppdrag, Kör, agentens poster, 202; träd `studio-running`), `studio-400x700@2`, `studio-800x600@1-error` – inspelade svar med platshållarnyckeln, `fetch_done` i begärd ordning. |
 | 5 Studio i `vy-dev serve` | `vy-dev serve` letar `studio.vyp` (`--studio <fil>`, annars bredvid binären, annars en katalog upp: `target/studio.vyp` i en checkout, som `tools/build_studio.sh` skriver). Paketet anpassas till körningen innan det serveras som `index` på origin B: modulens konfigurationsblock får `http://localhost:<studio-port> <nyckel>` (exakt en förekomst av markören, samma längd, utfyllt med mellanslag), manifestets `net` blir den origin ensam, modulens hash och storlek följer de nya byten, och utvecklarnyckeln signerar. Finns inget paket svarar API:t ändå och terminalen säger hur man bygger ett. `tools/build_studio.sh [ut]` bygger modulen och packar den med en slängnyckel (`VY_PUBLISH` kan peka på en färdig `vy-publish`). | `studio_runs_a_mission_through_the_client_path`: paketet som `build_studio.sh` gör, `vy-dev serve --studio`, `vy-proto` hämtar Studio från `vy://localhost:<b>/` och litar på den, `net`/`ime`/`storage` beviljas utan fråga, modulen bär körningens origin och nyckel och inte platshållaren, `vy-runtime` kör den riktiga modulen med `Transport::External`, varje begäran prövas mot `plain_http_allowed` och utförs med `Fetcher::request` som skalets laddare gör; adressen blir en länk, ett uppdrag skrivs och körs med Kör, den falska agenten får det, och agentens text, verktygsnamn och "agenten är klar" syns i Studios träd. `studio_config_block_is_patched_in_place`, `studio_lookup_order`. |
+| 6 Dokumentation | `docs/DEVELOPING.md`: de två vägarna (för hand och med Studio), förutsättningar, portar och origins, felsökning. Ett icke-normativt stycke i SPEC §17 om `vy-dev` och Studio (två meningar, inga id). | – |
 
 ## Beslut
 
@@ -60,6 +62,17 @@ formatraden i `conformance/cases.toml` och `conformance/README.md` (se *Berör a
   klonar och kompilerar i minuter); `log` i `/_dev/state` är alltid det senaste byggets.
 - **Händelseformatet** är ett objekt `{next, entries}` och inte en ren lista: med `raw=0` hoppar
   klienten över råa rader och behöver ändå veta var den ska fortsätta.
+- **Studio får sin konfiguration genom modulen, inte genom klienten.** En sida kan inte fråga efter
+  sin egen adress, och `fetch_begin` tar bara absoluta adresser. I stället för en ny import eller
+  en specialväg i klienten har modulen ett 128 byte stort block med en unik markör som `vy-dev`
+  skriver över innan det signerar (samma längd, så inget i modulen flyttas). Paketet i en release är
+  därmed generiskt och kan signeras med en slängnyckel.
+- **Studios long-poll väntar högst 1 s** (`wait=1000`), inte 20: skalets laddare utför en sidas
+  begäranden en i taget (se *Öppna frågor*), och en lång väntan hade hållit uppe både Studios egna
+  knappar och andra flikars laddning.
+- **Studio drar slutsatser om agenten ur händelserna** (`uppdrag:` → arbetar, `agenten …` → klar) och
+  läser om `/_dev/state` bara när ett bygge blivit klart eller fel, så att tillståndet och historiken
+  aldrig motsäger varandra mitt i en körning.
 - **Testprojekt byggs i `target/vy-dev-tests`** (`CARGO_TARGET_DIR`), så upprepade körningar delar
   ett bygge av `vy-sdk` i stället för att fylla disken med en katalog per test.
 
@@ -161,6 +174,18 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
 | `vy-abi` (bara `dev-dependencies`) | händelsetyper och metodnamn när Studio-testet driver modulen | konstanterna finns där och ska inte kopieras | 0 nya |
 | `vy-proto` (bara `dev-dependencies`) | klientens egen begäranväg i `origin_boundary` | testet ska pröva klientens kod, inte en kopia | 0 nya (ureq, rustls fanns) |
 
+## Grindar och tal
+
+På grenens topp: `cargo fmt --all --check` och `cargo clippy --workspace --all-targets -D warnings`
+rena; `cargo test --workspace` 282 gröna och 19 ignorerade (var 257 och 19 på `3bc0bcb`), där enda
+röda någon gång är tidsgränstestet i *Öppna frågor* 3, som går igenom ensamt; `spec_trace.py`
+132/132 (inga nya id); 12 moduler bygger, `check-abi` OK, `test_modules.sh` 12/12; konformans 59/59
+à 0,000 % (var 55), med en privat kopia av `vy-cli` (delade binärer i `target/debug` kan bytas av
+andra arbetskopior mellan bygge och körning). `vy-dev` typkontrollerad för
+`x86_64-pc-windows-msvc` och `aarch64-apple-darwin` (byggskripten för C-beroenden fick en låtsas-
+kompilator som skriver tomma objektfiler, eftersom sandlådan saknar Windows- och macOS-SDK:er).
+Testprojekt byggs i `target/vy-dev-tests` (13 MB).
+
 ## Öppna frågor
 
 1. **Vem ringer?** Ett localhost-API kan inte skilja Studio från en annan Vy-sida som fått `net` mot
@@ -171,8 +196,22 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
    typkontrollerade men inte körda här (ingen Windows i sandlådan); CI:s Windows-jobb kör
    `agent_end_to_end` med den.
 3. **Byggtestet för tidsgränser** `vy_render::tests::spec_5_3_3_bench_32_rounded_clips_2000_rects`
-   (1 s i debug) faller ibland här när fyra agenter bygger på två kärnor (1,1–1,3 s) och går igenom
+   (1 s i debug) faller ibland här när fyra agenter bygger på två kärnor (1,0–1,3 s) och går igenom
    ensam. Oberoende av den här grenen.
+4. **Skalets laddare är en tråd.** `vy_shell::page::start_loader` utför sidors `fetch_begin` en i
+   taget; en long-poll från Studio (≤ 1 s) skjuter upp andra flikars laddning lika länge. En liten
+   pool eller en tråd per begäran (med samma gränser) vore bättre – m4/ux.
+5. **Flikens grind är öppen när listan är tom** (före den här grenen): `Options::net_origins` tom
+   betyder "inget manifest", men skalet skickar manifestets lista, som är tom också när `net` begärs
+   med enbart origins som `origin_of` inte känner (`vy://…`) eller utan origins. Huvudprocessens
+   `request_verdict` är sträng och räddar läget i skalet; plain http täcks av den här grenens regel.
+   Bör stängas i `vy-runtime` (m4/perf, m4/security), t.ex. `Option<Vec<String>>`.
+6. **Konformansfallet för Studio** svarar med platshållarnyckeln och `http://localhost:8081`, eftersom
+   modulen i `target/wasm/` är den okodade. Det prövar sidan, inte anpassningen; anpassningen prövas
+   av `studio_end_to_end`.
+7. **SPEC-7.1.3 och en sidas egna anrop.** Meningen gäller `vy://`; att en sidas `fetch_begin` på
+   loopback följer samma undantag (och bara mot sin egen origin) står bara i koden och den här sidan.
+   En mening i §7 vore tydligare; lämnad till specägaren.
 
 ## Berör andra spår
 
@@ -199,8 +238,36 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
   tab.origin>)`, annars `E_ORIGIN`. Då når en sida bara sin egen loopback-origin över plain http,
   vad användaren än beviljat.
 - `vy-publish` och `vy-serve` används som bibliotek med sina befintliga publika funktioner; inget i
-  dem är ändrat. Utöver det bara medlemsraden i `Cargo.toml`, `Cargo.lock` och nya filer i
-  `tools/` (`fake_agent.sh`, `fake_agent.ps1`).
+  dem är ändrat. Utöver det bara medlemsraden i `Cargo.toml`, `Cargo.lock`, nya filer i `tools/`
+  (`fake_agent.sh`, `fake_agent.ps1`, `build_studio.sh`) och ett stycke i SPEC §17 (eget
+  `spec:`-commit).
+
+## För m4/ux: krokarna
+
+- **"Öppna Studio"**: öppna `vy://localhost:8081/` (eller den `--studio-port` användaren valt) som en
+  vanlig sida. Studio behöver inget av klienten utöver vanlig laddning och `net` mot sin egen origin,
+  som standardpolicyn beviljar utan fråga.
+- **Live-reload i devtools**: anropa inte `/_dev/` (det kräver körningens nyckel, som bara Studio och
+  terminalen har). Hämta i stället sidans egen adress på nytt: origin A serverar manifest och paket
+  med `Cache-Control: no-cache`, och `ETag` och identitet ändras efter varje lyckat bygge. Ladda om
+  fliken när identiteten ändrats.
+- **Länken i Studio** är `vy://localhost:8080/<namn>` via `link_register`; ett klick ska öppna den
+  i en flik som andra `vy://`-länkar.
+- **Den hårda regeln för plain http** (se *Berör andra spår*): `vy_runtime::plain_http_allowed` i
+  `Shell::request_verdict`.
+
+## Vid merge
+
+- `Cargo.toml` (medlemsrad) och `Cargo.lock` (posten för `vy-dev`) är tillägg.
+- `vy-runtime` (`182477a`): ändringen ligger i `origin_of` och `fetch_begin`s origingrind; behåll
+  båda sidornas ändringar där om m4/perf rört samma rader.
+- `vy-cli` (`7562b78`, `0c46014`): parserns skanner och talet tolv. Lägger ett annat spår till en
+  modul blir talen i `conformance_manifests_validate` och `spec_10_4_2_ime_required_for_input`
+  tretton.
+- `conformance/cases.toml`: Studios fyra fall står före skalfallen; fall från andra spår kan läggas
+  var som helst.
+- `tools/publish_site.sh` publicerar Studio tills deploy-spåret hoppar över den (se *Release*).
+- Den otrackade `.cargo/config.toml` i arbetskatalogen (samordnarens, isolerar byggen) ska inte med.
 
 ## Release
 
