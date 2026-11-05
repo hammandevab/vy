@@ -92,9 +92,10 @@ impl Path {
 
 /// The display list being built for the current `vy_frame`.
 ///
-/// Created by the export glue (see [`crate::App::frame`]) or, in native
-/// tests, with [`Frame::begin`]. `sem` registers the semantic tree
-/// alongside (SPEC-10.1.1).
+/// Only the export glue creates one (see [`crate::App::frame`]), so a page
+/// cannot open a list outside `vy_frame` (SPEC-5.3.2, SPEC-6.1.2); native
+/// tests run a page's frame with `vy_sdk::mock::run_frame`. `sem` registers
+/// the semantic tree alongside (SPEC-10.1.1).
 pub struct Frame {
     ops: u32,
     clip_depth: u32,
@@ -106,7 +107,7 @@ impl Frame {
     /// `dl_begin`: start a new display list (SPEC-6.1.2). The host refuses
     /// a `dl_begin` while a list is open (SPEC-5.3.2), which a `Frame` built
     /// by the export glue never does; the status is therefore not surfaced.
-    pub fn begin() -> Self {
+    pub(crate) fn begin() -> Self {
         // SAFETY: no arguments.
         let _ = unsafe { raw::dl_begin() };
         Self {
@@ -119,7 +120,7 @@ impl Frame {
     /// `dl_end`: close the list. Returns the opcode count `vy_frame` reports
     /// (SPEC-5.1.2); `DlClip` if clip pushes were left open (SPEC-6.1.4),
     /// in which case the host closed the list anyway.
-    pub fn end(self) -> Result<u32, VyError> {
+    pub(crate) fn end(self) -> Result<u32, VyError> {
         // SAFETY: no arguments.
         check(unsafe { raw::dl_end() })?;
         if self.clip_depth != 0 {

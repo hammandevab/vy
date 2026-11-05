@@ -2,12 +2,14 @@
 //! committed text into before delivering `TEXT_INPUT` or `IME_COMPOSE`.
 //!
 //! The host hands the pointer straight back in the event, so a buffer only
-//! has to live until the event that carries it has been dispatched. The
-//! arena is `ARENA_BYTES` large and wraps to its start when full; a buffer
-//! therefore stays valid until the arena has wrapped, which never happens
-//! within one event. On wasm32 the handle is the buffer's address in linear
-//! memory; natively, where pointers do not fit an `i32`, it is the offset
-//! into the arena, and [`bytes`] understands both.
+//! has to live until the event that carries it has been dispatched
+//! (SPEC-5.1.6), and that is exactly how long a page can see it: the bytes
+//! are borrowed from a [`Dispatch`], which the export glue creates for one
+//! `vy_event` and drops when it returns. The arena is `ARENA_BYTES` large
+//! and wraps to its start when full, which never happens within one event.
+//! On wasm32 the handle is the buffer's address in linear memory; natively,
+//! where pointers do not fit an `i32`, it is the offset into the arena, and
+//! [`Dispatch::bytes`] understands both.
 
 use core::cell::UnsafeCell;
 
@@ -66,20 +68,37 @@ pub fn alloc(size: i32) -> i32 {
     }
 }
 
-/// The bytes behind a handle from [`alloc`] and a length, or `None` when the
-/// range is not inside the arena.
-pub fn bytes(handle: i32, len: i32) -> Option<&'static [u8]> {
-    let (Ok(handle), Ok(len)) = (usize::try_from(handle), usize::try_from(len)) else {
-        return None;
-    };
-    let start = handle.checked_sub(origin())?;
-    let end = start.checked_add(len)?;
-    if end > ARENA_BYTES {
-        return None;
+/// One `vy_event` dispatch's view of the arena. The export glue makes one
+/// per event; the bytes behind a handle are borrowed from it and so cannot
+/// outlive the event that carried them (SPEC-5.1.6).
+pub struct Dispatch(());
+
+impl Dispatch {
+    pub(crate) fn new() -> Self {
+        Self(())
     }
-    // SAFETY: the range is inside the arena, which lives for the program;
-    // nothing writes to it while an event is being dispatched.
-    Some(unsafe { core::slice::from_raw_parts(base().add(start), len) })
+
+    /// The bytes behind a handle from [`alloc`] and a length, or `None` when
+    /// the range is not inside the arena.
+    pub fn bytes(&self, handle: i32, len: i32) -> Option<&[u8]> {
+        let (Ok(handle), Ok(len)) = (usize::try_from(handle), usize::try_from(len)) else {
+            return None;
+        };
+        let start = handle.checked_sub(origin())?;
+        let end = start.checked_add(len)?;
+        if end > ARENA_BYTES {
+            return None;
+        }
+        // SAFETY: the range is inside the arena, which lives for the
+        // program; the host writes to it only between events (SPEC-5.3.4),
+        // and the slice cannot outlive this dispatch.
+        Some(unsafe { core::slice::from_raw_parts(base().add(start), len) })
+    }
+
+    /// [`Dispatch::bytes`] as UTF-8, or `None` when it is not.
+    pub fn str(&self, handle: i32, len: i32) -> Option<&str> {
+        core::str::from_utf8(self.bytes(handle, len)?).ok()
+    }
 }
 
 /// Write `data` into a fresh buffer as the host would before a

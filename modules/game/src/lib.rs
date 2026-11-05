@@ -457,9 +457,7 @@ mod tests {
     }
 
     fn run_frame(g: &mut Game) -> usize {
-        let mut f = Frame::begin();
-        g.frame(&mut f, 16).unwrap();
-        f.end().unwrap();
+        mock::run_frame(g, 16).unwrap();
         mock::with(|h| h.frame_ops().len())
     }
 

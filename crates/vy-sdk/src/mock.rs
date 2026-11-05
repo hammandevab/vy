@@ -9,6 +9,9 @@
 //! wrapped greedily at word boundaries. Pixels are never produced; that is
 //! what `vy-cli render` and the conformance suite are for.
 
+use crate::app::App;
+use crate::error::VyError;
+use crate::frame::Frame;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -202,6 +205,18 @@ pub fn reset() {
 /// Take the current thread's mock host, leaving a fresh one.
 pub fn take() -> MockHost {
     with(core::mem::take)
+}
+
+/// Run one `vy_frame` of `app` against the mock as the export glue would:
+/// open the list, let the page draw, close it. Returns the opcode count the
+/// glue would report (SPEC-5.1.2), or the page's error, or `DlClip` for a
+/// clip left open (SPEC-6.1.4). The only way to get a [`Frame`] outside the
+/// glue, and only natively.
+pub fn run_frame<A: App>(app: &mut A, dt_ms: i32) -> Result<u32, VyError> {
+    let mut f = Frame::begin();
+    let drawn = app.frame(&mut f, dt_ms);
+    let ended = f.end();
+    drawn.and(ended)
 }
 
 impl MockHost {

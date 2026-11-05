@@ -183,6 +183,11 @@ fn spec_5_1_exports_lifecycle() {
 
     let ops = vy_frame(16);
     assert_eq!(ops, 2, "a rect and a text");
+    assert_eq!(
+        mock::run_frame(__VY_APP.get().unwrap(), 16),
+        Ok(2),
+        "the native test entry draws the same frame"
+    );
     mock::with(|h| {
         assert_eq!(h.ops.first(), Some(&Op::Begin));
         assert_eq!(h.ops.last(), Some(&Op::End));
@@ -214,7 +219,8 @@ fn spec_5_1_exports_lifecycle() {
 
     let p = vy_alloc(16);
     assert_ne!(p, 0);
-    assert_eq!(arena::bytes(p, 16).unwrap().len(), 16);
+    let d = arena::Dispatch::new();
+    assert_eq!(d.bytes(p, 16).unwrap().len(), 16);
     assert_eq!(vy_alloc(-1), 0, "bad size is 0");
 }
 
@@ -552,7 +558,8 @@ fn spec_a_2_1_event_decoding() {
     );
     // Text events through the arena (SPEC-5.1.6).
     let (ptr, len) = arena::write("åäö".as_bytes()).unwrap();
-    let resolve = |p, l| arena::bytes(p, l).and_then(|b| core::str::from_utf8(b).ok());
+    let dispatch = arena::Dispatch::new();
+    let resolve = |p, l| dispatch.str(p, l);
     assert_eq!(
         Event::decode(kind::TEXT_INPUT, ptr, len, 0, 0, resolve),
         Event::TextInput { text: "åäö" }
@@ -591,13 +598,14 @@ fn spec_5_1_6_arena() {
         (0, arena::ARENA_BYTES),
         "wrapped to the start"
     );
+    let d = arena::Dispatch::new();
     assert_eq!(
-        arena::bytes(big, arena::ARENA_BYTES as i32).unwrap().len(),
+        d.bytes(big, arena::ARENA_BYTES as i32).unwrap().len(),
         arena::ARENA_BYTES
     );
-    assert!(arena::bytes(big, arena::ARENA_BYTES as i32 + 1).is_none());
-    assert!(arena::bytes(-1, 1).is_none());
-    assert!(arena::bytes(big, -1).is_none());
+    assert!(d.bytes(big, arena::ARENA_BYTES as i32 + 1).is_none());
+    assert!(d.bytes(-1, 1).is_none());
+    assert!(d.bytes(big, -1).is_none());
 }
 
 /// SPEC-5.2.4, SPEC-5.2.5, SPEC-6.4.3: `Frame::text` returns the host's

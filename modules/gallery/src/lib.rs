@@ -471,9 +471,7 @@ mod tests {
     #[test]
     fn every_fit_mode_is_on_screen() {
         let mut page = page(800.0, 600.0);
-        let mut f = Frame::begin();
-        page.frame(&mut f, 16).unwrap();
-        f.end().unwrap();
+        mock::run_frame(&mut page, 16).unwrap();
         mock::with(|h| {
             let fits: alloc::vec::Vec<i32> = h
                 .frame_ops()
@@ -506,9 +504,7 @@ mod tests {
             modifiers: Modifiers(0),
         }));
         assert_eq!(page.open, Some(1));
-        let mut f = Frame::begin();
-        page.frame(&mut f, 16).unwrap();
-        f.end().unwrap();
+        mock::run_frame(&mut page, 16).unwrap();
         mock::with(|h| {
             let last = h
                 .frame_ops()

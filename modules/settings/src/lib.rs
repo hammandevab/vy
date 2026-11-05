@@ -956,9 +956,7 @@ mod tests {
         assert!(page.values.compact);
         assert_eq!(page.last_save, Some(Err(VyError::Denied)));
         assert!(page.status_text().contains("E_DENIED"));
-        let mut f = Frame::begin();
-        page.frame(&mut f, 16).unwrap();
-        assert!(f.end().unwrap() > 20);
+        assert!(mock::run_frame(&mut page, 16).unwrap() > 20);
         mock::with(|h| {
             assert!(h.sem.iter().any(|n| n.text == "Kompakt läge: på"));
             assert!(h.sem.iter().any(|n| n.text == "Volym: 40"));

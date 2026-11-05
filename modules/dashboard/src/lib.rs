@@ -636,9 +636,7 @@ mod tests {
             !mv(&mut page, bar.x + 1.0, bar.y + 20.0),
             "same bar: no redraw"
         );
-        let mut f = Frame::begin();
-        page.frame(&mut f, 16).unwrap();
-        f.end().unwrap();
+        mock::run_frame(&mut page, 16).unwrap();
         mock::with(|h| {
             assert!(h.sem.iter().any(|n| n.text == "Ons: 52 sidor"));
             assert!(h.refusals.is_empty(), "{:?}", h.refusals);

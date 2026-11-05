@@ -510,9 +510,7 @@ mod tests {
     #[test]
     fn frame_draws_only_visible_rows() {
         let mut page = page();
-        let mut f = Frame::begin();
-        page.frame(&mut f, 16).unwrap();
-        f.end().unwrap();
+        mock::run_frame(&mut page, 16).unwrap();
         mock::with(|h| {
             let items = h
                 .sem

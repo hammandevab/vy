@@ -126,9 +126,10 @@ pub fn event<A: App>(slot: &Slot<A>, kind: i32, a: i32, b: i32, c: i32, d: i32) 
     let Some(app) = slot.get() else {
         return 0;
     };
-    let ev = Event::decode(kind, a, b, c, d, |ptr, len| {
-        arena::bytes(ptr, len).and_then(|b| core::str::from_utf8(b).ok())
-    });
+    // The text of a `TEXT_INPUT` lives in the arena for this dispatch only
+    // (SPEC-5.1.6): the event borrows it, and both end with this call.
+    let dispatch = arena::Dispatch::new();
+    let ev = Event::decode(kind, a, b, c, d, |ptr, len| dispatch.str(ptr, len));
     i32::from(app.event(ev))
 }
 

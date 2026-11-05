@@ -102,12 +102,14 @@ kontrollera med `vy-cli check-abi` och rendera med `vy-cli render`. Referenssido
 
 ```rust
 vy_sdk::mock::reset();
-let mut page = Page::init(Window { width: 800.0, height: 600.0, scale: 1.0 }, 0);
-let mut f = Frame::begin();
-page.frame(&mut f, 16).unwrap();
-assert_eq!(f.end(), Ok(4), "bakgrund, två texter, knapp");
+let mut page = Page::init(Window { width: 800.0, height: 600.0, scale: 1.0 }, 0).unwrap();
+assert_eq!(vy_sdk::mock::run_frame(&mut page, 16), Ok(6), "bakgrund, kort, två texter, knapp, linje");
 vy_sdk::mock::with(|h| assert_eq!(h.sem.len(), 4, "main, heading, text, button"));
 ```
+
+`Frame` kan bara skapas av exportlimmet (och av `mock::run_frame` nativt), så en display list
+utanför `vy_frame` går inte att skriva från Rust (SPEC-5.3.2). Texten i en `TEXT_INPUT` lånas ur
+`vy_alloc`-arenan bara för det `vy_event` som bär den (SPEC-5.1.6): `Event<'_>` kan inte sparas.
 
 Mockens textmodell är fast (varje tecken `storlek × 0,6` brett, rader `storlek × 1,25` höga); pixlar
 kommer bara från `vy-cli render` och konformanssviten.
