@@ -29,7 +29,7 @@ use std::time::Instant;
 use vy_abi::{cap, event, key, modifier};
 use vy_manifest::Manifest;
 use vy_render::{ImageCache, RgbaImage, TextEngine};
-use vy_runtime::{Capabilities, Link, RandomSource};
+use vy_runtime::{Capabilities, Link, RandomSource, SemNode};
 
 /// Milliseconds between frames of an animating page, and the headless
 /// clock's step per tick.
@@ -129,6 +129,7 @@ struct Tab {
     display_list: Vec<u8>,
     rendered: Option<(u32, u32, f32, RgbaImage)>,
     links: Vec<Link>,
+    sem: Vec<SemNode>,
     has_tree: Option<bool>,
     loaded: bool,
     tick_pending: bool,
@@ -167,6 +168,7 @@ impl Tab {
             display_list: Vec::new(),
             rendered: None,
             links: Vec::new(),
+            sem: Vec::new(),
             has_tree: None,
             loaded: false,
             tick_pending: false,
@@ -427,6 +429,16 @@ impl Shell {
         self.tab(id).map(|t| t.links.clone()).unwrap_or_default()
     }
 
+    /// A tab's semantic tree as last sent (SPEC-10.1.1).
+    pub fn tab_semantic(&self, id: TabId) -> Vec<SemNode> {
+        self.tab(id).map(|t| t.sem.clone()).unwrap_or_default()
+    }
+
+    /// True when a tab is hidden (not active, or under its `min_size`).
+    pub fn tab_hidden(&self, id: TabId) -> bool {
+        self.tab(id).is_some_and(|t| t.hidden)
+    }
+
     /// The address field, for tests.
     pub fn address(&self) -> &AddressField {
         &self.address
@@ -514,6 +526,23 @@ impl Shell {
         if let Some(s) = source {
             self.navigate_tab(id, s, true);
         }
+        id
+    }
+
+    /// Open a tab with a page that is already in hand (a package another
+    /// part of the client fetched and judged), skipping the loader.
+    pub fn open_tab_loaded(&mut self, page: LoadedPage) -> TabId {
+        let id = self.open_tab(None);
+        if let Some(tab) = find_tab(&mut self.tabs, id) {
+            tab.generation += 1;
+            tab.history.push(&page.display);
+            tab.source = Some(Source::File {
+                path: PathBuf::from(&page.display),
+                draft: None,
+            });
+            tab.state = State::Loading;
+        }
+        self.start_page(id, page);
         id
     }
 
@@ -678,6 +707,7 @@ impl Shell {
             tab.display_list.clear();
             tab.rendered = None;
             tab.links.clear();
+            tab.sem.clear();
             tab.has_tree = None;
             tab.loaded = false;
             tab.tick_pending = false;
@@ -1014,10 +1044,12 @@ impl Shell {
             }
             ToShell::Semantic(nodes) => {
                 let had = self.tab(id).and_then(|t| t.has_tree);
+                let has = !nodes.is_empty();
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.has_tree = Some(!nodes.is_empty());
+                    tab.has_tree = Some(has);
+                    tab.sem = nodes;
                 }
-                if had != Some(!nodes.is_empty()) && active {
+                if had != Some(has) && active {
                     self.frame_dirty = true;
                 }
             }
