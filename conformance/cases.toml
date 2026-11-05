@@ -713,3 +713,40 @@ events = [
   {kind = "suspend"},                               # vy_suspend: sparar en gång till
   {kind = "reinit"},                                # ny instans med samma lagring: "Sparade inställningar laddade."
 ]
+
+# Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
+# flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
+# adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i
+# begränsat läge (SPEC-7.4.3), så markören "begränsat läge" syns. Inga events, inget träd.
+
+[[case]]
+name = "shell-hello-800x600@1"
+module = "hello"
+width = 800
+height = 600
+scale = 1
+shell = true
+
+[[case]]
+name = "shell-shop-1000x700@1"
+module = "shop"
+width = 1000
+height = 700
+scale = 1
+shell = true
+
+[[case]]
+name = "shell-form-400x700@2"
+module = "form"
+width = 400
+height = 700
+scale = 2
+shell = true
+
+[[case]]
+name = "shell-document-300x200@1"              # under min_size 320 × 240: manifestets reserv (SPEC-8.3.1)
+module = "document"
+width = 300
+height = 200
+scale = 1
+shell = true
