@@ -23,6 +23,6 @@
     {"id": 21, "parent_id": 1, "role": 17, "role_name": "dialog", "x": 0, "y": 0, "w": 800, "h": 600, "text": "Vågor"},
     {"id": 22, "parent_id": 21, "role": 10, "role_name": "image", "x": 24, "y": 68, "w": 752, "h": 452, "text": "Vågräta vågband i tre turkosa nyanser"},
     {"id": 23, "parent_id": 21, "role": 1, "role_name": "text", "x": 24, "y": 532, "w": 752, "h": 44, "text": "3 av 8: Vågor. Vågräta vågband i tre turkosa nyanser · 200 × 300 px · contain · pil vänster/höger bläddrar, Escape stänger"},
-    {"id": 900, "parent_id": 21, "role": 4, "role_name": "button", "x": 688, "y": 24, "w": 88, "h": 32, "text": "Stäng"}
+    {"id": -900, "parent_id": 21, "role": 4, "role_name": "button", "x": 688, "y": 24, "w": 88, "h": 32, "text": "Stäng"}
   ]
 }

@@ -22,6 +22,6 @@
     {"id": 20, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 256.375, "w": 432, "h": 24, "text": "Datum: 2026-01-17"},
     {"id": 21, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 280.375, "w": 432, "h": 24, "text": "Belopp: 13 449 kr"},
     {"id": 22, "parent_id": 16, "role": 1, "role_name": "text", "x": 184, "y": 316.375, "w": 432, "h": 56.25, "text": "Raden öppnades med Enter eller ett klick på en redan markerad rad. Escape, Enter eller ett klick utanför kortet stänger."},
-    {"id": 900, "parent_id": 16, "role": 4, "role_name": "button", "x": 496, "y": 392.625, "w": 120, "h": 40, "text": "Stäng"}
+    {"id": -900, "parent_id": 16, "role": 4, "role_name": "button", "x": 496, "y": 392.625, "w": 120, "h": 40, "text": "Stäng"}
   ]
 }
