@@ -194,10 +194,10 @@ mod tests {
     }
 
     fn draft() -> Draft {
-        Draft::from_json(include_str!("../tests/fixtures/hello.json")).unwrap()
+        Draft::from_json(include_str!("../../../conformance/manifests/hello.json")).unwrap()
     }
 
-    /// The fixture, finished with a 2-page module and no resources, signed.
+    /// The hello draft, finished with a 2-page module and no resources, signed.
     fn hello() -> (Manifest, Vec<u8>) {
         let wasm = module(2);
         let mut m = draft().finish(&wasm, &[]);
@@ -425,7 +425,7 @@ mod tests {
 
     /// SPEC-4.1.2, SPEC-2.1.2: package identity is SHA-256 of the canonical
     /// CBOR without `sig`, so re-signing keeps the identity and any other
-    /// change moves it. The canonical bytes of the fixture are pinned.
+    /// change moves it. The canonical bytes of the hello draft are pinned.
     #[test]
     fn spec_4_1_2_identity_is_hash_of_canonical_cbor() {
         let (signed, wasm) = hello();
@@ -440,7 +440,7 @@ mod tests {
         other.name.push('!');
         assert_ne!(other.identity(), signed.identity());
 
-        // Determinism: the fixture with this module encodes to these bytes,
+        // Determinism: the hello draft with this module encodes to these bytes,
         // keys sorted by their encoding (shorter first, then bytewise).
         let module_hash = Hash::of(&wasm).hex();
         let mut expected = String::new();
@@ -462,7 +462,7 @@ mod tests {
         expected.push_str("6866616c6c6261636b"); // "fallback"
         expected.push_str(&text_hex(signed.fallback.as_ref().unwrap()));
         expected.push_str("697075626c6973686564"); // "published"
-        expected.push_str(&text_hex("2026-11-05"));
+        expected.push_str(&text_hex("2026-11-04"));
         expected.push_str("6a6d656d6f72795f6d6178"); // "memory_max"
         expected.push_str("1820"); // 32
         expected.push_str("6a736f757263655f75726c"); // "source_url"
@@ -1155,7 +1155,7 @@ mod tests {
         assert_eq!(mime_for_path("data.bin"), "application/octet-stream");
     }
 
-    /// The JSON form round-trips and reads the draft fixture.
+    /// The JSON form round-trips and reads the hello draft.
     #[test]
     fn json_form_roundtrip() {
         let (mut m, _) = hello();

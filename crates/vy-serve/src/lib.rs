@@ -761,7 +761,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         let key = SigningKey::from_seed(&SEED);
         let draft =
-            Draft::from_json(include_str!("../../vy-manifest/tests/fixtures/hello.json")).unwrap();
+            Draft::from_json(include_str!("../../../conformance/manifests/hello.json")).unwrap();
         let res = vec![ResourceInput {
             mime: "image/png".into(),
             bytes: png(),

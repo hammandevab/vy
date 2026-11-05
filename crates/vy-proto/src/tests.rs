@@ -45,7 +45,7 @@ fn png(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn draft() -> Draft {
-    Draft::from_json(include_str!("../../vy-manifest/tests/fixtures/hello.json")).unwrap()
+    Draft::from_json(include_str!("../../../conformance/manifests/hello.json")).unwrap()
 }
 
 /// A signed package with one PNG resource.

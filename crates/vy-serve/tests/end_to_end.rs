@@ -86,7 +86,7 @@ fn spec_7_2_1_end_to_end_localhost() {
     // Publish.
     let key = SigningKey::from_seed(&SEED);
     let draft =
-        Draft::from_json(include_str!("../../vy-manifest/tests/fixtures/hello.json")).unwrap();
+        Draft::from_json(include_str!("../../../conformance/manifests/hello.json")).unwrap();
     let package = vy_publish::build(&draft, wasm, vec![], &key).unwrap();
     let site_dir = temp_dir("site");
     std::fs::write(site_dir.join("hello.vyp"), package.pack().unwrap()).unwrap();

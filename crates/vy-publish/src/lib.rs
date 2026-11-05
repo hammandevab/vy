@@ -218,7 +218,7 @@ mod tests {
     }
 
     fn draft() -> Draft {
-        Draft::from_json(include_str!("../../vy-manifest/tests/fixtures/hello.json")).unwrap()
+        Draft::from_json(include_str!("../../../conformance/manifests/hello.json")).unwrap()
     }
 
     /// SPEC-4.4.1, SPEC-7.4.1: build fills hashes, signs, and the package

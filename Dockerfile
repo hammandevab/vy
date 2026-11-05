@@ -27,7 +27,7 @@ RUN --mount=type=secret,id=vy_key,required=false \
     else $bin/vy-publish keygen --out /tmp/key/dev.key; fi; \
     $bin/vy-publish pubkey --key /tmp/key/dev.key --out /srv/dev.key.pub; \
     $bin/vy-publish build \
-        --manifest crates/vy-manifest/tests/fixtures/hello.json \
+        --manifest conformance/manifests/hello.json \
         --module modules/hello/target/wasm32-unknown-unknown/release/hello.wasm \
         --key /tmp/key/dev.key --out /srv/hello.vyp; \
     rm -rf /tmp/key
