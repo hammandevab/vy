@@ -41,5 +41,80 @@ fn main() -> ExitCode {
             }
         };
     }
+    if args.iter().any(|a| a == "--screenshot") {
+        return match screenshot(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("vy-shell --screenshot: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     usage()
+}
+
+/// `--screenshot <png> --size WxH [--scale S] [--ticks N] [--manifest <draft>] <source>`.
+fn screenshot(args: &[String]) -> Result<(), String> {
+    let mut out = None;
+    let mut size = None;
+    let mut scale = 1.0f32;
+    let mut ticks = 1u32;
+    let mut manifest = None;
+    let mut source = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |name: &str| -> Result<String, String> {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match a.as_str() {
+            "--screenshot" => out = Some(PathBuf::from(value("--screenshot")?)),
+            "--size" => {
+                let v = value("--size")?;
+                let (w, h) = v
+                    .split_once('x')
+                    .ok_or_else(|| format!("--size must be WxH, got {v:?}"))?;
+                let w: u32 = w.parse().map_err(|_| format!("bad width in {v:?}"))?;
+                let h: u32 = h.parse().map_err(|_| format!("bad height in {v:?}"))?;
+                size = Some((w, h));
+            }
+            "--scale" => {
+                scale = value("--scale")?
+                    .parse()
+                    .map_err(|_| "--scale must be a number".to_string())?;
+            }
+            "--ticks" => {
+                ticks = value("--ticks")?
+                    .parse()
+                    .map_err(|_| "--ticks must be a number".to_string())?;
+            }
+            "--manifest" => manifest = Some(PathBuf::from(value("--manifest")?)),
+            other if other.starts_with("--") => return Err(format!("unknown flag {other}")),
+            other => source = Some(other.to_string()),
+        }
+    }
+    let (Some(out), Some((w, h)), Some(source)) = (out, size, source) else {
+        return Err("--screenshot <png> --size WxH <address or file> are required".into());
+    };
+    if !(scale.is_finite() && scale > 0.0 && scale <= 8.0) {
+        return Err("--scale must be in (0, 8]".into());
+    }
+    let mut source = vy_shell::page::Source::parse(&source)?;
+    if let (vy_shell::page::Source::File { draft, .. }, Some(m)) = (&mut source, manifest) {
+        *draft = Some(m);
+    }
+    let options = vy_shell::headless::Options {
+        width: w as f32,
+        height: h as f32,
+        scale,
+        max_ticks: ticks.max(1),
+        exe: Some(std::env::current_exe().map_err(|e| e.to_string())?),
+        timeout: std::time::Duration::from_secs(60),
+    };
+    let image = vy_shell::headless::screenshot(source, &options)?;
+    let png = image.encode_png().map_err(|e| e.to_string())?;
+    std::fs::write(&out, png).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!("{}: {}x{} px", out.display(), image.width, image.height);
+    Ok(())
 }

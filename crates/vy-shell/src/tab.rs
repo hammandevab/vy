@@ -494,7 +494,7 @@ pub fn main(record: Option<&Path>, replay: Option<&Path>) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::ipc::ChannelTransport;
-    use crate::process::{spawn_thread, Inbound, TabEvent};
+    use crate::process::{channel_sink, spawn_thread, Inbound, TabEvent};
     use std::sync::mpsc;
     use std::time::Duration;
     use vy_runtime::RandomSource;
@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn thread_tab_reports_to_the_inbox() {
         let (sink, inbox) = mpsc::channel::<TabEvent>();
-        let conn = spawn_thread(7, sink).unwrap();
+        let conn = spawn_thread(7, channel_sink(sink)).unwrap();
         assert!(conn.send(&ToTab::Load(Box::new(load_request(module("hello"), 0)))));
         loop {
             let (id, ev) = inbox.recv_timeout(Duration::from_secs(20)).unwrap();

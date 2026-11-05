@@ -41,6 +41,10 @@ pub enum Inbound {
 /// A message to the shell from one tab.
 pub type TabEvent = (TabId, Inbound);
 
+/// Where a tab's reader delivers: returns false once the shell is gone.
+pub trait Sink: Fn(TabId, Inbound) -> bool + Send + 'static {}
+impl<F: Fn(TabId, Inbound) -> bool + Send + 'static> Sink for F {}
+
 enum Kind {
     Process(Child),
     Thread(Option<JoinHandle<()>>),
@@ -66,7 +70,7 @@ pub fn tab_executable() -> io::Result<PathBuf> {
 pub fn spawn_process(
     exe: &Path,
     id: TabId,
-    sink: Sender<TabEvent>,
+    sink: impl Sink,
     record: Option<&Path>,
     replay: Option<&Path>,
 ) -> io::Result<TabConnection> {
@@ -105,7 +109,7 @@ pub fn spawn_process(
                 match read_frame(&mut r) {
                     Ok(Some(body)) => match ToShell::decode(&body) {
                         Ok(m) => {
-                            if sink.send((id, Inbound::Message(m))).is_err() {
+                            if !sink(id, Inbound::Message(m)) {
                                 return;
                             }
                         }
@@ -115,7 +119,7 @@ pub fn spawn_process(
                     Err(e) => break Some(e.to_string()),
                 }
             };
-            let _ = sink.send((id, Inbound::Gone { error }));
+            sink(id, Inbound::Gone { error });
         })?;
     Ok(TabConnection {
         id,
@@ -128,7 +132,7 @@ pub fn spawn_process(
 
 /// Run the tab loop on a thread of this process over an in-memory
 /// channel: the same loop, no process boundary. For tests and tools.
-pub fn spawn_thread(id: TabId, sink: Sender<TabEvent>) -> io::Result<TabConnection> {
+pub fn spawn_thread(id: TabId, sink: impl Sink) -> io::Result<TabConnection> {
     let (tx, to_tab) = mpsc::channel::<Vec<u8>>();
     let (from_tab, rx) = mpsc::channel::<Vec<u8>>();
     let transport = ChannelTransport {
@@ -149,7 +153,7 @@ pub fn spawn_thread(id: TabId, sink: Sender<TabEvent>) -> io::Result<TabConnecti
                 match rx.recv() {
                     Ok(body) => match ToShell::decode(&body) {
                         Ok(m) => {
-                            if sink.send((id, Inbound::Message(m))).is_err() {
+                            if !sink(id, Inbound::Message(m)) {
                                 return;
                             }
                         }
@@ -158,7 +162,7 @@ pub fn spawn_thread(id: TabId, sink: Sender<TabEvent>) -> io::Result<TabConnecti
                     Err(_) => break None,
                 }
             };
-            let _ = sink.send((id, Inbound::Gone { error }));
+            sink(id, Inbound::Gone { error });
         })?;
     Ok(TabConnection {
         id,
@@ -259,6 +263,11 @@ impl Drop for TabConnection {
             let _ = c.wait();
         }
     }
+}
+
+/// A sink that sends to a channel.
+pub fn channel_sink(tx: std::sync::mpsc::Sender<TabEvent>) -> impl Sink {
+    move |id, inbound| tx.send((id, inbound)).is_ok()
 }
 
 /// Receive the next event for `id` within `timeout`, passing over events

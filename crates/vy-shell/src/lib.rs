@@ -9,8 +9,20 @@
 //! and never renders HTML (SPEC-1.1.1).
 #![deny(missing_docs)]
 
+pub mod address;
+pub mod chrome;
+pub mod compose;
+pub mod external;
+pub mod grants;
+pub mod headless;
+pub mod history;
 pub mod ipc;
+pub mod markdown;
+pub mod page;
+pub mod paths;
 pub mod process;
+pub mod shell;
+pub mod storage;
 pub mod tab;
 
 #[cfg(test)]
