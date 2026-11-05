@@ -256,6 +256,83 @@ pub mod method {
     }
 }
 
+/// Built-in font roles: the negative `font_resource_id` values `text_style`
+/// takes (SPEC-5.2.5, SPEC-6.4.2). A positive id names a font resource of
+/// the package (SPEC-4.5.1); 0 is the module and never a font.
+pub mod font {
+    /// Proportional sans-serif.
+    pub const SANS: i32 = -1;
+    /// Proportional serif.
+    pub const SERIF: i32 = -2;
+    /// Monospace.
+    pub const MONO: i32 = -3;
+    /// The host's interface face.
+    pub const UI: i32 = -4;
+    /// Emoji.
+    pub const EMOJI: i32 = -5;
+    /// Lowest (most negative) role id.
+    pub const MIN: i32 = -5;
+
+    /// Role names in id order, from `SANS` (−1) to `EMOJI` (−5) (SPEC-6.4.2).
+    pub const NAMES: [&str; 5] = ["sans", "serif", "mono", "ui", "emoji"];
+
+    /// Name of a built-in role, or `None` for an id that is not one.
+    pub fn name(id: i32) -> Option<&'static str> {
+        if (MIN..=SANS).contains(&id) {
+            Some(NAMES[(-id - 1) as usize])
+        } else {
+            None
+        }
+    }
+}
+
+/// `weight` argument of `text_style` (SPEC-5.2.5): 1..=1000 as CSS numbers
+/// it. The host clamps a value outside the range and draws with the face
+/// whose weight is nearest the requested one, the heavier on a tie.
+pub mod weight {
+    /// Lightest weight.
+    pub const MIN: i32 = 1;
+    /// Heaviest weight.
+    pub const MAX: i32 = 1000;
+    /// Regular text.
+    pub const NORMAL: i32 = 400;
+    /// Bold text.
+    pub const BOLD: i32 = 700;
+
+    /// The weight a host shapes with: the argument clamped to 1..=1000.
+    pub const fn clamp(weight: i32) -> i32 {
+        if weight < MIN {
+            MIN
+        } else if weight > MAX {
+            MAX
+        } else {
+            weight
+        }
+    }
+
+    /// The face a host picks for `weight` among the weights it has for a
+    /// role: the nearest, and the heavier when two are equally near
+    /// (SPEC-5.2.5). `None` only for an empty list.
+    pub fn nearest(weight: i32, available: &[i32]) -> Option<i32> {
+        let want = clamp(weight);
+        let mut best: Option<i32> = None;
+        for &have in available {
+            best = Some(match best {
+                None => have,
+                Some(b) => {
+                    let (db, dh) = ((b - want).abs(), (have - want).abs());
+                    if dh < db || (dh == db && have > b) {
+                        have
+                    } else {
+                        b
+                    }
+                }
+            });
+        }
+        best
+    }
+}
+
 /// `fit` argument of `dl_image` (SPEC-5.2.3) and the `fit` field of the
 /// `IMAGE` opcode (SPEC-C.1.1). Any other value is `E_ARG`.
 pub mod fit {
@@ -1198,6 +1275,57 @@ mod tests {
         }
         assert!(!role::is_focusable(0) && !role::is_focusable(25));
         assert_eq!(role::FOCUSABLE.len(), 8);
+    }
+
+    /// SPEC-6.4.2, SPEC-5.2.5: the five built-in roles are the resource
+    /// ids −1 sans, −2 serif, −3 mono, −4 ui, −5 emoji; nothing else is a
+    /// role, and 0 (the module) is never a font.
+    #[test]
+    fn spec_6_4_2_font_roles() {
+        assert_eq!(
+            (font::SANS, font::SERIF, font::MONO, font::UI, font::EMOJI),
+            (-1, -2, -3, -4, -5)
+        );
+        assert_eq!(font::MIN, -5);
+        assert_eq!(font::NAMES, ["sans", "serif", "mono", "ui", "emoji"]);
+        for (i, n) in font::NAMES.iter().enumerate() {
+            assert_eq!(font::name(-(i as i32) - 1), Some(*n));
+        }
+        assert_eq!(font::name(0), None, "the module is not a font");
+        assert_eq!(font::name(1), None, "a package resource, not a role");
+        assert_eq!(font::name(-6), None);
+    }
+
+    /// SPEC-5.2.5: `text_style.weight` is 1..=1000 as in CSS; a host clamps
+    /// the argument and picks the nearest face it has, the heavier on a tie.
+    #[test]
+    fn spec_5_2_5_weight_range_and_nearest_face() {
+        assert_eq!((weight::MIN, weight::MAX), (1, 1000));
+        assert_eq!((weight::NORMAL, weight::BOLD), (400, 700));
+        assert_eq!(weight::clamp(0), 1);
+        assert_eq!(weight::clamp(-5), 1);
+        assert_eq!(weight::clamp(1001), 1000);
+        assert_eq!(weight::clamp(i32::MAX), 1000);
+        assert_eq!(weight::clamp(i32::MIN), 1);
+        assert_eq!(weight::clamp(550), 550);
+        // The reference client's sans family: 400 and 700.
+        let faces = [400, 700];
+        assert_eq!(weight::nearest(400, &faces), Some(400));
+        assert_eq!(weight::nearest(549, &faces), Some(400), "nearer to 400");
+        assert_eq!(
+            weight::nearest(550, &faces),
+            Some(700),
+            "a tie goes heavier"
+        );
+        assert_eq!(weight::nearest(600, &faces), Some(700));
+        assert_eq!(weight::nearest(1000, &faces), Some(700));
+        assert_eq!(weight::nearest(0, &faces), Some(400), "clamped first");
+        assert_eq!(weight::nearest(5000, &faces), Some(700));
+        // A single face takes every weight; the order of the list is irrelevant.
+        assert_eq!(weight::nearest(900, &[400]), Some(400));
+        assert_eq!(weight::nearest(550, &[700, 400]), Some(700));
+        assert_eq!(weight::nearest(300, &[100, 500, 300]), Some(300));
+        assert_eq!(weight::nearest(400, &[]), None);
     }
 
     /// SPEC-A.2.2, SPEC-A.2.1: the buttons are 1 primary, 2 secondary,

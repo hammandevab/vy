@@ -83,7 +83,9 @@ pub fn exit(code: i32) {
     unsafe { raw::exit(code) }
 }
 
-/// `text_style`: register a style (SPEC-5.2.5). `weight` is 1..=1000.
+/// `text_style`: register a style (SPEC-5.2.5). `weight` is 1..=1000 as
+/// in CSS (400 normal, 700 bold); the host clamps it and draws with the
+/// face nearest to it, so a weight never fails.
 pub fn text_style(font: Font, size_px: f32, weight: u16, color: Color) -> Result<StyleId, VyError> {
     // SAFETY: no pointers.
     let id = unsafe {

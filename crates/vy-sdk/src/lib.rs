@@ -160,14 +160,14 @@ pub enum Font {
 }
 
 impl Font {
-    /// The `font_resource_id` the imports take.
+    /// The `font_resource_id` the imports take (`vy_abi::font` for the roles).
     pub const fn resource_id(self) -> i32 {
         match self {
-            Font::Sans => -1,
-            Font::Serif => -2,
-            Font::Mono => -3,
-            Font::Ui => -4,
-            Font::Emoji => -5,
+            Font::Sans => vy_abi::font::SANS,
+            Font::Serif => vy_abi::font::SERIF,
+            Font::Mono => vy_abi::font::MONO,
+            Font::Ui => vy_abi::font::UI,
+            Font::Emoji => vy_abi::font::EMOJI,
             Font::Resource(id) => id as i32,
         }
     }

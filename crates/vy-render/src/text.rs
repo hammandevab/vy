@@ -11,7 +11,7 @@ use cosmic_text::{
 };
 use std::borrow::Cow;
 use std::sync::Arc;
-use vy_abi::err;
+use vy_abi::{err, font, weight};
 
 /// Line height as a multiple of the font size. Fixed for determinism; a
 /// module that wants other spacing places runs itself.
@@ -41,38 +41,53 @@ fn sanitize(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// Built-in font roles as resource ids (SPEC-6.4.2).
-pub mod role {
-    /// Proportional sans-serif.
-    pub const SANS: i32 = -1;
-    /// Proportional serif.
-    pub const SERIF: i32 = -2;
-    /// Monospace.
-    pub const MONO: i32 = -3;
-    /// Interface font; same face as `SANS` in 1.0.
-    pub const UI: i32 = -4;
-    /// Emoji. 1.0 ships no colour emoji font; this maps to `SANS`
-    /// (DejaVu Sans covers symbols and dingbats). A real emoji face arrives in 1.x.
-    pub const EMOJI: i32 = -5;
-}
-
+/// The bundled faces per built-in role (SPEC-6.4.2, `vy_abi::font`):
+///
+/// | Roll | Resurs-id | Snitt |
+/// | --- | --- | --- |
+/// | `sans` | −1 | DejaVu Sans 400, DejaVu Sans Bold 700 |
+/// | `serif` | −2 | DejaVu Serif 400 |
+/// | `mono` | −3 | DejaVu Sans Mono 400 |
+/// | `ui` | −4 | same faces as `sans` |
+/// | `emoji` | −5 | same faces as `sans` (DejaVu Sans covers symbols and dingbats; a colour emoji face arrives in 1.x) |
+///
+/// `text_style.weight` is clamped to 1..=1000 and mapped to the nearest
+/// of these weights, the heavier on a tie (SPEC-5.2.5): for `sans`, `ui`
+/// and `emoji` 1–549 is DejaVu Sans and 550–1000 DejaVu Sans Bold; `serif`
+/// and `mono` are always their one face. The mapping is done here, so the
+/// shaper always gets an exact family and weight and never falls back to
+/// another family for a weight it lacks.
 const FAMILY_SANS: &str = "DejaVu Sans";
 const FAMILY_SERIF: &str = "DejaVu Serif";
 const FAMILY_MONO: &str = "DejaVu Sans Mono";
+
+/// Weights bundled for the sans family (`sans`, `ui`, `emoji`).
+const WEIGHTS_SANS: [i32; 2] = [weight::NORMAL, weight::BOLD];
+/// Weights bundled for `serif` and `mono`.
+const WEIGHTS_SINGLE: [i32; 1] = [weight::NORMAL];
 
 static FONT_SANS: &[u8] = include_bytes!("../fonts/DejaVuSans.ttf");
 static FONT_SANS_BOLD: &[u8] = include_bytes!("../fonts/DejaVuSans-Bold.ttf");
 static FONT_SERIF: &[u8] = include_bytes!("../fonts/DejaVuSerif.ttf");
 static FONT_MONO: &[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");
 
-/// Family name for a built-in role, or `None` for an unknown resource id.
-fn family_for(font_resource_id: i32) -> Option<&'static str> {
+/// Family name and bundled weights for a built-in role, or `None` for a
+/// resource id that is not one (package fonts arrive with WOFF2 support).
+fn family_for(font_resource_id: i32) -> Option<(&'static str, &'static [i32])> {
     match font_resource_id {
-        role::SANS | role::UI | role::EMOJI => Some(FAMILY_SANS),
-        role::SERIF => Some(FAMILY_SERIF),
-        role::MONO => Some(FAMILY_MONO),
+        font::SANS | font::UI | font::EMOJI => Some((FAMILY_SANS, &WEIGHTS_SANS)),
+        font::SERIF => Some((FAMILY_SERIF, &WEIGHTS_SINGLE)),
+        font::MONO => Some((FAMILY_MONO, &WEIGHTS_SINGLE)),
         _ => None,
     }
+}
+
+/// The face weight the host draws `weight` with for a role: the requested
+/// weight clamped to 1..=1000, then the nearest bundled weight, the
+/// heavier on a tie (SPEC-5.2.5). `None` for an id that is not a role.
+pub fn face_weight(font_resource_id: i32, requested: i32) -> Option<i32> {
+    let (_, weights) = family_for(font_resource_id)?;
+    weight::nearest(requested, weights)
 }
 
 /// Platform-independent fallback: only the bundled faces, in a fixed order.
@@ -96,8 +111,11 @@ pub struct Style {
     family: &'static str,
     /// Font size in logical pixels.
     pub size_px: f32,
-    /// CSS-style weight 1..=1000.
+    /// The weight asked for, clamped to 1..=1000.
     pub weight: u16,
+    /// The weight of the bundled face the text is drawn with: the nearest
+    /// to `weight`, the heavier on a tie (SPEC-5.2.5; see [`face_weight`]).
+    pub face_weight: u16,
     /// `0xRRGGBBAA`.
     pub color: u32,
 }
@@ -109,7 +127,7 @@ impl Style {
     fn attrs(&self) -> Attrs<'static> {
         Attrs::new()
             .family(Family::Name(self.family))
-            .weight(Weight(self.weight))
+            .weight(Weight(self.face_weight))
     }
 }
 
@@ -170,30 +188,32 @@ impl TextEngine {
 
     /// `text_style`: register a style and return its id (1-based) or an ABI error.
     ///
-    /// `E_RESOURCE` for an unknown font resource, `E_ARG` for a size or weight
-    /// out of range, `E_STYLE` when the style table is full.
+    /// `E_RESOURCE` for an unknown font resource, `E_ARG` for a size out of
+    /// range, `E_STYLE` when the style table is full. The weight never
+    /// fails: it is clamped to 1..=1000 and drawn with the nearest bundled
+    /// face (SPEC-5.2.5, [`face_weight`]).
     pub fn style(
         &mut self,
         font_resource_id: i32,
         size_px: f32,
-        weight: i32,
+        requested_weight: i32,
         color: u32,
     ) -> Result<u16, i32> {
-        let family = family_for(font_resource_id).ok_or(err::E_RESOURCE)?;
+        let (family, weights) = family_for(font_resource_id).ok_or(err::E_RESOURCE)?;
         let size_ok = size_px.is_finite() && size_px > 0.0 && size_px <= MAX_FONT_SIZE_PX;
         if !size_ok {
-            return Err(err::E_ARG);
-        }
-        if !(1..=1000).contains(&weight) {
             return Err(err::E_ARG);
         }
         if self.styles.len() >= MAX_STYLES {
             return Err(err::E_STYLE);
         }
+        let clamped = weight::clamp(requested_weight);
+        let face = weight::nearest(clamped, weights).expect("every role has a face");
         self.styles.push(Style {
             family,
             size_px,
-            weight: weight as u16,
+            weight: clamped as u16,
+            face_weight: face as u16,
             color,
         });
         Ok(self.styles.len() as u16)

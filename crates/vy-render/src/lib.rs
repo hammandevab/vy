@@ -15,12 +15,12 @@ pub use text::{pack_x100, Size, TextEngine};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vy_abi::{err, limits};
+    use vy_abi::{err, font, limits, weight};
     use vy_dl::{DisplayList, Fit};
 
     fn sans(engine: &mut TextEngine, size: f32) -> u16 {
         engine
-            .style(text::role::SANS, size, 400, 0x0000_00FF)
+            .style(font::SANS, size, weight::NORMAL, 0x0000_00FF)
             .unwrap()
     }
 
@@ -150,25 +150,78 @@ mod tests {
         assert!(dark > 50, "text was rasterized ({dark} dark pixels)");
     }
 
-    /// SPEC-6.4.2: resource ids -1..-5 are the built-in roles; anything else is E_RESOURCE.
+    /// SPEC-6.4.2, SPEC-5.2.5: resource ids −1 sans, −2 serif, −3 mono,
+    /// −4 ui, −5 emoji are the built-in roles (`vy_abi::font`); anything
+    /// else is E_RESOURCE; a bad size is E_ARG.
     #[test]
     fn spec_6_4_2_builtin_font_roles() {
         let mut t = TextEngine::new();
-        for id in -5..=-1 {
-            let sid = t.style(id, 16.0, 400, 0).unwrap();
+        for id in font::MIN..=font::SANS {
+            assert!(font::name(id).is_some(), "{id} is a role");
+            let sid = t.style(id, 16.0, weight::NORMAL, 0).unwrap();
             assert!(sid > 0, "role {id}");
             assert!(t.measure(sid, 100.0, "abc").unwrap().w > 0.0, "role {id}");
         }
         assert_eq!(t.style(-6, 16.0, 400, 0), Err(err::E_RESOURCE));
         assert_eq!(t.style(0, 16.0, 400, 0), Err(err::E_RESOURCE));
         assert_eq!(t.style(-1, 0.0, 400, 0), Err(err::E_ARG));
-        assert_eq!(t.style(-1, 16.0, 0, 0), Err(err::E_ARG));
+        assert_eq!(t.style(-1, f32::NAN, 400, 0), Err(err::E_ARG));
         // Serif and mono are distinct faces: the same string measures differently.
-        let sans = t.style(text::role::SANS, 16.0, 400, 0).unwrap();
-        let mono = t.style(text::role::MONO, 16.0, 400, 0).unwrap();
-        let a = t.measure(sans, 1000.0, "iiii mmmm").unwrap().w;
-        let b = t.measure(mono, 1000.0, "iiii mmmm").unwrap().w;
+        let sans = t.style(font::SANS, 16.0, 400, 0).unwrap();
+        let serif = t.style(font::SERIF, 16.0, 400, 0).unwrap();
+        let mono = t.style(font::MONO, 16.0, 400, 0).unwrap();
+        let w = |t: &mut TextEngine, s| t.measure(s, 1000.0, "iiii mmmm").unwrap().w;
+        let (a, b, c) = (w(&mut t, sans), w(&mut t, serif), w(&mut t, mono));
         assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+        // `ui` and `emoji` are the sans faces in 1.0.
+        let ui = t.style(font::UI, 16.0, 400, 0).unwrap();
+        let emoji = t.style(font::EMOJI, 16.0, 400, 0).unwrap();
+        assert_eq!(w(&mut t, ui), a);
+        assert_eq!(w(&mut t, emoji), a);
+    }
+
+    /// SPEC-5.2.5: `weight` is 1..=1000; a value outside is clamped, never
+    /// refused, and the text is drawn with the bundled face nearest the
+    /// weight, the heavier on a tie: sans 1–549 is DejaVu Sans, 550–1000
+    /// DejaVu Sans Bold; serif and mono have one face for every weight.
+    #[test]
+    fn spec_5_2_5_weight_clamps_to_nearest_face() {
+        let mut t = TextEngine::new();
+        let txt = "Hamburgefonstiv";
+        let width = |t: &mut TextEngine, role, w| {
+            let s = t.style(role, 16.0, w, 0).unwrap();
+            t.measure(s, 0.0, txt).unwrap().w
+        };
+        let book = width(&mut t, font::SANS, weight::NORMAL);
+        let bold = width(&mut t, font::SANS, weight::BOLD);
+        assert!(bold > book, "bold is wider: {bold} vs {book}");
+        for w in [i32::MIN, -1, 0, 1, 100, 300, 400, 500, 549] {
+            assert_eq!(width(&mut t, font::SANS, w), book, "weight {w}");
+            assert_eq!(text::face_weight(font::SANS, w), Some(400));
+        }
+        for w in [550, 551, 600, 700, 900, 1000, 1001, i32::MAX] {
+            assert_eq!(width(&mut t, font::SANS, w), bold, "weight {w}");
+            assert_eq!(text::face_weight(font::SANS, w), Some(700));
+        }
+        // The style remembers the clamped request and the face it got.
+        let s = t.style(font::SANS, 16.0, 5000, 0).unwrap();
+        let style = t.get_style(s).unwrap();
+        assert_eq!((style.weight, style.face_weight), (1000, 700));
+        let s = t.style(font::UI, 16.0, 0, 0).unwrap();
+        assert_eq!(t.get_style(s).unwrap().weight, 1);
+        assert_eq!(t.get_style(s).unwrap().face_weight, 400);
+        // Serif and mono never borrow a bold face from another family.
+        for role in [font::SERIF, font::MONO] {
+            let one = width(&mut t, role, 400);
+            for w in [1, 600, 700, 1000] {
+                assert_eq!(width(&mut t, role, w), one, "role {role} weight {w}");
+                assert_eq!(text::face_weight(role, w), Some(400));
+            }
+            assert_ne!(one, bold, "not DejaVu Sans Bold");
+        }
+        assert_eq!(text::face_weight(0, 400), None);
     }
 
     /// SPEC-6.1.3, SPEC-6.1.4: later ops paint over earlier ones and clipping limits drawing.

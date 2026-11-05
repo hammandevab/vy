@@ -8,7 +8,9 @@
 //! same commit, and after the freeze no such commit is allowed within 1.x.
 
 use std::fmt::Write;
-use vy_abi::{button, cap, err, event, key, level, limits, method, modifier, op, role, Sig};
+use vy_abi::{
+    button, cap, err, event, font, key, level, limits, method, modifier, op, role, weight, Sig,
+};
 
 /// Path of the listing relative to the repository root.
 pub const PATH: &str = "docs/ABI-1.0.md";
@@ -136,6 +138,29 @@ pub fn abi_listing() -> String {
         let _ = writeln!(w, "| {i} | `{name}` |");
     }
     let _ = writeln!(w);
+    let _ = writeln!(
+        w,
+        "`text_style.font_resource_id` under 0 är en inbyggd typsnittsroll (`vy_abi::font`, \\\n\
+         SPEC-6.4.2); 0 är modulen och ett positivt id en typsnittsresurs i paketet (SPEC-4.5.1):"
+    );
+    let _ = writeln!(w);
+    let _ = writeln!(w, "| Resurs-id | Roll |");
+    let _ = writeln!(w, "| --- | --- |");
+    for (i, name) in font::NAMES.iter().enumerate() {
+        let _ = writeln!(w, "| {} | `{name}` |", -(i as i32) - 1);
+    }
+    let _ = writeln!(w);
+    let _ = writeln!(
+        w,
+        "`text_style.weight` är {}–{} som i CSS ({} normal, {} fet; `vy_abi::weight`); ett värde \\\n\
+         utanför klampas, och värden ritar med det snitt vars vikt ligger närmast, vid lika avstånd \\\n\
+         det tyngre (SPEC-5.2.5).",
+        weight::MIN,
+        weight::MAX,
+        weight::NORMAL,
+        weight::BOLD
+    );
+    let _ = writeln!(w);
 
     let _ = writeln!(w, "## Händelsetyper (`kind` i `vy_event`)");
     let _ = writeln!(w);
@@ -244,7 +269,7 @@ pub fn abi_listing() -> String {
     let _ = writeln!(w);
     let _ = writeln!(w, "| Konstant | Värde | Betydelse |");
     let _ = writeln!(w, "| --- | --- | --- |");
-    let rows: [(&str, u64, &str); 23] = [
+    let rows: [(&str, u64, &str); 24] = [
         (
             "MAX_OPS_PER_FRAME",
             limits::MAX_OPS_PER_FRAME.into(),
@@ -359,6 +384,11 @@ pub fn abi_listing() -> String {
             "button::MAX",
             button::MAX as u64,
             "högsta pekarknapp (SPEC-A.2.2)",
+        ),
+        (
+            "weight::MAX",
+            weight::MAX as u64,
+            "tyngsta `text_style.weight`; `weight::MIN` är 1 (SPEC-5.2.5)",
         ),
     ];
     for (name, value, meaning) in rows {

@@ -101,6 +101,21 @@ nätverksanrop:
 | 2 | `PUT` |
 | 3 | `DELETE` |
 
+`text_style.font_resource_id` under 0 är en inbyggd typsnittsroll (`vy_abi::font`, \
+SPEC-6.4.2); 0 är modulen och ett positivt id en typsnittsresurs i paketet (SPEC-4.5.1):
+
+| Resurs-id | Roll |
+| --- | --- |
+| -1 | `sans` |
+| -2 | `serif` |
+| -3 | `mono` |
+| -4 | `ui` |
+| -5 | `emoji` |
+
+`text_style.weight` är 1–1000 som i CSS (400 normal, 700 fet; `vy_abi::weight`); ett värde \
+utanför klampas, och värden ritar med det snitt vars vikt ligger närmast, vid lika avstånd \
+det tyngre (SPEC-5.2.5).
+
 ## Händelsetyper (`kind` i `vy_event`)
 
 | Kind | Namn | a | b | c | d |
@@ -231,3 +246,4 @@ Reserverade och aldrig använda i 1.x: 0x07, 0x08.
 | `level::MAX` | 3 | högsta `log.level`; högre klampas hit (SPEC-5.2.1) |
 | `method::MAX` | 3 | högsta `fetch_begin.method` (SPEC-5.2.7) |
 | `button::MAX` | 5 | högsta pekarknapp (SPEC-A.2.2) |
+| `weight::MAX` | 1000 | tyngsta `text_style.weight`; `weight::MIN` är 1 (SPEC-5.2.5) |

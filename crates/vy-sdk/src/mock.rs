@@ -503,18 +503,19 @@ impl MockHost {
     }
 
     pub(crate) fn text_style(&mut self, font: i32, size_px: f32, weight: i32, color: i32) -> i32 {
-        if !(-5..=-1).contains(&font) && !(1..=i32::from(u16::MAX)).contains(&font) {
+        if vy_abi::font::name(font).is_none() && !(1..=i32::from(u16::MAX)).contains(&font) {
             self.refuse("text_style", err::E_RESOURCE);
             return err::E_RESOURCE;
         }
-        if !(size_px > 0.0 && size_px <= 512.0) || !(1..=1000).contains(&weight) {
+        if !(size_px > 0.0 && size_px <= 512.0) {
             self.refuse("text_style", err::E_ARG);
             return err::E_ARG;
         }
+        // The weight never fails: clamped to 1..=1000 like the host (SPEC-5.2.5).
         self.styles.push(Style {
             font,
             size_px,
-            weight,
+            weight: vy_abi::weight::clamp(weight),
             color: color as u32,
         });
         self.styles.len() as i32
