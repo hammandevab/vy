@@ -223,10 +223,10 @@ fn spec_6_1_4_clip_depth_checked_locally() {
     let mut f = Frame::begin();
     assert_eq!(f.clip_pop(), Err(VyError::DlClip));
     for _ in 0..limits::MAX_CLIP_DEPTH {
-        f.clip_push(Rect::new(0.0, 0.0, 1.0, 1.0)).unwrap();
+        f.clip_push(Rect::new(0.0, 0.0, 1.0, 1.0), 0.0).unwrap();
     }
     assert_eq!(
-        f.clip_push(Rect::new(0.0, 0.0, 1.0, 1.0)),
+        f.clip_push(Rect::new(0.0, 0.0, 1.0, 1.0), 0.0),
         Err(VyError::DlClip)
     );
     assert_eq!(f.clip_depth(), 32);
@@ -245,10 +245,17 @@ fn spec_6_1_4_clip_depth_checked_locally() {
     });
     // `clipped` pops even when the body fails.
     let mut f = Frame::begin();
-    let r: Result<(), VyError> = f.clipped(Rect::new(0.0, 0.0, 1.0, 1.0), |_| Err(VyError::Arg));
+    let r: Result<(), VyError> =
+        f.clipped(Rect::new(0.0, 0.0, 1.0, 1.0), 4.0, |_| Err(VyError::Arg));
     assert_eq!(r, Err(VyError::Arg));
     assert_eq!(f.clip_depth(), 0);
     assert_eq!(f.end(), Ok(2));
+    mock::with(|h| {
+        assert!(
+            matches!(h.frame_ops()[0], Op::ClipPush { radius, .. } if radius == 4.0),
+            "the radius reaches the host (SPEC-5.2.3)"
+        );
+    });
 }
 
 /// SPEC-6.1.6: the 65 537th opcode is refused by the SDK, not the host.
@@ -262,7 +269,7 @@ fn spec_6_1_6_op_count_checked_locally() {
     }
     assert_eq!(f.rect(r, 0.0, Color(0)), Err(VyError::DlFull));
     assert_eq!(f.text(0.0, 0.0, 1.0, style(), "x"), Err(VyError::DlFull));
-    assert_eq!(f.clip_push(r), Err(VyError::DlFull));
+    assert_eq!(f.clip_push(r, 0.0), Err(VyError::DlFull));
     assert_eq!(f.end(), Ok(limits::MAX_OPS_PER_FRAME));
     mock::with(|h| {
         assert_eq!(h.frame_ops().len(), limits::MAX_OPS_PER_FRAME as usize);

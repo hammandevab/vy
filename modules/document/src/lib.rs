@@ -436,7 +436,7 @@ impl DocumentPage {
                         let r = Rect::new(x, y, cw, ROW_H);
                         if on_screen {
                             if c == 0 {
-                                f.clipped(Rect::new(x, y, cw - 8.0, ROW_H), |f| {
+                                f.clipped(Rect::new(x, y, cw - 8.0, ROW_H), 0.0, |f| {
                                     f.text(x + 8.0, y + text_dy, 0.0, style, text).map(|_| ())
                                 })?;
                             } else {
@@ -509,7 +509,7 @@ impl App for DocumentPage {
         );
         let col_x = col.x;
         let col_w = col.w;
-        f.clipped(window, |f| {
+        f.clipped(window, 0.0, |f| {
             f.group(Role::Main, col, "", |f| {
                 // Title.
                 let t = self.layout.title.offset(0.0, -scroll);

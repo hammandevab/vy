@@ -234,7 +234,7 @@ impl FormPage {
         if value.is_empty() {
             f.text(tx, ty, 0.0, self.placeholder, placeholder)?;
         } else {
-            f.clipped(r.inset(line), |f| {
+            f.clipped(r.inset(line), 0.0, |f| {
                 f.text(tx, ty, 0.0, self.field, value).map(|_| ())
             })?;
         }

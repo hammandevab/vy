@@ -115,11 +115,23 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
     pb.finish()
 }
 
-/// Clip stack in physical pixels. The mask is rebuilt only when the stack changes.
+/// One `CLIP_PUSH` in physical pixels: a rectangle with a corner radius, or
+/// nothing at all when the rectangle was degenerate or absurd.
+#[derive(Clone, Copy)]
+struct ClipShape {
+    rect: Option<Rect>,
+    radius: f32,
+}
+
+/// Clip stack in physical pixels. The mask is rebuilt only when the stack
+/// changes: plain rectangles are intersected analytically and filled without
+/// anti-aliasing, so a clip never softens a crisp edge; as soon as a rounded
+/// shape is on the stack every shape is rasterized and the masks multiplied
+/// (SPEC-5.2.3, SPEC-6.1.4).
 struct Clip {
     width: u32,
     height: u32,
-    stack: Vec<Option<Rect>>,
+    stack: Vec<ClipShape>,
     mask: Option<Mask>,
 }
 
@@ -133,17 +145,8 @@ impl Clip {
         }
     }
 
-    fn current(&self) -> Option<Option<Rect>> {
-        self.stack.last().copied()
-    }
-
-    fn push(&mut self, rect: Option<Rect>) {
-        let next = match (self.current(), rect) {
-            (None, r) => r,
-            (Some(None), _) | (Some(_), None) => None,
-            (Some(Some(a)), Some(b)) => a.intersect(&b),
-        };
-        self.stack.push(next);
+    fn push(&mut self, shape: ClipShape) {
+        self.stack.push(shape);
         self.rebuild();
     }
 
@@ -153,23 +156,56 @@ impl Clip {
     }
 
     fn rebuild(&mut self) {
-        self.mask = match self.current() {
-            None => None,
-            Some(rect) => {
-                let mut mask = Mask::new(self.width, self.height);
-                if let Some(m) = mask.as_mut() {
-                    if let Some(r) = rect {
-                        m.fill_path(
-                            &PathBuilder::from_rect(r),
-                            FillRule::Winding,
-                            false,
-                            Transform::identity(),
-                        );
+        if self.stack.is_empty() {
+            self.mask = None;
+            return;
+        }
+        let Some(mut mask) = Mask::new(self.width, self.height) else {
+            self.mask = None;
+            return;
+        };
+        let rounded = self.stack.iter().any(|s| s.radius > 0.0);
+        if !rounded {
+            // Rectangles only: the intersection is a rectangle.
+            let mut current: Option<Rect> = self.stack[0].rect;
+            for s in &self.stack[1..] {
+                current = match (current, s.rect) {
+                    (Some(a), Some(b)) => a.intersect(&b),
+                    _ => None,
+                };
+            }
+            if let Some(r) = current {
+                mask.fill_path(
+                    &PathBuilder::from_rect(r),
+                    FillRule::Winding,
+                    false,
+                    Transform::identity(),
+                );
+            }
+        } else {
+            for (i, s) in self.stack.iter().enumerate() {
+                let path = s
+                    .rect
+                    .and_then(|r| rounded_rect(r.x(), r.y(), r.width(), r.height(), s.radius));
+                match path {
+                    Some(p) if i == 0 => {
+                        mask.fill_path(&p, FillRule::Winding, s.radius > 0.0, Transform::identity())
+                    }
+                    Some(p) => mask.intersect_path(
+                        &p,
+                        FillRule::Winding,
+                        s.radius > 0.0,
+                        Transform::identity(),
+                    ),
+                    // An empty shape clips everything.
+                    None => {
+                        mask.clear();
+                        break;
                     }
                 }
-                mask
             }
-        };
+        }
+        self.mask = Some(mask);
     }
 
     fn mask(&self) -> Option<&Mask> {
@@ -375,18 +411,19 @@ impl Canvas<'_> {
         );
     }
 
-    fn clip_push(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        if !sane(&[x, y, w, h]) {
-            self.clip.push(None);
+    fn clip_push(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+        if !sane(&[x, y, w, h, radius]) {
+            self.clip.push(ClipShape {
+                rect: None,
+                radius: 0.0,
+            });
             return;
         }
         let s = self.scale;
-        self.clip.push(Rect::from_xywh(
-            x * s,
-            y * s,
-            (w * s).max(0.0),
-            (h * s).max(0.0),
-        ));
+        self.clip.push(ClipShape {
+            rect: Rect::from_xywh(x * s, y * s, (w * s).max(0.0), (h * s).max(0.0)),
+            radius: (radius * s).max(0.0),
+        });
     }
 
     fn text(&mut self, x: f32, y: f32, max_w: f32, style_id: u16, text: &[u8]) {
@@ -506,6 +543,7 @@ pub fn render(
     };
     // Ops with non-finite or absurd values are skipped (`MAX_MAGNITUDE`);
     // `CLIP_PUSH` is the exception and always pushes, see `Canvas::clip_push`.
+    // A rounded clip (`radius > 0`) clips to a rounded rectangle (SPEC-5.2.3).
     for op in &ops {
         match op {
             Op::Rect {
@@ -536,7 +574,7 @@ pub fn render(
                 stroke_w,
                 cmds,
             } if sane_path(cmds, *stroke_w) => canvas.path(cmds, *color, *stroke_w),
-            Op::ClipPush { x, y, w, h } => canvas.clip_push(*x, *y, *w, *h),
+            Op::ClipPush { x, y, w, h, radius } => canvas.clip_push(*x, *y, *w, *h, *radius),
             Op::ClipPop => canvas.clip.pop(),
             Op::Rect { .. } | Op::Text { .. } | Op::Image { .. } | Op::Path { .. } => {}
         }

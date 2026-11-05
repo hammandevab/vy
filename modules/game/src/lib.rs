@@ -310,7 +310,7 @@ impl App for Game {
 
             f.rect(court, 6.0, BORDER)?;
             f.rect(court.inset(2.0), 4.0, COURT)?;
-            f.clipped(court.inset(2.0), |f| {
+            f.clipped(court.inset(2.0), 0.0, |f| {
                 if !self.low_detail {
                     self.draw_stars(f)?;
                     for (i, &(x, y)) in self.trail[..self.trail_len].iter().enumerate() {

@@ -1372,7 +1372,7 @@ fn status_module() -> Vec<u8> {
             (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32) (result i32)))
             (import "vy" "dl_image" (func $dl_image (param f32 f32 f32 f32 i32 i32) (result i32)))
             (import "vy" "dl_path" (func $dl_path (param i32 i32 i32 f32) (result i32)))
-            (import "vy" "dl_clip_push" (func $dl_clip_push (param f32 f32 f32 f32) (result i32)))
+            (import "vy" "dl_clip_push" (func $dl_clip_push (param f32 f32 f32 f32 f32) (result i32)))
             (import "vy" "dl_clip_pop" (func $dl_clip_pop (result i32)))
             (import "vy" "ime_begin" (func $ime_begin (param f32 f32 f32 f32) (result i32)))
             (import "vy" "ime_end" (func $ime_end (result i32)))
@@ -1408,7 +1408,7 @@ fn status_module() -> Vec<u8> {
                         (br $done)))
                     (if (i32.eq (local.get 0) (i32.const 6)) (then
                         (drop (call $dl_begin))
-                        (drop (call $dl_clip_push (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1)))
+                        (drop (call $dl_clip_push (f32.const 0) (f32.const 0) (f32.const 1) (f32.const 1) (f32.const 0)))
                         (local.set $r (call $dl_end))
                         (br $done)))
                     (if (i32.eq (local.get 0) (i32.const 7)) (then

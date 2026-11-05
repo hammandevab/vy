@@ -634,10 +634,16 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "dl_clip_push",
-        |mut c: Caller<'_, Host>, x: f32, y: f32, w: f32, h: f32| -> wasmtime::Result<i32> {
+        |mut c: Caller<'_, Host>,
+         x: f32,
+         y: f32,
+         w: f32,
+         h: f32,
+         radius: f32|
+         -> wasmtime::Result<i32> {
             with_host(&mut c, |host| {
                 let before = host.dl.bytes().len();
-                let code = match host.dl.clip_push(x, y, w, h) {
+                let code = match host.dl.clip_push(x, y, w, h, radius) {
                     Ok(()) => err::OK,
                     Err(code) => host.refuse("dl_clip_push", &code.into()),
                 };

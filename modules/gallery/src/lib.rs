@@ -257,7 +257,7 @@ impl GalleryPage {
         let thumb = Rect::new(cell.x, cell.y, cell.w, grid.thumb_h);
         f.rect(cell, 8.0, WHITE)?;
         // Dark ground so contain's letterbox and cover's crop both read.
-        f.clipped(thumb, |f| {
+        f.clipped(thumb, 0.0, |f| {
             f.rect(thumb, 0.0, THUMB_BG)?;
             f.image(thumb, Picture::resource(i), Picture::fit(i))
         })?;
@@ -358,12 +358,12 @@ impl App for GalleryPage {
             );
             let sw = text_measure(self.sub, 0.0, &sub)?.w;
             let sx = (self.window.width - MARGIN - sw).max(MARGIN + 110.0);
-            f.clipped(Rect::new(sx, 0.0, self.window.width - sx, HEADER_H), |f| {
+            f.clipped(Rect::new(sx, 0.0, self.window.width - sx, HEADER_H), 0.0, |f| {
                 f.text(sx, 25.0, 0.0, self.sub, &sub)
             })?;
             f.sem.text(Rect::new(sx, 25.0, sw, 16.25), &sub)?;
 
-            f.clipped(below, |f| {
+            f.clipped(below, 0.0, |f| {
                 f.group(Role::Region, below, "Bilder", |f| {
                     for i in 0..PICTURES.len() {
                         self.draw_cell(f, i)?;

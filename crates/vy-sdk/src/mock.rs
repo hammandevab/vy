@@ -91,6 +91,8 @@ pub enum Op {
         w: f32,
         /// Height.
         h: f32,
+        /// Corner radius.
+        radius: f32,
     },
     /// `dl_clip_pop`.
     ClipPop,
@@ -451,7 +453,7 @@ impl MockHost {
         err::OK
     }
 
-    pub(crate) fn dl_clip_push(&mut self, x: f32, y: f32, w: f32, h: f32) -> i32 {
+    pub(crate) fn dl_clip_push(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32) -> i32 {
         if let Err(c) = self.gate("dl_clip_push") {
             return c;
         }
@@ -461,7 +463,7 @@ impl MockHost {
         }
         self.clip_depth += 1;
         self.op_count += 1;
-        self.ops.push(Op::ClipPush { x, y, w, h });
+        self.ops.push(Op::ClipPush { x, y, w, h, radius });
         err::OK
     }
 

@@ -416,7 +416,7 @@ impl ChatPage {
         if self.input.is_empty() {
             f.text(tx, ty, 0.0, self.placeholder, PLACEHOLDER)?;
         } else {
-            f.clipped(r.inset(line), |f| {
+            f.clipped(r.inset(line), 0.0, |f| {
                 f.text(tx, ty, 0.0, self.field, &self.input).map(|_| ())
             })?;
         }
@@ -531,7 +531,7 @@ impl App for ChatPage {
                 f.rect(b, 0.0, AMBER_BG)?;
                 f.rect(Rect::new(b.x, b.y, 4.0, b.h), 0.0, AMBER_INK)?;
                 let text = format!("{BANNER} ({})", e.name());
-                f.clipped(b, |f| {
+                f.clipped(b, 0.0, |f| {
                     f.text(MARGIN, b.y + 8.0, 0.0, self.banner, &text)
                         .map(|_| ())
                 })?;
@@ -540,7 +540,7 @@ impl App for ChatPage {
 
             // Thread.
             let t = self.thread();
-            f.clipped(t, |f| {
+            f.clipped(t, 0.0, |f| {
                 f.group(Role::List, t, "Meddelanden", |f| {
                     let mut y = t.y + MARGIN - self.scroll;
                     for m in &self.messages {

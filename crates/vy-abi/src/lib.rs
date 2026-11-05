@@ -248,7 +248,7 @@ pub mod op {
     pub const IMAGE: u8 = 0x03;
     /// Path: color: u32; stroke_w: f32; n: u16; n commands.
     pub const PATH: u8 = 0x04;
-    /// Push clip rectangle.
+    /// Push clip rectangle: x, y, w, h, radius: f32.
     pub const CLIP_PUSH: u8 = 0x05;
     /// Pop clip rectangle.
     pub const CLIP_POP: u8 = 0x06;
@@ -428,7 +428,7 @@ pub const IMPORTS: &[Sig] = &[
     },
     Sig {
         name: "dl_clip_push",
-        params: &[F32, F32, F32, F32],
+        params: &[F32, F32, F32, F32, F32],
         result: Some(I32),
     },
     Sig {
@@ -651,6 +651,7 @@ mod tests {
             ("dl_rect", 6),
             ("dl_text", 6),
             ("dl_image", 6),
+            ("dl_clip_push", 5),
             ("text_style", 4),
             ("key_down", 1),
             ("fetch_begin", 5),

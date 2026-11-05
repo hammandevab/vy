@@ -674,7 +674,7 @@ impl App for SettingsPage {
         f.rect(window, 0.0, p.bg)?;
         let x = l.reset.x;
         let w = l.reset.w;
-        f.clipped(window, |f| {
+        f.clipped(window, 0.0, |f| {
             f.group(Role::Main, Rect::new(x, 0.0, w, l.content_h), "", |f| {
                 let s = self.styles();
                 let ty = MARGIN - self.scroll;

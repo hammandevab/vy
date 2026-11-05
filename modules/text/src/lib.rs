@@ -148,7 +148,7 @@ impl App for TextPage {
         let window = Rect::new(0.0, 0.0, self.window.width, self.window.height);
         let col = self.column();
         f.rect(window, 0.0, PAPER)?;
-        f.clipped(window, |f| {
+        f.clipped(window, 0.0, |f| {
             f.group(Role::Main, col, "", |f| {
                 let mut y = TOP - self.scroll;
                 for (i, block) in ARTICLE.iter().enumerate() {

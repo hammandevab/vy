@@ -20,7 +20,7 @@ mod ffi {
         pub fn dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: *const u8, len: i32) -> i64;
         pub fn dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32) -> i32;
         pub fn dl_path(ptr: *const u8, len: i32, color: i32, stroke_w: f32) -> i32;
-        pub fn dl_clip_push(x: f32, y: f32, w: f32, h: f32) -> i32;
+        pub fn dl_clip_push(x: f32, y: f32, w: f32, h: f32, radius: f32) -> i32;
         pub fn dl_clip_pop() -> i32;
         pub fn text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32;
         pub fn text_measure(style_id: i32, max_w: f32, ptr: *const u8, len: i32) -> i64;
@@ -128,8 +128,8 @@ mod ffi {
         let b = bytes(ptr, len);
         with(|m| m.dl_path(b, color, stroke_w))
     }
-    pub unsafe fn dl_clip_push(x: f32, y: f32, w: f32, h: f32) -> i32 {
-        with(|m| m.dl_clip_push(x, y, w, h))
+    pub unsafe fn dl_clip_push(x: f32, y: f32, w: f32, h: f32, radius: f32) -> i32 {
+        with(|m| m.dl_clip_push(x, y, w, h, radius))
     }
     pub unsafe fn dl_clip_pop() -> i32 {
         with(|m| m.dl_clip_pop())

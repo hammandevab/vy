@@ -93,7 +93,7 @@ pub enum Op {
         /// Commands.
         cmds: Vec<PathCmd>,
     },
-    /// Push a clip rectangle.
+    /// Push a clip rectangle with rounded corners.
     ClipPush {
         /// Left.
         x: f32,
@@ -103,6 +103,8 @@ pub enum Op {
         w: f32,
         /// Height.
         h: f32,
+        /// Corner radius; 0 is a plain rectangle.
+        radius: f32,
     },
     /// Pop the last clip rectangle.
     ClipPop,
@@ -314,14 +316,15 @@ impl DisplayList {
         Ok(())
     }
 
-    /// `CLIP_PUSH`. Depth above 32 is `E_DL_CLIP` (SPEC-6.1.4).
-    pub fn clip_push(&mut self, x: f32, y: f32, w: f32, h: f32) -> Result<(), i32> {
+    /// `CLIP_PUSH` with corner `radius` (SPEC-5.2.3). Depth above 32 is
+    /// `E_DL_CLIP` (SPEC-6.1.4).
+    pub fn clip_push(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32) -> Result<(), i32> {
         self.gate()?;
         if self.clip_depth >= limits::MAX_CLIP_DEPTH {
             return Err(err::E_DL_CLIP);
         }
         self.buf.push(op::CLIP_PUSH);
-        for v in [x, y, w, h] {
+        for v in [x, y, w, h, radius] {
             self.f(v);
         }
         self.clip_depth += 1;
@@ -494,6 +497,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Op>, DecodeError> {
                 y: c.f32()?,
                 w: c.f32()?,
                 h: c.f32()?,
+                radius: c.f32()?,
             }),
             op::CLIP_POP => out.push(Op::ClipPop),
             // 0x07 and 0x08 are reserved (SPEC-C.1.3) and decode as unknown.
@@ -515,19 +519,22 @@ mod tests {
         dl
     }
 
-    /// SPEC-C.1.1: RECT is 25 bytes, CLIP_PUSH 17, CLIP_POP 1, END 1.
+    /// SPEC-C.1.1, SPEC-5.2.3: RECT is 25 bytes, CLIP_PUSH 21 (with its
+    /// radius), CLIP_POP 1, END 1; the radius round-trips.
     #[test]
     fn spec_c_1_1_fixed_sizes() {
         let mut dl = open();
         dl.rect(0.0, 0.0, 1.0, 1.0, 0.0, 0xFF00_00FF).unwrap();
         assert_eq!(dl.bytes().len(), 25);
-        dl.clip_push(0.0, 0.0, 1.0, 1.0).unwrap();
-        assert_eq!(dl.bytes().len(), 25 + 17);
+        dl.clip_push(0.0, 0.0, 1.0, 1.0, 2.5).unwrap();
+        assert_eq!(dl.bytes().len(), 25 + 21);
         dl.clip_pop().unwrap();
-        assert_eq!(dl.bytes().len(), 25 + 17 + 1);
+        assert_eq!(dl.bytes().len(), 25 + 21 + 1);
         dl.end().unwrap();
-        assert_eq!(dl.bytes().len(), 25 + 17 + 1 + 1);
+        assert_eq!(dl.bytes().len(), 25 + 21 + 1 + 1);
         assert_eq!(*dl.bytes().last().unwrap(), op::END);
+        let ops = decode(dl.bytes()).unwrap();
+        assert!(matches!(ops[1], Op::ClipPush { radius, .. } if radius == 2.5));
     }
 
     /// SPEC-C.1.3, SPEC-C.1.1: the withdrawn `LINE` (0x07) and `SHADOW`
@@ -641,9 +648,9 @@ mod tests {
         let mut dl = open();
         assert_eq!(dl.clip_pop(), Err(err::E_DL_CLIP));
         for _ in 0..32 {
-            dl.clip_push(0.0, 0.0, 1.0, 1.0).unwrap();
+            dl.clip_push(0.0, 0.0, 1.0, 1.0, 0.0).unwrap();
         }
-        assert_eq!(dl.clip_push(0.0, 0.0, 1.0, 1.0), Err(err::E_DL_CLIP));
+        assert_eq!(dl.clip_push(0.0, 0.0, 1.0, 1.0, 0.0), Err(err::E_DL_CLIP));
         for _ in 0..32 {
             dl.clip_pop().unwrap();
         }
@@ -654,7 +661,7 @@ mod tests {
     #[test]
     fn spec_6_1_4_unbalanced_at_end() {
         let mut dl = open();
-        dl.clip_push(0.0, 0.0, 1.0, 1.0).unwrap();
+        dl.clip_push(0.0, 0.0, 1.0, 1.0, 0.0).unwrap();
         assert_eq!(dl.end(), Err(err::E_DL_CLIP));
         assert!(!dl.is_open());
     }

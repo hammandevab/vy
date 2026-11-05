@@ -332,7 +332,7 @@ impl ShopPage {
         link_register(i as i32 + 1, card, &url)?;
         f.group(Role::ListItem, card, p.name, |f| {
             f.sem.image(image, p.alt)?;
-            f.clipped(name, |f| {
+            f.clipped(name, 0.0, |f| {
                 f.text(x, name_y, 0.0, self.name, p.name).map(|_| ())
             })?;
             f.sem.link(name, p.name)?;
@@ -396,7 +396,7 @@ impl ShopPage {
                         let line = format!("{qty} × {}", PRODUCTS[i].name);
                         let sum = kr(qty * PRODUCTS[i].price);
                         let sw = text_measure(self.body, 0.0, &sum)?.w;
-                        f.clipped(Rect::new(x, y, w - sw - 8.0, ROW_H), |f| {
+                        f.clipped(Rect::new(x, y, w - sw - 8.0, ROW_H), 0.0, |f| {
                             f.text(x, y, 0.0, self.body, &line).map(|_| ())
                         })?;
                         f.text(x + w - sw, y, 0.0, self.body, &sum)?;
@@ -469,7 +469,7 @@ impl ShopPage {
             };
             let c = self.checkout_button(l);
             let text_w = c.x - MARGIN - 8.0 - if self.count() > 0 { 80.0 } else { 0.0 };
-            f.clipped(Rect::new(MARGIN, b.y, text_w.max(0.0), b.h), |f| {
+            f.clipped(Rect::new(MARGIN, b.y, text_w.max(0.0), b.h), 0.0, |f| {
                 f.text(MARGIN, b.y + 15.0, 0.0, self.body, &summary)
                     .map(|_| ())
             })?;
@@ -550,7 +550,7 @@ impl App for ShopPage {
             )?;
 
             // Grid, clipped and scrolled.
-            f.clipped(l.grid, |f| {
+            f.clipped(l.grid, 0.0, |f| {
                 f.group(Role::List, l.grid, "Produkter", |f| {
                     for i in 0..PRODUCTS.len() {
                         let card = self.card(&l, i);

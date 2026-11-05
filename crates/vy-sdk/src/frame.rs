@@ -208,14 +208,15 @@ impl Frame {
     }
 
     /// `dl_clip_push`: everything until the matching pop is clipped to `r`
-    /// (SPEC-6.1.4; at most 32 deep).
-    pub fn clip_push(&mut self, r: Rect) -> Result<(), VyError> {
+    /// with corners rounded by `radius` (SPEC-5.2.3, SPEC-6.1.4; at most 32
+    /// deep). A radius of 0 is a plain rectangle.
+    pub fn clip_push(&mut self, r: Rect, radius: f32) -> Result<(), VyError> {
         self.slot()?;
         if self.clip_depth >= limits::MAX_CLIP_DEPTH {
             return Err(VyError::DlClip);
         }
         // SAFETY: no pointers.
-        check(unsafe { raw::dl_clip_push(r.x, r.y, r.w, r.h) })?;
+        check(unsafe { raw::dl_clip_push(r.x, r.y, r.w, r.h, radius) })?;
         self.clip_depth += 1;
         self.ops += 1;
         Ok(())
@@ -249,13 +250,15 @@ impl Frame {
         result
     }
 
-    /// Run `f` with `r` as clip, popping afterwards even when `f` fails.
+    /// Run `f` with `r` (corners rounded by `radius`) as clip, popping
+    /// afterwards even when `f` fails.
     pub fn clipped<R>(
         &mut self,
         r: Rect,
+        radius: f32,
         f: impl FnOnce(&mut Frame) -> Result<R, VyError>,
     ) -> Result<R, VyError> {
-        self.clip_push(r)?;
+        self.clip_push(r, radius)?;
         let result = f(self);
         self.clip_pop()?;
         result

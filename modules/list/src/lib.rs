@@ -270,7 +270,7 @@ impl ListPage {
         let text_w = (value_x - 12.0 - (r.x + PAD)).max(0.0);
         // Title and subtitle on one line each, cut by a nested clip rather
         // than wrapped, so a narrow window never grows the row.
-        f.clipped(Rect::new(r.x + PAD, r.y, text_w, r.h), |f| {
+        f.clipped(Rect::new(r.x + PAD, r.y, text_w, r.h), 0.0, |f| {
             f.text(r.x + PAD, r.y + 9.0, 0.0, self.title, row.title())?;
             f.text(r.x + PAD, r.y + 30.0, 0.0, self.subtitle, &subtitle)?;
             Ok(())
@@ -383,7 +383,7 @@ impl App for ListPage {
             f.sem.text(Rect::new(cx, 25.0, cw, ch), &count)?;
 
             // The rows on screen, clipped to the viewport (SPEC-6.1.4).
-            f.clipped(area, |f| {
+            f.clipped(area, 0.0, |f| {
                 f.group(Role::List, area, "Fakturor", |f| {
                     for i in self.visible_rows() {
                         self.draw_row(f, i)?;

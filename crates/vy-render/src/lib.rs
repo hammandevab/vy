@@ -178,7 +178,7 @@ mod tests {
         let mut dl = DisplayList::new();
         dl.begin().unwrap();
         dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0xFF00_00FF).unwrap();
-        dl.clip_push(0.0, 0.0, 20.0, 40.0).unwrap();
+        dl.clip_push(0.0, 0.0, 20.0, 40.0, 0.0).unwrap();
         dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0x00FF_00FF).unwrap();
         dl.clip_pop().unwrap();
         dl.path(
@@ -203,6 +203,83 @@ mod tests {
             "outside clip: red stays"
         );
         assert_eq!(img.pixel(30, 35).unwrap(), [0, 0, 255, 255], "line on top");
+    }
+
+    /// SPEC-5.2.3, SPEC-C.1.1, SPEC-6.1.4: a `CLIP_PUSH` with a radius clips
+    /// to a rounded rectangle: the corners stay untouched and the middle is
+    /// painted; a radius of 0 is the plain rectangle of before, byte for
+    /// byte; nested rounded and plain clips intersect; the radius scales
+    /// with the DPI (SPEC-6.3.1).
+    #[test]
+    fn spec_5_2_3_rounded_clip() {
+        let mut t = TextEngine::new();
+        let list = |radius: f32| {
+            let mut dl = DisplayList::new();
+            dl.begin().unwrap();
+            dl.clip_push(10.0, 10.0, 40.0, 40.0, radius).unwrap();
+            dl.rect(0.0, 0.0, 60.0, 60.0, 0.0, 0xFF00_00FF).unwrap();
+            dl.clip_pop().unwrap();
+            dl.end().unwrap();
+            dl.bytes().to_vec()
+        };
+        let white = [255, 255, 255, 255];
+        let red = [255, 0, 0, 255];
+        let round = render(&list(12.0), 60, 60, 1.0, &mut t).unwrap();
+        assert_eq!(round.pixel(10, 10).unwrap(), white, "corner is clipped");
+        assert_eq!(round.pixel(49, 49).unwrap(), white, "every corner");
+        assert_eq!(round.pixel(30, 30).unwrap(), red, "the middle is painted");
+        assert_eq!(
+            round.pixel(30, 10).unwrap(),
+            red,
+            "the straight edge is kept"
+        );
+        assert_eq!(round.pixel(5, 30).unwrap(), white, "outside the rectangle");
+        let partial = (10..16)
+            .flat_map(|x| (10..16).map(move |y| (x, y)))
+            .map(|(x, y)| round.pixel(x, y).unwrap())
+            .any(|p| p[1] > 0 && p[1] < 255);
+        assert!(partial, "the arc is anti-aliased");
+
+        let square = render(&list(0.0), 60, 60, 1.0, &mut t).unwrap();
+        assert_eq!(
+            square.pixel(10, 10).unwrap(),
+            red,
+            "radius 0 keeps the corner"
+        );
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.clip_push(10.0, 10.0, 40.0, 40.0, 0.0).unwrap();
+        dl.rect(0.0, 0.0, 60.0, 60.0, 0.0, 0xFF00_00FF).unwrap();
+        dl.clip_pop().unwrap();
+        dl.end().unwrap();
+        assert_eq!(render(dl.bytes(), 60, 60, 1.0, &mut t).unwrap(), square);
+
+        // Nested: a rounded clip inside a plain one keeps both limits.
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.clip_push(0.0, 0.0, 30.0, 60.0, 0.0).unwrap();
+        dl.clip_push(10.0, 10.0, 40.0, 40.0, 12.0).unwrap();
+        dl.rect(0.0, 0.0, 60.0, 60.0, 0.0, 0xFF00_00FF).unwrap();
+        dl.clip_pop().unwrap();
+        dl.clip_pop().unwrap();
+        dl.end().unwrap();
+        let nested = render(dl.bytes(), 60, 60, 1.0, &mut t).unwrap();
+        assert_eq!(nested.pixel(20, 30).unwrap(), red);
+        assert_eq!(
+            nested.pixel(40, 30).unwrap(),
+            white,
+            "cut by the outer clip"
+        );
+        assert_eq!(
+            nested.pixel(10, 10).unwrap(),
+            white,
+            "and by the rounded one"
+        );
+
+        // DPI: at scale 2 the corner clipped away is twice as large.
+        let big = render(&list(12.0), 120, 120, 2.0, &mut t).unwrap();
+        assert_eq!(big.pixel(22, 22).unwrap(), white);
+        assert_eq!(big.pixel(60, 60).unwrap(), red);
     }
 
     /// SPEC-C.1.2: paths fill (stroke_w 0) and stroke; images draw something.
@@ -411,7 +488,7 @@ mod tests {
         // stretch into 4x2 at (8,0)
         dl.image(8.0, 0.0, 4.0, 2.0, 1, Fit::Stretch).unwrap();
         // clipped: only the left pixel column of a stretch survives
-        dl.clip_push(14.0, 0.0, 1.0, 2.0).unwrap();
+        dl.clip_push(14.0, 0.0, 1.0, 2.0, 0.0).unwrap();
         dl.image(14.0, 0.0, 4.0, 2.0, 1, Fit::Stretch).unwrap();
         dl.clip_pop().unwrap();
         dl.end().unwrap();
@@ -586,7 +663,7 @@ mod tests {
                 ],
             )
             .unwrap();
-            dl.clip_push(v, 0.0, 10.0, 10.0).unwrap();
+            dl.clip_push(v, 0.0, 10.0, 10.0, 0.0).unwrap();
             dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0xFF00_00FF).unwrap();
             dl.clip_pop().unwrap();
             dl.rect(0.0, 0.0, 10.0, 10.0, 0.0, 0x0000_FFFF).unwrap();
@@ -606,7 +683,7 @@ mod tests {
         dl.rect(-m, -m, 2.0 * m, 2.0 * m, m, 0xFF).unwrap();
         dl.path(0xFF, m, &[PathCmd::MoveTo(-m, m), PathCmd::LineTo(m, -m)])
             .unwrap();
-        dl.clip_push(-m, -m, 2.0 * m, 2.0 * m).unwrap();
+        dl.clip_push(-m, -m, 2.0 * m, 2.0 * m, 0.0).unwrap();
         dl.text(m, -m, m, s, b"hej").unwrap();
         dl.clip_pop().unwrap();
         dl.end().unwrap();

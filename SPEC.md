@@ -74,7 +74,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 
 - **[SPEC-5.2.1]** Livscykel: `abi_version() -> i32` (MAJOR × 100 + MINOR), `log(level: i32, ptr: i32, len: i32) -> i32`, `request_frame()`, `exit(code: i32)`; varje import som kan misslyckas returnerar sin statuskod, och `request_frame` och `exit`, som inte kan misslyckas, returnerar inget.
 - **[SPEC-5.2.2]** `request_frame()` är det enda sättet för modulen att begära ett `vy_frame`-anrop utanför händelser och fönsterändringar.
-- **[SPEC-5.2.3]** Display list: `dl_begin() -> i32` (`E_DL_STATE` om en lista redan är öppen), `dl_end() -> i32`, `dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32) -> i32`, `dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: i32, len: i32) -> i64`, `dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32) -> i32` (0 cover, 1 contain, 2 stretch), `dl_path(ptr: i32, len: i32, color: i32, stroke_w: f32) -> i32`, `dl_clip_push(x: f32, y: f32, w: f32, h: f32) -> i32`, `dl_clip_pop() -> i32`.
+- **[SPEC-5.2.3]** Display list: `dl_begin() -> i32` (`E_DL_STATE` om en lista redan är öppen), `dl_end() -> i32`, `dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32) -> i32`, `dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: i32, len: i32) -> i64`, `dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32) -> i32` (0 cover, 1 contain, 2 stretch), `dl_path(ptr: i32, len: i32, color: i32, stroke_w: f32) -> i32`, `dl_clip_push(x: f32, y: f32, w: f32, h: f32, radius: f32) -> i32` (klipper till en rektangel med hörnradie `radius`; 0 är en vanlig rektangel), `dl_clip_pop() -> i32`.
 - **[SPEC-5.2.4]** `dl_text` returnerar layoutens bredd × 100 i de höga 32 bitarna och höjd × 100 i de låga, i logiska pixlar och packat som `text_measure`; ett fel är en negativ `i64`.
 - **[SPEC-5.2.5]** Text: `text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32`, `text_measure(style_id: i32, max_w: f32, ptr: i32, len: i32) -> i64` (bredd × 100 i de höga 32 bitarna, höjd × 100 i de låga), `text_caret(style_id: i32, ptr: i32, len: i32, byte_offset: i32) -> i64` (x × 100 i de höga, y × 100 i de låga); varje halva i ett packat `i64` är högst 2³¹ − 1, så värdet är aldrig negativt, och ett fel returneras som statuskoden teckenutvidgad till `i64`, alltså negativt.
 - **[SPEC-5.2.6]** Input: `key_down(code: i32) -> i32`, `ime_begin(x: f32, y: f32, w: f32, h: f32) -> i32` och `ime_end() -> i32` (kräver capability `ime`); `pointer_get` har utgått: pekarens läge, knappar och modifierare levereras enbart via events.
@@ -290,7 +290,7 @@ little-endian. Koordinater `f32` i logiska pixlar, färger `u32` som `0xRRGGBBAA
 | 0x02 | `TEXT` | x, y, max_w: f32; style_id: u16; len: u16; utf8[len] | 17 + len |
 | 0x03 | `IMAGE` | x, y, w, h: f32; resource_id: u16; fit: u8 | 20 |
 | 0x04 | `PATH` | color: u32; stroke_w: f32; n: u16; n × (u8 typ + 2 × f32) | 11 + 9n |
-| 0x05 | `CLIP_PUSH` | x, y, w, h: f32 | 17 |
+| 0x05 | `CLIP_PUSH` | x, y, w, h, radius: f32 | 21 |
 | 0x06 | `CLIP_POP` | – | 1 |
 | 0x07 | – | reserverad (`LINE` utgick före frysningen) | – |
 | 0x08 | – | reserverad (`SHADOW` utgick före frysningen) | – |
