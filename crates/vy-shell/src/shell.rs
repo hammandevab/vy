@@ -125,6 +125,12 @@ struct Tab {
     caps: Vec<Resolved>,
     asks: VecDeque<&'static str>,
     is_localhost: bool,
+    /// The manifest's `net` origins as `vy_runtime::origin_of` writes
+    /// them (SPEC-5.2.8): the only origins a request may go to. Decided
+    /// here, in the main process; the tab process is not trusted to.
+    net_origins: Vec<String>,
+    /// The page's storage quota in bytes (SPEC-9.3.1).
+    storage_quota_bytes: u64,
     /// The page's styles, mirrored from the tab (SPEC-9.1.2).
     text: TextEngine,
     images: ImageCache,
@@ -165,6 +171,8 @@ impl Tab {
             caps: Vec::new(),
             asks: VecDeque::new(),
             is_localhost: false,
+            net_origins: Vec::new(),
+            storage_quota_bytes: 0,
             text: TextEngine::new(),
             images: ImageCache::empty(0),
             display_list: Vec::new(),
@@ -185,6 +193,21 @@ impl Tab {
             pressed_link: None,
             hidden: false,
             under_min: false,
+        }
+    }
+
+    /// Whether a request the page wants made may be made (SPEC-5.2.8,
+    /// SPEC-5.3.1): `net` must be granted now, and the URL's origin must
+    /// be one the manifest named. The tab process applies the same rule
+    /// before asking, but it runs page code, so the main process decides
+    /// (SPEC-2.1.4: no ambient authority).
+    fn request_verdict(&self, url: &str) -> Result<(), i32> {
+        if !self.capabilities().has(cap::NET) {
+            return Err(vy_abi::err::E_DENIED);
+        }
+        match vy_runtime::origin_of(url) {
+            Some(origin) if self.net_origins.contains(&origin) => Ok(()),
+            _ => Err(vy_abi::err::E_ORIGIN),
         }
     }
 
@@ -355,6 +378,12 @@ impl Shell {
     /// `https://` addresses handed to the opener so far, in order.
     pub fn external_opens(&self) -> &[String] {
         &self.external_opens
+    }
+
+    /// The shell's clipboard (SPEC-5.2.12), as the last page or address
+    /// bar left it.
+    pub fn clipboard(&self) -> &[u8] {
+        &self.clipboard
     }
 
     /// The active tab's id.
@@ -713,6 +742,8 @@ impl Shell {
             tab.trusted = false;
             tab.caps.clear();
             tab.asks.clear();
+            tab.net_origins.clear();
+            tab.storage_quota_bytes = 0;
             tab.text = TextEngine::new();
             tab.images = ImageCache::empty(0);
             tab.display_list.clear();
@@ -864,6 +895,9 @@ impl Shell {
             }) => {
                 if let Some(t) = find_tab(&mut self.tabs, tab) {
                     if t.generation == generation && t.running() {
+                        // The response counts against the same window as
+                        // the request (SPEC-9.3.1: 256 MB/min in all).
+                        t.net_window.1 = t.net_window.1.saturating_add(body.len() as u64);
                         t.send(&ToTab::FetchResponse { id, status, body });
                         t.tick_due = true;
                     }
@@ -956,6 +990,11 @@ impl Shell {
             .unwrap_or_else(|| page.display.clone());
         tab.trusted = page.trusted;
         tab.is_localhost = page.is_localhost;
+        tab.net_origins = net_origins
+            .iter()
+            .filter_map(|o| vy_runtime::origin_of(o))
+            .collect();
+        tab.storage_quota_bytes = storage_quota_bytes;
         tab.asks = resolved.iter().filter(|r| r.ask).map(|r| r.name).collect();
         tab.caps = resolved;
         tab.images = ImageCache::empty(page.resources.len());
@@ -1101,10 +1140,25 @@ impl Shell {
                 body,
             } => self.fetch_for(id, req, method, url, body),
             ToShell::Storage(entries) => {
-                let (origin, headless) = (
-                    self.tab(id).and_then(|t| t.origin.clone()),
-                    self.config.headless,
-                );
+                let Some(tab) = self.tab_mut(id) else {
+                    return;
+                };
+                // Only a page granted `storage` has anything to save, and
+                // only within its quota (SPEC-5.2.9, SPEC-9.3.1); the tab
+                // process is not trusted to have kept either.
+                let size: u64 = entries
+                    .iter()
+                    .map(|(k, v)| (k.len() + v.len()) as u64)
+                    .sum();
+                if !entries.is_empty()
+                    && (!tab.capabilities().has(cap::STORAGE) || size > tab.storage_quota_bytes)
+                {
+                    tab.log(format!(
+                        "[host] storage of {size} bytes not saved: not granted or over the quota"
+                    ));
+                    return;
+                }
+                let (origin, headless) = (tab.origin.clone(), self.config.headless);
                 if let (Some(origin), false) = (origin, headless) {
                     if !origin.starts_with("file:") {
                         let dir = self.config.data_dir.join("storage");
@@ -1117,6 +1171,16 @@ impl Shell {
                 }
             }
             ToShell::Clipboard(bytes) => {
+                // The clipboard is written through `clipboard_write`, which
+                // needs the capability (SPEC-5.2.12, SPEC-5.3.1): a tab
+                // without it has nothing to say to the other tabs.
+                let Some(tab) = self.tab_mut(id) else {
+                    return;
+                };
+                if !tab.capabilities().has(cap::CLIPBOARD) {
+                    tab.log("[host] clipboard ignored: `clipboard` is not granted".into());
+                    return;
+                }
                 self.clipboard = bytes.clone();
                 for tab in &self.tabs {
                     if tab.id != id && tab.running() {
@@ -1146,30 +1210,41 @@ impl Shell {
         }
     }
 
-    /// A page's own request (SPEC-5.2.7): within the per-minute budget
-    /// (SPEC-9.3.1) it goes to the loader; otherwise `E_RATE`.
+    /// A page's own request (SPEC-5.2.7): with `net` granted, to an origin
+    /// the manifest named (SPEC-5.2.8) and within the per-minute budget
+    /// (SPEC-9.3.1) it goes to the loader; otherwise the request is
+    /// answered with the code and never reaches the network.
     fn fetch_for(&mut self, id: TabId, req: i32, method: i32, url: String, body: Vec<u8>) {
         let now = self.now_ms();
         let Some(tab) = find_tab(&mut self.tabs, id) else {
             return;
         };
+        let refuse = |tab: &mut Tab, code: i32| {
+            tab.log(format!(
+                "[host] fetch {req}: {} for {url} (decided by the main process)",
+                vy_abi::err::name(code).unwrap_or("E_UNKNOWN")
+            ));
+            tab.send(&ToTab::FetchResponse {
+                id: req,
+                status: code,
+                body: Vec::new(),
+            });
+            tab.tick_due = true;
+        };
+        if let Err(code) = tab.request_verdict(&url) {
+            refuse(tab, code);
+            return;
+        }
         if now - tab.net_window.0 >= 60_000 {
             tab.net_window = (now, 0);
         }
         tab.net_window.1 += body.len() as u64;
         if tab.net_window.1 > NET_BYTES_PER_MINUTE {
-            tab.log(format!(
-                "[host] fetch {req}: E_RATE (256 MB/min, SPEC-9.3.1)"
-            ));
-            tab.send(&ToTab::FetchResponse {
-                id: req,
-                status: vy_abi::err::E_RATE,
-                body: Vec::new(),
-            });
-            tab.tick_due = true;
+            refuse(tab, vy_abi::err::E_RATE);
             return;
         }
         let Some(method) = vy_abi::method::name(method) else {
+            refuse(tab, vy_abi::err::E_ARG);
             return;
         };
         let _ = self.loader.send(Job::Request {

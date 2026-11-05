@@ -79,27 +79,38 @@ mod tests {
 
     /// A page from a module and its draft, signed with a test key and
     /// verified, so it is trusted and the default policy applies
-    /// (SPEC-8.2.3); `extra` adds capabilities to the draft's request.
+    /// (SPEC-8.2.3); `extra` adds capabilities to the draft's request, and
+    /// `net=<origin>` replaces the `net` origins with one treated as the
+    /// page's own.
     fn trusted_page(name: &str, extra: &[&str]) -> LoadedPage {
         let wasm = std::fs::read(module_path(name)).unwrap();
         let draft_path = root().join(format!("conformance/manifests/{name}.json"));
         let draft = Draft::from_json(&std::fs::read_to_string(&draft_path).unwrap()).unwrap();
         let inputs = draft.load_resources(draft_path.parent().unwrap()).unwrap();
         let mut manifest = draft.finish(&wasm, &inputs);
+        let mut own = vec!["https://chat.example".to_string()];
         for cap in extra {
             match *cap {
                 "clipboard" => manifest.capabilities.clipboard = Some(Empty {}),
                 "persist_frame" => manifest.capabilities.persist_frame = Some(Empty {}),
                 "hires_time" => manifest.capabilities.hires_time = Some(Empty {}),
-                other => panic!("{other}"),
+                other => match other.strip_prefix("net=") {
+                    Some(origin) => {
+                        own = vec![origin.to_string()];
+                        manifest.capabilities.net = Some(vy_manifest::NetRequest {
+                            origins: own.clone(),
+                        });
+                    }
+                    None => panic!("{other}"),
+                },
             }
         }
         let key = SigningKey::from_seed(&[3; 32]);
         manifest.sign(&key);
         let trust = manifest.verify(&key.public()).expect("signed by the key");
-        let verdicts = manifest.capabilities.default_grants(Some(&trust), |n| {
-            n.origins.iter().all(|o| o == "https://chat.example")
-        });
+        let verdicts = manifest
+            .capabilities
+            .default_grants(Some(&trust), |n| n.origins.iter().all(|o| own.contains(o)));
         let resources = inputs
             .into_iter()
             .zip(&manifest.resources)
@@ -400,6 +411,115 @@ mod tests {
             vec![("net", false), ("ime", false)]
         );
         assert_eq!(shell.pending_ask(), None);
+        shell.shutdown();
+    }
+
+    /// SPEC-5.2.8, SPEC-5.3.1, SPEC-9.3.1, SPEC-2.1.4: the main process
+    /// decides a page's requests itself, since the tab process runs page
+    /// code. A tab without `net` gets `E_DENIED`, one with `net` gets
+    /// `E_ORIGIN` outside the manifest's origins, and neither reaches the
+    /// loader; a request to a named origin does. A clipboard from a tab
+    /// without `clipboard` is ignored, and storage from a tab without
+    /// `storage` is not saved.
+    #[test]
+    fn spec_5_2_8_main_process_gates_page_requests() {
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let plain = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_badges(plain), vec![]);
+        let inject = |shell: &mut crate::shell::Shell, tab, m: ToShell| {
+            let generation = shell.tab_generation(tab);
+            shell.handle(Incoming::Tab(tab, generation, Inbound::Message(m)));
+        };
+        // Anything the loader answers within `wait` (the inbox otherwise
+        // only sees tab messages, which are handled on the way).
+        let loader_answer =
+            |shell: &mut crate::shell::Shell, wait: Duration| -> Option<(u32, i32, i32)> {
+                let deadline = Instant::now() + wait;
+                while Instant::now() < deadline {
+                    match shell.inbox().recv_timeout(Duration::from_millis(20)) {
+                        Ok(Incoming::Load(crate::page::Done::Request {
+                            tab, id, status, ..
+                        })) => return Some((tab, id, status)),
+                        Ok(other) => shell.handle(other),
+                        Err(_) => {}
+                    }
+                }
+                None
+            };
+        let request = |url: &str| ToShell::FetchRequest {
+            id: 7,
+            method: vy_abi::method::GET,
+            url: url.into(),
+            body: Vec::new(),
+        };
+        inject(&mut shell, plain, request("https://127.0.0.1:1/anything"));
+        assert!(
+            shell
+                .tab_logs(plain)
+                .iter()
+                .any(|l| l.contains("fetch 7: E_DENIED")),
+            "{:?}",
+            shell.tab_logs(plain)
+        );
+        assert_eq!(loader_answer(&mut shell, Duration::from_millis(300)), None);
+
+        // A trusted page whose manifest names a loopback origin as its own.
+        let tab = shell.open_tab_loaded(trusted_page("chat", &["net=https://127.0.0.1:1"]));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_badges(tab), vec![("net", true), ("ime", true)]);
+        inject(&mut shell, tab, request("https://127.0.0.2:1/elsewhere"));
+        assert!(shell
+            .tab_logs(tab)
+            .iter()
+            .any(|l| l.contains("fetch 7: E_ORIGIN")));
+        inject(&mut shell, tab, request("https://127.0.0.1:1@127.0.0.2:1/"));
+        assert_eq!(
+            shell
+                .tab_logs(tab)
+                .iter()
+                .filter(|l| l.contains("E_ORIGIN"))
+                .count(),
+            2,
+            "userinfo does not smuggle another host past the gate"
+        );
+        assert_eq!(loader_answer(&mut shell, Duration::from_millis(300)), None);
+        inject(&mut shell, tab, request("https://127.0.0.1:1/api"));
+        assert_eq!(
+            loader_answer(&mut shell, Duration::from_secs(10)).map(|(t, id, _)| (t, id)),
+            Some((tab, 7)),
+            "a named origin reaches the loader (and port 1 refuses it)"
+        );
+        // Revoked, the same request is refused again.
+        shell.toggle_capability(tab, "net");
+        inject(&mut shell, tab, request("https://127.0.0.1:1/api"));
+        assert!(shell
+            .tab_logs(tab)
+            .iter()
+            .any(|l| l.contains("fetch 7: E_DENIED")));
+
+        // Clipboard and storage follow their grants.
+        inject(
+            &mut shell,
+            plain,
+            ToShell::Clipboard(b"not granted".to_vec()),
+        );
+        assert_eq!(shell.clipboard(), b"");
+        inject(
+            &mut shell,
+            plain,
+            ToShell::Storage(vec![(b"k".to_vec(), b"v".to_vec())]),
+        );
+        assert!(shell
+            .tab_logs(plain)
+            .iter()
+            .any(|l| l.contains("storage of 2 bytes not saved")));
+        let clip = shell.open_tab_loaded(trusted_page("chat", &["clipboard"]));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.answer_ask(true);
+        assert_eq!(shell.tab_badges(clip)[1], ("clipboard", true));
+        inject(&mut shell, clip, ToShell::Clipboard(b"granted".to_vec()));
+        assert_eq!(shell.clipboard(), b"granted");
         shell.shutdown();
     }
 

@@ -18,6 +18,7 @@
 
 use std::io::{self, BufRead, Read, Write};
 use std::sync::mpsc::{Receiver, Sender};
+use vy_abi::limits;
 use vy_render::RgbaImage;
 use vy_runtime::{Link, RandomSource, SemNode};
 
@@ -26,6 +27,19 @@ use vy_runtime::{Link, RandomSource, SemNode};
 /// else. Bounded so a misbehaving tab process cannot make the main
 /// process allocate without end (SPEC-9.3.1).
 pub const MAX_FRAME_BYTES: u32 = vy_render::MAX_IMAGE_CACHE_BYTES as u32 + (1 << 20);
+
+/// Largest display list in one [`ToShell::Frame`]. A runtime that keeps
+/// its budget copies at most a couple of megabytes out of the module per
+/// call (`vy_runtime::CALL_HARD_LIMIT_FUEL` / `FUEL_PER_HOST_BYTE`), so a
+/// list beyond this did not come from one (SPEC-9.3.2).
+pub const MAX_DISPLAY_LIST_BYTES: usize = 64 << 20;
+/// Largest text in a log line, an error or a stop reason from the tab:
+/// a module's `log` is 4 KB (SPEC-9.3.2) and the host's own lines carry
+/// at most a URL and a message.
+pub const MAX_MESSAGE_TEXT_BYTES: usize = 64 << 10;
+/// Largest storage a tab may hand back: the quota's ceiling (SPEC-5.2.9,
+/// SPEC-8.2.1: `quota_kb` ≤ 16 384).
+pub const MAX_STORAGE_BYTES: usize = 16 << 20;
 
 /// Why a frame or a message could not be read.
 #[derive(Debug, PartialEq, Eq)]
@@ -194,9 +208,23 @@ impl<'a> Reader<'a> {
         let n = self.u32()? as usize;
         self.take(n)
     }
+    /// A length-prefixed byte string of at most `max` bytes; a longer one
+    /// is a bad value for `what` (SPEC-9.3.2: the caps hold on this side
+    /// of the pipe too, since the other side is not trusted).
+    pub fn bytes_max(&mut self, max: usize, what: &'static str) -> Result<&'a [u8], DecodeError> {
+        let n = self.u32()? as usize;
+        if n > max {
+            return Err(DecodeError::Value(what));
+        }
+        self.take(n)
+    }
     /// A length-prefixed UTF-8 string.
     pub fn str(&mut self) -> Result<&'a str, DecodeError> {
         std::str::from_utf8(self.bytes()?).map_err(|_| DecodeError::Utf8)
+    }
+    /// A length-prefixed UTF-8 string of at most `max` bytes.
+    pub fn str_max(&mut self, max: usize, what: &'static str) -> Result<&'a str, DecodeError> {
+        std::str::from_utf8(self.bytes_max(max, what)?).map_err(|_| DecodeError::Utf8)
     }
     /// An optional byte string.
     pub fn opt_bytes(&mut self) -> Result<Option<&'a [u8]>, DecodeError> {
@@ -595,12 +623,24 @@ fn put_entries(w: &mut Writer, entries: &[Entry]) {
     }
 }
 
+/// Storage entries within the runtime's caps (SPEC-9.3.2: key 256 bytes,
+/// value 1 MB) and the quota's ceiling in all (SPEC-5.2.9); more is not
+/// a page's storage, whichever side sent it.
 fn get_entries(r: &mut Reader<'_>) -> Result<Vec<Entry>, DecodeError> {
     let n = r.count("entries")?;
     let mut out = Vec::with_capacity(n.min(1024));
+    let mut total = 0usize;
     for _ in 0..n {
-        let k = r.bytes()?.to_vec();
-        let v = r.bytes()?.to_vec();
+        let k = r
+            .bytes_max(limits::MAX_STATE_KEY_BYTES as usize, "storage key")?
+            .to_vec();
+        let v = r
+            .bytes_max(limits::MAX_STATE_VALUE_BYTES as usize, "storage value")?
+            .to_vec();
+        total += k.len() + v.len();
+        if total > MAX_STORAGE_BYTES {
+            return Err(DecodeError::Value("storage size"));
+        }
         out.push((k, v));
     }
     Ok(out)
@@ -948,19 +988,28 @@ impl ToShell {
         }
     }
 
-    /// A message from a frame body.
+    /// A message from a frame body. The main process decodes what a tab
+    /// process sent, and a tab process runs page code, so every length
+    /// is held to the runtime's caps (SPEC-9.3.2) here as well: a message
+    /// over them cannot have come from a runtime that kept them, and is
+    /// refused before it is kept, drawn or acted on.
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         let (&tag, payload) = body.split_first().ok_or(DecodeError::Short)?;
         let mut r = Reader::new(payload);
         let msg = match tag {
             S_LOADED => Self::Loaded {
                 ok: r.bool()?,
-                error: r.str()?.to_string(),
+                error: r.str_max(MAX_MESSAGE_TEXT_BYTES, "error")?.to_string(),
                 pid: r.u32()?,
             },
             S_FRAME => {
-                let display_list = r.bytes()?.to_vec();
+                let display_list = r
+                    .bytes_max(MAX_DISPLAY_LIST_BYTES, "display list")?
+                    .to_vec();
                 let n = r.count("styles")?;
+                if n > vy_render::text::MAX_STYLES {
+                    return Err(DecodeError::Value("styles"));
+                }
                 let mut styles = Vec::with_capacity(n.min(1024));
                 for _ in 0..n {
                     styles.push(StyleSpec {
@@ -982,6 +1031,9 @@ impl ToShell {
                 let id = r.u16()?;
                 let width = r.u32()?;
                 let height = r.u32()?;
+                if width > limits::MAX_IMAGE_SIDE_PX || height > limits::MAX_IMAGE_SIDE_PX {
+                    return Err(DecodeError::Value("image side"));
+                }
                 let data = r.bytes()?;
                 let expect = (width as usize)
                     .checked_mul(height as usize)
@@ -1001,7 +1053,10 @@ impl ToShell {
             }
             S_LINKS => {
                 let n = r.count("links")?;
-                let mut links = Vec::with_capacity(n.min(4096));
+                if n > limits::MAX_LINKS_PER_FRAME as usize {
+                    return Err(DecodeError::Value("links"));
+                }
+                let mut links = Vec::with_capacity(n);
                 for _ in 0..n {
                     links.push(Link {
                         id: r.i32()?,
@@ -1009,13 +1064,18 @@ impl ToShell {
                         y: r.f32()?,
                         w: r.f32()?,
                         h: r.f32()?,
-                        url: r.str()?.to_string(),
+                        url: r
+                            .str_max(limits::MAX_URL_BYTES as usize, "link url")?
+                            .to_string(),
                     });
                 }
                 Self::Links(links)
             }
             S_SEMANTIC => {
                 let n = r.count("nodes")?;
+                if n > limits::MAX_SEM_NODES_PER_FRAME as usize {
+                    return Err(DecodeError::Value("nodes"));
+                }
                 let mut nodes = Vec::with_capacity(n.min(4096));
                 for _ in 0..n {
                     nodes.push(SemNode {
@@ -1026,7 +1086,9 @@ impl ToShell {
                         y: r.f32()?,
                         w: r.f32()?,
                         h: r.f32()?,
-                        text: r.str()?.to_string(),
+                        text: r
+                            .str_max(limits::MAX_SEM_TEXT_BYTES as usize, "node text")?
+                            .to_string(),
                     });
                 }
                 Self::Semantic(nodes)
@@ -1034,27 +1096,36 @@ impl ToShell {
             S_LOG => Self::Log {
                 module: r.bool()?,
                 level: r.i32()?,
-                message: r.str()?.to_string(),
+                message: r.str_max(MAX_MESSAGE_TEXT_BYTES, "log")?.to_string(),
             },
             S_NAVIGATE => Self::Navigate {
-                url: r.str()?.to_string(),
+                url: r
+                    .str_max(limits::MAX_URL_BYTES as usize, "navigate url")?
+                    .to_string(),
                 replace: r.bool()?,
             },
             S_FETCH_REQUEST => Self::FetchRequest {
                 id: r.i32()?,
                 method: r.i32()?,
-                url: r.str()?.to_string(),
-                body: r.bytes()?.to_vec(),
+                url: r
+                    .str_max(limits::MAX_URL_BYTES as usize, "fetch url")?
+                    .to_string(),
+                body: r
+                    .bytes_max(limits::MAX_FETCH_BODY_BYTES as usize, "fetch body")?
+                    .to_vec(),
             },
             S_STORAGE => Self::Storage(get_entries(&mut r)?),
-            S_CLIPBOARD => Self::Clipboard(r.bytes()?.to_vec()),
+            S_CLIPBOARD => Self::Clipboard(
+                r.bytes_max(limits::MAX_CLIPBOARD_BYTES as usize, "clipboard")?
+                    .to_vec(),
+            ),
             S_IME => Self::Ime(if r.bool()? {
                 Some((r.f32()?, r.f32()?, r.f32()?, r.f32()?))
             } else {
                 None
             }),
             S_STOPPED => Self::Stopped {
-                reason: r.str()?.to_string(),
+                reason: r.str_max(MAX_MESSAGE_TEXT_BYTES, "reason")?.to_string(),
             },
             other => return Err(DecodeError::Tag(other)),
         };
@@ -1314,7 +1385,8 @@ mod tests {
         img.bytes(&[]);
         assert_eq!(
             ToShell::decode(&img.finish()),
-            Err(DecodeError::Value("image size"))
+            Err(DecodeError::Value("image side")),
+            "a side over SPEC-6.5.1's 8192 is refused before the size is even multiplied"
         );
         // Frame lengths: zero, over the cap, and cut mid-frame.
         let mut zero = std::io::Cursor::new(0u32.to_le_bytes().to_vec());
@@ -1330,6 +1402,202 @@ mod tests {
         let mut out = Vec::new();
         assert!(write_frame(&mut out, &[]).is_err(), "a frame has a tag");
         assert!(write_frame(&mut out, &vec![0; MAX_FRAME_BYTES as usize + 1]).is_err());
+    }
+
+    /// SPEC-9.3.2, SPEC-9.3.1: the main process holds a tab's messages to
+    /// the runtime's caps before keeping anything: more links, nodes,
+    /// text, body, clipboard or storage than a page may produce is a
+    /// refused frame, not a bigger allocation. The caps are the same
+    /// constants the runtime applies, so a conforming tab never hits them.
+    #[test]
+    fn spec_9_3_2_main_process_holds_tab_messages_to_the_caps() {
+        use vy_abi::limits;
+        let link = |url: &str| Link {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            url: url.into(),
+        };
+        let node = |text: &str| SemNode {
+            id: 1,
+            parent_id: 0,
+            role: 1,
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            text: text.into(),
+        };
+        let max_url = "a".repeat(limits::MAX_URL_BYTES as usize);
+        let over_url = "a".repeat(limits::MAX_URL_BYTES as usize + 1);
+        let max_sem = "s".repeat(limits::MAX_SEM_TEXT_BYTES as usize);
+        let over_sem = "s".repeat(limits::MAX_SEM_TEXT_BYTES as usize + 1);
+        let ok: Vec<ToShell> = vec![
+            ToShell::Links(vec![link(&max_url); limits::MAX_LINKS_PER_FRAME as usize]),
+            ToShell::Semantic(vec![node(&max_sem); 1000]),
+            ToShell::Log {
+                module: false,
+                level: 0,
+                message: "m".repeat(MAX_MESSAGE_TEXT_BYTES),
+            },
+            ToShell::Navigate {
+                url: max_url.clone(),
+                replace: false,
+            },
+            ToShell::FetchRequest {
+                id: 1,
+                method: 0,
+                url: max_url.clone(),
+                body: vec![0; limits::MAX_FETCH_BODY_BYTES as usize],
+            },
+            ToShell::Clipboard(vec![0; limits::MAX_CLIPBOARD_BYTES as usize]),
+            ToShell::Storage(vec![(
+                vec![0; limits::MAX_STATE_KEY_BYTES as usize],
+                vec![0; limits::MAX_STATE_VALUE_BYTES as usize],
+            )]),
+            ToShell::Stopped {
+                reason: "r".repeat(MAX_MESSAGE_TEXT_BYTES),
+            },
+            ToShell::Image {
+                id: 1,
+                image: RgbaImage::new(limits::MAX_IMAGE_SIDE_PX, 1),
+            },
+        ];
+        for m in &ok {
+            assert_eq!(&ToShell::decode(&m.encode()).unwrap(), m);
+        }
+        let over: Vec<(ToShell, &str)> = vec![
+            (
+                ToShell::Links(vec![
+                    link("vy://x/");
+                    limits::MAX_LINKS_PER_FRAME as usize + 1
+                ]),
+                "links",
+            ),
+            (ToShell::Links(vec![link(&over_url)]), "link url"),
+            (
+                ToShell::Semantic(vec![node(""); limits::MAX_SEM_NODES_PER_FRAME as usize + 1]),
+                "nodes",
+            ),
+            (ToShell::Semantic(vec![node(&over_sem)]), "node text"),
+            (
+                ToShell::Log {
+                    module: true,
+                    level: 0,
+                    message: "m".repeat(MAX_MESSAGE_TEXT_BYTES + 1),
+                },
+                "log",
+            ),
+            (
+                ToShell::Navigate {
+                    url: over_url.clone(),
+                    replace: false,
+                },
+                "navigate url",
+            ),
+            (
+                ToShell::FetchRequest {
+                    id: 1,
+                    method: 0,
+                    url: over_url.clone(),
+                    body: Vec::new(),
+                },
+                "fetch url",
+            ),
+            (
+                ToShell::FetchRequest {
+                    id: 1,
+                    method: 0,
+                    url: "https://x/".into(),
+                    body: vec![0; limits::MAX_FETCH_BODY_BYTES as usize + 1],
+                },
+                "fetch body",
+            ),
+            (
+                ToShell::Clipboard(vec![0; limits::MAX_CLIPBOARD_BYTES as usize + 1]),
+                "clipboard",
+            ),
+            (
+                ToShell::Storage(vec![(
+                    vec![0; limits::MAX_STATE_KEY_BYTES as usize + 1],
+                    Vec::new(),
+                )]),
+                "storage key",
+            ),
+            (
+                ToShell::Storage(vec![(
+                    Vec::new(),
+                    vec![0; limits::MAX_STATE_VALUE_BYTES as usize + 1],
+                )]),
+                "storage value",
+            ),
+            (
+                ToShell::Storage(vec![
+                    (
+                        Vec::new(),
+                        vec![0; limits::MAX_STATE_VALUE_BYTES as usize]
+                    );
+                    MAX_STORAGE_BYTES
+                        / limits::MAX_STATE_VALUE_BYTES as usize
+                        + 1
+                ]),
+                "storage size",
+            ),
+            (
+                ToShell::Stopped {
+                    reason: "r".repeat(MAX_MESSAGE_TEXT_BYTES + 1),
+                },
+                "reason",
+            ),
+            (
+                ToShell::Frame {
+                    display_list: vec![0; MAX_DISPLAY_LIST_BYTES + 1],
+                    styles: Vec::new(),
+                    wants_more: false,
+                    over_budget: false,
+                },
+                "display list",
+            ),
+            (
+                ToShell::Frame {
+                    display_list: vec![0xFF],
+                    styles: vec![
+                        StyleSpec {
+                            font: -1,
+                            size_px: 1.0,
+                            weight: 1,
+                            color: 0
+                        };
+                        vy_render::text::MAX_STYLES + 1
+                    ],
+                    wants_more: false,
+                    over_budget: false,
+                },
+                "styles",
+            ),
+            (
+                ToShell::Image {
+                    id: 1,
+                    image: RgbaImage::new(limits::MAX_IMAGE_SIDE_PX + 1, 1),
+                },
+                "image side",
+            ),
+        ];
+        for (m, what) in &over {
+            assert_eq!(
+                ToShell::decode(&m.encode()),
+                Err(DecodeError::Value(what)),
+                "{what}"
+            );
+        }
+        // The same storage caps hold for the file the shell reads back.
+        let big = crate::storage::encode(&[(
+            Vec::new(),
+            vec![0; limits::MAX_STATE_VALUE_BYTES as usize + 1],
+        )]);
+        assert_eq!(crate::storage::decode(&big), None);
     }
 
     /// SPEC-11.2.1: the same frames travel over a pipe transport and an

@@ -28,24 +28,32 @@ pub fn encode(entries: &[Entry]) -> Vec<u8> {
     out
 }
 
-/// Decode the file form; `None` when it is not well formed.
+/// Decode the file form; `None` when it is not well formed or holds more
+/// than a page could have saved (SPEC-9.3.2: key 256 bytes, value 1 MB;
+/// SPEC-5.2.9: 16 MB in all), which no runtime wrote.
 pub fn decode(bytes: &[u8]) -> Option<Vec<Entry>> {
     let mut out = Vec::new();
     let mut pos = 0;
+    let mut total = 0usize;
     let take = |pos: &mut usize, n: usize| -> Option<&[u8]> {
         let s = bytes.get(*pos..pos.checked_add(n)?)?;
         *pos += n;
         Some(s)
     };
-    let len = |pos: &mut usize| -> Option<usize> {
+    let len = |pos: &mut usize, max: u32| -> Option<usize> {
         let b = take(pos, 4)?;
-        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        let n = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        (n <= max).then_some(n as usize)
     };
     while pos < bytes.len() {
-        let kl = len(&mut pos)?;
+        let kl = len(&mut pos, vy_abi::limits::MAX_STATE_KEY_BYTES)?;
         let k = take(&mut pos, kl)?.to_vec();
-        let vl = len(&mut pos)?;
+        let vl = len(&mut pos, vy_abi::limits::MAX_STATE_VALUE_BYTES)?;
         let v = take(&mut pos, vl)?.to_vec();
+        total += kl + vl;
+        if total > crate::ipc::MAX_STORAGE_BYTES {
+            return None;
+        }
         out.push((k, v));
     }
     Some(out)
