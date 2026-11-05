@@ -103,6 +103,8 @@ pub enum Event<'a> {
         /// Caret position.
         caret: i32,
     },
+    /// The pointer left the page; hover state should be cleared.
+    PointerLeave,
     /// Keyboard focus moved to or from a semantic node (SPEC-10.3.1).
     Focus {
         /// The node.
@@ -212,6 +214,7 @@ impl<'a> Event<'a> {
                 Some(text) => Event::ImeCompose { text, caret: c },
                 None => unknown,
             },
+            kind::POINTER_LEAVE => Event::PointerLeave,
             kind::FOCUS => Event::Focus {
                 node: NodeId(a),
                 gained: b == 1,

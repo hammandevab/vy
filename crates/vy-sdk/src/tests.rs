@@ -442,6 +442,7 @@ fn spec_a_2_1_event_decoding() {
             modifiers: Modifiers(0)
         }
     );
+    assert_eq!(dec(kind::POINTER_LEAVE, 0, 0, 0, 0), Event::PointerLeave);
     assert_eq!(
         dec(kind::FOCUS, 4, 1, 1, 0),
         Event::Focus {

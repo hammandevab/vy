@@ -221,6 +221,7 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
     let known: &[&str] = match kind {
         "pointer_move" => &["kind", "x", "y", "buttons", "modifiers"],
         "pointer_down" | "pointer_up" => &["kind", "x", "y", "button", "modifiers"],
+        "pointer_leave" => &["kind"],
         "scroll" => &["kind", "dx", "dy", "lines", "modifiers"],
         "key_down" => &["kind", "code", "modifiers", "repeat"],
         "key_up" => &["kind", "code", "modifiers"],
@@ -252,6 +253,7 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
             button: int("button", 1)?,
             modifiers: int("modifiers", 0)?,
         },
+        "pointer_leave" => ScriptedEvent::PointerLeave,
         "scroll" => ScriptedEvent::Scroll {
             dx: num("dx", 0.0)?,
             dy: need("dy")?.num("dy", line)? as f32,
@@ -713,6 +715,7 @@ events = [                                      # comment after the bracket
   {kind = "text_input", text = "Anna, #1"},
   {kind = "key_down", code = 43, repeat = true}, {kind = "key_up", code = 43},
   {kind = "pointer_move", x = 1, y = 2, buttons = 1},
+  {kind = "pointer_leave"},
   {kind = "scroll", dy = -120, lines = false},
   {kind = "focus", node = 12, gained = false, keyboard = false},
   {kind = "focus", node = 13},
@@ -723,7 +726,7 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
         assert_eq!(cases.len(), 1);
         let c = &cases[0];
         assert!(c.capabilities.ime && c.capabilities.storage && !c.capabilities.net);
-        assert_eq!(c.frames, 10, "1 + 9 events");
+        assert_eq!(c.frames, 11, "1 + 10 events");
         assert_eq!(
             c.resources,
             vec![
@@ -762,6 +765,7 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
                     buttons: 1,
                     modifiers: 0
                 },
+                ScriptedEvent::PointerLeave,
                 ScriptedEvent::Scroll {
                     dx: 0.0,
                     dy: -120.0,
@@ -787,6 +791,7 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
             "events = [{kind = \"tap\", x = 1, y = 1}]",
             "events = [{kind = \"pointer_down\", x = 1}]",
             "events = [{kind = \"pointer_down\", x = 1, y = 1, z = 1}]",
+            "events = [{kind = \"pointer_leave\", x = 1}]",
             "events = [{kind = \"text_input\"}]",
             "events = [{kind = \"key_down\", code = \"a\"}]",
             "events = [{kind = \"scroll\", dy = 1, lines = 1}]",

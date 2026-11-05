@@ -9,8 +9,9 @@
 # länge modulen begär en ny frame, SPEC-6.2.1), semantic, capabilities (lista med namn ur
 # SPEC-8.2.1), resources (lista med filer relativt repots rot; resources[i] blir resurs-id
 # i + 1, SPEC-4.5.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
-# key_down/up med code (USB HID); text_input med text; scroll med dx, dy, lines; focus med
-# node, gained, keyboard – det värden skulle skicka ur sin fokusordning, SPEC-10.3.1).
+# pointer_leave utan argument; key_down/up med code (USB HID); text_input med text; scroll
+# med dx, dy, lines; focus med node, gained, keyboard – det värden skulle skicka ur sin
+# fokusordning, SPEC-10.3.1).
 
 [[case]]
 name = "hello-800x600@1"
@@ -325,6 +326,17 @@ semantic = "dashboard-hover"
 events = [
   {kind = "pointer_move", x = 521, y = 400},       # september i linjediagrammet
   {kind = "pointer_move", x = 973, y = 526},       # onsdagsstapeln: verktygstips
+]
+
+[[case]]
+name = "dashboard-1280x800@1-leave"
+module = "dashboard"
+width = 1280
+height = 800
+scale = 1
+events = [
+  {kind = "pointer_move", x = 973, y = 526},       # onsdagsstapeln: verktygstips
+  {kind = "pointer_leave"},                         # pekaren lämnar sidan: inget verktygstips
 ]
 
 [[case]]

@@ -259,6 +259,7 @@ registret sist.
 | 6 | `KEY_UP` | keycode | modifierare | – | – |
 | 7 | `TEXT_INPUT` | ptr | len | – | – |
 | 8 | `IME_COMPOSE` | ptr | len | markör | – |
+| 9 | `POINTER_LEAVE` | – | – | – | – |
 | 10 | `FOCUS` | nod-id | 1 in / 0 ut | 0 mus / 1 tangentbord | – |
 | 20 | `FETCH_DONE` | req_id | status | bytes | – |
 | 30 | `VISIBILITY` | 1 synlig / 0 gömd | – | – | – |

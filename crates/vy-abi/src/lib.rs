@@ -66,6 +66,9 @@ pub mod event {
     pub const TEXT_INPUT: i32 = 7;
     /// IME composition in progress: a = ptr, b = len, c = caret.
     pub const IME_COMPOSE: i32 = 8;
+    /// The pointer left the page's area; no arguments. Until the next
+    /// `POINTER_MOVE` the page has no pointer position.
+    pub const POINTER_LEAVE: i32 = 9;
     /// Focus change: a = semantic node id, b = 1 in / 0 out, c = 0 mouse / 1 keyboard.
     pub const FOCUS: i32 = 10;
     /// Fetch finished: a = req_id, b = status or error, c = bytes.
@@ -728,6 +731,8 @@ mod tests {
     fn spec_a_2_1_event_kinds_fixed() {
         assert_eq!(event::POINTER_MOVE, 1);
         assert_eq!(event::TEXT_INPUT, 7);
+        assert_eq!(event::IME_COMPOSE, 8);
+        assert_eq!(event::POINTER_LEAVE, 9, "new kind, new number");
         assert_eq!(event::FOCUS, 10);
         assert_eq!(event::FETCH_DONE, 20);
         assert_eq!(event::VISIBILITY, 30);

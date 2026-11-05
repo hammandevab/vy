@@ -7,8 +7,9 @@
 //! What it exercises in the ABI: `dl_path` stroked as polylines for the
 //! lines (SPEC-5.2.3, SPEC-C.1.2) and `dl_rect` for bars, gridlines and
 //! tiles, in paint order (SPEC-6.1.3); `POINTER_MOVE` hit-tested against
-//! the bar and month slots so a tooltip follows the pointer (SPEC-A.2.1)
-//! and only a change in what is hovered asks for a frame (SPEC-5.1.3);
+//! the bar and month slots so a tooltip follows the pointer and
+//! `POINTER_LEAVE` takes it away (SPEC-A.2.1), and only a change in what is
+//! hovered asks for a frame (SPEC-5.1.3);
 //! `text_measure` for right-aligned axis ticks and a tooltip sized to its
 //! text (SPEC-5.2.5); a layout that reflows from one row of tiles and two
 //! chart cards to two by two and stacked when the window is narrow
@@ -234,6 +235,12 @@ impl Dashboard {
             w,
             h,
         )
+    }
+
+    fn set_hover(&mut self, hover: Hover) -> bool {
+        let changed = hover != self.hover;
+        self.hover = hover;
+        changed
     }
 
     fn hover_at(&self, x: f32, y: f32) -> Hover {
@@ -551,12 +558,9 @@ impl App for Dashboard {
 
     fn event(&mut self, event: Event<'_>) -> bool {
         match event {
-            Event::PointerMove { x, y, .. } => {
-                let hover = self.hover_at(x, y);
-                let changed = hover != self.hover;
-                self.hover = hover;
-                changed
-            }
+            Event::PointerMove { x, y, .. } => self.set_hover(self.hover_at(x, y)),
+            // No pointer, no tooltip (SPEC-A.2.1: `POINTER_LEAVE`).
+            Event::PointerLeave => self.set_hover(Hover::None),
             _ => false,
         }
     }
@@ -639,6 +643,13 @@ mod tests {
         });
         assert!(mv(&mut page, 1.0, 1.0));
         assert_eq!(page.hover, Hover::None);
+        assert!(mv(&mut page, bar.x + 1.0, bar.y + 1.0));
+        assert!(
+            page.event(Event::PointerLeave),
+            "leaving clears the tooltip"
+        );
+        assert_eq!(page.hover, Hover::None);
+        assert!(!page.event(Event::PointerLeave), "and again is no change");
     }
 
     #[test]

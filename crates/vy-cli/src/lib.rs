@@ -55,6 +55,8 @@ pub enum ScriptedEvent {
         /// Modifier bits.
         modifiers: i32,
     },
+    /// `POINTER_LEAVE`: the pointer left the page.
+    PointerLeave,
     /// `SCROLL`.
     Scroll {
         /// Horizontal delta.
@@ -119,6 +121,7 @@ impl ScriptedEvent {
                 button,
                 modifiers,
             } => rt.event(kind::POINTER_UP, x100(*x), x100(*y), *button, *modifiers),
+            Self::PointerLeave => rt.event(kind::POINTER_LEAVE, 0, 0, 0, 0),
             Self::Scroll {
                 dx,
                 dy,
