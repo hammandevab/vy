@@ -101,6 +101,25 @@ fn main() -> ExitCode {
             );
         }
     }
+    // The key log (SPEC-7.6.1) is optional in 1.0; a broken
+    // one is served as is, and clients will refuse it.
+    match handle.site().key_log() {
+        None => eprintln!(
+            "no {} in the site directory: no key log is served (SPEC-7.6.1)",
+            vy_serve::LOG_FILE_NAME
+        ),
+        Some(Ok(log)) => eprintln!(
+            "key log: {} entr{} at {}, head {}",
+            log.entries.len(),
+            if log.entries.len() == 1 { "y" } else { "ies" },
+            vy_serve::WELL_KNOWN_LOG_PATH,
+            vy_manifest::hex(&log.head())
+        ),
+        Some(Err(e)) => eprintln!(
+            "warning: {}: {e}; clients will refuse it",
+            vy_serve::LOG_FILE_NAME
+        ),
+    }
     // The workers run until the process is stopped.
     loop {
         std::thread::park();

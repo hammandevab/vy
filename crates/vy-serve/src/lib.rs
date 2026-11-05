@@ -37,6 +37,11 @@ pub const WELL_KNOWN_KEY_PATH: &str = "/.well-known/vy-key";
 /// Path of the DNS TXT records the operator must publish for the keys
 /// (SPEC-7.4.5), as plain text for the operator; no client reads it.
 pub const WELL_KNOWN_DNS_PATH: &str = "/.well-known/vy-dns";
+/// Path of the key transparency log (SPEC-7.6.1).
+pub const WELL_KNOWN_LOG_PATH: &str = "/.well-known/vy-log";
+/// The log's file in the site directory, served as is at
+/// [`WELL_KNOWN_LOG_PATH`]; `vy-publish log-append` writes it.
+pub const LOG_FILE_NAME: &str = "vy-log";
 /// Prefix of the text index route.
 pub const WELL_KNOWN_INDEX_PREFIX: &str = "/.well-known/vy-index/";
 /// Prefix of content-addressed blobs.
@@ -444,6 +449,15 @@ impl Site {
             .collect()
     }
 
+    /// The key log of the site (`<dir>/vy-log`), checked: `None` when
+    /// there is none, the parse error when its chain does not hold
+    /// (SPEC-7.6.1). The server serves the file as it is either way; this
+    /// is for the operator's startup message.
+    pub fn key_log(&self) -> Option<Result<vy_manifest::KeyLog, String>> {
+        let text = std::fs::read_to_string(self.dir.join(LOG_FILE_NAME)).ok()?;
+        Some(vy_manifest::KeyLog::parse(&text).map_err(|e| e.to_string()))
+    }
+
     /// The text served at [`WELL_KNOWN_DNS_PATH`] for `host`.
     fn dns_text(&self, host: &str) -> String {
         let mut out = format!(
@@ -578,6 +592,18 @@ impl Site {
                     Counted::Keys,
                 ),
                 None => (self.not_found(path, accept), Counted::None),
+            };
+        }
+        if path == WELL_KNOWN_LOG_PATH {
+            // Read per request: the log grows while the server runs, and
+            // a client fetches it only when it decides on a key.
+            return match std::fs::read(self.dir.join(LOG_FILE_NAME)) {
+                Ok(bytes) if bytes.len() <= vy_manifest::MAX_LOG_BYTES => (
+                    Reply::new(200, bytes, "text/plain; charset=utf-8")
+                        .header("Cache-Control", "no-cache"),
+                    Counted::Keys,
+                ),
+                _ => (self.not_found(path, accept), Counted::None),
             };
         }
         if path == WELL_KNOWN_DNS_PATH {
@@ -1371,6 +1397,55 @@ mod tests {
             assert_eq!(is_loopback_host(host), loopback, "{host}");
         }
         assert_eq!(site.stats().snapshot().keys, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-7.6.1: the site's key log is served as plain text at
+    /// `/.well-known/vy-log`, as the file is, read per request so an
+    /// appended entry is visible at once; no log is 404; a log over the
+    /// size cap is not served.
+    #[test]
+    fn spec_7_6_1_log_served() {
+        let (dir, _, key) = site_dir();
+        let site = Site::open(&config(&dir)).unwrap();
+        assert_eq!(get(&site, WELL_KNOWN_LOG_PATH, "*/*").status, 404);
+        assert!(site.key_log().is_none());
+        let mut log = vy_manifest::KeyLog::default();
+        log.append("vy.example", key.public(), "2026-11-05");
+        std::fs::write(dir.join(LOG_FILE_NAME), log.text()).unwrap();
+        let r = get(&site, WELL_KNOWN_LOG_PATH, "text/plain");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.get("content-type"), Some("text/plain; charset=utf-8"));
+        assert_eq!(r.get("cache-control"), Some("no-cache"));
+        assert_eq!(
+            vy_manifest::KeyLog::parse(&String::from_utf8(r.body).unwrap()).unwrap(),
+            log
+        );
+        assert_eq!(site.key_log(), Some(Ok(log.clone())));
+        log.append(
+            "vy.example",
+            SigningKey::from_seed(&[7; 32]).public(),
+            "2026-12-01",
+        );
+        std::fs::write(dir.join(LOG_FILE_NAME), log.text()).unwrap();
+        let grown = get(&site, WELL_KNOWN_LOG_PATH, "text/plain");
+        assert_eq!(
+            vy_manifest::KeyLog::parse(&String::from_utf8(grown.body).unwrap()).unwrap(),
+            log
+        );
+        std::fs::write(dir.join(LOG_FILE_NAME), "zz\n").unwrap();
+        assert!(matches!(site.key_log(), Some(Err(_))));
+        assert_eq!(
+            get(&site, WELL_KNOWN_LOG_PATH, "*/*").status,
+            200,
+            "served as is"
+        );
+        std::fs::write(
+            dir.join(LOG_FILE_NAME),
+            vec![b'#'; vy_manifest::MAX_LOG_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(get(&site, WELL_KNOWN_LOG_PATH, "*/*").status, 404);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
