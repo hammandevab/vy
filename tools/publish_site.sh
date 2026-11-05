@@ -16,6 +16,11 @@
 # Previews are the first frame at 1280x800, scale 1, with the draft's resources
 # in order (SPEC-4.5.1) and the capabilities it requests; `vy-cli render` is
 # deterministic, so the PNG is the same on every machine (SPEC-11.3.1).
+#
+# conformance/manifests/studio.json is skipped: Studio is local-only. It talks
+# to the dev API of a running `vy-dev serve` on loopback, which `vy-dev` serves
+# itself with the run's origin and key patched in (docs/DEVELOPING.md); it is
+# not part of the public site.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -92,6 +97,8 @@ mkdir -p "$out/previews"
 count=0
 for draft in conformance/manifests/*.json; do
   name=$(basename "$draft" .json)
+  # Local-only, see the header.
+  [ "$name" = studio ] && continue
   module=target/wasm/$name.wasm
   report=$("$bin/vy-publish" build --manifest "$draft" --module "$module" --key "$key" --out "$out/$name.vyp")
   printf '%s\n' "$report"
