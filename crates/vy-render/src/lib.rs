@@ -256,14 +256,16 @@ mod tests {
             cache.decode(3),
             Err(ImageError::TooLarge {
                 width: max + 1,
-                height: 1
+                height: 1,
+                max_side: max
             })
         );
         assert_eq!(
             cache.decode(4),
             Err(ImageError::TooLarge {
                 width: 1,
-                height: max + 1
+                height: max + 1,
+                max_side: max
             })
         );
         assert_eq!(
@@ -289,6 +291,7 @@ mod tests {
             ImageError::TooLarge {
                 width: 1,
                 height: 1,
+                max_side: 1,
             },
             ImageError::Decode(String::new()),
             ImageError::CacheFull,
@@ -304,6 +307,58 @@ mod tests {
         cache.decode(1).unwrap();
         assert_eq!(cache.decode(2), Err(ImageError::CacheFull));
         assert_eq!(cache.decoded_bytes(), MAX_IMAGE_CACHE_BYTES);
+    }
+
+    /// SPEC-6.5.1, SPEC-12.2.2: `decode_png`, which reads goldens back, checks
+    /// the declared size against the canvas limit before it allocates, like
+    /// the resource path checks SPEC-6.5.1's. A 33-byte file whose header
+    /// claims 65535 x 65535 px would otherwise ask for 16 GB and abort the
+    /// process (found by fuzzing in review 0002).
+    #[test]
+    fn spec_6_5_1_decode_png_header_checked_before_alloc() {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in data {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 {
+                        0xEDB8_8320 ^ (crc >> 1)
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        /// A real 1 x 1 PNG whose IHDR is rewritten to claim `w` x `h`.
+        fn claiming(w: u32, h: u32) -> Vec<u8> {
+            let mut bytes = png(1, 1, |_, _| [0, 0, 0, 255]);
+            bytes[16..20].copy_from_slice(&w.to_be_bytes());
+            bytes[20..24].copy_from_slice(&h.to_be_bytes());
+            let crc = crc32(&bytes[12..29]);
+            bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+            bytes
+        }
+        let max = raster::MAX_CANVAS_SIDE_PX;
+        for (w, h) in [
+            (u16::MAX as u32, u16::MAX as u32),
+            (max + 1, 1),
+            (1, max + 1),
+            (u32::MAX, 1),
+        ] {
+            let err = RgbaImage::decode_png(&claiming(w, h)).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("exceeds {max} px")),
+                "{w}x{h}: {err}"
+            );
+        }
+        // At the limit the header passes and the refusal comes from the
+        // missing pixel data instead: the check is on the header alone.
+        let err = RgbaImage::decode_png(&claiming(max, 1)).unwrap_err();
+        assert!(!err.to_string().contains("exceeds"), "{err}");
+        // Honest sizes decode as before, up to the canvas limit.
+        let wide = png(max, 1, |_, _| [1, 2, 3, 4]);
+        assert_eq!(RgbaImage::decode_png(&wide).unwrap().width, max);
     }
 
     /// SPEC-5.2.3, SPEC-C.1.1: `fit` 0 covers the rectangle and crops, 1 fits

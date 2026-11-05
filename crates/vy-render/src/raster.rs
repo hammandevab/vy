@@ -24,6 +24,10 @@ pub const SHADOW_STEPS: u32 = 8;
 /// the cache: never decoded (a display list rendered outside a runtime) or
 /// refused (`E_RESOURCE` was logged when `dl_image` ran).
 pub const IMAGE_PLACEHOLDER_COLOR: u32 = 0x8080_80FF;
+/// Largest canvas side `render` produces, in physical pixels; also the
+/// largest side [`RgbaImage::decode_png`] accepts, since what it reads back
+/// (goldens, SPEC-12.2.2) is what `render` wrote.
+pub const MAX_CANVAS_SIDE_PX: u32 = 16_384;
 /// Largest magnitude accepted for a coordinate, size, radius, blur or stroke
 /// width, in logical pixels. The canvas is at most 16384 physical pixels, so a
 /// larger value cannot be visible; it only serves to overflow the fixed-point
@@ -62,7 +66,11 @@ impl std::fmt::Display for RenderError {
         match self {
             Self::Decode(e) => write!(f, "display list does not decode: {e:?}"),
             Self::BadSize => {
-                f.write_str("output size must be at least 1x1 and at most 16384x16384")
+                write!(
+                    f,
+                    "output size must be at least 1x1 and at most {0}x{0}",
+                    MAX_CANVAS_SIDE_PX
+                )
             }
         }
     }
@@ -525,7 +533,8 @@ pub fn render(
 ) -> Result<RgbaImage, RenderError> {
     let ops = vy_dl::decode(display_list).map_err(RenderError::Decode)?;
     let scale_ok = scale.is_finite() && scale > 0.0;
-    if !(1..=16384).contains(&width) || !(1..=16384).contains(&height) || !scale_ok {
+    let side = 1..=MAX_CANVAS_SIDE_PX;
+    if !side.contains(&width) || !side.contains(&height) || !scale_ok {
         return Err(RenderError::BadSize);
     }
     let mut pixmap = Pixmap::new(width, height).ok_or(RenderError::BadSize)?;

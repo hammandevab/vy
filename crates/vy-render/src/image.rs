@@ -1,6 +1,7 @@
 //! Straight-alpha RGBA8 image, PNG encoding/decoding, and the per-package
 //! image cache behind `IMAGE` (SPEC-6.5.1).
 
+use crate::raster::MAX_CANVAS_SIDE_PX;
 use std::fmt;
 use vy_abi::limits;
 
@@ -76,8 +77,14 @@ impl RgbaImage {
     }
 
     /// Decode a PNG of any colour type into straight-alpha RGBA8.
+    ///
+    /// A header declaring a side above [`MAX_CANVAS_SIDE_PX`] (what `render`
+    /// can have written) is refused before any pixel buffer is allocated, so
+    /// a crafted 16-byte header cannot make the host allocate gigabytes.
+    /// Package resources go through [`ImageCache`] and the stricter limit of
+    /// SPEC-6.5.1.
     pub fn decode_png(bytes: &[u8]) -> Result<Self, PngError> {
-        Self::decode_png_within(bytes, None).map_err(|e| match e {
+        Self::decode_png_within(bytes, Some(MAX_CANVAS_SIDE_PX)).map_err(|e| match e {
             ImageError::Decode(s) => PngError(s),
             other => PngError(format!("{other}")),
         })
@@ -93,7 +100,11 @@ impl RgbaImage {
         let (width, height) = (header.width, header.height);
         if let Some(max) = max_side {
             if width > max || height > max {
-                return Err(ImageError::TooLarge { width, height });
+                return Err(ImageError::TooLarge {
+                    width,
+                    height,
+                    max_side: max,
+                });
             }
         }
         let mut reader = dec.read_info().map_err(decode_err)?;
@@ -131,12 +142,16 @@ impl RgbaImage {
 pub enum ImageError {
     /// Resource id 0 (the module itself, SPEC-4.5.1) or past the last resource.
     Unknown,
-    /// Width or height above `MAX_IMAGE_SIDE_PX` (SPEC-6.5.1); nothing was decoded.
+    /// Width or height above the side limit (`MAX_IMAGE_SIDE_PX` for a
+    /// resource, SPEC-6.5.1; `MAX_CANVAS_SIDE_PX` for `decode_png`);
+    /// nothing was decoded.
     TooLarge {
         /// Declared width.
         width: u32,
         /// Declared height.
         height: u32,
+        /// The limit that was exceeded.
+        max_side: u32,
     },
     /// Not a PNG, or a PNG that does not decode. WebP and AVIF (SPEC-4.1.5)
     /// are not decoded before M3 and land here.
@@ -149,11 +164,17 @@ impl fmt::Display for ImageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unknown => f.write_str("unknown resource id"),
-            Self::TooLarge { width, height } => write!(
-                f,
-                "{width}x{height} px exceeds {} px per side (SPEC-6.5.1)",
-                limits::MAX_IMAGE_SIDE_PX
-            ),
+            Self::TooLarge {
+                width,
+                height,
+                max_side,
+            } => {
+                write!(f, "{width}x{height} px exceeds {max_side} px per side")?;
+                if *max_side == limits::MAX_IMAGE_SIDE_PX {
+                    f.write_str(" (SPEC-6.5.1)")?;
+                }
+                Ok(())
+            }
             Self::Decode(s) => write!(f, "cannot decode image: {s}"),
             Self::CacheFull => write!(
                 f,
