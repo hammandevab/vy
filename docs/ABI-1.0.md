@@ -135,8 +135,9 @@ det tyngre (SPEC-5.2.5).
 | 31 | `BUDGET` | ms använt | ms tillåtet | 1 = sista varningen | - |
 | 32 | `CAPABILITY` | capability-id | 1 beviljad / 0 återkallad | - | - |
 
-Tangenter värden själv agerar på (USB HID): Tab 0x2B (blir `FOCUS`, når aldrig modulen), \
-Enter 0x28 och Escape 0x29 (levereras som `KEY_DOWN`) (SPEC-10.3.1).
+Tangenter värden själv agerar på (USB HID, `vy_abi::key`): Tab 43 (0x2B; blir `FOCUS` och når \
+aldrig modulen, bakåt med Skift som modifierarbit 1; skifttangenterna är 225 vänster och 229 \
+höger), Enter 40 (0x28) och Escape 41 (0x29) (levereras som `KEY_DOWN`) (SPEC-10.3.1).
 
 ## Pekarknappar (`c` i `POINTER_DOWN` och `POINTER_UP`; bitar i `POINTER_MOVE`)
 
@@ -241,6 +242,7 @@ Reserverade och aldrig använda i 1.x: 0x07, 0x08.
 | `MAX_CLIPBOARD_BYTES` | 1048576 | `clipboard_write` (SPEC-9.3.2) |
 | `MAX_SEM_NODES_PER_FRAME` | 65536 | semantiska noder per frame (SPEC-9.3.2) |
 | `MAX_FRAME_TEXT_BYTES` | 16777216 | text i träd och display list per frame (SPEC-9.3.2) |
+| `MAX_LINKS_PER_FRAME` | 4096 | länkar per frame (SPEC-9.3.2) |
 | `fit::MAX` | 2 | högsta `fit` (SPEC-5.2.3) |
 | `cap::MAX` | 6 | högsta capability-id (SPEC-A.4.1) |
 | `level::MAX` | 3 | högsta `log.level`; högre klampas hit (SPEC-5.2.1) |

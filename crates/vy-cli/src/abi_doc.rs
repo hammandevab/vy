@@ -176,10 +176,17 @@ pub fn abi_listing() -> String {
     let _ = writeln!(w);
     let _ = writeln!(
         w,
-        "Tangenter värden själv agerar på (USB HID): Tab {:#04X} (blir `FOCUS`, når aldrig modulen), \\\n\
-         Enter {:#04X} och Escape {:#04X} (levereras som `KEY_DOWN`) (SPEC-10.3.1).",
+        "Tangenter värden själv agerar på (USB HID, `vy_abi::key`): Tab {} ({:#04X}; blir `FOCUS` och når \\\n\
+         aldrig modulen, bakåt med Skift som modifierarbit {}; skifttangenterna är {} vänster och {} \\\n\
+         höger), Enter {} ({:#04X}) och Escape {} ({:#04X}) (levereras som `KEY_DOWN`) (SPEC-10.3.1).",
         key::TAB,
+        key::TAB,
+        modifier::SHIFT,
+        key::SHIFT_LEFT,
+        key::SHIFT_RIGHT,
         key::ENTER,
+        key::ENTER,
+        key::ESCAPE,
         key::ESCAPE
     );
     let _ = writeln!(w);
@@ -269,7 +276,7 @@ pub fn abi_listing() -> String {
     let _ = writeln!(w);
     let _ = writeln!(w, "| Konstant | Värde | Betydelse |");
     let _ = writeln!(w, "| --- | --- | --- |");
-    let rows: [(&str, u64, &str); 24] = [
+    let rows: [(&str, u64, &str); 25] = [
         (
             "MAX_OPS_PER_FRAME",
             limits::MAX_OPS_PER_FRAME.into(),
@@ -359,6 +366,11 @@ pub fn abi_listing() -> String {
             "MAX_FRAME_TEXT_BYTES",
             limits::MAX_FRAME_TEXT_BYTES.into(),
             "text i träd och display list per frame (SPEC-9.3.2)",
+        ),
+        (
+            "MAX_LINKS_PER_FRAME",
+            limits::MAX_LINKS_PER_FRAME.into(),
+            "länkar per frame (SPEC-9.3.2)",
         ),
         (
             "fit::MAX",

@@ -80,9 +80,6 @@ pub const HEADLESS_FRAME_MS: i64 = 16;
 pub const HEADLESS_RANDOM_SEED: u64 = 0x5EED_5EED_0000_0001;
 /// Upper bound on retained log entries per instance.
 pub const MAX_LOG_ENTRIES: usize = 10_000;
-/// Upper bound on links registered in one frame (SPEC-9.3.2); the list is
-/// emptied by every `dl_begin` (SPEC-5.2.10).
-pub const MAX_LINKS_PER_FRAME: usize = 4_096;
 
 /// Capabilities granted to the instance (SPEC-8.2.1). All false by default:
 /// the headless host grants only what the caller names (`vy-cli render
@@ -1206,7 +1203,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                         if let Some(slot) = host.links.iter_mut().find(|l| l.id == id) {
                             *slot = link;
                             err::OK
-                        } else if host.links.len() < MAX_LINKS_PER_FRAME {
+                        } else if host.links.len() < limits::MAX_LINKS_PER_FRAME as usize {
                             host.links.push(link);
                             err::OK
                         } else {

@@ -2602,7 +2602,7 @@ fn spec_5_2_10_links_per_frame() {
     assert_eq!(rt.links().len(), 11, "same id replaces, never duplicates");
     rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.links().len(), 1, "dl_begin emptied the list");
-    let cap = host::MAX_LINKS_PER_FRAME as i32;
+    let cap = limits::MAX_LINKS_PER_FRAME as i32;
     rt.event(0, cap - 1, 1000, 0, 0).unwrap();
     assert_eq!(rt.last_event_result(), err::OK);
     assert_eq!(rt.links().len(), cap as usize);

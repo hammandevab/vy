@@ -451,15 +451,21 @@ pub mod modifier {
 }
 
 /// USB HID usage codes of the keys the host itself acts on (SPEC-10.3.1):
-/// Tab moves focus and never reaches the module; Enter and Escape are
-/// delivered as `KEY_DOWN` for the module to act on.
+/// Tab moves focus and never reaches the module, backwards with Shift held
+/// (modifier bit 1, SPEC-A.5.1); Enter and Escape are delivered as
+/// `KEY_DOWN` for the module to act on. The Shift keys themselves arrive
+/// as ordinary `KEY_DOWN`/`KEY_UP` with these codes.
 pub mod key {
-    /// Return / Enter.
+    /// Return / Enter (40).
     pub const ENTER: i32 = 0x28;
-    /// Escape.
+    /// Escape (41).
     pub const ESCAPE: i32 = 0x29;
-    /// Tab (with Shift: backwards).
+    /// Tab (43); with Shift: backwards.
     pub const TAB: i32 = 0x2B;
+    /// Left Shift (225).
+    pub const SHIFT_LEFT: i32 = 0xE1;
+    /// Right Shift (229).
+    pub const SHIFT_RIGHT: i32 = 0xE5;
 }
 
 /// Semantic roles for `sem_node` (SPEC-A.3.1).
@@ -704,6 +710,10 @@ pub mod limits {
     /// together for one frame: 16 MB; a `dl_text` or `sem_node` that would
     /// exceed it is `E_DL_FULL` (SPEC-9.3.1).
     pub const MAX_FRAME_TEXT_BYTES: u32 = 16 << 20;
+    /// Maximum links registered per frame (SPEC-5.2.10, SPEC-9.3.2): the
+    /// list is emptied by `dl_begin` and the 4 097th `link_register` is
+    /// `E_DL_FULL`.
+    pub const MAX_LINKS_PER_FRAME: u32 = 4096;
 }
 
 /// Wasm value types used in ABI signatures.
@@ -1254,11 +1264,16 @@ mod tests {
         assert_eq!(cap::id("file"), None, "1.1 capabilities are not in 1.0");
     }
 
-    /// SPEC-10.3.1, SPEC-10.3.2: the host acts on Tab itself and leaves Enter
-    /// and Escape to the module; exactly the eight interactive roles take focus.
+    /// SPEC-10.3.1, SPEC-10.3.2: the host acts on Tab (USB HID 43) itself,
+    /// backwards with Shift (225 left, 229 right, modifier bit 1), and
+    /// leaves Enter (40) and Escape (41) to the module; exactly the eight
+    /// interactive roles take focus.
     #[test]
     fn spec_10_3_2_focusable_roles() {
+        assert_eq!((key::TAB, key::ENTER, key::ESCAPE), (43, 40, 41));
+        assert_eq!((key::SHIFT_LEFT, key::SHIFT_RIGHT), (225, 229));
         assert_eq!((key::TAB, key::ENTER, key::ESCAPE), (0x2B, 0x28, 0x29));
+        assert_eq!(modifier::SHIFT, 1, "Shift+Tab is Tab with modifier bit 1");
         for r in 1..=role::MAX {
             let expect = matches!(
                 r,
@@ -1402,6 +1417,7 @@ mod tests {
             "PATH n: u16"
         );
         assert_eq!(limits::MAX_SEM_NODES_PER_FRAME, limits::MAX_OPS_PER_FRAME);
+        assert_eq!(limits::MAX_LINKS_PER_FRAME, 4096, "links per frame");
         for cap in [
             limits::MAX_LOG_BYTES,
             limits::MAX_TEXT_BYTES,

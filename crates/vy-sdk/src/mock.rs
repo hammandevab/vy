@@ -22,8 +22,6 @@ use vy_abi::{err, fit, level, limits, ABI_VERSION};
 pub const CHAR_WIDTH_FACTOR: f32 = 0.6;
 /// Line height relative to the font size, as in `vy-render`.
 pub const LINE_HEIGHT_FACTOR: f32 = 1.25;
-/// Most links the host keeps for one frame (SPEC-9.3.2).
-pub const MAX_LINKS_PER_FRAME: usize = 4_096;
 
 /// One display-list call as the mock recorded it.
 #[derive(Clone, Debug, PartialEq)]
@@ -680,7 +678,7 @@ impl MockHost {
         let url = String::from_utf8_lossy(url).into_owned();
         if let Some(l) = self.links.iter_mut().find(|l| l.0 == id) {
             *l = (id, x, y, w, h, url);
-        } else if self.links.len() < MAX_LINKS_PER_FRAME {
+        } else if self.links.len() < limits::MAX_LINKS_PER_FRAME as usize {
             self.links.push((id, x, y, w, h, url));
         } else {
             self.refuse("link_register", err::E_DL_FULL);

@@ -311,6 +311,10 @@ pub mod key {
     pub const BACKSPACE: i32 = 0x2A;
     /// Tab; consumed by the host, listed so a page can name it.
     pub const TAB: i32 = vy_abi::key::TAB;
+    /// Left Shift; the host reports it as modifier bit 1 too (SPEC-A.5.1).
+    pub const SHIFT_LEFT: i32 = vy_abi::key::SHIFT_LEFT;
+    /// Right Shift.
+    pub const SHIFT_RIGHT: i32 = vy_abi::key::SHIFT_RIGHT;
     /// Space.
     pub const SPACE: i32 = 0x2C;
     /// Delete forward.
