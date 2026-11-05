@@ -286,16 +286,25 @@ impl Tab {
         if !self.capabilities().has(cap::NET) {
             return Err(vy_abi::err::E_DENIED);
         }
-        // Plain http (loopback only, SPEC-7.1.3) goes to the page's own
-        // loopback origin and nowhere else: a remote page never reaches
-        // localhost, a localhost page never another local port.
-        if url.starts_with("http://") && !plain_http_allowed(url, self.origin.as_deref()) {
+        let Some(origin) = vy_runtime::origin_of(url) else {
+            return Err(vy_abi::err::E_ORIGIN);
+        };
+        if !self.net_origins.contains(&origin) {
             return Err(vy_abi::err::E_ORIGIN);
         }
-        match vy_runtime::origin_of(url) {
-            Some(origin) if self.net_origins.contains(&origin) => Ok(()),
-            _ => Err(vy_abi::err::E_ORIGIN),
+        // Plain http (loopback only, SPEC-7.1.3) goes to the page's own
+        // loopback origin and nowhere else, whatever the user granted: a
+        // remote page never reaches localhost, a localhost page never
+        // another local port. One rule, the runtime's.
+        let page = self
+            .origin
+            .as_deref()
+            .and_then(|o| o.strip_prefix("vy://"))
+            .unwrap_or("");
+        if !vy_runtime::plain_http_allowed(&origin, page) {
+            return Err(vy_abi::err::E_ORIGIN);
         }
+        Ok(())
     }
 
     fn running(&self) -> bool {
@@ -3375,31 +3384,6 @@ impl Shell {
     }
 }
 
-/// Whether a plain-http `url` (SPEC-7.1.3: loopback only) may be fetched
-/// for a page at `page_origin` (`vy://host[:port]`): only when its
-/// authority is the page's own and that is a loopback host. No userinfo.
-/// The same rule as `vy_runtime::plain_http_allowed` on the m4/dev branch;
-/// the call in `Tab::request_verdict` switches to it at merge.
-pub fn plain_http_allowed(url: &str, page_origin: Option<&str>) -> bool {
-    let Some(rest) = url.strip_prefix("http://") else {
-        return false;
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = rest[..end].to_ascii_lowercase();
-    let Some(page) = page_origin.and_then(|o| o.strip_prefix("vy://")) else {
-        return false;
-    };
-    if authority.is_empty() || authority.contains('@') || authority != page.to_ascii_lowercase() {
-        return false;
-    }
-    let host = if authority.starts_with('[') {
-        authority.split_inclusive(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-}
-
 /// The selection caret for page point `(px, py)` in `tab`: in the text
 /// node under it, or with `nearest` the closest one, at glyph granularity
 /// where the frame draws the node's text in one run (SPEC-10.2.2).
@@ -3528,59 +3512,94 @@ mod tests {
     use super::*;
 
     /// SPEC-5.2.8, SPEC-7.1.3, SPEC-2.1.4: a plain-http request goes only
-    /// to the page's own loopback origin: not to another local port, not
-    /// from a remote page, not with userinfo, not to a non-loopback host;
-    /// the main process refuses the rest with `E_ORIGIN` before anything
-    /// reaches the loader.
+    /// to the page's own loopback origin, by the runtime's one rule
+    /// (`vy_runtime::plain_http_allowed`) applied in the main process: the
+    /// page's own loopback origin is reached; a remote page with a loopback
+    /// origin in its list and `net` granted never reaches it; a page on
+    /// `localhost:8080` never reaches `localhost:8081` (the dev API, which
+    /// also wants its run's token); not another name for the same port, not
+    /// with userinfo, not from a local file. The main process refuses the
+    /// rest with `E_ORIGIN` before anything reaches the loader.
     #[test]
     fn spec_5_2_8_plain_http_only_to_own_loopback_origin() {
-        let own = Some("vy://localhost:8081");
-        assert!(plain_http_allowed("http://localhost:8081/_dev/x", own));
-        assert!(plain_http_allowed("http://LOCALHOST:8081", own));
-        assert!(!plain_http_allowed("http://localhost:9000/", own));
-        assert!(!plain_http_allowed("http://127.0.0.1:8081/", own));
-        assert!(!plain_http_allowed(
-            "http://localhost:8081@evil.example/",
-            own
-        ));
-        assert!(!plain_http_allowed("https://localhost:8081/", own));
-        assert!(!plain_http_allowed("http://localhost:8081/", None));
-        assert!(!plain_http_allowed(
-            "http://localhost:8081/",
-            Some("vy://evil.example")
-        ));
-        assert!(!plain_http_allowed(
-            "http://evil.example/",
-            Some("vy://evil.example")
-        ));
+        use vy_runtime::plain_http_allowed;
+        // The rule itself, for the three cases.
         assert!(plain_http_allowed(
-            "http://[::1]:7000/a",
-            Some("vy://[::1]:7000")
+            "http://localhost:8081",
+            "localhost:8081"
         ));
-        assert!(plain_http_allowed(
-            "http://127.0.0.1/",
-            Some("vy://127.0.0.1")
+        assert!(!plain_http_allowed("http://localhost:8081", "evil.example"));
+        assert!(!plain_http_allowed(
+            "http://localhost:8081",
+            "localhost:8080"
         ));
-        // In the gate: a remote page with `net` and a loopback origin in its
-        // list still cannot reach localhost.
+
+        // In the gate, with `net` granted and every origin below listed.
         let mut tab = Tab::new(1);
         tab.caps = vec![Resolved {
             name: "net",
             granted: true,
             ask: false,
         }];
-        tab.net_origins = vec!["http://localhost:8081".into(), "https://api.example".into()];
-        tab.origin = Some("vy://evil.example".into());
-        assert_eq!(
-            tab.request_verdict("http://localhost:8081/secret"),
-            Err(vy_abi::err::E_ORIGIN)
-        );
-        assert_eq!(tab.request_verdict("https://api.example/x"), Ok(()));
+        tab.net_origins = [
+            "http://localhost:8081",
+            "http://localhost:9000",
+            "http://127.0.0.1:8081",
+            "http://127.0.0.1",
+            "http://[::1]:7000",
+            "https://localhost:8081",
+            "https://api.example",
+        ]
+        .map(String::from)
+        .to_vec();
+        let refused = Err(vy_abi::err::E_ORIGIN);
+
+        // 1. The page's own loopback origin.
         tab.origin = Some("vy://localhost:8081".into());
+        assert_eq!(tab.request_verdict("http://localhost:8081/_dev/x"), Ok(()));
+        assert_eq!(tab.request_verdict("http://LOCALHOST:8081"), Ok(()));
         assert_eq!(
             tab.request_verdict("http://localhost:9000/"),
-            Err(vy_abi::err::E_ORIGIN),
+            refused,
             "another local port"
         );
+        assert_eq!(
+            tab.request_verdict("http://127.0.0.1:8081/"),
+            refused,
+            "another name"
+        );
+        assert_eq!(
+            tab.request_verdict("http://localhost:8081@evil.example/"),
+            refused,
+            "userinfo"
+        );
+        assert_eq!(
+            tab.request_verdict("https://localhost:8081/"),
+            Ok(()),
+            "https is not the plain-http rule"
+        );
+        tab.origin = Some("vy://[::1]:7000".into());
+        assert_eq!(tab.request_verdict("http://[::1]:7000/a"), Ok(()));
+        tab.origin = Some("vy://127.0.0.1".into());
+        assert_eq!(tab.request_verdict("http://127.0.0.1/"), Ok(()));
+
+        // 2. A remote page never reaches loopback over plain http.
+        tab.origin = Some("vy://evil.example".into());
+        assert_eq!(tab.request_verdict("http://localhost:8081/secret"), refused);
+        assert_eq!(tab.request_verdict("http://127.0.0.1/"), refused);
+        assert_eq!(tab.request_verdict("http://evil.example/"), refused);
+        assert_eq!(tab.request_verdict("https://api.example/x"), Ok(()));
+
+        // 3. The page under development on localhost:8080 never reaches
+        // Studio's origin on localhost:8081.
+        tab.origin = Some("vy://localhost:8080".into());
+        assert_eq!(
+            tab.request_verdict("http://localhost:8081/_dev/agent"),
+            refused
+        );
+
+        // A local file has no origin and no plain http.
+        tab.origin = None;
+        assert_eq!(tab.request_verdict("http://localhost:8081/"), refused);
     }
 }
