@@ -116,14 +116,8 @@ pub fn text_caret(style: StyleId, text: &str, byte_offset: usize) -> Result<(f32
     Ok((from_x100((packed >> 32) as i32), from_x100(packed as i32)))
 }
 
-/// `pointer_get`: the pointer in logical pixels (SPEC-5.2.6).
-pub fn pointer() -> (f32, f32) {
-    // SAFETY: no arguments.
-    let packed = unsafe { raw::pointer_get() };
-    (from_x100((packed >> 32) as i32), from_x100(packed as i32))
-}
-
-/// `key_down`: true while the USB HID key `code` is held (SPEC-5.2.6).
+/// `key_down`: true while the USB HID key `code` is held (SPEC-5.2.6). The
+/// pointer has no such query: a page keeps the last `POINTER_MOVE` itself.
 pub fn key_down(code: i32) -> bool {
     // SAFETY: no pointers.
     unsafe { raw::key_down(code) != 0 }

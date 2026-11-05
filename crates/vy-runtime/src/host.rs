@@ -171,7 +171,6 @@ pub struct Host {
     pub(crate) rng: u64,
     pub(crate) wants_frame: bool,
     pub(crate) exited: Option<i32>,
-    pub(crate) pointer: (i32, i32),
     pub(crate) keys_down: Vec<i32>,
     pub(crate) ime_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) sem_full_logged: bool,
@@ -199,7 +198,6 @@ impl Host {
             rng: HEADLESS_RANDOM_SEED,
             wants_frame: false,
             exited: None,
-            pointer: (0, 0),
             keys_down: Vec::new(),
             ime_rect: None,
             sem_full_logged: false,
@@ -751,10 +749,6 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     )?;
 
     // input (SPEC-5.2.6)
-    linker.func_wrap(m, "pointer_get", |c: Caller<'_, Host>| -> i64 {
-        let (x, y) = c.data().pointer;
-        (i64::from(x) << 32) | i64::from(y as u32)
-    })?;
     linker.func_wrap(m, "key_down", |c: Caller<'_, Host>, code: i32| -> i32 {
         i32::from(c.data().keys_down.contains(&code))
     })?;

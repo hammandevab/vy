@@ -160,8 +160,6 @@ pub struct MockHost {
     pub frame_requests: u32,
     /// Code passed to `exit`.
     pub exit_code: Option<i32>,
-    /// Pointer position × 100.
-    pub pointer: (i32, i32),
     /// Keys currently down.
     pub keys_down: Vec<i32>,
     /// IME rectangle while composition is active.
@@ -538,10 +536,6 @@ impl MockHost {
         let lines_before = before.matches('\n').count() as f32;
         let x = line.chars().count() as f32 * style.size_px * CHAR_WIDTH_FACTOR;
         pack(x, lines_before * style.size_px * LINE_HEIGHT_FACTOR)
-    }
-
-    pub(crate) fn pointer_get(&self) -> i64 {
-        (i64::from(self.pointer.0) << 32) | i64::from(self.pointer.1 as u32)
     }
 
     pub(crate) fn key_down(&self, code: i32) -> i32 {

@@ -20,7 +20,7 @@ fn style() -> StyleId {
 /// `vy` exactly once and binds nothing the ABI does not have.
 #[test]
 fn spec_5_2_all_imports_bound() {
-    const BOUND: [&str; 33] = [
+    const BOUND: [&str; 32] = [
         "abi_version",
         "log",
         "request_frame",
@@ -36,7 +36,6 @@ fn spec_5_2_all_imports_bound() {
         "text_style",
         "text_measure",
         "text_caret",
-        "pointer_get",
         "key_down",
         "ime_begin",
         "ime_end",
@@ -676,11 +675,9 @@ fn spec_c_1_2_path_and_image_encoding() {
 fn spec_5_2_6_bindings_pass_through() {
     mock::reset();
     mock::with(|h| {
-        h.pointer = (1234, 56);
         h.keys_down.push(key::SPACE);
         h.now_ms = 42;
     });
-    assert_eq!(api::pointer(), (12.34, 0.56));
     assert!(api::key_down(key::SPACE) && !api::key_down(key::ENTER));
     assert_eq!(api::now_ms(), 42);
     let mut buf = [0u8; 12];

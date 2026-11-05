@@ -468,9 +468,6 @@ impl Runtime {
         {
             let host = self.host_mut();
             match kind {
-                event::POINTER_MOVE | event::POINTER_DOWN | event::POINTER_UP => {
-                    host.pointer = (a, b);
-                }
                 event::KEY_DOWN => {
                     if !host.keys_down.contains(&a) {
                         host.keys_down.push(a);

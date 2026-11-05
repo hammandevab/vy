@@ -456,12 +456,8 @@ pub const IMPORTS: &[Sig] = &[
         params: &[I32, I32, I32, I32],
         result: Some(I64),
     },
-    // input (SPEC-5.2.6)
-    Sig {
-        name: "pointer_get",
-        params: &[],
-        result: Some(I64),
-    },
+    // input (SPEC-5.2.6); `pointer_get` was withdrawn before the freeze:
+    // the pointer arrives through `POINTER_MOVE` only.
     Sig {
         name: "key_down",
         params: &[I32],
@@ -660,7 +656,7 @@ mod tests {
             ("dl_text", 6),
             ("dl_image", 6),
             ("text_style", 4),
-            ("pointer_get", 0),
+            ("key_down", 1),
             ("fetch_begin", 5),
             ("state_put", 4),
             ("navigate", 3),
@@ -674,6 +670,11 @@ mod tests {
             let s = import(name).unwrap_or_else(|| panic!("missing import {name}"));
             assert_eq!(s.params.len(), *arity, "{name} arity");
         }
+        assert!(
+            import("pointer_get").is_none(),
+            "withdrawn: the pointer is delivered by POINTER_MOVE only (SPEC-5.2.6)"
+        );
+        assert_eq!(IMPORTS.len(), 32);
         // No duplicate names (SPEC-2.1.1: one canonical expression per operation).
         for (i, a) in IMPORTS.iter().enumerate() {
             for b in &IMPORTS[i + 1..] {
@@ -691,7 +692,7 @@ mod tests {
         for s in IMPORTS {
             match s.name {
                 "request_frame" | "exit" => assert_eq!(s.result, None, "{}", s.name),
-                "text_measure" | "text_caret" | "dl_text" | "now_ms" | "pointer_get" => {
+                "text_measure" | "text_caret" | "dl_text" | "now_ms" => {
                     assert_eq!(s.result, Some(I64), "{}", s.name)
                 }
                 _ => assert_eq!(s.result, Some(I32), "{} returns a status", s.name),

@@ -1,4 +1,4 @@
-//! The 33 imports of namespace `vy` (SPEC-5.2.1..5.2.13), untyped.
+//! The 32 imports of namespace `vy` (SPEC-5.2.1..5.2.13), untyped.
 //!
 //! On `wasm32-unknown-unknown` these are the real imports; natively they
 //! dispatch to [`crate::mock::MockHost`] on the current thread. The signatures
@@ -25,7 +25,6 @@ mod ffi {
         pub fn text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32;
         pub fn text_measure(style_id: i32, max_w: f32, ptr: *const u8, len: i32) -> i64;
         pub fn text_caret(style_id: i32, ptr: *const u8, len: i32, byte_offset: i32) -> i64;
-        pub fn pointer_get() -> i64;
         pub fn key_down(code: i32) -> i32;
         pub fn ime_begin(x: f32, y: f32, w: f32, h: f32) -> i32;
         pub fn ime_end() -> i32;
@@ -145,9 +144,6 @@ mod ffi {
     pub unsafe fn text_caret(style_id: i32, ptr: *const u8, len: i32, byte_offset: i32) -> i64 {
         let b = bytes(ptr, len);
         with(|m| m.text_caret(style_id, b, byte_offset))
-    }
-    pub unsafe fn pointer_get() -> i64 {
-        with(|m| m.pointer_get())
     }
     pub unsafe fn key_down(code: i32) -> i32 {
         with(|m| m.key_down(code))

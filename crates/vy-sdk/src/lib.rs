@@ -3,7 +3,7 @@
 //! A page is a `struct` that implements [`App`]; `vy_sdk::export!(MyApp)`
 //! generates the six exports of SPEC-5.1 around it. Everything the module
 //! can ask the host for goes through the typed functions in this crate,
-//! which wrap the 33 imports of SPEC-5.2 (one function per import, SPEC-2.1.1)
+//! which wrap the 32 imports of SPEC-5.2 (one function per import, SPEC-2.1.1)
 //! and turn status codes into [`VyError`].
 //!
 //! The crate is `no_std` and builds for `wasm32-unknown-unknown`, where the
@@ -37,9 +37,9 @@ pub mod heap;
 
 pub use api::{
     abi_version, clipboard_read, clipboard_write, exit, fetch_begin, fetch_cancel, fetch_poll,
-    fetch_read, ime_begin, ime_end, key_down, link_register, log, navigate, now_ms, pointer,
-    random, request_frame, state_delete, state_get, state_put, text_caret, text_measure,
-    text_style, Level, Method,
+    fetch_read, ime_begin, ime_end, key_down, link_register, log, navigate, now_ms, random,
+    request_frame, state_delete, state_get, state_put, text_caret, text_measure, text_style, Level,
+    Method,
 };
 pub use app::{App, Window};
 pub use error::VyError;
