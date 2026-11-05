@@ -260,6 +260,7 @@ mod tests {
         assert_eq!(shell.tab_status(tab), "running");
         shell.handle(Incoming::Tab(
             tab,
+            shell.tab_generation(tab),
             Inbound::Message(ToShell::Navigate {
                 url: "https://docs.example/vy/m1-bench.csv".into(),
                 replace: false,
@@ -320,6 +321,21 @@ mod tests {
         let chrome_h = shell.layout().chrome_h as u32;
         assert_eq!(frame.pixel(400, chrome_h + 300).map(|p| p[3]), Some(255));
         assert_ne!(frame.pixel(400, chrome_h + 300), frame.pixel(400, 10));
+        // Navigating a running tab starts a fresh process (SPEC-9.5.2:
+        // nothing of the old page survives); the old process's end is
+        // not mistaken for the new one's.
+        shell.navigate_tab(b, local("hello"), true);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(b), "running");
+        let pb2 = shell.tab_pid(b).unwrap();
+        assert_ne!(pb2, pb);
+        assert!(shell.tab_frames(b) >= 1);
+        shell.drain();
+        assert_eq!(
+            shell.tab_status(b),
+            "running",
+            "a stale Gone changes nothing"
+        );
         shell.shutdown();
     }
 
@@ -634,6 +650,47 @@ mod tests {
         }
         assert!(differed, "a different random key, a different serve");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-9.7.1: reproducible builds publish hash and recipe.
+    #[test]
+    #[ignore = "M5: release"]
+    fn spec_9_7_1_reproducible_build() {
+        todo!()
+    }
+
+    /// SPEC-10.2.1: semantic tree exposed through AccessKit. The shell
+    /// receives the tree per frame (`Shell::tab_semantic`); exposing it
+    /// to the platform is M4.
+    #[test]
+    #[ignore = "M4: accessibility"]
+    fn spec_10_2_1_accesskit() {
+        todo!()
+    }
+
+    /// SPEC-10.2.2: text selection copies logical strings.
+    #[test]
+    #[ignore = "M4: accessibility"]
+    fn spec_10_2_2_text_selection() {
+        todo!()
+    }
+
+    /// SPEC-10.3.1: the shell feeds OS key and pointer events to the runtime, which owns
+    /// the focus order (Tab/Shift+Tab become KIND_FOCUS; Enter/Escape stay KEY_DOWN).
+    /// The keys reach the runtime as HID codes (`keymap`); the visible focus order is M4.
+    #[test]
+    #[ignore = "M4: accessibility"]
+    fn spec_10_3_1_focus_order() {
+        todo!()
+    }
+
+    /// SPEC-10.4.1: a page without a semantic tree is marked inaccessible.
+    /// The chrome draws the marker ("otillgänglig") from `has_tree`; the
+    /// test of the whole path is M4 with AccessKit.
+    #[test]
+    #[ignore = "M4: accessibility"]
+    fn spec_10_4_1_inaccessible_marker() {
+        todo!()
     }
 
     /// SPEC-13.1.1: cold start to empty window <= 150 ms.

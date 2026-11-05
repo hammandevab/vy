@@ -58,9 +58,11 @@ jobs:
         run: cargo build --release -p vy-shell
       - name: Shell screenshot
         run: target/release/vy-shell --screenshot /tmp/shell.png --size 1024x720 --manifest conformance/manifests/shop.json target/wasm/shop.wasm
-      # SPEC §13, informational until SPEC-12.2.3 has reference numbers.
+      # SPEC §13, informational until SPEC-12.2.3 has reference numbers;
+      # a debug build here, so the numbers only show that it runs
+      # (`cargo run --release -p vy-cli -- bench` for the real ones).
       - name: Bench (informational)
-        run: cargo run --release -p vy-cli -- bench --iterations 10
+        run: cargo run -p vy-cli -- bench --iterations 3
 
   platform:
     strategy:

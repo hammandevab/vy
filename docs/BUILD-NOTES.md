@@ -1,8 +1,17 @@
 # Byggnoteringar
 
 Skrivna av byggagenten. Granskningssidorna skrivs av en annan agent (`docs/reviews/`).
+M3:s andra del (vy-shell) har egna noteringar i [`docs/notes/m3-shell.md`](notes/m3-shell.md).
 M2.7 (luckorna före frysen, efter granskning 0003) står först, sedan M3:s första del, M2.6, M2.5,
 M2 och M1; äldre delar är oförändrade utom där senare milstolpar ändrat läget (markerat).
+
+# M3 del 2 – vy-shell
+
+Se [`docs/notes/m3-shell.md`](notes/m3-shell.md): fönstret (winit + softbuffer), en process per
+flik över rör med `IpcTransport`, chromen som display list, laddning genom vy-proto med policy
+och grants, `--record`/`--replay`, `vy-shell --screenshot` och fyra skalfall i sviten,
+`vy-cli bench`, Windows i CI. Backloggen 29 → 19. Spec-frågor 45–52 där. Nya beroenden: winit,
+softbuffer (motiverade där).
 
 # M2.7 – sista luckorna före frys
 

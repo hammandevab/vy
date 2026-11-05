@@ -123,7 +123,7 @@ Kvar ignorerade: spec_13_1_1 (kräver fönster; flikprocessens kallstart mäts i
 M5 (reproducerbara byggen), vy-cli:s bench-tester (13.1.2, 13.1.3, 13.2.2, 13.2.3 väntar på tal
 från referensmaskinen; `bench` mäter dem), vy-runtime (6.2.2 bevisas nu av 13.3.1-testet på
 skalnivå men meningen refereras därifrån; 9.3.1, 9.5.1), vy-render 13.2.1 (mäts i bench).
-Backloggen: 29 → 21.
+Backloggen: 29 → 19 (`cargo test --workspace -- --ignored --list`).
 
 ## Vad som kräver ett riktigt fönster – manuell kontroll på Windows
 

@@ -63,8 +63,10 @@ impl Waker {
 /// What arrives in the shell's inbox from its threads.
 #[derive(Debug)]
 pub enum Incoming {
-    /// From a tab's reader.
-    Tab(TabId, Inbound),
+    /// From a tab's reader: the tab, the navigation the process belongs
+    /// to (a message from an earlier process of the same tab is dropped),
+    /// and the message.
+    Tab(TabId, u64, Inbound),
     /// From the loader.
     Load(Done),
 }
@@ -391,6 +393,11 @@ impl Shell {
             Some(State::Stopped(r)) => format!("stopped: {r}"),
             Some(State::Gone(r)) => format!("gone: {r}"),
         }
+    }
+
+    /// A tab's navigation count: the generation its current process belongs to.
+    pub fn tab_generation(&self, id: TabId) -> u64 {
+        self.tab(id).map_or(0, |t| t.generation)
     }
 
     /// Frames a tab has received since its page loaded.
@@ -800,9 +807,14 @@ impl Shell {
 
     /// Handle one message from the inbox.
     pub fn handle(&mut self, incoming: Incoming) {
+        if let Incoming::Tab(id, generation, _) = &incoming {
+            if self.tab(*id).is_none_or(|t| t.generation != *generation) {
+                return;
+            }
+        }
         match incoming {
-            Incoming::Tab(id, Inbound::Message(m)) => self.tab_message(id, m),
-            Incoming::Tab(id, Inbound::Gone { error }) => {
+            Incoming::Tab(id, _, Inbound::Message(m)) => self.tab_message(id, m),
+            Incoming::Tab(id, _, Inbound::Gone { error }) => {
                 let active = Some(id) == self.active_tab();
                 if let Some(tab) = self.tab_mut(id) {
                     let status = tab
@@ -921,8 +933,11 @@ impl Shell {
                 vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
             ),
         };
+        let generation = self.tab(id).map_or(0, |t| t.generation);
         let forward = move |tab_id: TabId, inbound: Inbound| {
-            let ok = sink.send(Incoming::Tab(tab_id, inbound)).is_ok();
+            let ok = sink
+                .send(Incoming::Tab(tab_id, generation, inbound))
+                .is_ok();
             waker.wake();
             ok
         };
