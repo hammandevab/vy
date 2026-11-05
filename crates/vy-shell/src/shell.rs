@@ -40,6 +40,11 @@ const ZOOM_STEPS: [f32; 9] = [0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0];
 const NET_BYTES_PER_MINUTE: u64 = 256 << 20;
 /// Log lines kept per tab.
 const MAX_TAB_LOGS: usize = 200;
+/// How long after a user gesture in a tab (a pointer release or a key
+/// press delivered to its page) the page's `navigate` to an `https://`
+/// address may open the system browser (SPEC-2.1.7): the same second as
+/// SPEC-5.2.12 gives `clipboard_read`. One open per gesture.
+pub const GESTURE_WINDOW_MS: i64 = 1000;
 /// How long the capability question has to have been up before a click
 /// on "Tillåt" counts (SPEC-8.2.3): a page that makes the shell ask
 /// right before the user's next click (a reload on pointer movement)
@@ -157,6 +162,9 @@ struct Tab {
     pressed_link: Option<String>,
     hidden: bool,
     under_min: bool,
+    /// Clock reading of the last user gesture delivered to the page (a
+    /// pointer release or a key press) that no external open has used.
+    gesture_ms: Option<i64>,
     /// Clock reading at which the capability question now shown for this
     /// tab appeared, for arming "Tillåt" (`DIALOG_ARM_MS`).
     ask_since: Option<i64>,
@@ -201,8 +209,17 @@ impl Tab {
             pressed_link: None,
             hidden: false,
             under_min: false,
+            gesture_ms: None,
             ask_since: None,
         }
+    }
+
+    /// Take the tab's recent user gesture, if there is one at `now`:
+    /// true at most once per gesture.
+    fn take_gesture(&mut self, now: i64) -> bool {
+        self.gesture_ms
+            .take()
+            .is_some_and(|at| now - at <= GESTURE_WINDOW_MS)
     }
 
     /// The question now shown appeared at `now`, if there is one.
@@ -787,6 +804,7 @@ impl Shell {
             tab.hidden = false;
             tab.under_min = false;
             tab.pressed_link = None;
+            tab.gesture_ms = None;
             tab.ask_since = None;
         }
         if Some(id) == self.active_tab() {
@@ -842,6 +860,8 @@ impl Shell {
         }
     }
 
+    /// Open `url` in the system browser (SPEC-2.1.7) because the user
+    /// asked for it in the chrome: the address bar or an error view.
     fn open_external(&mut self, url: &str) {
         match self.config.opener.open(url) {
             Ok(()) => self.external_opens.push(url.to_string()),
@@ -850,6 +870,26 @@ impl Shell {
                     tab.log(format!("[host] could not open {url}: {e}"));
                 }
             }
+        }
+    }
+
+    /// Open `url` in the system browser on behalf of tab `id`'s page: its
+    /// `navigate` (SPEC-5.2.10) or a link it registered. Only on a user
+    /// gesture in that tab within `GESTURE_WINDOW_MS`, and once per
+    /// gesture; otherwise the request is dropped and logged with the
+    /// address. A hidden tab gets no events, so it never has a gesture,
+    /// and a thousand `navigate` calls on one click open one window.
+    fn open_external_for(&mut self, id: TabId, url: &str) {
+        let now = self.now_ms();
+        let Some(tab) = find_tab(&mut self.tabs, id) else {
+            return;
+        };
+        if tab.take_gesture(now) {
+            self.open_external(url);
+        } else {
+            tab.log(format!(
+                "[host info] not opened: {url} (no user gesture in the tab within {GESTURE_WINDOW_MS} ms, or the gesture already opened an address)"
+            ));
         }
     }
 
@@ -1158,7 +1198,7 @@ impl Shell {
                 // also reads a bare path as a local file, which is the
                 // user's to open from the address bar, never a tab's.
                 if is_external(&url) {
-                    self.open_external(&url);
+                    self.open_external_for(id, &url);
                 } else if let Some(source) = url
                     .starts_with("vy://")
                     .then(|| Source::parse(&url).ok())
@@ -1653,6 +1693,11 @@ impl Shell {
                     clock_ms: now,
                 });
                 tab.tick_due = true;
+                // A user gesture in this tab, for `open_external_for`:
+                // a release or a key press; moves and scrolls are not.
+                if kind == event::POINTER_UP || kind == event::KEY_DOWN {
+                    tab.gesture_ms = Some(now);
+                }
             }
         }
     }
@@ -1772,13 +1817,16 @@ impl Shell {
     }
 
     /// A link the page registered was clicked (SPEC-5.2.10, SPEC-2.1.7).
+    /// An `https://` link uses the click's gesture, so the page's own
+    /// `navigate` on the same click opens nothing more.
     fn follow_link(&mut self, url: &str) {
+        let Some(id) = self.active_tab() else {
+            return;
+        };
         if is_external(url) {
-            self.open_external(url);
+            self.open_external_for(id, url);
         } else if let Ok(source) = Source::parse(url) {
-            if let Some(id) = self.active_tab() {
-                self.navigate_tab(id, source, true);
-            }
+            self.navigate_tab(id, source, true);
         }
     }
 

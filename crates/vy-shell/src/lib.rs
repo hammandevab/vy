@@ -258,9 +258,9 @@ mod tests {
     }
 
     /// SPEC-2.1.7: an `https://` address typed in the address bar, called
-    /// by a page through `navigate`, or clicked as a link the page
-    /// registered goes to the system browser; the shell never loads it,
-    /// and the page keeps running.
+    /// by a page through `navigate` on a user gesture, or clicked as a
+    /// link the page registered goes to the system browser; the shell
+    /// never loads it, and the page keeps running.
     #[test]
     fn spec_2_1_7_https_opens_externally() {
         let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
@@ -275,6 +275,9 @@ mod tests {
         shell.navigate_tab(tab, local("document"), true);
         settle(&mut shell, 1, TIMEOUT).unwrap();
         assert_eq!(shell.tab_status(tab), "running");
+        // The page's `navigate` on the user's key press (a gesture).
+        shell.key(crate::shell::hid::END, true, 0, false);
+        shell.key(crate::shell::hid::END, false, 0, false);
         shell.handle(Incoming::Tab(
             tab,
             shell.tab_generation(tab),
@@ -286,9 +289,8 @@ mod tests {
         assert_eq!(shell.external_opens().len(), 2);
         assert_eq!(shell.tab_status(tab), "running");
         // A registered https:// link, clicked in the page area: the
-        // document's external links are in its notes, at the end.
-        shell.key(crate::shell::hid::END, true, 0, false);
-        shell.key(crate::shell::hid::END, false, 0, false);
+        // document's external links are in its notes, at the end (the
+        // End key above scrolled there).
         settle(&mut shell, 1, TIMEOUT).unwrap();
         let page = shell.layout().page;
         let link = shell
@@ -310,6 +312,99 @@ mod tests {
         );
         assert_eq!(shell.tab_status(tab), "running");
         assert_eq!(shell.address().committed(), "document.wasm");
+        shell.shutdown();
+    }
+
+    /// SPEC-2.1.7, SPEC-5.2.10, SPEC-5.2.12: a page's `navigate` to an
+    /// `https://` address opens the system browser only on a user
+    /// gesture in its tab (a pointer release or a key press delivered to
+    /// the page) within the last second of the shell's clock, and once
+    /// per gesture: a thousand calls after one click open one window,
+    /// a call without a gesture, after the second has passed, or from a
+    /// hidden tab opens nothing and is logged with the address. The
+    /// address bar, which the user types in, needs no gesture.
+    #[test]
+    fn spec_2_1_7_page_opens_externally_once_per_gesture() {
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        let navigate = |shell: &mut crate::shell::Shell, tab, url: &str| {
+            let generation = shell.tab_generation(tab);
+            shell.handle(Incoming::Tab(
+                tab,
+                generation,
+                Inbound::Message(ToShell::Navigate {
+                    url: url.into(),
+                    replace: false,
+                }),
+            ));
+        };
+        let dropped = |shell: &crate::shell::Shell, tab| {
+            shell
+                .tab_logs(tab)
+                .iter()
+                .filter(|l| l.starts_with("[host info] not opened: https://"))
+                .count()
+        };
+        // No gesture yet: nothing opens.
+        navigate(&mut shell, tab, "https://spam.example/0");
+        assert_eq!(shell.external_opens(), &[] as &[String]);
+        assert_eq!(dropped(&shell, tab), 1);
+        assert!(shell
+            .tab_logs(tab)
+            .iter()
+            .any(|l| l.contains("https://spam.example/0")));
+        // Pointer movement and scrolling are not gestures.
+        let page = shell.layout().page;
+        shell.pointer_move(page.x + 50.0, page.y + 50.0);
+        shell.scroll(0.0, 10.0, true);
+        navigate(&mut shell, tab, "https://spam.example/1");
+        assert_eq!(shell.external_opens().len(), 0);
+        assert_eq!(dropped(&shell, tab), 2);
+        // One click: a thousand calls open one window.
+        shell.pointer_button(button::PRIMARY, true);
+        shell.pointer_button(button::PRIMARY, false);
+        for i in 0..1000 {
+            navigate(&mut shell, tab, &format!("https://spam.example/{i}"));
+        }
+        assert_eq!(shell.external_opens(), ["https://spam.example/0"]);
+        assert!(
+            shell
+                .tab_logs(tab)
+                .last()
+                .is_some_and(|l| l.starts_with("[host info] not opened: https://spam.example/999 ")),
+            "{:?}",
+            shell.tab_logs(tab).last()
+        );
+        // A key press is a gesture, but not after a second has passed.
+        shell.key(0x2C, true, 0, false);
+        shell.key(0x2C, false, 0, false);
+        shell.advance_clock(crate::shell::GESTURE_WINDOW_MS + 1);
+        navigate(&mut shell, tab, "https://late.example/");
+        assert_eq!(shell.external_opens().len(), 1);
+        shell.key(0x2C, true, 0, false);
+        shell.advance_clock(crate::shell::GESTURE_WINDOW_MS);
+        navigate(&mut shell, tab, "https://in-time.example/");
+        assert_eq!(
+            shell.external_opens().last().map(String::as_str),
+            Some("https://in-time.example/")
+        );
+        // A gesture in one tab is not a gesture in another: the hidden
+        // tab gets no events and its page opens nothing.
+        let other = shell.open_tab(Some(local("text")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert!(shell.tab_hidden(tab) && shell.active_tab() == Some(other));
+        shell.key(0x2C, true, 0, false);
+        shell.key(0x2C, false, 0, false);
+        navigate(&mut shell, tab, "https://hidden.example/");
+        assert_eq!(shell.external_opens().len(), 2);
+        navigate(&mut shell, other, "https://shown.example/");
+        assert_eq!(shell.external_opens().len(), 3);
+        // Typed by the user, no gesture is needed; the page runs on.
+        shell.navigate("https://typed.example/");
+        assert_eq!(shell.external_opens().len(), 4);
+        assert_eq!(shell.tab_status(other), "running");
         shell.shutdown();
     }
 
