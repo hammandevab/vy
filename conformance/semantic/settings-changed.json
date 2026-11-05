@@ -2,7 +2,7 @@
   "nodes": [
     {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 24, "y": 0, "w": 752, "h": 556, "text": ""},
     {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 24, "y": 24, "w": 752, "h": 32.5, "text": "Inställningar"},
-    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 24, "y": 60.5, "w": 752, "h": 16.25, "text": "Lagring otillgänglig (E_DENIED): standardvärden visas. Ändringen kunde inte sparas (E_DENIED)."},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 24, "y": 60.5, "w": 752, "h": 16.25, "text": "Inga sparade inställningar: standardvärden visas. Ändringen är sparad."},
     {"id": 4, "parent_id": 1, "role": 16, "role_name": "region", "x": 24, "y": 88, "w": 368, "h": 170, "text": "Utseende"},
     {"id": 5, "parent_id": 4, "role": 2, "role_name": "heading", "x": 40, "y": 104, "w": 336, "h": 18.75, "text": "Utseende"},
     {"id": 6, "parent_id": 4, "role": 6, "role_name": "checkbox", "x": 40, "y": 134, "w": 336, "h": 36, "text": "Mörkt tema: på"},
