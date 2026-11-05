@@ -20,7 +20,9 @@ mod test_server;
 mod tests;
 
 pub use address::{to_https, Address, AddressError, DEFAULT_PORT};
-pub use cache::{BlobCache, HttpCache, HttpRecord, DEFAULT_CACHE_CAP_BYTES};
+pub use cache::{
+    BlobCache, HttpCache, HttpRecord, DEFAULT_CACHE_CAP_BYTES, DEFAULT_HTTP_CACHE_CAP_BYTES,
+};
 pub use fetch::{
     transport_allowed, Error, Fetched, Fetcher, Form, Options, ACCEPT, BLOB_PATH_PREFIX,
     MAX_BLOB_BYTES, MAX_KEY_FILE_BYTES, MAX_REDIRECTS, WELL_KNOWN_KEY_PATH,

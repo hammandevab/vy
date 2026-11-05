@@ -3,7 +3,10 @@
 //! from the content-addressed cache, and decide trust from the signature.
 
 use crate::address::Address;
-use crate::cache::{now_secs, BlobCache, HttpCache, HttpRecord, DEFAULT_CACHE_CAP_BYTES};
+use crate::cache::{
+    now_secs, BlobCache, HttpCache, HttpRecord, DEFAULT_CACHE_CAP_BYTES,
+    DEFAULT_HTTP_CACHE_CAP_BYTES,
+};
 use crate::keys::KeyStore;
 use crate::url::{cache_control, media_type, resolve, CacheControl, HttpUrl};
 use std::fmt;
@@ -152,16 +155,19 @@ pub struct Options {
     pub cache_dir: PathBuf,
     /// Size cap of the content-addressed cache in bytes.
     pub cache_cap_bytes: u64,
+    /// Size cap of the HTTP cache of page responses in bytes (SPEC-7.3.2).
+    pub http_cache_cap_bytes: u64,
     /// Whole-request timeout.
     pub timeout: Duration,
 }
 
 impl Options {
-    /// Defaults: 2 GB cap, 30 s timeout.
+    /// Defaults: 2 GB blob cap, 64 MB HTTP cap, 30 s timeout.
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
         Options {
             cache_dir: cache_dir.into(),
             cache_cap_bytes: DEFAULT_CACHE_CAP_BYTES,
+            http_cache_cap_bytes: DEFAULT_HTTP_CACHE_CAP_BYTES,
             timeout: Duration::from_secs(30),
         }
     }
@@ -298,7 +304,7 @@ impl Fetcher {
         Ok(Fetcher {
             agent: Agent::new_with_config(config),
             blobs: BlobCache::open(&options.cache_dir, options.cache_cap_bytes).map_err(io)?,
-            http: HttpCache::open(&options.cache_dir).map_err(io)?,
+            http: HttpCache::open(&options.cache_dir, options.http_cache_cap_bytes).map_err(io)?,
             keys: KeyStore::open(&options.cache_dir).map_err(io)?,
         })
     }

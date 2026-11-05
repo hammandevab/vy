@@ -10,6 +10,11 @@ use vy_manifest::Hash;
 
 /// Default size cap of the content-addressed cache: 2 GB.
 pub const DEFAULT_CACHE_CAP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Default size cap of the HTTP cache of page responses: 64 MB. A manifest
+/// is at most 64 KB, but a whole package (SPEC-7.2.1) is cached under its
+/// URL too, so without a cap every package ever visited stayed on disk for
+/// good, twice over with the blob cache (review 0003, finding 6).
+pub const DEFAULT_HTTP_CACHE_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Seconds since the Unix epoch.
 pub fn now_secs() -> u64 {
@@ -248,40 +253,173 @@ impl HttpRecord {
     }
 }
 
-/// Ordinary HTTP cache for manifests, keyed by the URL asked for
-/// (SPEC-7.3.2): one file per URL hash under `http/`.
+/// Ordinary HTTP cache for page responses, keyed by the URL asked for
+/// (SPEC-7.3.2): one file per URL hash under `http/`, evicted least
+/// recently used first when the total passes the cap, with the same
+/// logical-sequence index as [`BlobCache`] (`http/index`).
 #[derive(Debug)]
 pub struct HttpCache {
     dir: PathBuf,
+    cap: u64,
+    /// URL hash (hex) -> (last use, file size)
+    index: BTreeMap<String, (u64, u64)>,
+    next_seq: u64,
 }
 
 impl HttpCache {
-    /// Open or create under `dir`.
-    pub fn open(dir: &Path) -> io::Result<Self> {
+    /// Open or create under `dir` with a size cap in bytes.
+    pub fn open(dir: &Path, cap: u64) -> io::Result<Self> {
         let dir = dir.join("http");
         fs::create_dir_all(&dir)?;
-        Ok(HttpCache { dir })
+        let mut cache = HttpCache {
+            dir,
+            cap,
+            index: BTreeMap::new(),
+            next_seq: 1,
+        };
+        cache.load_index()?;
+        Ok(cache)
     }
 
-    fn path(&self, url: &str) -> PathBuf {
-        self.dir.join(Hash::of(url.as_bytes()).hex())
+    fn index_path(&self) -> PathBuf {
+        self.dir.join("index")
     }
 
-    /// The record for `url`, if any.
-    pub fn get(&self, url: &str) -> Option<HttpRecord> {
-        fs::read(self.path(url))
-            .ok()
-            .and_then(|b| HttpRecord::decode(&b))
+    fn key(url: &str) -> String {
+        Hash::of(url.as_bytes()).hex()
     }
 
-    /// Store the record for `url`.
-    pub fn put(&self, url: &str, record: &HttpRecord) -> io::Result<()> {
-        write_atomic(&self.path(url), &record.encode())
+    fn path(&self, key: &str) -> PathBuf {
+        self.dir.join(key)
+    }
+
+    /// Read `index`; files it does not know about count as oldest.
+    fn load_index(&mut self) -> io::Result<()> {
+        if let Ok(text) = fs::read_to_string(self.index_path()) {
+            for line in text.lines() {
+                let mut parts = line.split(' ');
+                let (Some(key), Some(seq), Some(size)) = (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                let (Some(_), Ok(seq), Ok(size)) = (
+                    vy_manifest::from_hex::<32>(key),
+                    seq.parse::<u64>(),
+                    size.parse::<u64>(),
+                ) else {
+                    continue;
+                };
+                if self.path(key).is_file() {
+                    self.index.insert(key.to_string(), (seq, size));
+                    self.next_seq = self.next_seq.max(seq + 1);
+                }
+            }
+        }
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(key) = name
+                .to_str()
+                .filter(|n| vy_manifest::from_hex::<32>(n).is_some())
+            else {
+                continue;
+            };
+            self.index.entry(key.to_string()).or_insert_with(|| {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                (0, size)
+            });
+        }
+        Ok(())
+    }
+
+    fn save_index(&self) -> io::Result<()> {
+        let mut text = String::new();
+        for (key, (seq, size)) in &self.index {
+            text.push_str(&format!("{key} {seq} {size}\n"));
+        }
+        write_atomic(&self.index_path(), text.as_bytes())
+    }
+
+    fn touch(&mut self, key: &str, size: u64) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.index.insert(key.to_string(), (seq, size));
+    }
+
+    /// Number of records.
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// True when empty.
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    /// Bytes held.
+    pub fn total_bytes(&self) -> u64 {
+        self.index.values().map(|(_, s)| s).sum()
+    }
+
+    /// True when a record for `url` is held.
+    pub fn contains(&self, url: &str) -> bool {
+        self.index.contains_key(&Self::key(url))
+    }
+
+    /// The record for `url`, if any; a hit makes it the most recently used.
+    pub fn get(&mut self, url: &str) -> Option<HttpRecord> {
+        let key = Self::key(url);
+        if !self.index.contains_key(&key) {
+            return None;
+        }
+        let read = fs::read(self.path(&key)).ok().and_then(|b| {
+            let size = b.len() as u64;
+            HttpRecord::decode(&b).map(|r| (r, size))
+        });
+        match read {
+            Some((record, size)) => {
+                self.touch(&key, size);
+                let _ = self.save_index();
+                Some(record)
+            }
+            None => {
+                self.forget(&key);
+                None
+            }
+        }
+    }
+
+    /// Store the record for `url` and evict the least recently used
+    /// records until the cap holds; the record just stored is never evicted.
+    pub fn put(&mut self, url: &str, record: &HttpRecord) -> io::Result<()> {
+        let key = Self::key(url);
+        let bytes = record.encode();
+        write_atomic(&self.path(&key), &bytes)?;
+        self.touch(&key, bytes.len() as u64);
+        while self.total_bytes() > self.cap && self.index.len() > 1 {
+            let Some(victim) = self
+                .index
+                .iter()
+                .min_by_key(|(_, (seq, _))| *seq)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            let _ = fs::remove_file(self.path(&victim));
+            self.index.remove(&victim);
+        }
+        self.save_index()
     }
 
     /// Forget `url`.
-    pub fn remove(&self, url: &str) {
-        let _ = fs::remove_file(self.path(url));
+    pub fn remove(&mut self, url: &str) {
+        self.forget(&Self::key(url));
+    }
+
+    fn forget(&mut self, key: &str) {
+        let _ = fs::remove_file(self.path(key));
+        self.index.remove(key);
+        let _ = self.save_index();
     }
 }
 
@@ -340,7 +478,7 @@ mod tests {
     #[test]
     fn http_cache_roundtrip() {
         let dir = temp_dir("http");
-        let cache = HttpCache::open(&dir).unwrap();
+        let mut cache = HttpCache::open(&dir, DEFAULT_HTTP_CACHE_CAP_BYTES).unwrap();
         let rec = HttpRecord {
             url: "http://localhost:1/x".into(),
             etag: Some("\"abc\"".into()),
@@ -359,6 +497,61 @@ mod tests {
         assert_eq!(cache.get("u").unwrap(), none);
         cache.remove("u");
         assert!(cache.get("u").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-7.3.2, SPEC-9.3.1: the HTTP cache has a size cap (64 MB by
+    /// default) and evicts the least recently used record first, where a
+    /// hit counts as use; the record just stored survives even alone over
+    /// the cap; the index outlives a reopen; a damaged file is a miss and
+    /// is dropped. Without this every package ever fetched stayed on disk
+    /// (review 0003, finding 6).
+    #[test]
+    fn http_cache_evicts_least_recently_used_at_cap() {
+        assert_eq!(DEFAULT_HTTP_CACHE_CAP_BYTES, 64 << 20);
+        let dir = temp_dir("http-cap");
+        let record = |n: u8| HttpRecord {
+            url: format!("http://localhost:1/{n}"),
+            etag: None,
+            max_age: 60,
+            fetched_at: 1000,
+            media_type: "application/vy-package+zstd".into(),
+            body: vec![n; 1000],
+        };
+        let size = record(0).encode().len() as u64;
+        let cap = size * 2 + size / 2;
+        {
+            let mut cache = HttpCache::open(&dir, cap).unwrap();
+            cache.put("a", &record(1)).unwrap();
+            cache.put("b", &record(2)).unwrap();
+            assert_eq!(cache.len(), 2);
+            assert_eq!(cache.total_bytes(), 2 * size);
+            // a is used, so b is the oldest when c arrives.
+            assert_eq!(cache.get("a").unwrap().body, vec![1; 1000]);
+            cache.put("c", &record(3)).unwrap();
+            assert!(cache.contains("a") && !cache.contains("b") && cache.contains("c"));
+            assert_eq!(cache.total_bytes(), 2 * size);
+            assert!(cache.total_bytes() <= cap);
+            // One record bigger than the whole cap still goes in, alone.
+            let big = HttpRecord {
+                body: vec![9; 4000],
+                ..record(4)
+            };
+            cache.put("d", &big).unwrap();
+            assert_eq!(cache.len(), 1, "only the newest survives");
+            assert_eq!(cache.get("d").unwrap().body.len(), 4000);
+            assert!(cache.get("a").is_none());
+        }
+        // Reopened: the index and the file are still there, and a damaged
+        // file is dropped on read.
+        let mut cache = HttpCache::open(&dir, cap).unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains("d"));
+        let key = HttpCache::key("d");
+        fs::write(dir.join("http").join(&key), b"garbage").unwrap();
+        assert!(cache.get("d").is_none());
+        assert!(cache.is_empty());
+        assert!(!dir.join("http").join(&key).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }
