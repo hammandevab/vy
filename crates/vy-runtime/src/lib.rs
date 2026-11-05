@@ -14,7 +14,8 @@ pub mod host;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
 pub use host::{
-    Capabilities, Link, LogEntry, LogSource, SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES,
+    origin_of, CannedResponse, Capabilities, Link, LogEntry, LogSource, SemNode, Storage,
+    DEFAULT_STORAGE_QUOTA_BYTES,
 };
 pub use vy_render::Resource;
 
@@ -22,7 +23,7 @@ use host::Host;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::OnceLock;
-use vy_abi::{event, key, limits, modifier, role, ABI_MINOR};
+use vy_abi::{err, event, key, limits, modifier, role, ABI_MINOR};
 use vy_render::{ImageCache, TextEngine};
 use wasmtime::{
     Config, Engine, Instance, Linker, Module, Store, StoreLimitsBuilder, Trap, TypedFunc,
@@ -160,6 +161,13 @@ pub struct Options {
     /// Most bytes the storage may hold, keys and values together; the
     /// manifest's `quota_kb` × 1024, or [`DEFAULT_STORAGE_QUOTA_BYTES`].
     pub storage_quota_bytes: u64,
+    /// Responses the headless host serves for `fetch_begin` (SPEC-5.2.7);
+    /// a URL without one is denied. Served only when `net` is granted.
+    pub fetch: Vec<CannedResponse>,
+    /// Origins the manifest lists under `net` (SPEC-5.2.8); a request to
+    /// any other origin is `E_ORIGIN`. Empty when there is no manifest,
+    /// which skips the gate.
+    pub net_origins: Vec<String>,
 }
 
 impl Default for Options {
@@ -170,6 +178,8 @@ impl Default for Options {
             resources: Vec::new(),
             storage: Storage::new(),
             storage_quota_bytes: DEFAULT_STORAGE_QUOTA_BYTES,
+            fetch: Vec::new(),
+            net_origins: Vec::new(),
         }
     }
 }
@@ -284,6 +294,8 @@ impl Runtime {
                 options.resources,
                 options.storage,
                 options.storage_quota_bytes,
+                options.fetch,
+                options.net_origins,
             ),
         );
         store.limiter(|host| &mut host.limits);
@@ -810,6 +822,46 @@ impl Runtime {
     /// Log lines from the module and about it.
     pub fn logs(&self) -> &[LogEntry] {
         &self.host().log
+    }
+
+    /// Deliver `FETCH_DONE` for the oldest request that has not had it
+    /// (SPEC-5.2.7): the whole body is buffered by then, so `b` is the
+    /// status and `c` the body's length, or `b = E_TOO_LARGE` and no body
+    /// for one over 64 MB, which also closes the request. Returns whether
+    /// the module asked for a redraw, or `None` when no request is waiting.
+    /// In the shell the transport does this when the response has arrived;
+    /// headless it happens when the conformance case says so.
+    pub fn fetch_done(&mut self) -> Result<Option<bool>, Error> {
+        self.gate()?;
+        let host = self.host_mut();
+        let Some(f) = host.fetches.iter_mut().find(|f| !f.delivered) else {
+            return Ok(None);
+        };
+        let id = f.id;
+        let (status, len) = if f.body.len() > limits::MAX_FETCH_RESPONSE_BYTES as usize {
+            host.fetches.retain(|f| f.id != id);
+            host.host_log(format!(
+                "fetch {id}: E_TOO_LARGE (response over {} bytes dropped)",
+                limits::MAX_FETCH_RESPONSE_BYTES
+            ));
+            (err::E_TOO_LARGE, 0)
+        } else {
+            f.delivered = true;
+            (f.status, f.body.len() as i32)
+        };
+        self.deliver(event::FETCH_DONE, id, status, len, 0)
+            .map(Some)
+    }
+
+    /// Requests begun but not yet closed by `fetch_read` returning 0 or
+    /// `fetch_cancel` (SPEC-5.2.7).
+    pub fn open_fetches(&self) -> usize {
+        self.host().fetches.len()
+    }
+
+    /// Open requests still waiting for their `FETCH_DONE`.
+    pub fn pending_fetches(&self) -> usize {
+        self.host().fetches.iter().filter(|f| !f.delivered).count()
     }
 
     /// What the module has saved with `state_put` (SPEC-5.2.9).

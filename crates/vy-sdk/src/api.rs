@@ -146,13 +146,18 @@ pub fn fetch_begin(method: Method, url: &str, body: &[u8]) -> Result<Request, Vy
     check(unsafe { raw::fetch_begin(method as i32, up, ul, bp, bl) }).map(Request)
 }
 
-/// `fetch_poll`: the host's status for a request (SPEC-5.2.7).
+/// `fetch_poll`: 0 while the response is on its way, 1 once `FETCH_DONE`
+/// has been delivered and the body can be read (SPEC-5.2.7); `Arg` for a
+/// request that is not open.
 pub fn fetch_poll(req: Request) -> Result<i32, VyError> {
     // SAFETY: no pointers.
     check(unsafe { raw::fetch_poll(req.0) })
 }
 
-/// `fetch_read`: copy response bytes into `dst`; returns how many (SPEC-5.2.7).
+/// `fetch_read`: copy the next bytes of the buffered response body into
+/// `dst`; returns how many, and 0 only at the end of the body, which closes
+/// the request and frees the body in the host (SPEC-5.2.7). The whole body
+/// is buffered before `FETCH_DONE`, so a loop until 0 reads all of it.
 pub fn fetch_read(req: Request, dst: &mut [u8]) -> Result<usize, VyError> {
     let max = len_i32(dst.len())?;
     // SAFETY: `dst` is valid for `max` bytes during the call.

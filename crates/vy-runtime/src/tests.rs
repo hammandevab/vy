@@ -55,6 +55,8 @@ fn spec_5_2_all_imports_linked() {
             Vec::new(),
             Storage::new(),
             DEFAULT_STORAGE_QUOTA_BYTES,
+            Vec::new(),
+            Vec::new(),
         ),
     );
     let mut linked = 0;
@@ -182,11 +184,246 @@ fn spec_5_3_1_denied_call_is_harmless() {
     assert_eq!(rt.exit_code(), None);
 }
 
-/// SPEC-5.2.8: fetch_begin to an unlisted origin returns E_ORIGIN with no network call.
+/// A module driven by `vy_event`: kind 200 calls `fetch_begin` with URL
+/// `a` (0 the listed API, 1 a foreign origin, 2 not https) and returns
+/// the result; 201 returns `fetch_poll(a)`; 202 returns `fetch_read(a,
+/// 2048, b)`; 203 returns `fetch_cancel(a)`. Every `FETCH_DONE` is
+/// recorded as three `i32`s at 4096; kind 100 returns field `a` of the
+/// records, 101 clears them, 102 returns the count. `FETCH_DONE` answers 1.
+fn fetch_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "fetch_begin" (func $fetch_begin (param i32 i32 i32 i32 i32) (result i32)))
+            (import "vy" "fetch_poll" (func $fetch_poll (param i32) (result i32)))
+            (import "vy" "fetch_read" (func $fetch_read (param i32 i32 i32) (result i32)))
+            (import "vy" "fetch_cancel" (func $fetch_cancel (param i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $n (mut i32) (i32.const 0))
+            (data (i32.const 0) "https://chat.example/api/messages")
+            (data (i32.const 64) "https://evil.example/x")
+            (data (i32.const 128) "ftp://x")
+            (data (i32.const 256) "{{\"text\":\"hej\"}}")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func $begin (param $which i32) (result i32)
+                (if (i32.eq (local.get $which) (i32.const 1)) (then
+                    (return (call $fetch_begin (i32.const 1) (i32.const 64) (i32.const 22) (i32.const 256) (i32.const 14)))))
+                (if (i32.eq (local.get $which) (i32.const 2)) (then
+                    (return (call $fetch_begin (i32.const 1) (i32.const 128) (i32.const 7) (i32.const 256) (i32.const 14)))))
+                (call $fetch_begin (i32.const 1) (i32.const 0) (i32.const 33) (i32.const 256) (i32.const 14)))
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (local $p i32)
+                (if (i32.eq (local.get 0) (i32.const 200)) (then (return (call $begin (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 201)) (then (return (call $fetch_poll (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 202)) (then
+                    (return (call $fetch_read (local.get 1) (i32.const 2048) (local.get 2)))))
+                (if (i32.eq (local.get 0) (i32.const 203)) (then (return (call $fetch_cancel (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 100)) (then
+                    (return (i32.load (i32.add (i32.const 4096) (i32.mul (local.get 1) (i32.const 4)))))))
+                (if (i32.eq (local.get 0) (i32.const 101)) (then
+                    (global.set $n (i32.const 0))
+                    (return (i32.const 0))))
+                (if (i32.eq (local.get 0) (i32.const 102)) (then (return (global.get $n))))
+                (if (i32.eq (local.get 0) (i32.const 20)) (then
+                    (local.set $p (i32.add (i32.const 4096) (i32.mul (global.get $n) (i32.const 12))))
+                    (i32.store (local.get $p) (local.get 1))
+                    (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get 2))
+                    (i32.store (i32.add (local.get $p) (i32.const 8)) (local.get 3))
+                    (global.set $n (i32.add (global.get $n) (i32.const 1)))
+                    (return (i32.const 1))))
+                i32.const 0)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ))
+}
+
+/// The `FETCH_DONE` events `fetch_module` recorded since the last call, as
+/// `(req_id, status, bytes)`.
+fn fetch_done_events(rt: &mut Runtime) -> Vec<(i32, i32, i32)> {
+    rt.event(102, 0, 0, 0, 0).unwrap();
+    let n = rt.last_event_result();
+    let field = |rt: &mut Runtime, i: i32| {
+        rt.event(100, i, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    let out = (0..n)
+        .map(|i| (field(rt, i * 3), field(rt, i * 3 + 1), field(rt, i * 3 + 2)))
+        .collect();
+    rt.event(101, 0, 0, 0, 0).unwrap();
+    out
+}
+
+fn fetch_runtime(canned: Vec<CannedResponse>, origins: &[&str]) -> Runtime {
+    let bytes = fetch_module();
+    let opts = Options {
+        capabilities: Capabilities::from_names(["net"]).unwrap(),
+        fetch: canned,
+        net_origins: origins.iter().map(|o| o.to_string()).collect(),
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    rt
+}
+
+const API: &str = "https://chat.example/api/messages";
+
+/// SPEC-5.2.7, SPEC-A.2.1: the host buffers the whole response before
+/// `FETCH_DONE`, which carries the status and the body's length;
+/// `fetch_read` copies the buffered body in order and returns 0 only at
+/// its end, which closes the request and frees the body; `fetch_cancel`
+/// closes it early; a request is not readable before its `FETCH_DONE`;
+/// the 65th open request is `E_RATE`; a body over 64 MB is `E_TOO_LARGE`
+/// in `FETCH_DONE` with no body; `fetch_poll` is 0 until `FETCH_DONE`.
 #[test]
-#[ignore = "M3: network"]
+fn spec_5_2_7_fetch_read_zero_only_at_end() {
+    let canned = CannedResponse {
+        url: API.into(),
+        status: 200,
+        body: b"hello world!".to_vec(),
+    };
+    let mut rt = fetch_runtime(vec![canned.clone()], &["https://chat.example"]);
+    let call = |rt: &mut Runtime, kind: i32, a: i32, b: i32| {
+        rt.event(kind, a, b, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    assert_eq!(call(&mut rt, 200, 0, 0), 1, "first request id");
+    assert_eq!((rt.open_fetches(), rt.pending_fetches()), (1, 1));
+    assert_eq!(call(&mut rt, 201, 1, 0), 0, "poll: on its way");
+    assert_eq!(
+        call(&mut rt, 202, 1, 64),
+        err::E_ARG,
+        "not readable before FETCH_DONE"
+    );
+    assert_eq!(fetch_done_events(&mut rt), vec![]);
+
+    assert_eq!(rt.fetch_done().unwrap(), Some(true), "the module redraws");
+    assert_eq!(fetch_done_events(&mut rt), vec![(1, 200, 12)]);
+    assert_eq!((rt.open_fetches(), rt.pending_fetches()), (1, 0));
+    assert_eq!(call(&mut rt, 201, 1, 0), 1, "poll: body available");
+    assert_eq!(rt.fetch_done().unwrap(), None, "nothing else waiting");
+
+    assert_eq!(call(&mut rt, 202, 1, 5), 5);
+    assert_eq!(rt.read_memory(2048, 5), b"hello");
+    assert_eq!(call(&mut rt, 202, 1, 5), 5);
+    assert_eq!(rt.read_memory(2048, 5), b" worl");
+    assert_eq!(call(&mut rt, 202, 1, 5), 2, "the rest, not a full chunk");
+    assert_eq!(rt.read_memory(2048, 2), b"d!");
+    assert_eq!(rt.open_fetches(), 1, "still open until the 0");
+    assert_eq!(call(&mut rt, 202, 1, 5), 0, "the end");
+    assert_eq!(rt.open_fetches(), 0, "closed and freed by the 0");
+    assert_eq!(call(&mut rt, 202, 1, 5), err::E_ARG, "no such request now");
+    assert_eq!(call(&mut rt, 203, 1, 0), err::E_ARG);
+    assert_eq!(call(&mut rt, 202, 1, 0), err::E_ARG, "max must be positive");
+
+    // Cancel before FETCH_DONE: nothing is delivered for it afterwards.
+    assert_eq!(call(&mut rt, 200, 0, 0), 2);
+    assert_eq!(call(&mut rt, 203, 2, 0), err::OK);
+    assert_eq!(rt.open_fetches(), 0);
+    assert_eq!(rt.fetch_done().unwrap(), None);
+    assert_eq!(fetch_done_events(&mut rt), vec![]);
+
+    // 64 open requests at once; the 65th is E_RATE (SPEC-9.3.1).
+    for i in 0..limits::MAX_OPEN_FETCHES as i32 {
+        assert_eq!(call(&mut rt, 200, 0, 0), 3 + i);
+    }
+    assert_eq!(call(&mut rt, 200, 0, 0), err::E_RATE);
+    assert_eq!(call(&mut rt, 203, 3, 0), err::OK, "closing one makes room");
+    assert_eq!(
+        call(&mut rt, 200, 0, 0),
+        3 + limits::MAX_OPEN_FETCHES as i32
+    );
+    assert!(host_logs(&rt).iter().any(|l| l == "fetch_begin: E_RATE"));
+
+    // FETCH_DONE goes to the oldest waiting request first.
+    assert_eq!(rt.fetch_done().unwrap(), Some(true));
+    assert_eq!(fetch_done_events(&mut rt), vec![(4, 200, 12)]);
+
+    // A body over 64 MB: E_TOO_LARGE, no body, request closed.
+    let huge = CannedResponse {
+        url: API.into(),
+        status: 200,
+        body: vec![0; limits::MAX_FETCH_RESPONSE_BYTES as usize + 1],
+    };
+    let mut rt = fetch_runtime(vec![huge], &[]);
+    assert_eq!(call(&mut rt, 200, 0, 0), 1);
+    assert_eq!(rt.fetch_done().unwrap(), Some(true));
+    assert_eq!(fetch_done_events(&mut rt), vec![(1, err::E_TOO_LARGE, 0)]);
+    assert_eq!(rt.open_fetches(), 0);
+    assert_eq!(call(&mut rt, 202, 1, 5), err::E_ARG);
+    assert!(host_logs(&rt)
+        .iter()
+        .any(|l| l.starts_with("fetch 1: E_TOO_LARGE")));
+
+    // An empty body: the first read is already the end.
+    let empty = CannedResponse {
+        url: API.into(),
+        status: 204,
+        body: Vec::new(),
+    };
+    let mut rt = fetch_runtime(vec![empty], &[]);
+    assert_eq!(call(&mut rt, 200, 0, 0), 1);
+    rt.fetch_done().unwrap();
+    assert_eq!(fetch_done_events(&mut rt), vec![(1, 204, 0)]);
+    assert_eq!(call(&mut rt, 202, 1, 5), 0);
+    assert_eq!(rt.open_fetches(), 0);
+}
+
+/// SPEC-5.2.8, SPEC-9.5.1: `fetch_begin` to an origin the manifest does
+/// not list is `E_ORIGIN` with no request made, even with a canned
+/// response for it; origins compare as scheme, host and port; a URL that
+/// is not `https://` is `E_ARG`; with no manifest (no origins) the gate is
+/// not applied.
+#[test]
 fn spec_5_2_8_origin_gate() {
-    todo!()
+    let canned = |url: &str| CannedResponse {
+        url: url.into(),
+        status: 200,
+        body: b"ok".to_vec(),
+    };
+    let responses = vec![canned(API), canned("https://evil.example/x")];
+    let call = |rt: &mut Runtime, which: i32| {
+        rt.event(200, which, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    let mut rt = fetch_runtime(responses.clone(), &["https://chat.example"]);
+    assert_eq!(call(&mut rt, 0), 1, "listed origin");
+    assert_eq!(call(&mut rt, 1), err::E_ORIGIN, "foreign origin");
+    assert_eq!(rt.open_fetches(), 1, "no request was made for it");
+    assert!(host_logs(&rt)
+        .iter()
+        .any(|l| l.starts_with("fetch_begin: E_ORIGIN (https://evil.example")));
+    assert_eq!(
+        call(&mut rt, 2),
+        err::E_ARG,
+        "ftp:// is not a fetchable URL"
+    );
+
+    let mut rt = fetch_runtime(
+        responses.clone(),
+        &["https://CHAT.example:443/ignored/path"],
+    );
+    assert_eq!(
+        call(&mut rt, 0),
+        err::E_ORIGIN,
+        "the port is part of the origin"
+    );
+    let mut rt = fetch_runtime(responses.clone(), &["https://Chat.Example"]);
+    assert_eq!(call(&mut rt, 0), 1, "hosts compare case-insensitively");
+    let mut rt = fetch_runtime(responses, &[]);
+    assert_eq!(call(&mut rt, 1), 1, "no manifest, no gate");
+
+    assert_eq!(
+        origin_of("https://Chat.example:8443/a?b#c").as_deref(),
+        Some("https://chat.example:8443")
+    );
+    assert_eq!(
+        origin_of("https://chat.example").as_deref(),
+        Some("https://chat.example")
+    );
+    assert_eq!(origin_of("http://chat.example/"), None);
+    assert_eq!(origin_of("https:///x"), None);
 }
 
 fn budget_module() -> Vec<u8> {
@@ -1360,10 +1597,11 @@ fn spec_5_1_6_alloc_failure_drops_the_event() {
     assert!(!rt.is_suspended());
 }
 
-/// SPEC-5.2.7, SPEC-5.3.1: the headless host has no transport, so every
-/// `fetch_*` call is `E_DENIED` even with `net` granted (noted at debug
-/// level, since the capability is there: it is the host that lacks a
-/// network), and the page runs on. Storage is served (SPEC-5.2.9): a key
+/// SPEC-5.2.7, SPEC-5.3.1: without a canned response the headless host has
+/// no transport, so `fetch_begin` is `E_DENIED` even with `net` granted
+/// (noted at debug level, since the capability is there: it is the host
+/// that lacks a network), the other `fetch_*` calls name no open request
+/// (`E_ARG`), and the page runs on. Storage is served (SPEC-5.2.9): a key
 /// nobody wrote is `E_RESOURCE`.
 #[test]
 fn spec_5_2_7_fetch_and_storage_denied_headless() {
@@ -1400,9 +1638,9 @@ fn spec_5_2_7_fetch_and_storage_denied_headless() {
     rt.init(10, 10, 1.0).unwrap();
     for (case, name, code, level) in [
         (1, "fetch_begin", err::E_DENIED, 0),
-        (2, "fetch_poll", err::E_DENIED, 2),
-        (3, "fetch_read", err::E_DENIED, 2),
-        (4, "fetch_cancel", err::E_DENIED, 2),
+        (2, "fetch_poll", err::E_ARG, 2),
+        (3, "fetch_read", err::E_ARG, 2),
+        (4, "fetch_cancel", err::E_ARG, 2),
         (5, "state_get", err::E_RESOURCE, 0),
     ] {
         let before = rt.logs().len();

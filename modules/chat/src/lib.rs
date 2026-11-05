@@ -15,10 +15,11 @@
 //!   (SPEC-5.1.6).
 //! - Enter appends the message locally and calls `fetch_begin` (SPEC-5.2.7)
 //!   against the one origin the manifest lists (SPEC-5.2.8). A refusal
-//!   (`E_DENIED` without `net` or in a headless host, `E_ORIGIN` for a
-//!   foreign origin; SPEC-5.3.1) marks the message "ej skickat" and shows an
-//!   offline banner instead of failing. `FETCH_DONE` (SPEC-A.2.1) closes the
-//!   request: a 2xx reads the answer with `fetch_read` and marks the message
+//!   (`E_DENIED` without `net` or in a headless host without a canned
+//!   response, `E_ORIGIN` for a foreign origin; SPEC-5.3.1) marks the
+//!   message "ej skickat" and shows an offline banner instead of failing.
+//!   `FETCH_DONE` (SPEC-A.2.1) closes the request: a 2xx reads the buffered
+//!   answer with `fetch_read` until the 0 at its end and marks the message
 //!   delivered, anything else marks it failed; `KIND_CAPABILITY` revoking
 //!   `net` switches the page offline at once.
 //! - `SCROLL` moves a clipped list (SPEC-6.1.4); `KIND_FOCUS` on the composer
@@ -343,8 +344,16 @@ impl ChatPage {
         }
         self.pending = None;
         if (200..300).contains(&status) {
+            // The whole body is buffered by now (SPEC-5.2.7); reading to
+            // the 0 at its end is what frees it in the host.
             let mut buf = [0u8; 256];
-            let read = fetch_read(req, &mut buf).unwrap_or(0);
+            let mut read = 0;
+            loop {
+                match fetch_read(req, &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => read += n,
+                }
+            }
             let _ = log(
                 Level::Info,
                 &format!("chat: delivered, read {read} of {bytes} bytes"),

@@ -321,6 +321,12 @@ pub mod limits {
     pub const MAX_URL_BYTES: u32 = 2048;
     /// Largest request body accepted by `fetch_begin` (SPEC-5.2.7): 1 MB (SPEC-9.3.1).
     pub const MAX_FETCH_BODY_BYTES: u32 = 1 << 20;
+    /// Largest response body the host buffers for `fetch_read` (SPEC-5.2.7):
+    /// 64 MB; a longer one is `E_TOO_LARGE` in `FETCH_DONE`.
+    pub const MAX_FETCH_RESPONSE_BYTES: u32 = 64 << 20;
+    /// Most requests open at once per instance (SPEC-5.2.7, SPEC-9.3.1):
+    /// the 65th `fetch_begin` is `E_RATE`.
+    pub const MAX_OPEN_FETCHES: u32 = 64;
     /// Largest key accepted by `state_put`, `state_get` and `state_delete`
     /// (SPEC-5.2.9): 256 bytes (SPEC-9.3.1).
     pub const MAX_STATE_KEY_BYTES: u32 = 256;

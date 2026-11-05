@@ -36,6 +36,44 @@ pub type Storage = BTreeMap<Vec<u8>, Vec<u8>>;
 /// 1 MB, the policy default of SPEC-8.2.3.
 pub const DEFAULT_STORAGE_QUOTA_BYTES: u64 = 1 << 20;
 
+/// A response the headless host serves for `fetch_begin` to one URL
+/// (SPEC-5.2.7): what a conformance case declares as
+/// `fetch = [{url, status, body}]`. The headless host has no transport;
+/// a URL without a canned response is denied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CannedResponse {
+    /// The exact URL `fetch_begin` must name.
+    pub url: String,
+    /// HTTP status delivered in `FETCH_DONE`.
+    pub status: i32,
+    /// The whole body, buffered before `FETCH_DONE` (SPEC-5.2.7).
+    pub body: Vec<u8>,
+}
+
+/// One request from `fetch_begin` to the `fetch_read` that returns 0 or
+/// the `fetch_cancel` that drops it (SPEC-5.2.7).
+pub(crate) struct Fetch {
+    pub(crate) id: i32,
+    pub(crate) status: i32,
+    pub(crate) body: Vec<u8>,
+    /// Bytes `fetch_read` has copied so far.
+    pub(crate) pos: usize,
+    /// True once `FETCH_DONE` has been delivered and the body is readable.
+    pub(crate) delivered: bool,
+}
+
+/// Origin of an `https://` URL: scheme, host and port, lower-cased
+/// (SPEC-9.5.1); `None` for anything else.
+pub fn origin_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("https://{}", authority.to_ascii_lowercase()))
+}
+
 /// Milliseconds the headless clock advances per completed frame.
 pub const HEADLESS_FRAME_MS: i64 = 16;
 /// Seed of the headless random source; fixed so renders repeat byte for byte.
@@ -192,6 +230,15 @@ pub struct Host {
     pub(crate) state: Storage,
     /// Most bytes (keys and values together) `state` may hold (SPEC-9.3.1).
     pub(crate) state_quota: u64,
+    /// Responses `fetch_begin` can be answered with (SPEC-5.2.7).
+    pub(crate) canned: Vec<CannedResponse>,
+    /// Origins the manifest lists under `net`, normalised with
+    /// [`origin_of`]; empty when the caller has no manifest, and then the
+    /// gate of SPEC-5.2.8 is not applied.
+    pub(crate) net_origins: Vec<String>,
+    /// Open requests in the order they were begun.
+    pub(crate) fetches: Vec<Fetch>,
+    pub(crate) next_fetch_id: i32,
     /// Fuel owed for host work in the current import call; settled by
     /// [`with_host`] / [`with_memory`] before the call returns to wasm.
     pending_fuel: u64,
@@ -206,6 +253,8 @@ impl Host {
         resources: Vec<Resource>,
         state: Storage,
         state_quota: u64,
+        canned: Vec<CannedResponse>,
+        net_origins: Vec<String>,
     ) -> Self {
         Self {
             memory: None,
@@ -227,8 +276,26 @@ impl Host {
             sem_full_logged: false,
             state,
             state_quota,
+            canned,
+            net_origins: net_origins.iter().filter_map(|o| origin_of(o)).collect(),
+            fetches: Vec::new(),
+            next_fetch_id: 1,
             pending_fuel: 0,
             host_fuel: 0,
+        }
+    }
+
+    /// The open request with this id, or `E_ARG`.
+    fn fetch_mut(&mut self, name: &str, req_id: i32) -> Result<&mut Fetch, i32> {
+        if self.fetches.iter().any(|f| f.id == req_id) {
+            Ok(self
+                .fetches
+                .iter_mut()
+                .find(|f| f.id == req_id)
+                .expect("checked above"))
+        } else {
+            self.host_log(format!("{name}: E_ARG (no open request {req_id})"));
+            Err(err::E_ARG)
         }
     }
 
@@ -242,7 +309,7 @@ impl Host {
         }
     }
 
-    fn host_log(&mut self, message: String) {
+    pub(crate) fn host_log(&mut self, message: String) {
         self.log(LogSource::Host, 2, message);
     }
 
@@ -829,9 +896,9 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         }
     })?;
 
-    // network (SPEC-5.2.7): M3 implements fetching. The capability gate comes
-    // first (SPEC-5.3.1), then the byte caps, so M3 inherits both; a headless
-    // host with `net` granted still has no transport and denies.
+    // network (SPEC-5.2.7): the headless host answers from canned responses
+    // and otherwise denies; the capability gate comes first (SPEC-5.3.1),
+    // then the byte caps (SPEC-9.3.2), then the origin gate (SPEC-5.2.8).
     linker.func_wrap(
         m,
         "fetch_begin",
@@ -847,43 +914,128 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     return host.denied("fetch_begin", "net");
                 }
                 let checked = (|| {
-                    slice(data, url_ptr, url_len, "url", limits::MAX_URL_BYTES)?;
-                    slice(
+                    let url = string(data, url_ptr, url_len, "url", limits::MAX_URL_BYTES)?;
+                    let body = slice(
                         data,
                         body_ptr,
                         body_len,
                         "body",
                         limits::MAX_FETCH_BODY_BYTES,
                     )?;
-                    Ok::<(), Fault>(())
+                    Ok::<(String, usize), Fault>((url, body.len()))
                 })();
-                match checked {
-                    Err(fault) => {
-                        host.report("fetch_begin", &fault);
-                        fault.code()
-                    }
-                    Ok(()) => host.denied_headless("fetch_begin", "a transport"),
+                let (url, body_len) = match checked {
+                    Err(fault) => return host.refuse("fetch_begin", &fault),
+                    Ok(v) => v,
+                };
+                host.charge(url.len() + body_len);
+                let Some(origin) = origin_of(&url) else {
+                    host.host_log(format!("fetch_begin: E_ARG ({url:?} is not an https:// URL)"));
+                    return err::E_ARG;
+                };
+                if !host.net_origins.is_empty() && !host.net_origins.contains(&origin) {
+                    host.host_log(format!(
+                        "fetch_begin: E_ORIGIN ({origin} is not in the manifest's net list; no request made)"
+                    ));
+                    return err::E_ORIGIN;
                 }
+                if host.fetches.len() >= limits::MAX_OPEN_FETCHES as usize {
+                    return host.refuse("fetch_begin", &err::E_RATE.into());
+                }
+                let Some(canned) = host.canned.iter().find(|r| r.url == url) else {
+                    return host.denied_headless("fetch_begin", "a transport");
+                };
+                let id = host.next_fetch_id;
+                host.next_fetch_id += 1;
+                host.fetches.push(Fetch {
+                    id,
+                    status: canned.status,
+                    body: canned.body.clone(),
+                    pos: 0,
+                    delivered: false,
+                });
+                id
             })
         },
     )?;
     linker.func_wrap(
         m,
         "fetch_poll",
-        |mut c: Caller<'_, Host>, _req_id: i32| -> i32 { c.data_mut().denied("fetch_poll", "net") },
+        |mut c: Caller<'_, Host>, req_id: i32| -> i32 {
+            let host = c.data_mut();
+            if !host.caps.net {
+                return host.denied("fetch_poll", "net");
+            }
+            // 0 while the response is on its way, 1 once `FETCH_DONE` has
+            // been delivered and the body can be read.
+            match host.fetch_mut("fetch_poll", req_id) {
+                Ok(f) => i32::from(f.delivered),
+                Err(code) => code,
+            }
+        },
     )?;
     linker.func_wrap(
         m,
         "fetch_read",
-        |mut c: Caller<'_, Host>, _req_id: i32, _dst_ptr: i32, _max: i32| -> i32 {
-            c.data_mut().denied("fetch_read", "net")
+        |mut c: Caller<'_, Host>, req_id: i32, dst_ptr: i32, max: i32| -> wasmtime::Result<i32> {
+            with_memory(&mut c, |data, host| {
+                if !host.caps.net {
+                    return host.denied("fetch_read", "net");
+                }
+                let (pos, remaining, delivered) = match host.fetch_mut("fetch_read", req_id) {
+                    Ok(f) => (f.pos, f.body.len() - f.pos, f.delivered),
+                    Err(code) => return code,
+                };
+                if !delivered {
+                    host.host_log(format!(
+                        "fetch_read: E_ARG (request {req_id} is not readable before FETCH_DONE)"
+                    ));
+                    return err::E_ARG;
+                }
+                if dst_ptr < 0 || max <= 0 {
+                    return host.refuse("fetch_read", &err::E_ARG.into());
+                }
+                // The whole body is buffered (SPEC-5.2.7): 0 means the end,
+                // and the end closes the request and frees the body.
+                let n = remaining.min(max as usize);
+                if n == 0 {
+                    host.fetches.retain(|f| f.id != req_id);
+                    return 0;
+                }
+                let start = dst_ptr as usize;
+                let Some(dst) = start
+                    .checked_add(n)
+                    .and_then(|end| data.get_mut(start..end))
+                else {
+                    return host.refuse("fetch_read", &err::E_ARG.into());
+                };
+                let f = host
+                    .fetches
+                    .iter_mut()
+                    .find(|f| f.id == req_id)
+                    .expect("looked up above");
+                dst.copy_from_slice(&f.body[pos..pos + n]);
+                f.pos += n;
+                host.charge(n);
+                n as i32
+            })
         },
     )?;
     linker.func_wrap(
         m,
         "fetch_cancel",
-        |mut c: Caller<'_, Host>, _req_id: i32| -> i32 {
-            c.data_mut().denied("fetch_cancel", "net")
+        |mut c: Caller<'_, Host>, req_id: i32| -> i32 {
+            let host = c.data_mut();
+            if !host.caps.net {
+                return host.denied("fetch_cancel", "net");
+            }
+            match host.fetch_mut("fetch_cancel", req_id) {
+                Ok(_) => {
+                    host.fetches.retain(|f| f.id != req_id);
+                    err::OK
+                }
+                Err(code) => code,
+            }
         },
     )?;
 
