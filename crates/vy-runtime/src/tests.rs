@@ -1103,11 +1103,139 @@ fn spec_4_2_4_memory_cap() {
     }
 }
 
-/// SPEC-9.3.1: resource limits enforced by the host.
+/// SPEC-9.3.1: the host enforces every per-tab limit of the sentence on
+/// the page itself: memory stops at `memory_max`, a frame over 8 ms of
+/// fuel is a budget breach and two in a row suspend the page, the 65th
+/// open request is `E_RATE`, a minute of the page's clock carries at most
+/// 256 MB of URLs, request bodies and response bodies (a request that does
+/// not fit is `E_RATE` and never made, a response that does not fit is
+/// `FETCH_DONE` with `E_RATE` and no body), and storage stops at
+/// `quota_kb` with `E_QUOTA`. (0 CPU in the background is SPEC-13.3.2's
+/// test in vy-shell; the main process holds the network limits again for
+/// the tab it does not trust, `vy_shell::netlimit`.)
 #[test]
-#[ignore = "M3: limits"]
 fn spec_9_3_1_resource_limits() {
-    todo!()
+    let call = |rt: &mut Runtime, kind: i32, a: i32, b: i32| {
+        rt.event(kind, a, b, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+
+    // Memory: four pages at most, however much the module asks for.
+    let grow = wasm(&format!(
+        r#"(module
+            (memory (export "memory") 1)
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) (memory.grow (local.get 0)))
+            {STUBS})"#
+    ));
+    let opts = Options {
+        memory_max_pages: 4,
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&grow, &sha256(&grow), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame_with_dt(100).unwrap();
+    rt.frame_with_dt(3).unwrap();
+    assert_eq!(rt.memory_pages(), 4);
+
+    // CPU: 8 ms of fuel per frame; the second breach in a row suspends.
+    let mut rt = load(&budget_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame_with_dt(3_000_000).unwrap();
+    assert!(rt.last_frame().over_budget);
+    assert!(rt.last_frame().fuel > FRAME_BUDGET_FUEL);
+    rt.frame_with_dt(3_000_000).unwrap();
+    assert!(rt.is_suspended());
+
+    // Network: 64 open requests, 256 MB a minute.
+    let bytes = fetch_module();
+    let opts = Options {
+        capabilities: Capabilities::from_names(["net"]).unwrap(),
+        net_origins: vec!["https://chat.example".into()],
+        transport: Transport::External,
+        clock: ClockSource::External,
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    // Each request of `fetch_module` counts its URL and body.
+    let per_request = (API.len() + br#"{"text":"hej"}"#.len()) as u64;
+    let ids: Vec<i32> = (0..limits::MAX_OPEN_FETCHES)
+        .map(|_| call(&mut rt, 200, 0, 0))
+        .collect();
+    assert!(ids.iter().all(|&id| id > 0));
+    assert_eq!(
+        call(&mut rt, 200, 0, 0),
+        err::E_RATE,
+        "the 65th open request"
+    );
+    let mut used = per_request * u64::from(limits::MAX_OPEN_FETCHES);
+    let big = limits::MAX_FETCH_RESPONSE_BYTES as usize;
+    for &id in &ids[..3] {
+        assert_eq!(
+            rt.fetch_complete(id, 200, vec![0; big]).unwrap(),
+            Some(true)
+        );
+        assert_eq!(fetch_done_events(&mut rt), vec![(id, 200, big as i32)]);
+        assert_eq!(call(&mut rt, 203, id, 0), err::OK, "cancel frees the body");
+        used += big as u64;
+    }
+    // A fourth 64 MB body does not fit this minute: dropped, closed.
+    let open = rt.open_fetches();
+    assert_eq!(
+        rt.fetch_complete(ids[3], 200, vec![0; big]).unwrap(),
+        Some(true)
+    );
+    assert_eq!(fetch_done_events(&mut rt), vec![(ids[3], err::E_RATE, 0)]);
+    assert_eq!(rt.open_fetches(), open - 1);
+    assert!(host_logs(&rt)
+        .iter()
+        .any(|l| l.contains("E_RATE (response of")));
+    // Fill the minute to the byte; then even a small request is refused,
+    // and is not made.
+    let rest = (NET_BYTES_PER_MINUTE - used) as usize;
+    assert!(rest < big);
+    assert_eq!(
+        rt.fetch_complete(ids[4], 200, vec![0; rest]).unwrap(),
+        Some(true)
+    );
+    assert_eq!(fetch_done_events(&mut rt), vec![(ids[4], 200, rest as i32)]);
+    assert_eq!(call(&mut rt, 203, ids[4], 0), err::OK);
+    let _ = rt.take_fetch_requests();
+    assert_eq!(call(&mut rt, 200, 0, 0), err::E_RATE, "the minute is full");
+    assert!(rt.take_fetch_requests().is_empty(), "no request was made");
+    assert!(host_logs(&rt)
+        .iter()
+        .any(|l| l.contains("network bytes this minute; no request made")));
+    // A minute later the budget is back.
+    rt.set_clock_ms(60_000);
+    assert!(call(&mut rt, 200, 0, 0) > 0);
+    assert_eq!(rt.take_fetch_requests().len(), 1);
+
+    // Storage: `quota_kb` (here 1 KB) bounds keys and values together.
+    let store = wasm(&format!(
+        r#"(module
+            (import "vy" "state_put" (func $state_put (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "key")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (call $state_put (i32.const 0) (i32.const 3) (i32.const 64) (local.get 1)))
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 1024))"#
+    ));
+    let opts = Options {
+        capabilities: Capabilities::from_names(["storage"]).unwrap(),
+        storage_quota_bytes: 1024,
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&store, &sha256(&store), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    assert_eq!(call(&mut rt, 300, 1021, 0), err::OK, "3 + 1021 bytes fit");
+    assert_eq!(call(&mut rt, 300, 1022, 0), err::E_QUOTA, "one byte over");
+    assert_eq!(rt.storage().values().map(Vec::len).sum::<usize>(), 1021);
 }
 
 /// A module whose frame calls one import with a `len` one byte over its cap,
@@ -1482,11 +1610,66 @@ fn spec_9_4_1_hash_mismatch_never_runs() {
     }
 }
 
-/// SPEC-9.5.1, SPEC-9.5.2: storage and state are per origin and never shared.
+/// SPEC-9.5.1, SPEC-9.5.2: storage and state are per origin and never
+/// shared. Each page instance has its own `Storage`, which the host fills
+/// with exactly its origin's saved entries (on disk, one SHA-256-named file
+/// per origin: `vy_shell::storage`, `spec_9_5_2_storage_is_per_origin_on_disk`);
+/// a key one origin writes is not there for another, even under the same
+/// name, and a later instance of the first origin, handed its storage,
+/// reads it back. Grants and trust are per origin in `vy-proto` and the
+/// shell (`spec_7_4_2_*`, `spec_9_2_1_*`).
 #[test]
-#[ignore = "M3: storage"]
 fn spec_9_5_1_per_origin_isolation() {
-    todo!()
+    let page = wasm(&format!(
+        r#"(module
+            (import "vy" "state_put" (func $state_put (param i32 i32 i32 i32) (result i32)))
+            (import "vy" "state_get" (func $state_get (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "theme")
+            (data (i32.const 16) "dark")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 300)) (then
+                    (return (call $state_put (i32.const 0) (i32.const 5) (i32.const 16) (i32.const 4)))))
+                (call $state_get (i32.const 0) (i32.const 5) (i32.const 64) (i32.const 16)))
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 1024))"#
+    ));
+    let instance = |storage: Storage| {
+        let opts = Options {
+            capabilities: Capabilities::from_names(["storage"]).unwrap(),
+            storage,
+            ..Options::default()
+        };
+        let mut rt = Runtime::load(&page, &sha256(&page), opts).unwrap();
+        rt.init(10, 10, 1.0).unwrap();
+        rt
+    };
+    let call = |rt: &mut Runtime, kind: i32| {
+        rt.event(kind, 0, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    // Origin A writes; origin B, running the same module at the same
+    // time, sees nothing under the same key.
+    let mut a = instance(Storage::new());
+    let mut b = instance(Storage::new());
+    assert_eq!(call(&mut a, 300), err::OK);
+    assert_eq!(call(&mut a, 301), 4, "A reads its own value");
+    assert_eq!(call(&mut b, 301), err::E_RESOURCE, "B has no such key");
+    assert!(b.storage().is_empty());
+    // A later instance of A, handed A's entries, reads them; B's own
+    // write does not reach A.
+    assert_eq!(call(&mut b, 300), err::OK);
+    let saved_a = a.storage().clone();
+    let mut a2 = instance(saved_a.clone());
+    assert_eq!(call(&mut a2, 301), 4);
+    assert_eq!(a2.storage(), &saved_a);
+    assert_eq!(
+        saved_a.get(b"theme".as_slice()).map(Vec::as_slice),
+        Some(b"dark".as_slice())
+    );
 }
 
 /// SPEC-10.1.1, SPEC-10.1.2, SPEC-5.2.13: the semantic tree is rebuilt every frame via

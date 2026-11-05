@@ -36,8 +36,6 @@ use vy_runtime::{Capabilities, Link, RandomSource, SemNode};
 pub const FRAME_MS: i64 = 16;
 /// Font scale steps (Ctrl+Plus/Minus).
 const ZOOM_STEPS: [f32; 9] = [0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0];
-/// Bytes a tab may fetch per minute (SPEC-9.3.1).
-const NET_BYTES_PER_MINUTE: u64 = 256 << 20;
 /// Log lines kept per tab.
 const MAX_TAB_LOGS: usize = 200;
 /// How long after a user gesture in a tab (a pointer release or a key
@@ -158,7 +156,7 @@ struct Tab {
     zoom: f32,
     ime: Option<(f32, f32, f32, f32)>,
     logs: VecDeque<String>,
-    net_window: (i64, u64),
+    net_window: crate::netlimit::NetBudget,
     pressed_link: Option<String>,
     hidden: bool,
     under_min: bool,
@@ -205,7 +203,7 @@ impl Tab {
             zoom: 1.0,
             ime: None,
             logs: VecDeque::new(),
-            net_window: (0, 0),
+            net_window: crate::netlimit::NetBudget::default(),
             pressed_link: None,
             hidden: false,
             under_min: false,
@@ -787,6 +785,7 @@ impl Shell {
             tab.asks.clear();
             tab.net_origins.clear();
             tab.storage_quota_bytes = 0;
+            tab.net_window.new_page();
             tab.text = TextEngine::new();
             tab.images = ImageCache::empty(0);
             tab.display_list.clear();
@@ -960,12 +959,25 @@ impl Shell {
                 status,
                 body,
             }) => {
+                let now = self.now_ms();
                 if let Some(t) = find_tab(&mut self.tabs, tab) {
                     if t.generation == generation && t.running() {
                         // The response counts against the same window as
-                        // the request (SPEC-9.3.1: 256 MB/min in all).
-                        t.net_window.1 = t.net_window.1.saturating_add(body.len() as u64);
-                        t.send(&ToTab::FetchResponse { id, status, body });
+                        // the request (SPEC-9.3.1: 256 MB/min in all); one
+                        // that does not fit is E_RATE without its body.
+                        if t.net_window.complete(now, body.len() as u64) {
+                            t.send(&ToTab::FetchResponse { id, status, body });
+                        } else {
+                            t.log(format!(
+                                "[host] fetch {id}: E_RATE (response of {} bytes over the minute's network budget)",
+                                body.len()
+                            ));
+                            t.send(&ToTab::FetchResponse {
+                                id,
+                                status: vy_abi::err::E_RATE,
+                                body: Vec::new(),
+                            });
+                        }
                         t.tick_due = true;
                     }
                 }
@@ -1046,6 +1058,13 @@ impl Shell {
             Some(exe) => process::spawn_process(exe, id, forward, None, None),
             None => process::spawn_thread(id, forward),
         };
+        // The Windows job's commit limit follows the page's memory_max
+        // (SPEC-9.3.1); elsewhere this does nothing.
+        if let Ok(c) = &conn {
+            if let Err(e) = c.limit_memory(memory_max_pages) {
+                eprintln!("vy-shell: tab {id}: memory limit not set: {e}");
+            }
+        }
         let active = Some(id) == self.active_tab();
         let Some(tab) = find_tab(&mut self.tabs, id) else {
             return;
@@ -1311,18 +1330,15 @@ impl Shell {
             refuse(tab, code);
             return;
         }
-        if now - tab.net_window.0 >= 60_000 {
-            tab.net_window = (now, 0);
-        }
-        tab.net_window.1 += body.len() as u64;
-        if tab.net_window.1 > NET_BYTES_PER_MINUTE {
-            refuse(tab, vy_abi::err::E_RATE);
-            return;
-        }
         let Some(method) = vy_abi::method::name(method) else {
             refuse(tab, vy_abi::err::E_ARG);
             return;
         };
+        // 64 in flight and 256 MB a minute (SPEC-9.3.1, `netlimit`).
+        if let Err(code) = tab.net_window.begin(now, (url.len() + body.len()) as u64) {
+            refuse(tab, code);
+            return;
+        }
         let _ = self.loader.send(Job::Request {
             tab: id,
             generation: tab.generation,

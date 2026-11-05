@@ -20,6 +20,7 @@ pub mod ipc;
 #[cfg(feature = "window")]
 pub mod keymap;
 pub mod markdown;
+pub mod netlimit;
 pub mod page;
 pub mod paths;
 pub mod process;
