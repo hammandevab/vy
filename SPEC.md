@@ -64,11 +64,11 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 ### 5.1 Exporter
 
 - **[SPEC-5.1.1]** `vy_init(abi_minor: i32, width: i32, height: i32, scale: f32) -> i32` anropas en gång efter att modulen laddats och verifierats.
-- **[SPEC-5.1.2]** `vy_frame(dt_ms: i32) -> i32` anropas när värden vill ha en ny display list och returnerar antal opkoder skrivna.
+- **[SPEC-5.1.2]** `vy_frame(dt_ms: i32) -> i32` anropas när värden vill ha en ny display list och returnerar antal opkoder skrivna; `dt_ms` är tiden i millisekunder sedan föregående `vy_frame` enligt värdens klocka, och 0 i det första anropet efter `vy_init` och i det första efter `VISIBILITY` synlig.
 - **[SPEC-5.1.3]** `vy_event(kind: i32, a: i32, b: i32, c: i32, d: i32) -> i32` anropas vid input- eller systemhändelse och returnerar 1 om omritning begärs.
 - **[SPEC-5.1.4]** `vy_resize(width: i32, height: i32, scale: f32)` anropas när fönstret ändrat storlek eller DPI.
 - **[SPEC-5.1.5]** `vy_suspend() -> i32` anropas när fliken göms; modulen får skriva undan tillstånd via `state_put` under anropet.
-- **[SPEC-5.1.6]** `vy_alloc(size: i32) -> i32` returnerar en pekare till `size` byte som värden får skriva till, eller 0 vid fel.
+- **[SPEC-5.1.6]** `vy_alloc(size: i32) -> i32` returnerar en pekare till `size` byte som värden får skriva till, eller 0 vid fel; bufferten är giltig tills det `vy_event` som bär den har returnerat, och vid 0 (eller en pekare utan plats i minnet) loggar värden och släpper händelsen utan att anropa `vy_event`.
 
 ### 5.2 Importer
 
@@ -77,7 +77,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-5.2.3]** Display list: `dl_begin() -> i32` (`E_DL_STATE` om en lista redan är öppen), `dl_end() -> i32`, `dl_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32) -> i32`, `dl_text(x: f32, y: f32, w: f32, style_id: i32, ptr: i32, len: i32) -> i64`, `dl_image(x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32) -> i32` (0 cover, 1 contain, 2 stretch), `dl_path(ptr: i32, len: i32, color: i32, stroke_w: f32) -> i32`, `dl_clip_push(x: f32, y: f32, w: f32, h: f32, radius: f32) -> i32` (klipper till en rektangel med hörnradie `radius`; 0 är en vanlig rektangel), `dl_clip_pop() -> i32`.
 - **[SPEC-5.2.4]** `dl_text` returnerar layoutens bredd × 100 i de höga 32 bitarna och höjd × 100 i de låga, i logiska pixlar och packat som `text_measure`; ett fel är en negativ `i64`.
 - **[SPEC-5.2.5]** Text: `text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32`, `text_measure(style_id: i32, max_w: f32, ptr: i32, len: i32) -> i64` (bredd × 100 i de höga 32 bitarna, höjd × 100 i de låga), `text_caret(style_id: i32, ptr: i32, len: i32, byte_offset: i32) -> i64` (x × 100 i de höga, y × 100 i de låga); varje halva i ett packat `i64` är högst 2³¹ − 1, så värdet är aldrig negativt, och ett fel returneras som statuskoden teckenutvidgad till `i64`, alltså negativt.
-- **[SPEC-5.2.6]** Input: `key_down(code: i32) -> i32`, `ime_begin(x: f32, y: f32, w: f32, h: f32) -> i32` och `ime_end() -> i32` (kräver capability `ime`); `pointer_get` har utgått: pekarens läge, knappar och modifierare levereras enbart via events.
+- **[SPEC-5.2.6]** Input: `key_down(code: i32) -> i32` är 1 från `KEY_DOWN` till `KEY_UP` för koden och nollställs av värden vid `VISIBILITY` dold och vid fokusförlust; `ime_begin(x: f32, y: f32, w: f32, h: f32) -> i32` och `ime_end() -> i32` (kräver capability `ime`); `pointer_get` har utgått: pekarens läge, knappar och modifierare levereras enbart via events.
 - **[SPEC-5.2.7]** Nätverk (capability `net`): `fetch_begin(method: i32, url_ptr: i32, url_len: i32, body_ptr: i32, body_len: i32) -> i32`, `fetch_poll(req_id: i32) -> i32`, `fetch_read(req_id: i32, dst_ptr: i32, max: i32) -> i32`, `fetch_cancel(req_id: i32) -> i32`.
 - **[SPEC-5.2.8]** `fetch_begin` mot en origin som inte står i manifestets `net`-lista returnerar `E_ORIGIN` utan nätverksanrop.
 - **[SPEC-5.2.9]** Lagring (capability `storage`): `state_put(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32`, `state_get(key_ptr: i32, key_len: i32, dst_ptr: i32, max: i32) -> i32`, `state_delete(key_ptr: i32, key_len: i32) -> i32`; nyckelrymd per origin, högst 16 MB.
@@ -102,7 +102,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-6.1.4]** Klippstacken har högst djup 32; `dl_clip_pop` utan matchande push returnerar `E_DL_CLIP`.
 - **[SPEC-6.1.5]** Färg är `i32` tolkad som `0xRRGGBBAA` i sRGB.
 - **[SPEC-6.1.6]** Högst 65 536 opkoder per frame; överskott ignoreras och loggas med `E_DL_FULL`.
-- **[SPEC-6.2.1]** Värden anropar `vy_frame` endast efter `vy_init`, efter `request_frame`, efter ett `vy_event` som returnerade 1, eller efter fönsterändring.
+- **[SPEC-6.2.1]** Värden anropar `vy_frame` endast efter `vy_init`, efter `request_frame`, efter ett `vy_event` som returnerade 1, eller efter fönsterändring, och aldrig medan fliken är dold utan capability `persist_frame`, oavsett vad modulen begärt; en begäran gjord dold kvarstår tills fliken syns igen.
 - **[SPEC-6.2.2]** En stillastående sida förbrukar 0 CPU-tid i modulen.
 - **[SPEC-6.3.1]** Alla koordinater är logiska pixlar; `scale` anger förhållandet till fysiska pixlar.
 - **[SPEC-6.4.1]** Textformning och typsnittsrendering sker i värden; modulen ser aldrig glyfer.

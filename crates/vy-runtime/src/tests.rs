@@ -103,20 +103,20 @@ fn spec_6_2_1_frame_only_on_request() {
     ));
     let mut rt = load(&bytes);
     assert!(!rt.wants_frame(), "nothing wanted before init");
-    assert!(matches!(rt.frame(0), Err(Error::NotInitialized)));
+    assert!(matches!(rt.frame_with_dt(0), Err(Error::NotInitialized)));
     rt.init(100, 100, 1.0).unwrap();
     assert!(rt.wants_frame(), "init is a window change");
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert!(!rt.wants_frame(), "frame consumed the request");
-    rt.frame(1).unwrap();
+    rt.frame_with_dt(1).unwrap();
     assert!(rt.wants_frame(), "request_frame during the frame");
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert!(!rt.wants_frame());
     assert!(!rt.event(event::POINTER_MOVE, 0, 0, 0, 0).unwrap());
     assert!(!rt.wants_frame(), "event returning 0 wants nothing");
     assert!(rt.event(event::POINTER_MOVE, 1, 0, 0, 0).unwrap());
     assert!(rt.wants_frame(), "event returning 1 wants a frame");
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     rt.resize(200, 100, 1.0).unwrap();
     assert!(rt.wants_frame(), "resize wants a frame");
 }
@@ -159,7 +159,7 @@ fn spec_5_3_1_denied_call_is_harmless() {
     let mut rt = load(&bytes);
     rt.init(10, 10, 1.0).unwrap();
     for _ in 0..2 {
-        let dl = rt.frame(16).unwrap().to_vec();
+        let dl = rt.frame_with_dt(16).unwrap().to_vec();
         assert_eq!(dl.len(), 26, "the frame still produced its display list");
         assert_eq!(rt.last_frame().ops_reported, 3 * err::E_DENIED);
     }
@@ -223,16 +223,16 @@ fn spec_5_3_3_frame_budget() {
     let slow = 3_000_000;
     let mut rt = load(&budget_module());
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert!(!rt.last_frame().over_budget);
     assert!(rt.last_frame().fuel < FRAME_BUDGET_FUEL);
 
-    rt.frame(slow).unwrap();
+    rt.frame_with_dt(slow).unwrap();
     assert!(rt.last_frame().over_budget, "{:?}", rt.last_frame());
     assert_eq!(module_logs(&rt), vec!["budget"], "first breach: a warning");
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert!(!rt.last_frame().over_budget);
-    rt.frame(slow).unwrap();
+    rt.frame_with_dt(slow).unwrap();
     assert_eq!(
         module_logs(&rt),
         vec!["budget", "budget"],
@@ -240,25 +240,28 @@ fn spec_5_3_3_frame_budget() {
     );
     assert!(!rt.is_suspended());
 
-    rt.frame(slow).unwrap();
+    rt.frame_with_dt(slow).unwrap();
     assert_eq!(
         module_logs(&rt),
         vec!["budget", "budget", "budget", "final", "suspend"],
         "second consecutive breach: final warning then forced suspend"
     );
     assert!(rt.is_suspended());
-    assert!(matches!(rt.frame(0), Err(Error::Suspended)));
+    assert!(matches!(rt.frame_with_dt(0), Err(Error::Suspended)));
 
     // Hard limit: the frame is aborted and counts as a breach.
     let mut rt = load(&budget_module());
     rt.init(10, 10, 1.0).unwrap();
-    let e = rt.frame(-1).unwrap_err();
+    let e = rt.frame_with_dt(-1).unwrap_err();
     assert!(
         matches!(e, Error::OverBudget { used_ms } if used_ms >= 8 * 8),
         "{e}"
     );
     assert_eq!(module_logs(&rt), vec!["budget"]);
-    assert!(matches!(rt.frame(-1), Err(Error::OverBudget { .. })));
+    assert!(matches!(
+        rt.frame_with_dt(-1),
+        Err(Error::OverBudget { .. })
+    ));
     assert!(rt.is_suspended());
     assert_eq!(
         module_logs(&rt),
@@ -320,7 +323,7 @@ fn spec_5_3_3_host_work_costs_fuel() {
 
     let mut rt = load(&host_work_module());
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(1).unwrap();
+    rt.frame_with_dt(1).unwrap();
     let one = rt.last_frame();
     assert!(!one.over_budget, "{one:?}");
     assert_eq!(
@@ -333,12 +336,12 @@ fn spec_5_3_3_host_work_costs_fuel() {
         "the wasm side is cheap: {one:?}"
     );
 
-    rt.frame(over).unwrap();
+    rt.frame_with_dt(over).unwrap();
     let four = rt.last_frame();
     assert!(four.over_budget, "{four:?}");
     assert_eq!(four.host_fuel, u64::from(over as u32) * per_measure);
     assert_eq!(module_logs(&rt), vec!["budget"], "KIND_BUDGET delivered");
-    rt.frame(over).unwrap();
+    rt.frame_with_dt(over).unwrap();
     assert!(
         rt.is_suspended(),
         "second consecutive breach: forced suspend"
@@ -349,10 +352,10 @@ fn spec_5_3_3_host_work_costs_fuel() {
     let bytes = (CALL_HARD_LIMIT_FUEL / FUEL_PER_HOST_BYTE) as i32;
     let mut rt = load(&host_work_module());
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(-(bytes / 16)).unwrap();
+    rt.frame_with_dt(-(bytes / 16)).unwrap();
     assert!(!rt.last_frame().over_budget, "{:?}", rt.last_frame());
     assert_eq!(rt.last_frame().host_fuel, CALL_HARD_LIMIT_FUEL / 16);
-    let r = rt.frame(-bytes).map(|_| ());
+    let r = rt.frame_with_dt(-bytes).map(|_| ());
     assert!(
         matches!(r, Err(Error::OverBudget { .. })),
         "{r:?} {:?}",
@@ -399,7 +402,7 @@ fn spec_5_3_4_no_callbacks() {
     ));
     let mut rt = load(&bytes);
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.frames(), 1);
     assert_eq!(rt.now_ms(), host::HEADLESS_FRAME_MS);
     assert!(rt.wants_frame());
@@ -447,7 +450,7 @@ fn spec_2_1_5_determinism() {
         rt.init(120, 60, 1.0).unwrap();
         let mut dls = Vec::new();
         for _ in 0..3 {
-            dls.push(rt.frame(16).unwrap().to_vec());
+            dls.push(rt.frame_with_dt(16).unwrap().to_vec());
         }
         let images = vy_render::ImageCache::new(Vec::new());
         let img = vy_render::render(&dls[2], 120, 60, 1.0, rt.text_engine_mut(), &images).unwrap();
@@ -478,7 +481,7 @@ fn spec_2_1_5_nan_is_canonical() {
     ));
     let mut rt = load(&bytes);
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(1).unwrap();
+    rt.frame_with_dt(1).unwrap();
     assert_eq!(
         rt.last_frame().ops_reported as u32,
         0x7FC0_0000,
@@ -516,7 +519,7 @@ fn spec_2_1_5_relaxed_simd_refused() {
     ));
     let mut rt = load(&plain);
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.last_frame().ops_reported, 3);
 }
 
@@ -563,7 +566,7 @@ fn spec_5_2_4_dl_text_size() {
     );
     let mut rt = load(&bytes);
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(1000).unwrap();
+    rt.frame_with_dt(1000).unwrap();
     let one_line = rt.last_frame().ops_reported;
     assert_eq!(one_line, 2000, "16 px * 1.25 line height * 100");
     // The high half is the width: one line is wider than 100 px.
@@ -573,7 +576,7 @@ fn spec_5_2_4_dl_text_size() {
     assert!(wide_w > 100 * 100, "width x100: {wide_w}");
     assert!(!rt.event(2, 0, 0, 0, 0).unwrap(), "non-negative i64");
 
-    rt.frame(100).unwrap();
+    rt.frame_with_dt(100).unwrap();
     let wrapped = rt.last_frame().ops_reported;
     assert!(wrapped > one_line, "{wrapped} > {one_line}");
     assert_eq!(wrapped % 2000, 0);
@@ -583,7 +586,7 @@ fn spec_5_2_4_dl_text_size() {
         narrow_w <= 100 * 100 && narrow_w > 0,
         "wrapped width x100: {narrow_w}"
     );
-    let dl = rt.frame(100).unwrap().to_vec();
+    let dl = rt.frame_with_dt(100).unwrap().to_vec();
     let ops = vy_dl::decode(&dl).unwrap();
     assert!(matches!(ops[0], vy_dl::Op::Text { max_w, .. } if max_w == 100.0));
     // text_measure's low 32 bits are the same height (SPEC-5.2.5); vy_event here
@@ -599,13 +602,13 @@ fn spec_5_2_4_dl_text_size() {
     );
 
     // w <= 0: no wrapping, same as the wide layout (SPEC-6.4.3).
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.last_frame().ops_reported, one_line);
     rt.event(1, 0, 0, 0, 0).unwrap();
     assert_eq!(rt.last_event_result(), wide_w);
 
     // A refused call is the status code sign-extended to i64: negative as a whole.
-    rt.frame(-1).unwrap();
+    rt.frame_with_dt(-1).unwrap();
     assert_eq!(
         rt.last_frame().ops_reported,
         err::E_STYLE,
@@ -635,19 +638,19 @@ fn spec_4_2_4_memory_cap() {
     let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts.clone()).unwrap();
     rt.init(10, 10, 1.0).unwrap();
     assert_eq!(rt.memory_pages(), 1);
-    rt.frame(2).unwrap();
+    rt.frame_with_dt(2).unwrap();
     assert_eq!(rt.last_frame().ops_reported, 1, "grow returns the old size");
     assert_eq!(rt.memory_pages(), 3);
-    rt.frame(2).unwrap();
+    rt.frame_with_dt(2).unwrap();
     assert_eq!(
         rt.last_frame().ops_reported,
         -1,
         "3 + 2 > 4 pages is refused"
     );
     assert_eq!(rt.memory_pages(), 3);
-    rt.frame(1).unwrap();
+    rt.frame_with_dt(1).unwrap();
     assert_eq!(rt.memory_pages(), 4);
-    rt.frame(1).unwrap();
+    rt.frame_with_dt(1).unwrap();
     assert_eq!(rt.last_frame().ops_reported, -1);
     assert_eq!(rt.memory_pages(), 4);
 
@@ -830,7 +833,7 @@ fn spec_9_3_1_byte_caps_per_call() {
         rt.init(10, 10, 1.0).unwrap();
         for (case, name, what, cap) in cases {
             let before = rt.logs().len();
-            rt.frame(case).unwrap();
+            rt.frame_with_dt(case).unwrap();
             let stats = rt.last_frame();
             let new: Vec<String> = rt.logs()[before..]
                 .iter()
@@ -881,7 +884,7 @@ fn spec_9_3_1_byte_caps_per_call() {
     // The caps themselves pass: a 4 KB log line and a 64 KB text run.
     let mut rt = load(&bytes);
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(20).unwrap();
+    rt.frame_with_dt(20).unwrap();
     let stats = rt.last_frame();
     assert!(
         stats.ops_reported > 0,
@@ -964,7 +967,7 @@ fn spec_9_3_1_frame_caps() {
     rt.event(0, 2, 0, 0, 0).unwrap();
     assert_eq!(rt.semantic_tree().len(), nodes as usize, "65 537th dropped");
     assert_eq!(host_logs(&rt), vec!["sem_node: E_DL_FULL"], "logged once");
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert!(rt.semantic_tree().is_empty(), "a frame starts a new tree");
 
     // 16 MB of text in the tree, 256 nodes (1 MB) per event call.
@@ -1005,7 +1008,7 @@ fn spec_9_3_1_frame_caps() {
     assert!(matches!(&ops[0], vy_dl::Op::Text { text, .. } if text.is_empty()));
 
     // After a frame the tree is empty and both fit again.
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     rt.event(1, 1, 1, 0, 0).unwrap();
     assert_eq!(vy_dl::decode(rt.display_list()).unwrap().len(), 2);
     assert_eq!(host_logs(&rt).len(), 2, "no new complaint");
@@ -1080,7 +1083,7 @@ fn spec_10_1_1_semantic_tree() {
     rt.init(100, 50, 1.0).unwrap();
     assert!(rt.semantic_tree().is_empty());
     for _ in 0..2 {
-        rt.frame(16).unwrap();
+        rt.frame_with_dt(16).unwrap();
         let tree = rt.semantic_tree();
         assert_eq!(tree.len(), 2, "{tree:?}");
         assert_eq!(
@@ -1134,7 +1137,7 @@ fn spec_5_2_11_time_resolution() {
     rt.init(10, 10, 1.0).unwrap();
     let mut last = -1;
     for i in 0..5 {
-        rt.frame(16).unwrap();
+        rt.frame_with_dt(16).unwrap();
         let now = rt.last_frame().ops_reported;
         assert!(now > last, "monotonic: {now} after {last}");
         assert_eq!(
@@ -1168,6 +1171,178 @@ fn spec_5_1_6_text_input_via_alloc() {
     assert!(rt.text_input("Hej från Vy").unwrap());
     assert_eq!(module_logs(&rt), vec!["Hej från Vy"]);
     assert!(rt.wants_frame());
+}
+
+/// A module whose frame returns `dt_ms` and whose `vy_event` returns 1 for
+/// kind 1; `key_down` of the code given as `a` to kind 2 decides the frame's
+/// return value instead when kind 2 was the last event.
+fn lifecycle_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "request_frame" (func $request_frame))
+            (import "vy" "key_down" (func $key_down (param i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $probe (mut i32) (i32.const -1))
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (if (i32.ge_s (global.get $probe) (i32.const 0)) (then
+                    (return (call $key_down (global.get $probe)))))
+                local.get 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 2)) (then
+                    (global.set $probe (local.get 1))))
+                (if (i32.eq (local.get 0) (i32.const 3)) (then (call $request_frame)))
+                (i32.eq (local.get 0) (i32.const 1)))
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ))
+}
+
+/// SPEC-5.1.2: `dt_ms` is the host clock's advance since the previous
+/// `vy_frame`, 0 in the first frame after `vy_init` and in the first after
+/// `VISIBILITY` shown, so a page never integrates a pause.
+#[test]
+fn spec_5_1_2_dt_ms_is_time_since_previous_frame() {
+    let mut rt = load(&lifecycle_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame().unwrap();
+    assert_eq!(rt.last_frame().ops_reported, 0, "first frame after init");
+    rt.frame().unwrap();
+    assert_eq!(
+        rt.last_frame().ops_reported,
+        host::HEADLESS_FRAME_MS as i32,
+        "the headless clock advanced one frame"
+    );
+    rt.event(0, 0, 0, 0, 0).unwrap();
+    rt.event(0, 0, 0, 0, 0).unwrap();
+    rt.frame().unwrap();
+    assert_eq!(
+        rt.last_frame().ops_reported,
+        host::HEADLESS_FRAME_MS as i32,
+        "events do not advance the headless clock"
+    );
+    rt.event(event::VISIBILITY, 0, 0, 0, 0).unwrap();
+    rt.event(event::VISIBILITY, 1, 0, 0, 0).unwrap();
+    rt.frame().unwrap();
+    assert_eq!(rt.last_frame().ops_reported, 0, "first frame after shown");
+    rt.frame().unwrap();
+    assert_eq!(rt.last_frame().ops_reported, host::HEADLESS_FRAME_MS as i32);
+}
+
+/// SPEC-5.2.6: `key_down` is 1 from `KEY_DOWN` to `KEY_UP`; the host
+/// clears every held key when the tab is hidden, so a key held across a
+/// `VISIBILITY` cycle is released as far as the module can tell.
+#[test]
+fn spec_5_2_6_key_state_held_until_up_or_hidden() {
+    let mut rt = load(&lifecycle_module());
+    rt.init(10, 10, 1.0).unwrap();
+    let probe = |rt: &mut Runtime, code: i32| {
+        rt.event(2, code, 0, 0, 0).unwrap();
+        rt.frame().unwrap();
+        rt.last_frame().ops_reported
+    };
+    assert_eq!(probe(&mut rt, 80), 0);
+    rt.event(event::KEY_DOWN, 80, 0, 0, 0).unwrap();
+    rt.event(event::KEY_DOWN, 80, 0, 1, 0).unwrap();
+    assert_eq!(probe(&mut rt, 80), 1, "held, repeats do not matter");
+    assert_eq!(probe(&mut rt, 79), 0, "another key is not");
+    rt.event(event::KEY_UP, 80, 0, 0, 0).unwrap();
+    assert_eq!(probe(&mut rt, 80), 0, "released");
+    rt.event(event::KEY_DOWN, 80, 0, 0, 0).unwrap();
+    rt.event(event::KEY_DOWN, 79, 0, 0, 0).unwrap();
+    assert_eq!(probe(&mut rt, 80), 1);
+    rt.event(event::VISIBILITY, 0, 0, 0, 0).unwrap();
+    rt.event(event::VISIBILITY, 1, 0, 0, 0).unwrap();
+    assert_eq!(probe(&mut rt, 80), 0, "hidden clears the held keys");
+    assert_eq!(probe(&mut rt, 79), 0);
+}
+
+/// SPEC-6.2.1, SPEC-9.3.1, SPEC-13.3.2: no `vy_frame` while the tab is
+/// hidden without `persist_frame`, whatever the module asked for; the
+/// request is kept and served when the tab is shown again. With
+/// `persist_frame` frames go on while hidden.
+#[test]
+fn spec_6_2_1_no_frame_while_hidden() {
+    let mut rt = load(&lifecycle_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame().unwrap();
+    assert!(!rt.wants_frame());
+    rt.event(event::VISIBILITY, 0, 0, 0, 0).unwrap();
+    assert!(!rt.is_visible());
+    assert!(
+        rt.event(1, 0, 0, 0, 0).unwrap(),
+        "the module asks for a redraw"
+    );
+    assert!(!rt.wants_frame(), "but hidden means no frame");
+    rt.event(3, 0, 0, 0, 0).unwrap();
+    assert!(!rt.wants_frame(), "request_frame neither");
+    assert!(matches!(rt.frame(), Err(Error::Hidden)));
+    assert_eq!(rt.frames(), 1, "nothing ran");
+    rt.event(event::VISIBILITY, 1, 0, 0, 0).unwrap();
+    assert!(rt.is_visible());
+    assert!(rt.wants_frame(), "the request survived the pause");
+    rt.frame().unwrap();
+    assert_eq!(rt.frames(), 2);
+
+    let bytes = lifecycle_module();
+    let opts = Options {
+        capabilities: Capabilities::from_names(["persist_frame"]).unwrap(),
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame().unwrap();
+    rt.event(event::VISIBILITY, 0, 0, 0, 0).unwrap();
+    assert!(rt.event(1, 0, 0, 0, 0).unwrap());
+    assert!(rt.wants_frame(), "persist_frame: frames continue hidden");
+    rt.frame().unwrap();
+    assert_eq!(rt.frames(), 2);
+}
+
+/// SPEC-5.1.6: when `vy_alloc` returns 0 (or a pointer with no room) the
+/// host logs it and drops the event; the module never sees a `TEXT_INPUT`
+/// it has no buffer for, and the page goes on.
+#[test]
+fn spec_5_1_6_alloc_failure_drops_the_event() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $mode (mut i32) (i32.const 0))
+            {INIT_OK}
+            ;; dt_ms picks what vy_alloc answers: 0 => 0, 1 => past memory, 2 => 4096
+            (func (export "vy_frame") (param i32) (result i32)
+                (global.set $mode (local.get 0))
+                i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 7)) (then
+                    (drop (call $log (i32.const 0) (local.get 1) (local.get 2)))))
+                i32.const 1)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32)
+                (if (i32.eq (global.get $mode) (i32.const 0)) (then (return (i32.const 0))))
+                (if (i32.eq (global.get $mode) (i32.const 1)) (then (return (i32.const 65530))))
+                i32.const 4096))"#
+    ));
+    let mut rt = load(&bytes);
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame_with_dt(0).unwrap();
+    assert!(!rt.text_input("Hej").unwrap(), "dropped, no redraw asked");
+    assert_eq!(
+        host_logs(&rt),
+        vec!["TEXT_INPUT dropped: vy_alloc(3) returned 0 (SPEC-5.1.6)"]
+    );
+    assert!(module_logs(&rt).is_empty(), "the module saw nothing");
+    rt.frame_with_dt(1).unwrap();
+    assert!(!rt.text_input("Hej från Vy").unwrap());
+    assert_eq!(host_logs(&rt).len(), 2, "{:?}", host_logs(&rt));
+    assert!(host_logs(&rt)[1].contains("returned 65530"));
+    rt.frame_with_dt(2).unwrap();
+    assert!(rt.text_input("Hej").unwrap(), "a real buffer: delivered");
+    assert_eq!(module_logs(&rt), vec!["Hej"]);
+    assert!(!rt.is_suspended());
 }
 
 /// A module whose frame draws one `IMAGE` with `resource_id = dt_ms / 10`
@@ -1220,14 +1395,14 @@ fn spec_5_2_3_dl_image_fit_and_resources() {
     assert_eq!(rt.image_cache().decodes(), 0, "nothing decoded before use");
 
     // fit 3 with resource 1: E_ARG, no decode, no op.
-    let dl = rt.frame(13).unwrap().to_vec();
+    let dl = rt.frame_with_dt(13).unwrap().to_vec();
     assert_eq!(vy_dl::decode(&dl).unwrap().len(), 0);
     assert_eq!(host_logs(&rt), vec!["dl_image: E_ARG"]);
     assert_eq!(rt.image_cache().decodes(), 0);
 
     // fit 0..=2 with resource 1: decoded once, on the first call.
     for (i, fit_mode) in [0, 1, 2].into_iter().enumerate() {
-        let dl = rt.frame(10 + fit_mode).unwrap().to_vec();
+        let dl = rt.frame_with_dt(10 + fit_mode).unwrap().to_vec();
         let ops = vy_dl::decode(&dl).unwrap();
         assert!(
             matches!(ops[0], vy_dl::Op::Image { resource_id: 1, fit, .. } if fit == fit_mode as u8),
@@ -1261,7 +1436,7 @@ fn spec_5_2_3_dl_image_fit_and_resources() {
         (30, "dl_image: resource 3: cannot decode image: "),
     ] {
         let before = rt.logs().len();
-        let dl = rt.frame(dt).unwrap().to_vec();
+        let dl = rt.frame_with_dt(dt).unwrap().to_vec();
         assert_eq!(
             vy_dl::decode(&dl).unwrap().len(),
             0,
@@ -1331,7 +1506,7 @@ fn spec_8_2_1_capabilities_from_names() {
         };
         let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
         rt.init(10, 10, 1.0).unwrap();
-        rt.frame(0).unwrap();
+        rt.frame_with_dt(0).unwrap();
         let logs = host_logs(&rt);
         assert_eq!(logs.len(), denied, "{logs:?}");
         assert!(logs.iter().all(|l| l.contains("E_DENIED")));
@@ -1354,11 +1529,11 @@ fn spec_5_2_1_exit() {
     ));
     let mut rt = load(&bytes);
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.last_frame().ops_reported, vy_abi::ABI_VERSION);
-    assert!(matches!(rt.frame(1), Err(Error::Exited(42))));
+    assert!(matches!(rt.frame_with_dt(1), Err(Error::Exited(42))));
     assert_eq!(rt.exit_code(), Some(42));
-    assert!(matches!(rt.frame(0), Err(Error::Exited(42))));
+    assert!(matches!(rt.frame_with_dt(0), Err(Error::Exited(42))));
 }
 
 /// A module whose frame runs one import call selected by `dt_ms` and returns
@@ -1490,7 +1665,7 @@ fn spec_5_3_1_status_codes_reach_the_module() {
     rt.init(10, 10, 1.0).unwrap();
     for (case, what, expect) in cases {
         let before = rt.logs().len();
-        rt.frame(case).unwrap();
+        rt.frame_with_dt(case).unwrap();
         assert_eq!(rt.last_frame().ops_reported, expect, "case {case}: {what}");
         let logged = rt.logs()[before..]
             .iter()
@@ -1511,7 +1686,7 @@ fn spec_5_3_1_status_codes_reach_the_module() {
 fn spec_5_2_13_duplicate_node_id_refused() {
     let mut rt = load(&status_module());
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(20).unwrap();
+    rt.frame_with_dt(20).unwrap();
     assert_eq!(rt.last_frame().ops_reported, err::E_ARG);
     let tree = rt.semantic_tree();
     assert_eq!(tree.len(), 1, "{tree:?}");
@@ -1521,7 +1696,7 @@ fn spec_5_2_13_duplicate_node_id_refused() {
         "the first one stays"
     );
     assert_eq!(host_logs(&rt), vec!["sem_node: E_ARG"]);
-    rt.frame(20).unwrap();
+    rt.frame_with_dt(20).unwrap();
     assert_eq!(
         rt.semantic_tree().len(),
         1,
@@ -1567,14 +1742,14 @@ fn links_module() -> Vec<u8> {
 fn spec_5_2_10_links_per_frame() {
     let mut rt = load(&links_module());
     rt.init(10, 10, 1.0).unwrap();
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.links().len(), 1, "the frame's own link");
     rt.event(0, 10, 100, 0, 0).unwrap();
     assert_eq!(rt.last_event_result(), err::OK);
     assert_eq!(rt.links().len(), 11, "links from events add to the frame's");
     rt.event(0, 1, 100, 0, 0).unwrap();
     assert_eq!(rt.links().len(), 11, "same id replaces, never duplicates");
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.links().len(), 1, "dl_begin emptied the list");
     let cap = host::MAX_LINKS_PER_FRAME as i32;
     rt.event(0, cap - 1, 1000, 0, 0).unwrap();
@@ -1584,7 +1759,7 @@ fn spec_5_2_10_links_per_frame() {
     assert_eq!(rt.last_event_result(), err::E_DL_FULL, "the 4 097th link");
     assert_eq!(rt.links().len(), cap as usize);
     assert_eq!(host_logs(&rt), vec!["link_register: E_DL_FULL"]);
-    rt.frame(0).unwrap();
+    rt.frame_with_dt(0).unwrap();
     assert_eq!(rt.links().len(), 1, "and the next frame is free again");
 }
 
@@ -1600,7 +1775,7 @@ fn spec_4_1_4_trap_is_reported() {
     ));
     let mut rt = load(&bytes);
     rt.init(10, 10, 1.0).unwrap();
-    assert!(matches!(rt.frame(0), Err(Error::Trap(_))));
+    assert!(matches!(rt.frame_with_dt(0), Err(Error::Trap(_))));
     assert!(matches!(
         Runtime::load(b"garbage", &sha256(b"garbage"), Options::default()),
         Err(Error::Invalid(_))

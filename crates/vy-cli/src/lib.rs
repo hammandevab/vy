@@ -14,9 +14,6 @@ use vy_runtime::{Capabilities, LogEntry, Options, Runtime, SemNode};
 
 pub use vy_runtime::{check_abi_bytes, AbiReport};
 
-/// Milliseconds passed as `dt_ms` to every headless frame.
-pub const HEADLESS_DT_MS: i32 = 16;
-
 /// An input event replayed before the final frame (SPEC-5.1.3, SPEC-A.2.1),
 /// in logical pixels. The minimal subset a conformance case needs to reach a
 /// focus, hover or scroll state; the shell delivers the rest in M3.
@@ -272,7 +269,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     let mut run_frames = |rt: &mut Runtime, display_list: &mut Vec<u8>| -> Result<()> {
         while frames_run < req.frames && rt.wants_frame() {
             *display_list = rt
-                .frame(HEADLESS_DT_MS)
+                .frame()
                 .map_err(|e| anyhow!("frame {}: {e}", frames_run + 1))?
                 .to_vec();
             frames_run += 1;

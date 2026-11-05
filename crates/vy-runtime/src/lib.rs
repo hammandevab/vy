@@ -89,8 +89,9 @@ pub enum Error {
     Suspended,
     /// The module called `exit`.
     Exited(i32),
-    /// `vy_alloc` returned 0 or a pointer outside memory.
-    Alloc,
+    /// A frame was asked for while the tab is hidden and `persist_frame`
+    /// is not granted (SPEC-6.2.1, SPEC-9.3.1).
+    Hidden,
 }
 
 impl fmt::Display for Error {
@@ -117,7 +118,7 @@ impl fmt::Display for Error {
             }
             Self::Suspended => f.write_str("module is suspended after repeated budget breaches"),
             Self::Exited(c) => write!(f, "module exited with code {c}"),
-            Self::Alloc => f.write_str("vy_alloc failed"),
+            Self::Hidden => f.write_str("tab is hidden without persist_frame (SPEC-6.2.1)"),
         }
     }
 }
@@ -211,6 +212,12 @@ pub struct Runtime {
     frames: u64,
     last_frame: FrameStats,
     last_event: i32,
+    /// Clock reading at the start of the previous `vy_frame` (SPEC-5.1.2).
+    last_frame_at: i64,
+    /// The next `dt_ms` is 0: set by `init` and by `VISIBILITY` shown (SPEC-5.1.2).
+    dt_reset: bool,
+    /// False between `VISIBILITY` hidden and shown (SPEC-6.2.1).
+    visible: bool,
 }
 
 impl Runtime {
@@ -278,6 +285,9 @@ impl Runtime {
                 over_budget: false,
             },
             last_event: 0,
+            last_frame_at: 0,
+            dt_reset: true,
+            visible: true,
         })
     }
 
@@ -372,18 +382,60 @@ impl Runtime {
             return Err(Error::InitFailed(code));
         }
         self.initialized = true;
+        self.dt_reset = true;
         self.host_mut().wants_frame = true;
         Ok(())
     }
 
+    /// True when a frame may run at all: the tab is visible, or
+    /// `persist_frame` is granted (SPEC-6.2.1, SPEC-9.3.1).
+    fn frames_allowed(&self) -> bool {
+        self.visible || self.host().caps.persist_frame
+    }
+
     /// `vy_frame(dt_ms)` (SPEC-5.1.2): rebuild the display list and semantic tree.
     ///
-    /// Returns the display list bytes. Exceeding the 8 ms logical budget twice
-    /// in a row delivers `KIND_BUDGET` and then a forced `vy_suspend`
-    /// (SPEC-5.3.3); hitting the hard limit aborts the frame with
-    /// [`Error::OverBudget`].
-    pub fn frame(&mut self, dt_ms: i32) -> Result<&[u8], Error> {
+    /// `dt_ms` is the host clock's advance since the previous frame, and 0
+    /// for the first frame after `init` and after `VISIBILITY` shown
+    /// (SPEC-5.1.2). Returns the display list bytes. Exceeding the 8 ms
+    /// logical budget twice in a row delivers `KIND_BUDGET` and then a forced
+    /// `vy_suspend` (SPEC-5.3.3); hitting the hard limit aborts the frame
+    /// with [`Error::OverBudget`]; a hidden tab without `persist_frame` is
+    /// [`Error::Hidden`] (SPEC-6.2.1).
+    pub fn frame(&mut self) -> Result<&[u8], Error> {
         self.gate()?;
+        if !self.frames_allowed() {
+            return Err(Error::Hidden);
+        }
+        let now = self.host().clock_ms;
+        let dt_ms = if self.dt_reset {
+            0
+        } else {
+            i32::try_from(now - self.last_frame_at).unwrap_or(i32::MAX)
+        };
+        self.dt_reset = false;
+        self.last_frame_at = now;
+        self.frame_with_dt(dt_ms)
+    }
+
+    /// `vy_frame` with a `dt_ms` of the caller's choosing; tests use the
+    /// argument as a channel into the module. [`Runtime::frame`] is the one
+    /// the hosts use.
+    #[cfg(test)]
+    pub(crate) fn frame_with_dt(&mut self, dt_ms: i32) -> Result<&[u8], Error> {
+        self.gate()?;
+        if !self.frames_allowed() {
+            return Err(Error::Hidden);
+        }
+        self.run_frame(dt_ms)
+    }
+
+    #[cfg(not(test))]
+    fn frame_with_dt(&mut self, dt_ms: i32) -> Result<&[u8], Error> {
+        self.run_frame(dt_ms)
+    }
+
+    fn run_frame(&mut self, dt_ms: i32) -> Result<&[u8], Error> {
         {
             let host = self.host_mut();
             host.wants_frame = false;
@@ -463,19 +515,29 @@ impl Runtime {
 
     /// `vy_event(kind, a, b, c, d)` (SPEC-5.1.3). Returns true when the module
     /// asks for a redraw; the host then wants a frame (SPEC-6.2.1).
+    ///
+    /// The host keeps the state behind `key_down` from `KEY_DOWN` to
+    /// `KEY_UP` and clears it when the tab is hidden (SPEC-5.2.6); a
+    /// `VISIBILITY` shown makes the next `dt_ms` 0 (SPEC-5.1.2).
     pub fn event(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) -> Result<bool, Error> {
         self.gate()?;
-        {
-            let host = self.host_mut();
-            match kind {
-                event::KEY_DOWN => {
-                    if !host.keys_down.contains(&a) {
-                        host.keys_down.push(a);
-                    }
+        match kind {
+            event::KEY_DOWN => {
+                let host = self.host_mut();
+                if !host.keys_down.contains(&a) {
+                    host.keys_down.push(a);
                 }
-                event::KEY_UP => host.keys_down.retain(|k| *k != a),
-                _ => {}
             }
+            event::KEY_UP => self.host_mut().keys_down.retain(|k| *k != a),
+            event::VISIBILITY if a == 1 => {
+                self.visible = true;
+                self.dt_reset = true;
+            }
+            event::VISIBILITY => {
+                self.visible = false;
+                self.host_mut().keys_down.clear();
+            }
+            _ => {}
         }
         let ev = self.exports.event.clone();
         let (r, _) = self.call(&ev, (kind, a, b, c, d)).map_err(|(e, _)| e)?;
@@ -495,20 +557,37 @@ impl Runtime {
 
     /// Deliver committed text as `TEXT_INPUT`: the bytes are written into
     /// memory obtained from `vy_alloc` (SPEC-5.1.6) and passed as `(ptr, len)`.
+    ///
+    /// When `vy_alloc` returns 0, or a pointer that does not leave room for
+    /// the text inside memory, the host logs it and drops the event
+    /// (SPEC-5.1.6): `Ok(false)`, nothing delivered.
     pub fn text_input(&mut self, text: &str) -> Result<bool, Error> {
         self.gate()?;
-        let len = i32::try_from(text.len()).map_err(|_| Error::Alloc)?;
+        let Ok(len) = i32::try_from(text.len()) else {
+            self.host_mut().log(
+                LogSource::Host,
+                2,
+                "TEXT_INPUT dropped: text longer than i32 (SPEC-5.1.6)".into(),
+            );
+            return Ok(false);
+        };
         let alloc = self.exports.alloc.clone();
         let (ptr, _) = self.call(&alloc, len).map_err(|(e, _)| e)?;
-        if ptr <= 0 {
-            return Err(Error::Alloc);
-        }
         let memory = self.host().memory.expect("memory");
-        let start = ptr as usize;
-        let end = start.checked_add(text.len()).ok_or(Error::Alloc)?;
-        let data = memory.data_mut(&mut self.store);
-        let dst = data.get_mut(start..end).ok_or(Error::Alloc)?;
-        dst.copy_from_slice(text.as_bytes());
+        let room = usize::try_from(ptr)
+            .ok()
+            .filter(|p| *p > 0)
+            .and_then(|start| start.checked_add(text.len()).map(|end| start..end))
+            .filter(|range| range.end <= memory.data_size(&self.store));
+        let Some(range) = room else {
+            self.host_mut().log(
+                LogSource::Host,
+                2,
+                format!("TEXT_INPUT dropped: vy_alloc({len}) returned {ptr} (SPEC-5.1.6)"),
+            );
+            return Ok(false);
+        };
+        memory.data_mut(&mut self.store)[range].copy_from_slice(text.as_bytes());
         self.event(event::TEXT_INPUT, ptr, len, 0, 0)
     }
 
@@ -531,10 +610,17 @@ impl Runtime {
     }
 
     /// True when the module asked for a frame (`request_frame`), an event
-    /// returned 1, the window changed, or `init` just ran (SPEC-6.2.1). The
-    /// host must not call [`Runtime::frame`] otherwise.
+    /// returned 1, the window changed, or `init` just ran (SPEC-6.2.1), and
+    /// the tab is visible or has `persist_frame`; a request made while hidden
+    /// is kept until the tab is shown again. The host must not call
+    /// [`Runtime::frame`] otherwise.
     pub fn wants_frame(&self) -> bool {
-        self.host().wants_frame
+        self.host().wants_frame && self.frames_allowed()
+    }
+
+    /// False between `VISIBILITY` hidden and shown.
+    pub fn is_visible(&self) -> bool {
+        self.visible
     }
 
     /// True after a forced suspend (SPEC-5.3.3).
