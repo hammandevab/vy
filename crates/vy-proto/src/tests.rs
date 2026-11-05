@@ -408,6 +408,55 @@ fn spec_7_3_1_content_addressed_cache() {
     let _ = std::fs::remove_dir_all(dir2);
 }
 
+/// SPEC-4.1.4, SPEC-4.1.5, SPEC-7.2.1: in the bare-manifest form the sizes
+/// the manifest declares bound what the client downloads, and they are
+/// checked before the first blob request. A manifest claiming a 1 TB
+/// module used to make the client read whatever the blob URL streamed
+/// until the hash check at the end (review 0003: 300 MB buffered from a
+/// loopback server before it gave up).
+#[test]
+fn spec_4_1_4_declared_sizes_bound_blob_downloads() {
+    let p = package(&key(0), None);
+    let site = Site::new(p.clone(), Form::Manifest, &[key(0)]);
+    site.lock().unwrap().cache_control = None;
+    let server = serve(&site);
+    let module_path = format!("/_vy/{}", p.manifest.module.hash.hex());
+    let (mut f, dir) = fetcher("declared");
+
+    let mut huge = p.clone();
+    huge.manifest.module.size = 1 << 40;
+    huge.manifest.sign(&key(0));
+    site.lock().unwrap().packages.insert("/huge".into(), huge);
+    match f.fetch(&addr(&server, "/huge")) {
+        Err(Error::Invalid(problems)) => assert!(
+            matches!(problems.as_slice(), [Problem::ModuleTooLarge { .. }]),
+            "{problems:?}"
+        ),
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+    assert_eq!(server.count(&module_path), 0, "no blob was requested");
+
+    let mut wide = p.clone();
+    wide.manifest.resources[0].size = u64::MAX;
+    wide.manifest.sign(&key(0));
+    site.lock().unwrap().packages.insert("/wide".into(), wide);
+    match f.fetch(&addr(&server, "/wide")) {
+        Err(Error::Invalid(problems)) => assert!(
+            matches!(problems.as_slice(), [Problem::ResourcesTooLarge { .. }]),
+            "{problems:?}"
+        ),
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+    assert_eq!(server.count(&module_path), 0);
+    assert_eq!(server.requests().len(), 2, "only the two manifests");
+    const _: () = assert!(MAX_BLOB_BYTES <= vy_manifest::MAX_PACKAGE_BYTES);
+
+    // The honest manifest still works, and its blob is fetched once.
+    assert!(f.fetch(&addr(&server, "/hello")).unwrap().trusted);
+    assert_eq!(server.count(&module_path), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// SPEC-7.3.2: manifests use ordinary HTTP caching: `max-age` serves from
 /// disk without a request, `ETag` revalidates with 304, `no-store` never.
 #[test]

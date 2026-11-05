@@ -470,6 +470,29 @@ fn is_url_with(s: &str, schemes: &[&str]) -> bool {
 }
 
 impl Manifest {
+    /// The size limits of §4 applied to what the manifest *declares*, before
+    /// any bytes exist: `module.size` at most 8 MB (SPEC-4.1.4) and the
+    /// resources at most 32 MB together (SPEC-4.1.5). A client fetching the
+    /// bare-manifest form (SPEC-7.2.1) checks this before it downloads a
+    /// single blob, so a manifest cannot make it buffer more than a package
+    /// may hold; [`Manifest::validate`] checks the same against the bytes.
+    pub fn declared_size_problems(&self) -> Vec<Problem> {
+        let mut p = Vec::new();
+        if self.module.size > MAX_MODULE_BYTES as u64 {
+            p.push(Problem::ModuleTooLarge {
+                bytes: usize::try_from(self.module.size).unwrap_or(usize::MAX),
+            });
+        }
+        let total = self
+            .resources
+            .iter()
+            .fold(0u64, |acc, r| acc.saturating_add(r.size));
+        if total > MAX_RESOURCES_BYTES {
+            p.push(Problem::ResourcesTooLarge { bytes: total });
+        }
+        p
+    }
+
     /// Every reason this manifest does not describe `module` and
     /// `resources`; empty means the package is consistent. Checks hashes
     /// and sizes (SPEC-9.4.1, SPEC-4.1.1), image headers against `w`/`h`,

@@ -25,6 +25,10 @@ pub const MAX_REDIRECTS: u32 = 3;
 pub const MAX_PACKAGE_DOWNLOAD_BYTES: u64 = vy_manifest::MAX_PACKAGE_BYTES;
 /// Largest `/.well-known/vy-key` body.
 pub const MAX_KEY_FILE_BYTES: u64 = 16 * 1024;
+/// Largest single blob fetched by hash, whatever a manifest declares: no
+/// module or resource may be larger than the whole resource budget
+/// (SPEC-4.1.4, SPEC-4.1.5).
+pub const MAX_BLOB_BYTES: u64 = vy_manifest::MAX_RESOURCES_BYTES;
 /// Where `/.well-known/vy-key` lives (SPEC-7.4.2).
 pub const WELL_KNOWN_KEY_PATH: &str = "/.well-known/vy-key";
 /// Prefix of the default blob URL when a manifest entry has no `url`:
@@ -317,6 +321,13 @@ impl Fetcher {
             }
             MEDIA_MANIFEST => {
                 let manifest = Manifest::decode(&primary.body)?;
+                // What the manifest declares bounds what is downloaded
+                // (SPEC-4.1.4, SPEC-4.1.5): checked before the first blob,
+                // or a hostile `size` would have the client buffer without end.
+                let declared = manifest.declared_size_problems();
+                if !declared.is_empty() {
+                    return Err(Error::Invalid(declared));
+                }
                 let module = self.blob(
                     &manifest.module.hash,
                     manifest.module.size,
@@ -399,7 +410,10 @@ impl Fetcher {
         let url = resolve(base, &reference).ok_or_else(|| Error::BadRedirect {
             url: reference.clone(),
         })?;
-        let resp = self.get(&url, "*/*", &|_| size, None, requests)?;
+        // `size` is the manifest's claim, already bounded by
+        // `declared_size_problems`; the cap here is the last line of defence.
+        let limit = size.min(MAX_BLOB_BYTES);
+        let resp = self.get(&url, "*/*", &|_| limit, None, requests)?;
         if resp.status != 200 {
             return Err(Error::Status {
                 url: resp.url,
@@ -542,7 +556,7 @@ impl Fetcher {
                 let body = resp
                     .body_mut()
                     .with_config()
-                    .limit(limit + 1)
+                    .limit(limit.saturating_add(1))
                     .read_to_vec()
                     .map_err(|e| match e {
                         ureq::Error::BodyExceedsLimit(_) => Error::TooLarge {
