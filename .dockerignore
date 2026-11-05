@@ -1,0 +1,5 @@
+target
+modules/*/target
+.git
+*.png.new
+*.json.new

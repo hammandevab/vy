@@ -10,6 +10,8 @@ members = [
     "crates/vy-sdk",
     "crates/vy-shell",
     "crates/vy-cli",
+    "crates/vy-publish",
+    "crates/vy-serve",
 ]
 # modules/* byggs separat för wasm32 (tools/build_modules.sh)
 exclude = ["modules"]
@@ -40,6 +42,24 @@ cosmic-text = { version = "0.19", default-features = false, features = ["std", "
 unicode-script = "0.5"
 png = "0.18"
 wat = "1"
+# M3 (vy-manifest, vy-proto, vy-publish, vy-serve); motiveringar i docs/notes/m3-proto-serve.md.
+vy-proto = { path = "crates/vy-proto" }
+vy-publish = { path = "crates/vy-publish" }
+vy-serve = { path = "crates/vy-serve" }
+# CBOR tokenizer only (no derive, no serde, no f16): the canonical checks of
+# SPEC-4.1.3 are done on top of it in vy-manifest::cbor.
+minicbor = { version = "2", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Ed25519 without rand_core/pkcs8/pem; keys are raw 32-byte seeds.
+ed25519-dalek = { version = "3", default-features = false, features = ["fast", "alloc"] }
+# Reference zstd (C, via zstd-sys); no legacy formats, no dictionaries.
+zstd = { version = "0.14", default-features = false }
+# Blocking HTTPS client: rustls with ring and bundled Mozilla roots, no gzip, no cookies.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+tiny_http = "0.12"
+# OS entropy for `vy-publish keygen` only (same version ring uses).
+getrandom = "0.2"
 
 [profile.release]
 lto = "thin"

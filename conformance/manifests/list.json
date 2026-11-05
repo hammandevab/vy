@@ -3,11 +3,8 @@
   "name": "Fakturor",
   "summary": "Referensmodul 3: 200 rader med markering, tangentbordsnavigering och en detaljdialog; bara synliga rader ritas. Inga capabilities.",
   "lang": "sv",
-  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 64,
-  "capabilities": {},
-  "fallback": "# Fakturor\n\nListan kräver en Vy-klient.",
   "published": "2026-11-05",
-  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/list",
-  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+  "fallback": "# Fakturor\n\nListan kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/list"
 }

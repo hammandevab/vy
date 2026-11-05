@@ -3,22 +3,22 @@
   "name": "Vy-butiken",
   "summary": "Referensmodul 4: produktrutnät med bilder ur paketets resurser, link_register per kort, lägg-i-varukorg-knappar och en varukorg med summa. Inga capabilities.",
   "lang": "sv",
-  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 64,
-  "resources": [
-    { "path": "assets/01-mugg.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
-    { "path": "assets/02-bok.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
-    { "path": "assets/03-lampa.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
-    { "path": "assets/04-vaxt.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
-    { "path": "assets/05-horlurar.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
-    { "path": "assets/06-ryggsack.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
-    { "path": "assets/07-termos.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
-    { "path": "assets/08-plad.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 }
-  ],
-  "capabilities": {},
-  "links": ["vy://shop.example/produkt/", "vy://shop.example/kassa"],
-  "fallback": "# Vy-butiken\n\nButiken kräver en Vy-klient.",
   "published": "2026-11-04",
-  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/shop",
-  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+  "resources": [
+    {"path": "../../modules/shop/assets/01-mugg.png", "mime": "image/png", "w": 240, "h": 240},
+    {"path": "../../modules/shop/assets/02-bok.png", "mime": "image/png", "w": 240, "h": 240},
+    {"path": "../../modules/shop/assets/03-lampa.png", "mime": "image/png", "w": 240, "h": 240},
+    {"path": "../../modules/shop/assets/04-vaxt.png", "mime": "image/png", "w": 240, "h": 240},
+    {"path": "../../modules/shop/assets/05-horlurar.png", "mime": "image/png", "w": 240, "h": 240},
+    {"path": "../../modules/shop/assets/06-ryggsack.png", "mime": "image/png", "w": 240, "h": 240},
+    {"path": "../../modules/shop/assets/07-termos.png", "mime": "image/png", "w": 240, "h": 240},
+    {"path": "../../modules/shop/assets/08-plad.png", "mime": "image/png", "w": 240, "h": 240}
+  ],
+  "links": [
+    "vy://shop.example/produkt/",
+    "vy://shop.example/kassa"
+  ],
+  "fallback": "# Vy-butiken\n\nButiken kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/shop"
 }

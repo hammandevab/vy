@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "vy:// addresses, HTTPS fetching, content-addressed cache and publisher keys"
 
 [dependencies]
 vy-abi.workspace = true
+vy-manifest.workspace = true
+ureq.workspace = true
+minicbor.workspace = true
+
+[dev-dependencies]
+wat.workspace = true

@@ -3,11 +3,8 @@
   "name": "Hej från Vy",
   "summary": "Referensmodul 0: en rubrik, ett stycke och en kortbakgrund. Inga capabilities.",
   "lang": "sv",
-  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 32,
-  "capabilities": {},
-  "fallback": "# Hej från Vy\n\nDen här sidan är en WebAssembly-modul.",
   "published": "2026-11-04",
-  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/hello",
-  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M0" }
+  "fallback": "# Hej från Vy\n\nDen här sidan är en WebAssembly-modul.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/hello"
 }

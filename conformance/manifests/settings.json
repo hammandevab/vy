@@ -3,11 +3,9 @@
   "name": "Inställningar",
   "summary": "Referensmodul 6: vippknappar, radiogrupper, en slider som dras med pekaren och en återställningsknapp; värdena sparas med state_put och läses med state_get vid start. Begär storage.",
   "lang": "sv",
-  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 64,
-  "capabilities": { "storage": { "quota_kb": 16 } },
-  "fallback": "# Inställningar\n\nSidan kräver en Vy-klient.",
   "published": "2026-11-04",
-  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/settings",
-  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+  "capabilities": {"storage": {"quota_kb": 16}},
+  "fallback": "# Inställningar\n\nSidan kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/settings"
 }

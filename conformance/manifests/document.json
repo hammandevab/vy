@@ -3,9 +3,8 @@
   "name": "Lägesrapport: Vy-klienten efter M1",
   "summary": "Referensmodul 5: rapport med byline, tvåspaltig brödtext som blir enspaltig under 640 px, datatabell med semantiska rader och celler, noter och tangentbordsfokus över länkar. Inga capabilities.",
   "lang": "sv",
-  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 64,
-  "capabilities": {},
+  "published": "2026-11-04",
   "links": [
     "vy://docs.example/personer/maja-ek",
     "vy://docs.example/lagesrapport",
@@ -14,9 +13,7 @@
     "vy://docs.example/protokoll/m1",
     "https://github.com/hammandevab/vy/blob/main/docs/BUILD-NOTES.md"
   ],
-  "min_size": [320, 240],
   "fallback": "# Lägesrapport: Vy-klienten efter M1\n\nRapporten kräver en Vy-klient.",
-  "published": "2026-11-04",
-  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/document",
-  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+  "min_size": {"w": 320, "h": 240},
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/document"
 }

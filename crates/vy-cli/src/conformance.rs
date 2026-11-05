@@ -12,7 +12,7 @@ use crate::{render, CannedResponse, RenderRequest, ScriptedEvent, Step};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use vy_manifest::{Capability, Manifest};
+use vy_manifest::{mime_for_path, CapabilityRequests, Draft, Manifest, ResourceInput};
 use vy_render::{diff_ratio, Resource, RgbaImage};
 use vy_runtime::{Capabilities, SemNode};
 
@@ -45,9 +45,10 @@ pub struct Case {
     /// Responses the headless host answers `fetch_begin` with (SPEC-5.2.7).
     pub fetch: Vec<CannedResponse>,
     /// Package resources as paths relative to the repository root;
-    /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1), with the
-    /// size the manifest declares for an image when the case states it
-    /// (SPEC-8.1.2).
+    /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1). The list
+    /// must name the same files, in the same order, as the module's
+    /// manifest draft; a size the case states must be the one the manifest
+    /// declares (SPEC-8.1.2).
     pub resources: Vec<CaseResource>,
 }
 
@@ -66,7 +67,9 @@ impl Case {
         root.join("conformance/golden")
             .join(format!("{}.png", self.name))
     }
-    /// The module's manifest, `conformance/manifests/<module>.json`.
+    /// The module's manifest draft, `conformance/manifests/<module>.json`
+    /// (the publisher's input, SPEC-8.1.1; `vy-publish build` reads the
+    /// same file).
     fn manifest_path(&self, root: &Path) -> PathBuf {
         root.join("conformance/manifests")
             .join(format!("{}.json", self.module))
@@ -546,12 +549,12 @@ pub fn load_cases(root: &Path) -> Result<Vec<Case>> {
 
 /// SPEC-10.4.2: a page with input fields (`textbox` nodes) whose manifest
 /// does not request `ime` is rejected. Returns the problem, if any.
-pub fn ime_requirement(semantic: &[SemNode], manifest: &Manifest) -> Option<String> {
+pub fn ime_requirement(semantic: &[SemNode], requested: &CapabilityRequests) -> Option<String> {
     let textboxes = semantic
         .iter()
         .filter(|n| n.role == vy_abi::role::TEXTBOX)
         .count();
-    if textboxes > 0 && !manifest.requests("ime") {
+    if textboxes > 0 && !requested.requests("ime") {
         return Some(format!(
             "{textboxes} textbox node(s) but the manifest does not request `ime` (SPEC-10.4.2)"
         ));
@@ -561,10 +564,118 @@ pub fn ime_requirement(semantic: &[SemNode], manifest: &Manifest) -> Option<Stri
 
 /// SPEC-8.2.2: a case may grant only what the manifest requests. Returns
 /// the first capability granted without being requested.
-pub fn grants_within_manifest(caps: Capabilities, manifest: &Manifest) -> Option<&'static str> {
+pub fn grants_within_manifest(
+    caps: Capabilities,
+    requested: &CapabilityRequests,
+) -> Option<&'static str> {
     vy_abi::cap::NAMES
         .into_iter()
-        .find(|name| caps.has(vy_abi::cap::id(name).unwrap_or(0)) && !manifest.requests(name))
+        .find(|name| caps.has(vy_abi::cap::id(name).unwrap_or(0)) && !requested.requests(name))
+}
+
+/// What a case runs: the module, the manifest finished from the module's
+/// draft with the case's resources, and the resources as the host holds
+/// them, each with the size the manifest declares (SPEC-8.1.2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CasePackage {
+    /// The module bytes.
+    pub wasm: Vec<u8>,
+    /// The finished, unsigned manifest.
+    pub manifest: Manifest,
+    /// `resources[i]` is resource id `i + 1` (SPEC-4.5.1).
+    pub resources: Vec<Resource>,
+}
+
+/// Read the module and the draft, finish the draft with the case's
+/// resources and check that the result describes the package
+/// (SPEC-4.1.1): the case names the draft's files in the draft's order,
+/// a size the case states is the one the manifest declares, and
+/// `Manifest::validate` finds nothing wrong (hashes, image headers,
+/// `memory_max` against the module's initial memory, SPEC-8.1.3, and
+/// every limit of §4 and §8).
+pub fn load_case_package(root: &Path, case: &Case) -> Result<CasePackage> {
+    let module_path = root
+        .join("target/wasm")
+        .join(format!("{}.wasm", case.module));
+    let wasm = fs::read(&module_path).with_context(|| {
+        format!(
+            "reading {} (run tools/build_modules.sh)",
+            module_path.display()
+        )
+    })?;
+    let manifest_path = case.manifest_path(root);
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {} (SPEC-4.1.1)", manifest_path.display()))?;
+    let draft =
+        Draft::from_json(&manifest_text).with_context(|| format!("{}", manifest_path.display()))?;
+    let manifest_dir = manifest_path.parent().unwrap_or(root);
+    if draft.resources.len() != case.resources.len() {
+        bail!(
+            "case lists {} resources but {} declares {} (SPEC-4.1.1)",
+            case.resources.len(),
+            manifest_path.display(),
+            draft.resources.len()
+        );
+    }
+    let mut inputs = Vec::with_capacity(case.resources.len());
+    for (i, (declared, given)) in draft.resources.iter().zip(&case.resources).enumerate() {
+        let id = i + 1;
+        let case_path = root.join(&given.path);
+        let draft_path = manifest_dir.join(&declared.path);
+        let same_file = match (fs::canonicalize(&case_path), fs::canonicalize(&draft_path)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if !same_file {
+            bail!(
+                "resource {id}: the case names {} but the manifest names {} (SPEC-4.5.1)",
+                case_path.display(),
+                draft_path.display()
+            );
+        }
+        if let (Some(stated), Some(w), Some(h)) = (given.pixels, declared.w, declared.h) {
+            if stated != (w, h) {
+                bail!(
+                    "resource {id}: the case states {}x{} but the manifest declares {w}x{h} (SPEC-8.1.2)",
+                    stated.0,
+                    stated.1
+                );
+            }
+        }
+        let bytes = fs::read(&case_path)
+            .with_context(|| format!("reading resource {}", case_path.display()))?;
+        inputs.push(ResourceInput {
+            mime: declared
+                .mime
+                .clone()
+                .unwrap_or_else(|| mime_for_path(&declared.path).to_string()),
+            bytes,
+            size_hint: declared.w.zip(declared.h),
+        });
+    }
+    let manifest = draft.finish(&wasm, &inputs);
+    let problems = manifest.validate(&wasm, &inputs.iter().map(|r| &r.bytes).collect::<Vec<_>>());
+    if !problems.is_empty() {
+        let lines: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
+        bail!(
+            "{} does not describe the package:\n  {}",
+            manifest_path.display(),
+            lines.join("\n  ")
+        );
+    }
+    let resources = inputs
+        .into_iter()
+        .zip(&manifest.resources)
+        .map(|(input, r)| Resource {
+            bytes: input.bytes,
+            pixels: r.w.zip(r.h),
+        })
+        .collect();
+    Ok(CasePackage {
+        wasm,
+        manifest,
+        resources,
+    })
 }
 
 /// Outcome of one case.
@@ -616,52 +727,27 @@ fn run_case(root: &Path, case: &Case, update: bool) -> CaseResult {
 }
 
 fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResult) -> Result<()> {
-    let module_path = root
-        .join("target/wasm")
-        .join(format!("{}.wasm", case.module));
-    let wasm = fs::read(&module_path).with_context(|| {
-        format!(
-            "reading {} (run tools/build_modules.sh)",
-            module_path.display()
-        )
-    })?;
-    let manifest_path = case.manifest_path(root);
-    let manifest_text = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("reading {} (SPEC-4.1.1)", manifest_path.display()))?;
-    let manifest = Manifest::from_json(&manifest_text)
-        .with_context(|| format!("{}", manifest_path.display()))?;
-    let report = vy_runtime::check_abi_bytes(&wasm).map_err(|e| anyhow!("{e}"))?;
-    if let Some((initial, _)) = report.memory {
-        let initial = u32::try_from(initial).unwrap_or(u32::MAX);
-        manifest
-            .check_memory(initial)
-            .with_context(|| format!("{}", manifest_path.display()))?;
-    }
-    if let Some(name) = grants_within_manifest(case.capabilities, &manifest) {
+    let CasePackage {
+        wasm,
+        manifest,
+        resources,
+    } = load_case_package(root, case)?;
+    if let Some(name) = grants_within_manifest(case.capabilities, &manifest.capabilities) {
         bail!("case grants `{name}` but the manifest does not request it (SPEC-8.2.2)");
     }
-    let resources = case
-        .resources
-        .iter()
-        .map(|r| {
-            let path = root.join(&r.path);
-            let bytes =
-                fs::read(&path).with_context(|| format!("reading resource {}", path.display()))?;
-            Ok(Resource {
-                bytes,
-                pixels: r.pixels,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    // What the manifest grants shapes the host (SPEC-5.2.8, SPEC-9.3.1).
-    let net_origins = match manifest.capabilities.get("net") {
-        Some(Capability::Net { origins }) => origins.clone(),
-        _ => Vec::new(),
-    };
-    let storage_quota_bytes = match manifest.capabilities.get("storage") {
-        Some(Capability::Storage { quota_kb }) => u64::from(*quota_kb) * 1024,
-        _ => vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES,
-    };
+    // What the manifest requests shapes the host (SPEC-5.2.8, SPEC-9.3.1).
+    let net_origins = manifest
+        .capabilities
+        .net
+        .as_ref()
+        .map(|n| n.origins.clone())
+        .unwrap_or_default();
+    let storage_quota_bytes = manifest
+        .capabilities
+        .storage
+        .as_ref()
+        .map(|s| u64::from(s.quota_kb) * 1024)
+        .unwrap_or(vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES);
     let req = RenderRequest {
         wasm: &wasm,
         width: case.width,
@@ -677,7 +763,7 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         storage_quota_bytes,
     };
     let out = render(&req)?;
-    if let Some(problem) = ime_requirement(&out.semantic, &manifest) {
+    if let Some(problem) = ime_requirement(&out.semantic, &manifest.capabilities) {
         bail!("{problem}");
     }
     let golden_path = case.golden(root);
@@ -1039,8 +1125,10 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
     /// SPEC-10.4.2, SPEC-8.2.2: a page with input fields whose manifest does
     /// not request `ime` fails conformance; with `ime` requested, or without
     /// input fields, it passes. A case may grant only what the manifest
-    /// requests, and every module in the suite has a manifest whose
-    /// `memory_max` leaves its module room to grow (SPEC-8.1.3).
+    /// requests, and every module in the suite has a manifest that
+    /// describes its module and resources: `memory_max` leaves the module
+    /// room to grow (SPEC-8.1.3) and the images are the size it declares
+    /// (SPEC-8.1.2).
     #[test]
     fn spec_10_4_2_ime_required_for_input() {
         let node = |role: i32| SemNode {
@@ -1056,23 +1144,24 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         let textbox = [node(vy_abi::role::TEXTBOX)];
         let button = [node(vy_abi::role::BUTTON)];
         let read = |name: &str| {
-            Manifest::from_json(
+            Draft::from_json(
                 &fs::read_to_string(root().join(format!("conformance/manifests/{name}.json")))
                     .unwrap(),
             )
             .unwrap()
+            .capabilities
         };
-        let (form_manifest, hello_manifest) = (read("form"), read("hello"));
-        assert!(form_manifest.requests("ime") && !hello_manifest.requests("ime"));
-        assert!(ime_requirement(&textbox, &hello_manifest)
+        let (form_requests, hello_requests) = (read("form"), read("hello"));
+        assert!(form_requests.requests("ime") && !hello_requests.requests("ime"));
+        assert!(ime_requirement(&textbox, &hello_requests)
             .unwrap()
             .contains("SPEC-10.4.2"));
-        assert_eq!(ime_requirement(&textbox, &form_manifest), None);
-        assert_eq!(ime_requirement(&button, &hello_manifest), None);
-        assert_eq!(ime_requirement(&[], &hello_manifest), None);
+        assert_eq!(ime_requirement(&textbox, &form_requests), None);
+        assert_eq!(ime_requirement(&button, &hello_requests), None);
+        assert_eq!(ime_requirement(&[], &hello_requests), None);
         let ime = Capabilities::from_names(["ime"]).unwrap();
-        assert_eq!(grants_within_manifest(ime, &hello_manifest), Some("ime"));
-        assert_eq!(grants_within_manifest(ime, &form_manifest), None);
+        assert_eq!(grants_within_manifest(ime, &hello_requests), Some("ime"));
+        assert_eq!(grants_within_manifest(ime, &form_requests), None);
 
         // The real suite: every form case grants ime (its manifest requests
         // it), a case granting what the manifest does not request is
@@ -1098,22 +1187,63 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         modules.dedup();
         assert_eq!(modules.len(), 11);
         for m in &modules {
-            let manifest = read(m);
-            let wasm = fs::read(root().join(format!("target/wasm/{m}.wasm"))).unwrap();
-            let report = vy_runtime::check_abi_bytes(&wasm).unwrap();
-            let (initial, _) = report.memory.unwrap();
-            manifest
-                .check_memory(initial as u32)
-                .unwrap_or_else(|e| panic!("{m}: {e}"));
+            let first = cases.iter().find(|c| &c.module == m).unwrap();
+            let package =
+                load_case_package(&root(), first).unwrap_or_else(|e| panic!("{m}: {e:#}"));
+            assert_eq!(package.manifest.resources.len(), first.resources.len());
+            assert!(package
+                .resources
+                .iter()
+                .zip(&first.resources)
+                .all(|(held, stated)| stated.pixels.is_none() || held.pixels == stated.pixels));
             for c in cases.iter().filter(|c| &c.module == m) {
                 assert_eq!(
-                    grants_within_manifest(c.capabilities, &manifest),
+                    grants_within_manifest(c.capabilities, &package.manifest.capabilities),
                     None,
                     "{}",
                     c.name
                 );
             }
         }
+        // A case must name the draft's files, in order, with its sizes;
+        // the manifest must fit the module (SPEC-8.1.3).
+        let gallery = cases
+            .iter()
+            .find(|c| c.name == "gallery-800x600@1")
+            .unwrap();
+        let mut swapped = gallery.clone();
+        swapped.resources.swap(0, 1);
+        let e = load_case_package(&root(), &swapped).unwrap_err();
+        assert!(format!("{e:#}").contains("SPEC-4.5.1"), "{e:#}");
+        let mut fewer = gallery.clone();
+        fewer.resources.pop();
+        let e = load_case_package(&root(), &fewer).unwrap_err();
+        assert!(format!("{e:#}").contains("SPEC-4.1.1"), "{e:#}");
+        let mut wrong_size = gallery.clone();
+        wrong_size.resources[0].pixels = Some((200, 320));
+        let e = load_case_package(&root(), &wrong_size).unwrap_err();
+        assert!(format!("{e:#}").contains("SPEC-8.1.2"), "{e:#}");
+        // A draft whose memory_max cannot hold the module, in a scratch
+        // repository root with the real hello module.
+        let scratch = std::env::temp_dir().join(format!("vy-cli-cramped-{}", std::process::id()));
+        fs::create_dir_all(scratch.join("conformance/manifests")).unwrap();
+        fs::create_dir_all(scratch.join("target/wasm")).unwrap();
+        fs::copy(
+            root().join("target/wasm/hello.wasm"),
+            scratch.join("target/wasm/hello.wasm"),
+        )
+        .unwrap();
+        let draft = fs::read_to_string(root().join("conformance/manifests/hello.json")).unwrap();
+        assert!(draft.contains("\"memory_max\": 32"));
+        fs::write(
+            scratch.join("conformance/manifests/hello.json"),
+            draft.replace("\"memory_max\": 32", "\"memory_max\": 1"),
+        )
+        .unwrap();
+        let hello = cases.iter().find(|c| c.module == "hello").unwrap();
+        let e = load_case_package(&scratch, hello).unwrap_err();
+        assert!(format!("{e:#}").contains("SPEC-8.1.3"), "{e:#}");
+        let _ = fs::remove_dir_all(&scratch);
 
         // Without ime granted the host denies `ime_begin` on focus and logs
         // it (SPEC-5.3.1); the page runs on regardless.

@@ -3,11 +3,9 @@
   "name": "Teamkanalen",
   "summary": "Referensmodul 3: meddelandetråd med bubblor, tidsstämplar från now_ms, kompositör med IME och sändning via fetch_begin mot en listad origin. Nekad sändning ger ett synligt offline-läge.",
   "lang": "sv",
-  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 64,
-  "capabilities": { "ime": {}, "net": { "origins": ["https://chat.example"] } },
-  "fallback": "# Teamkanalen\n\nTråden kräver en Vy-klient.",
   "published": "2026-11-04",
-  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/chat",
-  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+  "capabilities": {"ime": {}, "net": {"origins": ["https://chat.example"]}},
+  "fallback": "# Teamkanalen\n\nTråden kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/chat"
 }

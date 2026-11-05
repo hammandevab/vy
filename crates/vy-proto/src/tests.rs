@@ -1,0 +1,651 @@
+//! Spec tests for §7, against an in-process HTTP server on loopback.
+
+use crate::test_server::{Request, Response, TestServer};
+use crate::*;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use vy_manifest::{key_file, Draft, Grant, Hash, Package, ResourceInput, SigningKey};
+
+/// RFC 8032 §7.1 test vector 1: a publicly known key, never a secret.
+const SEED_A: [u8; 32] = [
+    0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+    0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
+];
+
+fn key(seed: u8) -> SigningKey {
+    if seed == 0 {
+        SigningKey::from_seed(&SEED_A)
+    } else {
+        SigningKey::from_seed(&[seed; 32])
+    }
+}
+
+fn module() -> Vec<u8> {
+    wat::parse_str(
+        r#"(module (memory (export "memory") 2)
+            (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+    )
+    .unwrap()
+}
+
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut b = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    b.extend_from_slice(&13u32.to_be_bytes());
+    b.extend_from_slice(b"IHDR");
+    b.extend_from_slice(&w.to_be_bytes());
+    b.extend_from_slice(&h.to_be_bytes());
+    b.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b
+}
+
+fn draft() -> Draft {
+    Draft::from_json(include_str!("../../vy-manifest/tests/fixtures/hello.json")).unwrap()
+}
+
+/// A signed package with one PNG resource.
+fn package(key: &SigningKey, next_key_id: Option<&str>) -> Package {
+    let mut d = draft();
+    d.next_key_id = next_key_id.map(str::to_string);
+    let res = vec![ResourceInput {
+        mime: "image/png".into(),
+        bytes: png(32, 16),
+        size_hint: None,
+    }];
+    let wasm = module();
+    let mut manifest = d.finish(&wasm, &res);
+    manifest.sign(key);
+    let p = Package {
+        manifest,
+        module: wasm,
+        resources: res.into_iter().map(|r| r.bytes).collect(),
+    };
+    assert!(p.validate().is_empty());
+    p
+}
+
+/// What the test site serves; tests mutate it between fetches.
+struct Site {
+    packages: HashMap<String, Package>,
+    form: Form,
+    cache_control: Option<String>,
+    etag: bool,
+    keys: String,
+    /// Bytes to serve for a hash instead of the real ones.
+    blob_override: HashMap<Hash, Vec<u8>>,
+    /// Paths that redirect: path -> Location.
+    redirects: HashMap<String, String>,
+    /// Paths served as something else: path -> (content type, body).
+    other: HashMap<String, (String, Vec<u8>)>,
+}
+
+impl Site {
+    fn new(p: Package, form: Form, keys: &[SigningKey]) -> Arc<Mutex<Site>> {
+        let mut packages = HashMap::new();
+        packages.insert("/hello".to_string(), p);
+        Arc::new(Mutex::new(Site {
+            packages,
+            form,
+            cache_control: Some("max-age=60".into()),
+            etag: true,
+            keys: key_file(&keys.iter().map(|k| k.public()).collect::<Vec<_>>()),
+            blob_override: HashMap::new(),
+            redirects: HashMap::new(),
+            other: HashMap::new(),
+        }))
+    }
+}
+
+fn handle(site: &Arc<Mutex<Site>>, req: &Request) -> Response {
+    let site = site.lock().unwrap();
+    if let Some(location) = site.redirects.get(&req.path) {
+        return Response::new(302).header("Location", location);
+    }
+    if let Some((ct, body)) = site.other.get(&req.path) {
+        return Response::ok(ct, body.clone());
+    }
+    if req.path == WELL_KNOWN_KEY_PATH {
+        return Response::ok("text/plain", site.keys.clone());
+    }
+    if let Some(hex) = req.path.strip_prefix(BLOB_PATH_PREFIX) {
+        let Some(hash) = vy_manifest::from_hex::<32>(hex).map(Hash) else {
+            return Response::new(404);
+        };
+        if let Some(b) = site.blob_override.get(&hash) {
+            return Response::ok("application/octet-stream", b.clone());
+        }
+        for p in site.packages.values() {
+            if p.manifest.module.hash == hash {
+                return Response::ok("application/wasm", p.module.clone());
+            }
+            for (r, bytes) in p.manifest.resources.iter().zip(&p.resources) {
+                if r.hash == hash {
+                    return Response::ok(&r.mime, bytes.clone());
+                }
+            }
+        }
+        return Response::new(404);
+    }
+    let Some(p) = site.packages.get(&req.path) else {
+        return Response::new(404);
+    };
+    let (media, body) = match site.form {
+        Form::Manifest => (MEDIA_MANIFEST, p.manifest.encode().unwrap()),
+        Form::Package => (MEDIA_PACKAGE, p.pack().unwrap()),
+    };
+    // The ETag names the body, signature included, so a re-signed page
+    // revalidates to new bytes.
+    let etag = format!("\"{}\"", Hash::of(&body).hex());
+    if site.etag && req.header("if-none-match") == Some(etag.as_str()) {
+        return Response::new(304).header("ETag", &etag);
+    }
+    let mut resp = Response::ok(media, body);
+    if site.etag {
+        resp = resp.header("ETag", &etag);
+    }
+    if let Some(cc) = &site.cache_control {
+        resp = resp.header("Cache-Control", cc);
+    }
+    resp
+}
+
+fn serve(site: &Arc<Mutex<Site>>) -> TestServer {
+    let site = Arc::clone(site);
+    TestServer::start(move |req| handle(&site, req))
+}
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "vy-proto-test-{name}-{}-{}",
+        std::process::id(),
+        cache::now_secs()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn fetcher(name: &str) -> (Fetcher, PathBuf) {
+    let dir = temp_dir(name);
+    (Fetcher::new(Options::new(&dir)).unwrap(), dir)
+}
+
+fn addr(server: &TestServer, path: &str) -> Address {
+    Address::parse(&format!("vy://localhost:{}{path}", server.port())).unwrap()
+}
+
+/// SPEC-7.1.1: vy://host/path?q becomes https://host/path?q with the Accept header.
+#[test]
+fn spec_7_1_1_translation() {
+    assert_eq!(
+        to_https("vy://exempel.se/butik?x=1").as_deref(),
+        Some("https://exempel.se/butik?x=1")
+    );
+    assert_eq!(
+        to_https("vy://exempel.se:8443/").as_deref(),
+        Some("https://exempel.se:8443/")
+    );
+    assert_eq!(to_https("https://exempel.se/"), None);
+    let a = Address::parse("vy://Exempel.SE:443").unwrap();
+    assert_eq!(a.to_string(), "vy://exempel.se/");
+    assert_eq!(a.origin(), "vy://exempel.se");
+    assert_eq!(a.port(), 443);
+    assert_eq!(a.path(), "/");
+    let b = Address::parse("vy://exempel.se:8443/a/b?c=d").unwrap();
+    assert_eq!(b.origin(), "vy://exempel.se:8443");
+    assert_eq!(b.query(), Some("c=d"));
+    assert_eq!(b.fetch_url(), "https://exempel.se:8443/a/b?c=d");
+    assert_eq!(
+        Address::parse("vy://[::1]:8080/x").unwrap().fetch_url(),
+        "http://[::1]:8080/x"
+    );
+    for bad in [
+        "https://exempel.se/",
+        "vy://",
+        "vy:///path",
+        "vy://user@host/",
+        "vy://host:0/",
+        "vy://host:70000/",
+        "vy://host:08/",
+        "vy://hos t/",
+        "vy://exempel.se/sida#avsnitt",
+        "vy://exämpel.se/",
+    ] {
+        assert!(Address::parse(bad).is_err(), "{bad}");
+    }
+    assert_eq!(
+        ACCEPT,
+        "application/vy-package+zstd, application/vy-manifest+cbor"
+    );
+    // The header actually sent is exactly that.
+    let site = Site::new(package(&key(0), None), Form::Package, &[key(0)]);
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("accept");
+    f.fetch(&addr(&server, "/hello")).unwrap();
+    let first = &server.requests()[0];
+    assert_eq!(first.path, "/hello");
+    assert_eq!(first.header("accept"), Some(ACCEPT));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.1.2: fragments are not allowed.
+#[test]
+fn spec_7_1_2_no_fragments() {
+    assert_eq!(to_https("vy://exempel.se/sida#avsnitt"), None);
+    assert_eq!(
+        Address::parse("vy://exempel.se/sida#"),
+        Err(AddressError::Fragment)
+    );
+}
+
+/// SPEC-7.2.1: a response is the whole package or the bare manifest with
+/// addresses to module and resources; both give the same page.
+#[test]
+fn spec_7_2_1_media_types() {
+    assert_eq!(MEDIA_PACKAGE, "application/vy-package+zstd");
+    assert_eq!(MEDIA_MANIFEST, "application/vy-manifest+cbor");
+    let p = package(&key(0), None);
+    let site = Site::new(p.clone(), Form::Package, &[key(0)]);
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("forms");
+    let whole = f.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(whole.form, Form::Package);
+    assert_eq!(whole.package, p);
+    assert_eq!(whole.identity, p.identity());
+    assert!(whole.trusted);
+    // Page plus key discovery.
+    assert_eq!(whole.requests, 2);
+
+    site.lock().unwrap().form = Form::Manifest;
+    let (mut g, dir2) = fetcher("forms2");
+    let bare = g.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(bare.form, Form::Manifest);
+    assert_eq!(bare.package, p);
+    // Manifest, module, resource, keys.
+    assert_eq!(bare.requests, 4);
+    let paths: Vec<String> = server.requests().iter().map(|r| r.path.clone()).collect();
+    assert!(paths.contains(&format!("/_vy/{}", p.manifest.module.hash.hex())));
+    assert!(paths.contains(&format!("/_vy/{}", p.manifest.resources[0].hash.hex())));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+/// SPEC-7.1.3: TLS is required; localhost is the only exception. A hop to
+/// a plain `http://` host is refused before anything is connected.
+#[test]
+fn spec_7_1_3_tls_required() {
+    assert_eq!(
+        Address::parse("vy://exempel.se/").unwrap().fetch_url(),
+        "https://exempel.se/"
+    );
+    assert!(Address::parse("vy://localhost/").unwrap().is_localhost());
+    assert!(Address::parse("vy://127.0.0.1/").unwrap().is_localhost());
+    assert!(!Address::parse("vy://localhost.example/")
+        .unwrap()
+        .is_localhost());
+
+    let site = Site::new(package(&key(0), None), Form::Package, &[key(0)]);
+    site.lock()
+        .unwrap()
+        .redirects
+        .insert("/plain".into(), "http://example.invalid/hello".into());
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("tls");
+    match f.fetch(&addr(&server, "/plain")) {
+        Err(Error::TlsRequired { url }) => assert_eq!(url, "http://example.invalid/hello"),
+        other => panic!("expected TlsRequired, got {other:?}"),
+    }
+    // Only the redirecting request reached a server; `.invalid` was never resolved.
+    assert_eq!(server.requests().len(), 1);
+    // 127.0.0.1 is loopback too.
+    let a = Address::parse(&format!("vy://127.0.0.1:{}/hello", server.port())).unwrap();
+    assert!(f.fetch(&a).unwrap().trusted);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.2.2, SPEC-1.1.1: a response with another media type (e.g. HTML)
+/// is never rendered: the fetch fails naming the type.
+#[test]
+fn spec_7_2_2_other_media_type_not_rendered() {
+    let site = Site::new(package(&key(0), None), Form::Package, &[key(0)]);
+    site.lock().unwrap().other.insert(
+        "/page.html".into(),
+        (
+            "text/html; charset=utf-8".into(),
+            b"<html>no</html>".to_vec(),
+        ),
+    );
+    site.lock().unwrap().other.insert(
+        "/data".into(),
+        ("application/octet-stream".into(), vec![0; 10]),
+    );
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("notvy");
+    match f.fetch(&addr(&server, "/page.html")) {
+        Err(Error::NotVy { media_type, url }) => {
+            assert_eq!(media_type, "text/html");
+            assert!(url.ends_with("/page.html"));
+        }
+        other => panic!("expected NotVy, got {other:?}"),
+    }
+    assert!(matches!(
+        f.fetch(&addr(&server, "/data")),
+        Err(Error::NotVy { media_type, .. }) if media_type == "application/octet-stream"
+    ));
+    assert!(matches!(
+        f.fetch(&addr(&server, "/missing")),
+        Err(Error::Status { status: 404, .. })
+    ));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.3.1: modules and resources are cached by SHA-256, not URL; a
+/// matching hash is never refetched; bytes are verified on read.
+#[test]
+fn spec_7_3_1_content_addressed_cache() {
+    let p = package(&key(0), None);
+    let site = Site::new(p.clone(), Form::Manifest, &[key(0)]);
+    // No HTTP caching of the manifest: every fetch asks the server again.
+    site.lock().unwrap().cache_control = None;
+    site.lock().unwrap().etag = false;
+    let server = serve(&site);
+    let module_path = format!("/_vy/{}", p.manifest.module.hash.hex());
+    let res_path = format!("/_vy/{}", p.manifest.resources[0].hash.hex());
+    let (mut f, dir) = fetcher("blobs");
+    f.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(server.count(&module_path), 1);
+    assert_eq!(server.count(&res_path), 1);
+    let second = f.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(server.count("/hello"), 2);
+    assert_eq!(server.count(&module_path), 1, "module refetched");
+    assert_eq!(server.count(&res_path), 1, "resource refetched");
+    assert_eq!(second.package, p);
+    assert!(f.blobs().contains(&p.manifest.module.hash));
+
+    // Another page using the same module under another URL: not fetched.
+    let mut other = p.clone();
+    other.manifest.name = "Annan sida".into();
+    other.manifest.module.url = Some("/elsewhere/module.wasm".into());
+    other.manifest.sign(&key(0));
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/other".into(), other.clone());
+    let third = f.fetch(&addr(&server, "/other")).unwrap();
+    assert_eq!(third.package.module, p.module);
+    assert_eq!(server.count("/elsewhere/module.wasm"), 0);
+    assert_eq!(server.count(&module_path), 1);
+
+    // A tampered cache file is a miss: verified on read, then refetched.
+    std::fs::write(
+        dir.join("blobs").join(p.manifest.module.hash.hex()),
+        b"tampered",
+    )
+    .unwrap();
+    f.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(server.count(&module_path), 2);
+
+    // A server answering a hash URL with other bytes is refused (SPEC-9.4.1).
+    let (mut g, dir2) = fetcher("blobs2");
+    site.lock()
+        .unwrap()
+        .blob_override
+        .insert(p.manifest.module.hash, vec![0; p.module.len()]);
+    match g.fetch(&addr(&server, "/hello")) {
+        Err(Error::HashMismatch { expected, .. }) => {
+            assert_eq!(expected, p.manifest.module.hash)
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+    assert!(!g.blobs().contains(&p.manifest.module.hash));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+/// SPEC-7.3.2: manifests use ordinary HTTP caching: `max-age` serves from
+/// disk without a request, `ETag` revalidates with 304, `no-store` never.
+#[test]
+fn spec_7_3_2_manifest_http_cache() {
+    let p = package(&key(0), None);
+    let site = Site::new(p.clone(), Form::Manifest, &[key(0)]);
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("http");
+    let first = f.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(first.requests, 4);
+    // Fresh for 60 s: no request at all.
+    let second = f.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(second.requests, 0);
+    assert_eq!(second.package, p);
+    assert_eq!(server.count("/hello"), 1);
+
+    // Stale at once, with ETag: one conditional request, answered 304.
+    site.lock().unwrap().cache_control = Some("max-age=0".into());
+    let (mut g, dir2) = fetcher("http2");
+    g.fetch(&addr(&server, "/hello")).unwrap();
+    let third = g.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(third.requests, 1);
+    assert_eq!(third.package, p);
+    let conditional = server
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/hello" && r.header("if-none-match").is_some())
+        .count();
+    assert_eq!(conditional, 1);
+
+    // The page changes: the ETag no longer matches, the new manifest is used.
+    let mut changed = p.clone();
+    changed.manifest.name = "Ny version".into();
+    changed.manifest.sign(&key(0));
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), changed.clone());
+    let fourth = g.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(fourth.package.manifest.name, "Ny version");
+    assert_eq!(fourth.requests, 1, "module and resource are unchanged");
+
+    // no-store: refetched every time, with the body.
+    site.lock().unwrap().cache_control = Some("no-store".into());
+    site.lock().unwrap().etag = false;
+    let (mut h, dir3) = fetcher("http3");
+    h.fetch(&addr(&server, "/hello")).unwrap();
+    let before = server.count("/hello");
+    let again = h.fetch(&addr(&server, "/hello")).unwrap();
+    assert_eq!(again.requests, 1);
+    assert_eq!(server.count("/hello"), before + 1);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+    let _ = std::fs::remove_dir_all(dir3);
+}
+
+/// SPEC-7.4.1: the Ed25519 signature covers the canonical CBOR without
+/// `sig`: a manifest altered after signing is not trusted, the identity
+/// does not depend on the signature.
+#[test]
+fn spec_7_4_1_signature_scope() {
+    let p = package(&key(0), None);
+    let mut altered = p.clone();
+    altered.manifest.name = "Ändrad efter signering".into();
+    assert_eq!(altered.manifest.sig, p.manifest.sig);
+    let site = Site::new(altered.clone(), Form::Package, &[key(0)]);
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("scope");
+    let fetched = f.fetch(&addr(&server, "/hello")).unwrap();
+    assert!(!fetched.trusted);
+    assert_eq!(fetched.key_id, key(0).public().key_id());
+    // Signing again with any key leaves the identity alone.
+    let mut resigned = altered.clone();
+    resigned.manifest.sign(&key(5));
+    assert_eq!(resigned.identity(), altered.identity());
+    assert_ne!(resigned.manifest.sig, altered.manifest.sig);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.4.2: the publisher key is read from `/.well-known/vy-key` on the
+/// first visit and pinned; later visits use the pin and never ask again.
+/// (The DNS TXT half is not implemented, see the ignored test below.)
+#[test]
+fn spec_7_4_2_key_discovery() {
+    let p = package(&key(0), None);
+    let site = Site::new(p.clone(), Form::Package, &[key(0), key(9)]);
+    site.lock().unwrap().cache_control = None;
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("tofu");
+    let a = addr(&server, "/hello");
+    let first = f.fetch(&a).unwrap();
+    assert!(first.trusted);
+    assert_eq!(server.count(WELL_KNOWN_KEY_PATH), 1);
+    let pinned = f.keys().origin(&a.origin()).unwrap();
+    assert_eq!(pinned.pinned.len(), 2, "every published key is pinned");
+
+    // Same origin again: the pin answers, no discovery.
+    f.fetch(&a).unwrap();
+    assert_eq!(server.count(WELL_KNOWN_KEY_PATH), 1);
+
+    // A key that appears on the site later, unannounced, is not believed.
+    let mut other = p.clone();
+    other.manifest.sign(&key(7));
+    site.lock().unwrap().keys = key_file(&[key(0).public(), key(7).public()]);
+    site.lock().unwrap().packages.insert("/hello".into(), other);
+    let later = f.fetch(&a).unwrap();
+    assert!(!later.trusted);
+    assert_eq!(server.count(WELL_KNOWN_KEY_PATH), 1);
+
+    // A first visit to an origin whose key file lacks the signing key.
+    site.lock().unwrap().keys = key_file(&[key(0).public()]);
+    let (mut g, dir2) = fetcher("tofu2");
+    assert!(!g.fetch(&a).unwrap().trusted);
+    assert!(
+        g.keys().has_pins(&a.origin()),
+        "published keys are pinned anyway"
+    );
+    // A first visit without any key file: untrusted, nothing pinned.
+    site.lock().unwrap().keys.clear();
+    let (mut h, dir3) = fetcher("tofu3");
+    let none = h.fetch(&a).unwrap();
+    assert!(!none.trusted);
+    assert!(!h.keys().has_pins(&a.origin()));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+    let _ = std::fs::remove_dir_all(dir3);
+}
+
+/// SPEC-7.4.2: DNS TXT `_vy.<host>` must agree with `.well-known/vy-key`
+/// on the first visit.
+#[test]
+#[ignore = "M4: DNS TXT lookup needs a resolver; only .well-known is consulted in M3"]
+fn spec_7_4_2_dns_txt_must_agree() {
+    todo!()
+}
+
+/// SPEC-7.4.3: a page without a valid signature runs in restricted mode:
+/// no capability is granted, not even those granted automatically.
+#[test]
+fn spec_7_4_3_restricted_mode() {
+    let mut d = draft();
+    d.capabilities.ime = Some(vy_manifest::Empty {});
+    d.capabilities.storage = Some(vy_manifest::StorageRequest { quota_kb: 64 });
+    let wasm = module();
+    let mut manifest = d.finish(&wasm, &[]);
+    manifest.sign(&key(0));
+    let good = Package {
+        manifest,
+        module: wasm,
+        resources: vec![],
+    };
+    let mut bad = good.clone();
+    bad.manifest.sig.as_mut().unwrap().bytes.0[0] ^= 1;
+
+    let site = Site::new(bad, Form::Package, &[key(0)]);
+    site.lock().unwrap().cache_control = None;
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("restricted");
+    let a = addr(&server, "/hello");
+    let restricted = f.fetch(&a).unwrap();
+    assert!(!restricted.trusted);
+    assert_eq!(
+        restricted.grants(),
+        [("storage", Grant::Denied), ("ime", Grant::Denied)]
+    );
+    site.lock().unwrap().packages.insert("/hello".into(), good);
+    let trusted = f.fetch(&a).unwrap();
+    assert!(trusted.trusted);
+    assert_eq!(
+        trusted.grants(),
+        [("storage", Grant::Auto), ("ime", Grant::Auto)]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.4.4: key rotation: a manifest signed with the old key names the
+/// new key id; the new key is then accepted from `.well-known/vy-key`.
+#[test]
+fn spec_7_4_4_key_rotation() {
+    let old = key(0);
+    let new = key(3);
+    let stranger = key(4);
+    let announcing = package(&old, Some(&new.public().key_id()));
+    let site = Site::new(announcing, Form::Package, std::slice::from_ref(&old));
+    site.lock().unwrap().cache_control = None;
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("rotation");
+    let a = addr(&server, "/hello");
+    assert!(f.fetch(&a).unwrap().trusted);
+    assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
+
+    // The publisher rotates: new key signs, both keys published.
+    site.lock().unwrap().keys = key_file(&[old.public(), new.public(), stranger.public()]);
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&new, None));
+    let rotated = f.fetch(&a).unwrap();
+    assert!(rotated.trusted);
+    assert_eq!(rotated.key_id, new.public().key_id());
+    assert!(f
+        .keys()
+        .pinned(&a.origin(), &new.public().key_id())
+        .is_some());
+    assert!(!f.keys().is_successor(&a.origin(), &new.public().key_id()));
+
+    // A key that was published but never announced is still refused.
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&stranger, None));
+    assert!(!f.fetch(&a).unwrap().trusted);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.5.1: no Referer, at most 3 redirects.
+#[test]
+fn spec_7_5_1_no_referer_max_redirects() {
+    let site = Site::new(package(&key(0), None), Form::Package, &[key(0)]);
+    {
+        let mut s = site.lock().unwrap();
+        s.redirects.insert("/r1".into(), "/r2".into());
+        s.redirects.insert("/r2".into(), "r3".into());
+        s.redirects.insert("/r3".into(), "/hello".into());
+        s.redirects.insert("/r0".into(), "/r1".into());
+    }
+    let server = serve(&site);
+    let (mut f, dir) = fetcher("redirects");
+    // Three hops: allowed.
+    let fetched = f.fetch(&addr(&server, "/r1")).unwrap();
+    assert!(fetched.trusted);
+    // Four hops: refused at the fourth redirect, before following it.
+    match f.fetch(&addr(&server, "/r0")) {
+        Err(Error::TooManyRedirects { url }) => assert!(url.ends_with("/r3")),
+        other => panic!("expected TooManyRedirects, got {other:?}"),
+    }
+    assert_eq!(MAX_REDIRECTS, 3);
+    for r in server.requests() {
+        assert!(r.header("referer").is_none(), "{r:?}");
+    }
+    assert!(server.requests().len() >= 8);
+    let _ = std::fs::remove_dir_all(dir);
+}
