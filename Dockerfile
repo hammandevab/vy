@@ -23,7 +23,7 @@ WORKDIR /src
 # (rustup show gör det) INNAN targets läggs till, annars hamnar musl-targetet
 # på bildens standardkedja och saknas när cargo byter till den pinnade.
 COPY rust-toolchain.toml ./
-RUN rustup toolchain install 1.97.0 --profile minimal \
+RUN rustup toolchain install 1.97.0 --profile minimal --component rustfmt --component clippy \
     && rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl wasm32-unknown-unknown \
     && rustup target list --toolchain 1.97.0 --installed
 COPY . .
