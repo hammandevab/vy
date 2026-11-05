@@ -36,15 +36,10 @@ jobs:
         run: |
           rustup toolchain install nightly --profile minimal
           cargo install cargo-fuzz --locked
-      - name: Modules (seeds are generated from them when the corpus is empty)
-        run: |
-          rustup target add wasm32-unknown-unknown --toolchain 1.97.0 || true
-          RUSTUP_TOOLCHAIN=1.97.0 tools/build_modules.sh
       - name: Fuzz ${{ matrix.target }}
-        working-directory: fuzz
         run: |
-          mkdir -p corpus/${{ matrix.target }} artifacts/${{ matrix.target }}
-          cargo fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} -- \
+          mkdir -p fuzz/artifacts/${{ matrix.target }}
+          cargo fuzz run --fuzz-dir fuzz ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
             -max_total_time=${{ github.event.inputs.seconds || '300' }} \
             -rss_limit_mb=2048 -timeout=10
       - name: Upload crashes
