@@ -272,6 +272,45 @@ impl ImageCache {
         Self::new(resources.into_iter().map(Resource::new).collect())
     }
 
+    /// A cache of `count` resources with no bytes at all: every id draws
+    /// the placeholder until [`ImageCache::set_decoded`] fills it. The
+    /// main process holds one per tab, filled with the pixels the tab
+    /// process decoded (SPEC-9.1.2: it rasterizes, the tab decodes).
+    pub fn empty(count: usize) -> Self {
+        Self {
+            slots: (0..count)
+                .map(|_| Slot::Failed(ImageError::Unknown))
+                .collect(),
+            decoded_bytes: 0,
+            decodes: 0,
+        }
+    }
+
+    /// Put an already decoded image behind resource `id`. False, and
+    /// nothing kept, for an id outside the package, for an image already
+    /// in place, or when the pixels would push the cache past
+    /// [`MAX_IMAGE_CACHE_BYTES`] (SPEC-9.3.1: the limit holds whoever
+    /// decoded).
+    pub fn set_decoded(&mut self, id: u16, image: RgbaImage) -> bool {
+        let Some(slot) = Self::index(id).and_then(|i| self.slots.get_mut(i)) else {
+            return false;
+        };
+        if matches!(slot, Slot::Ready(_)) {
+            return false;
+        }
+        let expected = (image.width as usize) * (image.height as usize) * 4;
+        if image.data.len() != expected
+            || image.width > limits::MAX_IMAGE_SIDE_PX
+            || image.height > limits::MAX_IMAGE_SIDE_PX
+            || image.data.len() > MAX_IMAGE_CACHE_BYTES.saturating_sub(self.decoded_bytes)
+        {
+            return false;
+        }
+        self.decoded_bytes += image.data.len();
+        *slot = Slot::Ready(image);
+        true
+    }
+
     /// Number of resources in the package (ids `1..=count`).
     pub fn resource_count(&self) -> usize {
         self.slots.len()

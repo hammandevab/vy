@@ -20,7 +20,8 @@
 //!   (SPEC-5.3.3). Decoding a package resource is the exception: a one-time
 //!   cost bounded by the manifest, charged to nobody (SPEC-6.5.1).
 
-use crate::FUEL_PER_HOST_BYTE;
+use crate::rng::Rng;
+use crate::{ClockSource, Transport, FUEL_PER_HOST_BYTE};
 use std::collections::{BTreeMap, HashSet};
 use vy_abi::{cap, err, fit, level, limits, method, ABI_VERSION};
 use vy_dl::DisplayList;
@@ -58,8 +59,38 @@ pub(crate) struct Fetch {
     pub(crate) body: Vec<u8>,
     /// Bytes `fetch_read` has copied so far.
     pub(crate) pos: usize,
+    /// True once the response is in `body` (a canned one from the start;
+    /// an external one from [`crate::Runtime::fetch_complete`]).
+    pub(crate) answered: bool,
     /// True once `FETCH_DONE` has been delivered and the body is readable.
     pub(crate) delivered: bool,
+}
+
+/// A request a module made with `fetch_begin` under [`Transport::External`]
+/// (SPEC-5.2.7): the host process performs it and answers with
+/// [`crate::Runtime::fetch_complete`]. The capability, method, byte caps
+/// (SPEC-9.3.2), origin gate (SPEC-5.2.8) and rate limit were checked
+/// before it was queued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchRequest {
+    /// The `req_id` the module holds.
+    pub id: i32,
+    /// `vy_abi::method`: 0 GET, 1 POST, 2 PUT, 3 DELETE.
+    pub method: i32,
+    /// An `https://` URL within the manifest's `net` origins.
+    pub url: String,
+    /// Request body, at most `MAX_FETCH_BODY_BYTES`.
+    pub body: Vec<u8>,
+}
+
+/// A `navigate` call the host accepted (SPEC-5.2.10) and the shell carries
+/// out; `vy://` in the tab, `https://` in the system browser (SPEC-2.1.7).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Navigation {
+    /// The `vy://` or `https://` address.
+    pub url: String,
+    /// True to replace the current history entry instead of pushing one.
+    pub replace: bool,
 }
 
 /// Origin of an `https://` URL: scheme, host and port, lower-cased
@@ -143,6 +174,30 @@ impl Capabilities {
             _ => false,
         }
     }
+
+    /// Grant or revoke the capability with this id; `false` for an id 1.0
+    /// does not define, which changes nothing.
+    pub fn set(&mut self, id: i32, granted: bool) -> bool {
+        let slot = match id {
+            cap::NET => &mut self.net,
+            cap::STORAGE => &mut self.storage,
+            cap::CLIPBOARD => &mut self.clipboard,
+            cap::HIRES_TIME => &mut self.hires_time,
+            cap::IME => &mut self.ime,
+            cap::PERSIST_FRAME => &mut self.persist_frame,
+            _ => return false,
+        };
+        *slot = granted;
+        true
+    }
+
+    /// The granted capabilities' canonical names, in id order.
+    pub fn names(&self) -> Vec<&'static str> {
+        cap::NAMES
+            .into_iter()
+            .filter(|n| self.has(cap::id(n).unwrap_or(0)))
+            .collect()
+    }
 }
 
 /// Who wrote a log entry.
@@ -225,7 +280,10 @@ pub struct Host {
     pub(crate) links: Vec<Link>,
     pub(crate) log: Vec<LogEntry>,
     pub(crate) clock_ms: i64,
-    pub(crate) rng: u64,
+    /// Where the clock comes from: advanced per frame headless, set by
+    /// the host process otherwise (SPEC-5.2.11).
+    pub(crate) clock: ClockSource,
+    pub(crate) rng: Rng,
     pub(crate) wants_frame: bool,
     pub(crate) exited: Option<i32>,
     pub(crate) keys_down: Vec<i32>,
@@ -244,6 +302,16 @@ pub struct Host {
     /// Open requests in the order they were begun.
     pub(crate) fetches: Vec<Fetch>,
     pub(crate) next_fetch_id: i32,
+    /// How `fetch_begin` is served (SPEC-5.2.7).
+    pub(crate) transport: Transport,
+    /// Requests queued for the host process under [`Transport::External`],
+    /// taken with [`crate::Runtime::take_fetch_requests`].
+    pub(crate) fetch_requests: Vec<FetchRequest>,
+    /// True when `navigate` is carried out by the host (SPEC-5.2.10);
+    /// false in the headless host, where it is `E_DENIED`.
+    pub(crate) navigation: bool,
+    /// Accepted `navigate` calls, taken with [`crate::Runtime::take_navigations`].
+    pub(crate) navigations: Vec<Navigation>,
     /// The headless clipboard, when the caller gave the host one
     /// (SPEC-5.2.12).
     pub(crate) clipboard: Option<Vec<u8>>,
@@ -271,6 +339,10 @@ impl Host {
             net_origins,
             clipboard,
             memory_max_pages: _,
+            clock,
+            random,
+            transport,
+            navigation,
         } = options;
         Self {
             memory: None,
@@ -285,7 +357,8 @@ impl Host {
             links: Vec::new(),
             log: Vec::new(),
             clock_ms: 0,
-            rng: HEADLESS_RANDOM_SEED,
+            clock,
+            rng: Rng::new(random),
             wants_frame: false,
             exited: None,
             keys_down: Vec::new(),
@@ -297,6 +370,10 @@ impl Host {
             net_origins: net_origins.iter().filter_map(|o| origin_of(o)).collect(),
             fetches: Vec::new(),
             next_fetch_id: 1,
+            transport,
+            fetch_requests: Vec::new(),
+            navigation,
+            navigations: Vec::new(),
             clipboard,
             last_gesture_ms: None,
             pending_fuel: 0,
@@ -412,16 +489,6 @@ impl Host {
             return Err(Fault::Code(err::E_DL_FULL));
         }
         Ok(())
-    }
-
-    /// Next 64 random bits (xorshift64*; headless only, see `HEADLESS_RANDOM_SEED`).
-    fn next_random(&mut self) -> u64 {
-        let mut x = self.rng;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.rng = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 }
 
@@ -962,19 +1029,49 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 if host.fetches.len() >= limits::MAX_OPEN_FETCHES as usize {
                     return host.refuse("fetch_begin", &err::E_RATE.into());
                 }
-                let Some(canned) = host.canned.iter().find(|r| r.url == url) else {
-                    return host.denied_headless("fetch_begin", "a transport");
-                };
-                let id = host.next_fetch_id;
-                host.next_fetch_id += 1;
-                host.fetches.push(Fetch {
-                    id,
-                    status: canned.status,
-                    body: canned.body.clone(),
-                    pos: 0,
-                    delivered: false,
-                });
-                id
+                match host.transport {
+                    Transport::Canned => {
+                        let Some(canned) = host.canned.iter().find(|r| r.url == url) else {
+                            return host.denied_headless("fetch_begin", "a transport");
+                        };
+                        let id = host.next_fetch_id;
+                        host.next_fetch_id += 1;
+                        host.fetches.push(Fetch {
+                            id,
+                            status: canned.status,
+                            body: canned.body.clone(),
+                            pos: 0,
+                            answered: true,
+                            delivered: false,
+                        });
+                        id
+                    }
+                    Transport::External => {
+                        // The host process performs the request; the body
+                        // arrives through `Runtime::fetch_complete`.
+                        let body = data
+                            .get(body_ptr as usize..body_ptr as usize + body_len)
+                            .map(<[u8]>::to_vec)
+                            .unwrap_or_default();
+                        let id = host.next_fetch_id;
+                        host.next_fetch_id += 1;
+                        host.fetches.push(Fetch {
+                            id,
+                            status: 0,
+                            body: Vec::new(),
+                            pos: 0,
+                            answered: false,
+                            delivered: false,
+                        });
+                        host.fetch_requests.push(FetchRequest {
+                            id,
+                            method: http_method,
+                            url,
+                            body,
+                        });
+                        id
+                    }
+                }
             })
         },
     )?;
@@ -1174,23 +1271,30 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // navigation (SPEC-5.2.10): the headless host has nowhere to navigate.
+    // navigation (SPEC-5.2.10): the headless host has nowhere to navigate;
+    // the shell takes the address from `Runtime::take_navigations`.
     linker.func_wrap(
         m,
         "navigate",
         |mut c: Caller<'_, Host>,
          url_ptr: i32,
          url_len: i32,
-         _replace: i32|
+         replace: i32|
          -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 match string(data, url_ptr, url_len, "url", limits::MAX_URL_BYTES) {
                     Ok(url) => {
                         host.charge(url.len());
-                        if url.starts_with("vy://") || url.starts_with("https://") {
-                            host.denied_headless("navigate", "navigation")
-                        } else {
+                        if !(url.starts_with("vy://") || url.starts_with("https://")) {
                             host.refuse("navigate", &err::E_ARG.into())
+                        } else if host.navigation {
+                            host.navigations.push(Navigation {
+                                url,
+                                replace: replace != 0,
+                            });
+                            err::OK
+                        } else {
+                            host.denied_headless("navigate", "navigation")
                         }
                     }
                     Err(fault) => host.refuse("navigate", &fault),
@@ -1258,10 +1362,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     return host.refuse("random", &err::E_ARG.into());
                 };
                 host.charge(len);
-                for chunk in dst.chunks_mut(8) {
-                    let bytes = host.next_random().to_le_bytes();
-                    chunk.copy_from_slice(&bytes[..chunk.len()]);
-                }
+                host.rng.fill(dst);
                 err::OK
             })
         },

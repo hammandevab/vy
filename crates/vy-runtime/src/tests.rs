@@ -2875,3 +2875,270 @@ fn spec_4_1_4_trap_is_reported() {
         Err(Error::Invalid(_))
     ));
 }
+
+/// SPEC-5.2.7, SPEC-9.1.1: under `Transport::External` a `fetch_begin`
+/// that passed every gate is queued for the host process with its
+/// method, URL and body, `fetch_poll` is 0 meanwhile, and
+/// `fetch_complete` brings the response: `FETCH_DONE` with the status
+/// and length, the body readable to its end; a cancelled request's
+/// response is dropped; a transport failure is a negative status with
+/// no body; nothing is queued for a refused call.
+#[test]
+fn spec_5_2_7_external_transport_queues_requests() {
+    let bytes = fetch_module();
+    let opts = Options {
+        capabilities: Capabilities::from_names(["net"]).unwrap(),
+        net_origins: vec!["https://chat.example".into()],
+        transport: Transport::External,
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    let call = |rt: &mut Runtime, kind: i32, a: i32, b: i32| {
+        rt.event(kind, a, b, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    assert_eq!(call(&mut rt, 200, 0, 0), 1, "first request id");
+    assert_eq!(call(&mut rt, 200, 1, 0), err::E_ORIGIN, "foreign origin");
+    assert_eq!(call(&mut rt, 200, 0, 0), 2);
+    let queued = rt.take_fetch_requests();
+    assert_eq!(
+        queued,
+        vec![
+            FetchRequest {
+                id: 1,
+                method: vy_abi::method::POST,
+                url: API.into(),
+                body: br#"{"text":"hej"}"#.to_vec(),
+            },
+            FetchRequest {
+                id: 2,
+                method: vy_abi::method::POST,
+                url: API.into(),
+                body: br#"{"text":"hej"}"#.to_vec(),
+            },
+        ],
+        "only calls that passed every gate are queued"
+    );
+    assert!(rt.take_fetch_requests().is_empty(), "taken once");
+    assert_eq!(call(&mut rt, 201, 1, 0), 0, "poll: on its way");
+    assert_eq!(rt.fetch_done().unwrap(), None, "nothing answered yet");
+    assert_eq!((rt.open_fetches(), rt.pending_fetches()), (2, 2));
+
+    // The host process answers request 2 first; order of arrival rules.
+    assert_eq!(
+        rt.fetch_complete(2, 201, b"created".to_vec()).unwrap(),
+        Some(true)
+    );
+    assert_eq!(fetch_done_events(&mut rt), vec![(2, 201, 7)]);
+    assert_eq!(call(&mut rt, 201, 2, 0), 1, "poll: readable");
+    assert_eq!(call(&mut rt, 201, 1, 0), 0, "the other still on its way");
+    assert_eq!(call(&mut rt, 202, 2, 64), 7);
+    assert_eq!(rt.read_memory(2048, 7), b"created");
+    assert_eq!(call(&mut rt, 202, 2, 64), 0, "the end closes it");
+    assert_eq!(rt.open_fetches(), 1);
+
+    // Cancelled before the answer: the answer is dropped, no event.
+    assert_eq!(call(&mut rt, 203, 1, 0), err::OK);
+    assert_eq!(rt.fetch_complete(1, 200, b"late".to_vec()).unwrap(), None);
+    assert_eq!(fetch_done_events(&mut rt), vec![]);
+    assert_eq!(rt.open_fetches(), 0);
+
+    // A transport failure: E_NET as the status, no body (SPEC-5.2.7).
+    assert_eq!(call(&mut rt, 200, 0, 0), 3);
+    assert_eq!(rt.take_fetch_requests().len(), 1);
+    assert_eq!(
+        rt.fetch_complete(3, err::E_NET, Vec::new()).unwrap(),
+        Some(true)
+    );
+    assert_eq!(fetch_done_events(&mut rt), vec![(3, err::E_NET, 0)]);
+    assert_eq!(call(&mut rt, 202, 3, 64), 0);
+    // An answer twice, or for an unknown id, is nothing.
+    assert_eq!(rt.fetch_complete(3, 200, Vec::new()).unwrap(), None);
+    assert_eq!(rt.fetch_complete(99, 200, Vec::new()).unwrap(), None);
+    // The canned transport never queues anything.
+    let mut canned = fetch_runtime(vec![], &[]);
+    assert_eq!(call(&mut canned, 200, 0, 0), err::E_DENIED);
+    assert!(canned.take_fetch_requests().is_empty());
+}
+
+/// SPEC-5.2.10, SPEC-2.1.7: with navigation on, `navigate` is `OK` for
+/// `vy://` and `https://` and the shell takes the addresses in order with
+/// their `replace` flags; anything else stays `E_ARG`; the headless host
+/// still denies and queues nothing.
+#[test]
+fn spec_5_2_10_navigate_queues_for_the_shell() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "navigate" (func $navigate (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "vy://example.test/a")
+            (data (i32.const 32) "https://example.test/b")
+            (data (i32.const 64) "ftp://nej")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 100)) (then
+                    (return (call $navigate (i32.const 0) (i32.const 19) (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 101)) (then
+                    (return (call $navigate (i32.const 32) (i32.const 22) (local.get 1)))))
+                (call $navigate (i32.const 64) (i32.const 9) (i32.const 0)))
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ));
+    let call = |rt: &mut Runtime, kind: i32, replace: i32| {
+        rt.event(kind, replace, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    let opts = Options {
+        navigation: true,
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    assert_eq!(call(&mut rt, 100, 0), err::OK);
+    assert_eq!(call(&mut rt, 101, 1), err::OK);
+    assert_eq!(call(&mut rt, 102, 0), err::E_ARG, "ftp:// is not navigable");
+    assert_eq!(
+        rt.take_navigations(),
+        vec![
+            Navigation {
+                url: "vy://example.test/a".into(),
+                replace: false
+            },
+            Navigation {
+                url: "https://example.test/b".into(),
+                replace: true
+            },
+        ]
+    );
+    assert!(rt.take_navigations().is_empty());
+    let mut headless = load(&bytes);
+    headless.init(10, 10, 1.0).unwrap();
+    assert_eq!(call(&mut headless, 100, 0), err::E_DENIED);
+    assert!(headless.take_navigations().is_empty());
+}
+
+/// SPEC-9.2.1, SPEC-A.2.1, SPEC-5.3.1: a capability granted or revoked
+/// while the page runs reaches the module as `CAPABILITY` (`a` the id,
+/// `b` 1 or 0) and takes effect at the next import call; an id outside
+/// 1.0 is refused and delivers nothing.
+#[test]
+fn spec_9_2_1_capability_change_at_runtime() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "clipboard_write" (func $clipboard_write (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "kopia")
+            (global $last (mut i32) (i32.const -1))
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 32)) (then
+                    (global.set $last (i32.add (i32.mul (local.get 1) (i32.const 10)) (local.get 2)))
+                    (return (i32.const 1))))
+                (if (i32.eq (local.get 0) (i32.const 100)) (then
+                    (return (call $clipboard_write (i32.const 0) (i32.const 5)))))
+                global.get $last)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ));
+    let opts = Options {
+        clipboard: Some(Vec::new()),
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    rt.event(100, 0, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), err::E_DENIED, "not granted yet");
+    assert!(!rt.capabilities().clipboard);
+    assert!(rt.set_capability(vy_abi::cap::CLIPBOARD, true).unwrap());
+    assert!(rt.capabilities().clipboard);
+    rt.event(101, 0, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), 31, "CAPABILITY a=3 b=1");
+    rt.event(100, 0, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), err::OK);
+    assert_eq!(rt.clipboard(), Some(&b"kopia"[..]));
+    assert!(rt.set_capability(vy_abi::cap::CLIPBOARD, false).unwrap());
+    rt.event(101, 0, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), 30, "CAPABILITY a=3 b=0");
+    rt.event(100, 0, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), err::E_DENIED, "revoked");
+    assert!(matches!(rt.set_capability(7, true), Err(Error::Trap(_))));
+    rt.event(101, 0, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), 30, "nothing delivered for id 7");
+    assert_eq!(rt.capabilities().names(), vec![] as Vec<&str>);
+    let mut caps = Capabilities::default();
+    assert!(caps.set(vy_abi::cap::NET, true));
+    assert!(caps.set(vy_abi::cap::IME, true));
+    assert!(!caps.set(0, true));
+    assert_eq!(caps.names(), vec!["net", "ime"]);
+    rt.set_clipboard(Some(b"ny".to_vec()));
+    assert_eq!(rt.clipboard(), Some(&b"ny"[..]));
+}
+
+/// SPEC-5.2.11, SPEC-5.1.2: with `ClockSource::External` the module's
+/// clock is what the host process set last, never goes backwards, and
+/// feeds `dt_ms`; `random` under `RandomSource::ChaCha20` gives a
+/// different stream from the headless seed and the same stream for the
+/// same key, so a recorded session replays exactly (SPEC-11.4.1).
+#[test]
+fn spec_5_2_11_external_clock_and_keyed_random() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "now_ms" (func $now_ms (result i64)))
+            (import "vy" "random" (func $random (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const -7)) (then
+                    (drop (call $random (i32.const 0) (i32.const 8)))
+                    (return (i32.load (i32.const 0)))))
+                (i32.wrap_i64 (call $now_ms)))
+            {STUBS})"#
+    ));
+    let opts = Options {
+        clock: ClockSource::External,
+        random: RandomSource::ChaCha20([7; 32]),
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    rt.set_clock_ms(1_000);
+    rt.frame().unwrap();
+    assert_eq!(rt.last_frame().ops_reported, 1_000);
+    rt.frame().unwrap();
+    assert_eq!(rt.now_ms(), 1_000, "no advance without the host");
+    rt.set_clock_ms(900);
+    assert_eq!(rt.now_ms(), 1_000, "never backwards");
+    rt.set_clock_ms(1_016);
+    rt.frame().unwrap();
+    assert_eq!(rt.last_frame().ops_reported, 1_016);
+    let draw = |source: RandomSource| {
+        let opts = Options {
+            random: source,
+            ..Options::default()
+        };
+        let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+        rt.init(10, 10, 1.0).unwrap();
+        rt.frame_with_dt(-7).unwrap();
+        rt.last_frame().ops_reported
+    };
+    let a = draw(RandomSource::ChaCha20([7; 32]));
+    assert_eq!(
+        a,
+        draw(RandomSource::ChaCha20([7; 32])),
+        "same key, same stream"
+    );
+    assert_ne!(a, draw(RandomSource::ChaCha20([8; 32])));
+    assert_ne!(a, draw(RandomSource::default()));
+    assert_eq!(draw(RandomSource::default()), draw(RandomSource::default()));
+    // The headless clock is untouched by set_clock_ms.
+    let mut headless = load(&bytes);
+    headless.init(10, 10, 1.0).unwrap();
+    headless.set_clock_ms(5_000);
+    headless.frame().unwrap();
+    assert_eq!(headless.last_frame().ops_reported, 0);
+}

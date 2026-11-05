@@ -14,6 +14,8 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    /// The body, as far as `Content-Length` says (at most 64 KB here).
+    pub body: Vec<u8>,
 }
 
 impl Request {
@@ -138,8 +140,10 @@ fn read_request(mut stream: &TcpStream) -> Option<Request> {
         .unwrap();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
+    let rest;
     loop {
         if let Some(end) = find_header_end(&buf) {
+            rest = buf.split_off(end + 4);
             buf.truncate(end);
             break;
         }
@@ -158,14 +162,30 @@ fn read_request(mut stream: &TcpStream) -> Option<Request> {
     let mut parts = request_line.split(' ');
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
-    let headers = lines
+    let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(':'))
         .map(|(n, v)| (n.trim().to_string(), v.trim().to_string()))
         .collect();
+    let length: usize = headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0)
+        .min(64 * 1024);
+    let mut body = rest;
+    while body.len() < length {
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(length);
     Some(Request {
         method,
         path,
         headers,
+        body,
     })
 }
 

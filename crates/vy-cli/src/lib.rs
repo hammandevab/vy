@@ -357,7 +357,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
             storage_quota_bytes: req.storage_quota_bytes,
             fetch: req.fetch.to_vec(),
             net_origins: req.net_origins.to_vec(),
-            clipboard: None,
+            ..Options::default()
         };
         Runtime::load(req.wasm, &hash, options).map_err(|e| anyhow!("{e}"))
     };

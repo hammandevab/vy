@@ -319,6 +319,71 @@ impl Fetcher {
         &self.keys
     }
 
+    /// One plain request on a page's behalf (`fetch_begin`, SPEC-5.2.7),
+    /// made by the main process because the tab process has no network
+    /// (SPEC-9.1.1). `method` is `GET`, `POST`, `PUT` or `DELETE`; the
+    /// URL must be `https://`, or `http://` to loopback for a page whose
+    /// own address is loopback (`page_is_localhost`, SPEC-7.1.3);
+    /// redirects are not followed, no `Referer` is sent (SPEC-7.5.1), and
+    /// the body is read up to `limit` bytes, beyond which the result is
+    /// [`Error::TooLarge`]. Returns the status and the body; a status
+    /// other than 2xx is still a response, not an error. Nothing is cached:
+    /// the page's own requests are its own business.
+    pub fn request(
+        &self,
+        method: &str,
+        url: &str,
+        body: &[u8],
+        page_is_localhost: bool,
+        limit: u64,
+    ) -> Result<(u16, Vec<u8>), Error> {
+        let parsed = HttpUrl::parse(url).ok_or_else(|| Error::BadRedirect {
+            url: url.to_string(),
+        })?;
+        if !transport_allowed(page_is_localhost, &parsed) {
+            return Err(Error::TlsRequired {
+                url: url.to_string(),
+            });
+        }
+        let transport = |e: ureq::Error| Error::Transport {
+            url: url.to_string(),
+            message: e.to_string(),
+        };
+        let mut resp = match method {
+            "GET" => self.agent.get(url).call(),
+            "DELETE" => self.agent.delete(url).call(),
+            "POST" => self.agent.post(url).send(body),
+            "PUT" => self.agent.put(url).send(body),
+            other => {
+                return Err(Error::Transport {
+                    url: url.to_string(),
+                    message: format!("method {other} is not GET, POST, PUT or DELETE"),
+                })
+            }
+        }
+        .map_err(transport)?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .body_mut()
+            .with_config()
+            .limit(limit.saturating_add(1))
+            .read_to_vec()
+            .map_err(|e| match e {
+                ureq::Error::BodyExceedsLimit(_) => Error::TooLarge {
+                    url: url.to_string(),
+                    limit,
+                },
+                e => transport(e),
+            })?;
+        if body.len() as u64 > limit {
+            return Err(Error::TooLarge {
+                url: url.to_string(),
+                limit,
+            });
+        }
+        Ok((status, body))
+    }
+
     /// Fetch a page.
     pub fn fetch(&mut self, address: &Address) -> Result<Fetched, Error> {
         let mut requests = 0;

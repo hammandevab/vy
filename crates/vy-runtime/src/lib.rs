@@ -11,12 +11,14 @@
 
 pub mod abi_check;
 pub mod host;
+mod rng;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
 pub use host::{
-    origin_of, CannedResponse, Capabilities, Link, LogEntry, LogSource, SemNode, Storage,
-    DEFAULT_STORAGE_QUOTA_BYTES,
+    origin_of, CannedResponse, Capabilities, FetchRequest, Link, LogEntry, LogSource, Navigation,
+    SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES,
 };
+pub use rng::RandomSource;
 pub use vy_render::{RasterReport, Resource};
 
 use host::Host;
@@ -141,6 +143,32 @@ pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+/// Where `now_ms` comes from (SPEC-5.2.11).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClockSource {
+    /// The headless clock: completed frames × 16 ms, never the wall clock,
+    /// so a render repeats byte for byte (SPEC-2.1.5).
+    #[default]
+    Headless,
+    /// The host process sets the clock with [`Runtime::set_clock_ms`]
+    /// before each call into the module: the shell passes its monotonic
+    /// clock, and a session record keeps every value (SPEC-11.4.1).
+    External,
+}
+
+/// How `fetch_begin` is served (SPEC-5.2.7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transport {
+    /// The canned responses in [`Options::fetch`]; any other URL is
+    /// denied. The headless host.
+    #[default]
+    Canned,
+    /// Requests are queued for the host process, which has the network
+    /// (SPEC-9.1.1: the tab process has none): [`Runtime::take_fetch_requests`]
+    /// hands them out and [`Runtime::fetch_complete`] brings the response.
+    External,
+}
+
 /// Per-instance settings that come from the manifest and the policy.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -173,6 +201,17 @@ pub struct Options {
     /// what `clipboard_read` copies and `clipboard_write` replaces. Served
     /// only when `clipboard` is granted.
     pub clipboard: Option<Vec<u8>>,
+    /// Where `now_ms` comes from (SPEC-5.2.11): the headless clock, or
+    /// the host process through [`Runtime::set_clock_ms`].
+    pub clock: ClockSource,
+    /// Where `random` comes from (SPEC-5.2.11): the seeded headless
+    /// generator, or a ChaCha20 stream the client keyed from the OS.
+    pub random: RandomSource,
+    /// How `fetch_begin` is served (SPEC-5.2.7).
+    pub transport: Transport,
+    /// True when the host carries out `navigate` (SPEC-5.2.10); the
+    /// headless host answers `E_DENIED`.
+    pub navigation: bool,
 }
 
 impl Default for Options {
@@ -186,6 +225,10 @@ impl Default for Options {
             fetch: Vec::new(),
             net_origins: Vec::new(),
             clipboard: None,
+            clock: ClockSource::Headless,
+            random: RandomSource::default(),
+            transport: Transport::Canned,
+            navigation: false,
         }
     }
 }
@@ -514,7 +557,9 @@ impl Runtime {
         let outcome = self.call(&frame, dt_ms);
         let host_fuel = self.host_mut().take_host_fuel();
         self.frames += 1;
-        self.host_mut().clock_ms = self.frames as i64 * host::HEADLESS_FRAME_MS;
+        if self.host().clock == ClockSource::Headless {
+            self.host_mut().clock_ms = self.frames as i64 * host::HEADLESS_FRAME_MS;
+        }
 
         let (result, used) = match outcome {
             Ok((ops, used)) => (Ok(ops), used),
@@ -928,11 +973,54 @@ impl Runtime {
     /// headless it happens when the conformance case says so.
     pub fn fetch_done(&mut self) -> Result<Option<bool>, Error> {
         self.gate()?;
-        let host = self.host_mut();
-        let Some(f) = host.fetches.iter_mut().find(|f| !f.delivered) else {
+        let Some(id) = self
+            .host()
+            .fetches
+            .iter()
+            .find(|f| f.answered && !f.delivered)
+            .map(|f| f.id)
+        else {
             return Ok(None);
         };
-        let id = f.id;
+        self.deliver_fetch(id).map(Some)
+    }
+
+    /// The response to an external request (SPEC-5.2.7, [`Transport::External`]):
+    /// `status` is the HTTP status, or a negative code from appendix A
+    /// (`E_NET` for a transport failure) with an empty body. Delivers
+    /// `FETCH_DONE` like [`Runtime::fetch_done`]; `Ok(None)` when the
+    /// module has cancelled the request meanwhile, and nothing happens.
+    pub fn fetch_complete(
+        &mut self,
+        req_id: i32,
+        status: i32,
+        body: Vec<u8>,
+    ) -> Result<Option<bool>, Error> {
+        self.gate()?;
+        let host = self.host_mut();
+        let Some(f) = host
+            .fetches
+            .iter_mut()
+            .find(|f| f.id == req_id && !f.answered)
+        else {
+            return Ok(None);
+        };
+        f.status = status;
+        f.body = body;
+        f.answered = true;
+        self.deliver_fetch(req_id).map(Some)
+    }
+
+    /// `FETCH_DONE` for an answered request: the status and the body's
+    /// length, or `E_TOO_LARGE` and no body for one over 64 MB, which
+    /// also closes the request (SPEC-5.2.7).
+    fn deliver_fetch(&mut self, id: i32) -> Result<bool, Error> {
+        let host = self.host_mut();
+        let f = host
+            .fetches
+            .iter_mut()
+            .find(|f| f.id == id)
+            .expect("an answered request");
         let (status, len) = if f.body.len() > limits::MAX_FETCH_RESPONSE_BYTES as usize {
             host.fetches.retain(|f| f.id != id);
             host.host_log(format!(
@@ -945,7 +1033,6 @@ impl Runtime {
             (f.status, f.body.len() as i32)
         };
         self.deliver(event::FETCH_DONE, id, status, len, 0)
-            .map(Some)
     }
 
     /// Requests begun but not yet closed by `fetch_read` returning 0 or
@@ -957,6 +1044,64 @@ impl Runtime {
     /// Open requests still waiting for their `FETCH_DONE`.
     pub fn pending_fetches(&self) -> usize {
         self.host().fetches.iter().filter(|f| !f.delivered).count()
+    }
+
+    /// Requests the module made with `fetch_begin` since the last call
+    /// ([`Transport::External`]); the host process performs them and
+    /// answers with [`Runtime::fetch_complete`].
+    pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
+        std::mem::take(&mut self.host_mut().fetch_requests)
+    }
+
+    /// Accepted `navigate` calls since the last call (SPEC-5.2.10), in
+    /// order; empty in the headless host, which denies them.
+    pub fn take_navigations(&mut self) -> Vec<Navigation> {
+        std::mem::take(&mut self.host_mut().navigations)
+    }
+
+    /// Set the clock the module sees through `now_ms` (SPEC-5.2.11), for
+    /// [`ClockSource::External`]: the host process passes its monotonic
+    /// clock before each call into the module. The clock never goes
+    /// backwards; a smaller value is ignored. Ignored by the headless clock.
+    pub fn set_clock_ms(&mut self, ms: i64) {
+        let host = self.host_mut();
+        if host.clock == ClockSource::External && ms > host.clock_ms {
+            host.clock_ms = ms;
+        }
+    }
+
+    /// Grant or revoke a capability while the page runs (SPEC-9.2.1,
+    /// SPEC-8.2.2: the shell only passes what the manifest requested) and
+    /// tell the module with `CAPABILITY` (SPEC-A.2.1). Returns whether the
+    /// module asked for a redraw; `Err(Trap)` for an id 1.0 does not define.
+    pub fn set_capability(&mut self, id: i32, granted: bool) -> Result<bool, Error> {
+        self.gate()?;
+        if !self.host_mut().caps.set(id, granted) {
+            return Err(Error::Trap(format!("capability id {id} is not in 1.0")));
+        }
+        self.deliver(event::CAPABILITY, id, i32::from(granted), 0, 0)
+    }
+
+    /// The capabilities granted right now.
+    pub fn capabilities(&self) -> Capabilities {
+        self.host().caps
+    }
+
+    /// The rectangle the module asked the IME to compose at with
+    /// `ime_begin`, until `ime_end` (SPEC-5.2.6), in logical pixels.
+    pub fn ime_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        self.host().ime_rect
+    }
+
+    /// The host's clipboard as the module last left it (SPEC-5.2.12);
+    /// `None` when the host has none.
+    pub fn clipboard(&self) -> Option<&[u8]> {
+        self.host().clipboard.as_deref()
+    }
+
+    /// Replace the clipboard the module reads (SPEC-5.2.12).
+    pub fn set_clipboard(&mut self, clipboard: Option<Vec<u8>>) {
+        self.host_mut().clipboard = clipboard;
     }
 
     /// What the module has saved with `state_put` (SPEC-5.2.9).

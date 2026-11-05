@@ -790,3 +790,66 @@ fn spec_7_5_1_no_referer_max_redirects() {
     assert!(server.requests().len() >= 8);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// SPEC-5.2.7, SPEC-9.1.1, SPEC-7.1.3, SPEC-7.5.1: a page's own
+/// `fetch_begin` is performed by the main process through
+/// `Fetcher::request`: GET and POST with the body as given, the status
+/// and body returned whatever the status, no `Referer`, no redirect
+/// followed, plain `http://` only to loopback for a loopback page, and a
+/// body over the limit refused.
+#[test]
+fn spec_5_2_7_page_requests_through_the_main_process() {
+    let server = TestServer::start(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/api/items") => Response::ok("application/json", "[1,2,3]"),
+        ("POST", "/api/messages") => {
+            Response::new(201).body(format!("got {} bytes", req.body.len()))
+        }
+        ("GET", "/api/big") => Response::ok("text/plain", vec![b'x'; 10_000]),
+        ("GET", "/api/moved") => Response::new(302).header("Location", "/api/items"),
+        _ => Response::new(404).body("nope"),
+    });
+    let (f, dir) = fetcher("request");
+    let base = format!("http://localhost:{}", server.port());
+    let (status, body) = f
+        .request("GET", &format!("{base}/api/items"), b"", true, 1 << 20)
+        .unwrap();
+    assert_eq!((status, body.as_slice()), (200, &b"[1,2,3]"[..]));
+    let (status, body) = f
+        .request(
+            "POST",
+            &format!("{base}/api/messages"),
+            br#"{"text":"hej"}"#,
+            true,
+            1 << 20,
+        )
+        .unwrap();
+    assert_eq!((status, body.as_slice()), (201, &b"got 14 bytes"[..]));
+    let (status, body) = f
+        .request("GET", &format!("{base}/missing"), b"", true, 1 << 20)
+        .unwrap();
+    assert_eq!(
+        (status, body.as_slice()),
+        (404, &b"nope"[..]),
+        "a status, not an error"
+    );
+    let (status, _) = f
+        .request("GET", &format!("{base}/api/moved"), b"", true, 1 << 20)
+        .unwrap();
+    assert_eq!(status, 302, "redirects are the page's to handle");
+    match f.request("GET", &format!("{base}/api/big"), b"", true, 9_999) {
+        Err(Error::TooLarge { limit, .. }) => assert_eq!(limit, 9_999),
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+    match f.request("GET", &format!("{base}/api/items"), b"", false, 1 << 20) {
+        Err(Error::TlsRequired { .. }) => {}
+        other => panic!("http:// for a remote page: expected TlsRequired, got {other:?}"),
+    }
+    assert!(f
+        .request("PATCH", &format!("{base}/api/items"), b"", true, 1 << 20)
+        .is_err());
+    for r in server.requests() {
+        assert!(r.header("referer").is_none(), "{r:?}");
+    }
+    assert_eq!(server.requests().len(), 5);
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -109,6 +109,11 @@ impl Fallback for BundledFallback {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
     family: &'static str,
+    /// The font resource id the style was made with (`vy_abi::font` for
+    /// the built-in roles, SPEC-6.4.2), so another text engine can be
+    /// given the same style: the main process draws what the tab process
+    /// measured (SPEC-9.1.2).
+    pub font: i32,
     /// Font size in logical pixels.
     pub size_px: f32,
     /// The weight asked for, clamped to 1..=1000.
@@ -211,6 +216,7 @@ impl TextEngine {
         let face = weight::nearest(clamped, weights).expect("every role has a face");
         self.styles.push(Style {
             family,
+            font: font_resource_id,
             size_px,
             weight: clamped as u16,
             face_weight: face as u16,

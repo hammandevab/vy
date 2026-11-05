@@ -432,6 +432,23 @@ impl Manifest {
         })
     }
 
+    /// Whether the client shows `fallback` instead of the page
+    /// (SPEC-8.3.1): when the module was rejected, or when the page's area
+    /// is `width` × `height` logical pixels and that is smaller than
+    /// `min_size` in either direction. Never for a page that has no
+    /// `fallback`, since there is nothing to show; the client reports the
+    /// rejection its own way then.
+    pub fn needs_fallback(&self, module_rejected: bool, width: u32, height: u32) -> bool {
+        if self.fallback.is_none() {
+            return false;
+        }
+        if module_rejected {
+            return true;
+        }
+        self.min_size
+            .is_some_and(|min| width < min.w || height < min.h)
+    }
+
     /// Canonical CBOR of everything but `sig`: the bytes that are signed
     /// (SPEC-7.4.1) and hashed for the package identity (SPEC-4.1.2).
     pub fn signed_bytes(&self) -> Vec<u8> {

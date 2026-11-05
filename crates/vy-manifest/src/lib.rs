@@ -1127,11 +1127,32 @@ mod tests {
             .is_empty());
     }
 
-    /// SPEC-8.3.1: fallback is shown when the module is rejected or the window is under min_size.
+    /// SPEC-8.3.1: fallback is shown when the module is rejected or the
+    /// window is under `min_size`, in either direction; a page without a
+    /// `fallback` has nothing to show; the shell asks this one function.
     #[test]
-    #[ignore = "M3: vy-shell decides when to show the fallback"]
     fn spec_8_3_1_fallback_conditions() {
-        todo!()
+        let (mut m, _) = hello();
+        assert!(m
+            .fallback
+            .as_deref()
+            .is_some_and(|f| f.starts_with("# Hej")));
+        assert!(m.min_size.is_none());
+        assert!(!m.needs_fallback(false, 1, 1), "no min_size: any size");
+        assert!(m.needs_fallback(true, 800, 600), "rejected module");
+        m.min_size = Some(MinSize { w: 320, h: 240 });
+        assert!(!m.needs_fallback(false, 320, 240), "exactly min_size");
+        assert!(!m.needs_fallback(false, 1280, 800));
+        assert!(m.needs_fallback(false, 319, 240), "too narrow");
+        assert!(m.needs_fallback(false, 320, 239), "too low");
+        assert!(m.needs_fallback(false, 0, 0));
+        assert!(m.needs_fallback(true, 1280, 800));
+        m.fallback = None;
+        assert!(
+            !m.needs_fallback(true, 100, 100),
+            "nothing to show without a fallback"
+        );
+        assert!(!m.needs_fallback(false, 100, 100));
     }
 
     /// SPEC-8.1.3, decision 29: `memory_max` is 1..=4096 pages and at
