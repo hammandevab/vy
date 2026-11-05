@@ -5,7 +5,8 @@ annan agent. Spåret: en användare startar `vy-dev` i en projektkatalog, öppna
 "gör en sida som …", och Claude Code bygger sidan, som visas i Vy.
 
 Rörda kataloger: `crates/vy-dev` (ny), `tools/fake_agent.sh` och `tools/fake_agent.ps1` (nya),
-`docs/notes/m4-dev.md` (den här sidan), `Cargo.toml` (en medlemsrad), `Cargo.lock`.
+`docs/notes/m4-dev.md` (den här sidan), `Cargo.toml` (en medlemsrad), `Cargo.lock`, och utanför
+spåret `crates/vy-runtime/src/{host,lib,tests}.rs` (se *Berör andra spår*).
 
 ## Vad som landat
 
@@ -104,6 +105,32 @@ också läsa nyckeln ur Studio-paketet; och m4/ux öppnar Studio på den fasta a
   Studio; prompt injection via filer i projektet är samma risk som när användaren kör Claude Code för
   hand i katalogen.
 
+**Ändringen i `vy-runtime` (plain http till loopback).** Studio på `vy://localhost:8081/` måste nå
+`http://localhost:8081/_dev/…`, men `vy_runtime::origin_of` tog bara `https://`, så `fetch_begin` gav
+`E_ARG` för varje `http://`-adress – även för en sida på loopback, som SPEC-7.1.3 undantar från TLS
+och som `vy-proto` redan släpper igenom. Ändringen är minsta möjliga: `origin_of` ger nu också
+`http://<loopback>` (exakt `localhost`, `127.0.0.1` eller `[::1]` med valfri siffer-port; inget annat
+namn, ingen user info), och flikens egen grind släpper aldrig igenom plain http för att listan är tom
+(sidan utan manifest): bara en loopback-origin som manifestets `net` namnger. Varför det inte öppnar
+loopback för andra sidor, lager för lager:
+
+1. *Fjärrsida (vilken origin som helst utanför loopback) som listar `http://localhost:8081`.*
+   Standardpolicyn frågar (inte egen origin), och även om användaren säger ja eller slår på `net` i
+   adressfältet stoppar huvudprocessens laddare anropet: `vy_proto::transport_allowed` släpper bara
+   igenom `http://` till loopback för en sida som själv ligger på loopback, och svaret blir `E_NET`
+   utan att någon förbindelse öppnas. Det var så före ändringen och är oförändrat; det prövas mot en
+   körande `vy-dev` i `vy-dev`s tester.
+2. *Sida på `localhost:8080` (sidan under utveckling) som listar `http://localhost:8081`.* Policyn
+   frågar, aldrig tyst ja. Skalet kan i dag inte skilja `localhost:8080` från `localhost:8081` vid
+   anropet (laddaren får bara *sidan ligger på loopback*), så den hårda regeln *bara sin egen
+   loopback-origin* ligger färdig som `vy_runtime::plain_http_allowed(origin, sidans_auktoritet)` för
+   m4/ux att anropa i `Shell::request_verdict` (en rad, se *Berör andra spår*). Till dess skyddar
+   dev-API:t sig självt: utan körningens nyckel, som en sida inte kan läsa ut, svarar det 403.
+3. *Sidan utan manifest* (headless, `vy-cli render` utan utkast) har ingen grind för `https://` som
+   förut, men plain http kräver alltid att origin står i listan.
+4. *Studio på `vy://localhost:8081/`* listar `http://localhost:8081`: egen origin, `net` beviljas
+   automatiskt (SPEC-8.2.3), grinden och laddaren släpper igenom.
+
 ## Nya beroenden
 
 Inga nya crates i trädet (`Cargo.lock` får bara posten för `vy-dev`). `vy-dev` beror på crates som
@@ -125,9 +152,22 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
 
 ## Berör andra spår
 
-Inget utanför `crates/vy-dev` och `tools/` (nya `fake_agent.sh`, `fake_agent.ps1`) utöver
-medlemsraden i `Cargo.toml` och `Cargo.lock`. `vy-publish`
-och `vy-serve` används som bibliotek med sina befintliga publika funktioner; inget i dem är ändrat.
+- **`crates/vy-runtime` (m4/perf).** Eget commit, bara tillägg i beteende:
+  `host.rs`: `origin_of` ger även `http://` för en exakt loopback-auktoritet (ny privat
+  `is_loopback_authority`), grinden i `fetch_begin` kräver att en plain-http-origin står i listan
+  även när listan är tom, felmeddelandet för `E_ARG` säger "neither https:// nor http:// to
+  loopback", dokumentationen av `FetchRequest::url`; ny publik ren funktion `plain_http_allowed`.
+  `lib.rs`: exporten av `plain_http_allowed`. `tests.rs`: nytt test
+  `spec_7_1_3_plain_http_only_to_a_listed_loopback_origin`. Inga signaturer ändrade, inga befintliga
+  tester ändrade. `vy-shell` får beteendet utan kodändring, eftersom huvudprocessen normaliserar
+  manifestets origins och prövar anropens origin med samma `origin_of`.
+- **`crates/vy-shell` (m4/ux), inte ändrat, men en rad behövs:** i `Shell::request_verdict`, efter
+  att origin hittats i listan, även `vy_runtime::plain_http_allowed(&origin, <sidans auktoritet ur
+  tab.origin>)`, annars `E_ORIGIN`. Då når en sida bara sin egen loopback-origin över plain http,
+  vad användaren än beviljat.
+- `vy-publish` och `vy-serve` används som bibliotek med sina befintliga publika funktioner; inget i
+  dem är ändrat. Utöver det bara medlemsraden i `Cargo.toml`, `Cargo.lock` och nya filer i
+  `tools/` (`fake_agent.sh`, `fake_agent.ps1`).
 
 ## Release
 

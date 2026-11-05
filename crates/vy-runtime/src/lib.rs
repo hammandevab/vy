@@ -15,8 +15,8 @@ mod rng;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
 pub use host::{
-    origin_of, CannedResponse, Capabilities, FetchRequest, Link, LogEntry, LogSource, Navigation,
-    SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES,
+    origin_of, plain_http_allowed, CannedResponse, Capabilities, FetchRequest, Link, LogEntry,
+    LogSource, Navigation, SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES,
 };
 pub use rng::RandomSource;
 pub use vy_render::{RasterReport, Resource};

@@ -3142,3 +3142,142 @@ fn spec_5_2_11_external_clock_and_keyed_random() {
     headless.frame().unwrap();
     assert_eq!(headless.last_frame().ops_reported, 0);
 }
+
+/// SPEC-7.1.3, SPEC-5.2.8: plain `http://` is fetchable only on loopback
+/// and only to an origin the manifest names: a page served from
+/// `vy://localhost:<port>` reaches its own `http://localhost:<port>`, while
+/// `http://` to another host is `E_ARG` as before, another loopback origin
+/// is `E_ORIGIN`, user info does not smuggle a host past the check, and the
+/// open gate of a host without a manifest never covers plain http. The
+/// tab process knows only the manifest's list; `plain_http_allowed` is the
+/// rule the host process, which knows the page's address, applies on top:
+/// a page reaches only its own loopback origin.
+#[test]
+fn spec_7_1_3_plain_http_only_to_a_listed_loopback_origin() {
+    let module = wasm(&format!(
+        r#"(module
+            (import "vy" "fetch_begin" (func $fetch_begin (param i32 i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "http://localhost:8081/_dev/state")
+            (data (i32.const 64) "http://127.0.0.1:8081/_dev/state")
+            (data (i32.const 128) "http://chat.example/api")
+            (data (i32.const 192) "http://localhost:8081@evil.example/")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 1) (i32.const 1)) (then
+                    (return (call $fetch_begin (i32.const 0) (i32.const 64) (i32.const 32) (i32.const 0) (i32.const 0)))))
+                (if (i32.eq (local.get 1) (i32.const 2)) (then
+                    (return (call $fetch_begin (i32.const 0) (i32.const 128) (i32.const 23) (i32.const 0) (i32.const 0)))))
+                (if (i32.eq (local.get 1) (i32.const 3)) (then
+                    (return (call $fetch_begin (i32.const 0) (i32.const 192) (i32.const 35) (i32.const 0) (i32.const 0)))))
+                (call $fetch_begin (i32.const 0) (i32.const 0) (i32.const 32) (i32.const 0) (i32.const 0)))
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ));
+    let state = CannedResponse {
+        url: "http://localhost:8081/_dev/state".into(),
+        status: 200,
+        body: b"{}".to_vec(),
+    };
+    let runtime = |origins: &[&str]| {
+        let opts = Options {
+            capabilities: Capabilities::from_names(["net"]).unwrap(),
+            fetch: vec![state.clone()],
+            net_origins: origins.iter().map(|o| o.to_string()).collect(),
+            ..Options::default()
+        };
+        let mut rt = Runtime::load(&module, &sha256(&module), opts).unwrap();
+        rt.init(100, 100, 1.0).unwrap();
+        rt
+    };
+    let call = |rt: &mut Runtime, which: i32| {
+        rt.event(200, which, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+
+    let mut rt = runtime(&["http://localhost:8081"]);
+    assert_eq!(call(&mut rt, 0), 1, "the listed loopback origin");
+    assert_eq!(rt.open_fetches(), 1);
+    assert_eq!(call(&mut rt, 1), err::E_ORIGIN, "another loopback origin");
+    assert_eq!(call(&mut rt, 2), err::E_ARG, "http:// to a remote host");
+    assert_eq!(call(&mut rt, 3), err::E_ARG, "user info hides the host");
+    assert_eq!(rt.open_fetches(), 1, "no request for any of them");
+
+    let mut open = runtime(&[]);
+    assert_eq!(
+        call(&mut open, 0),
+        err::E_ORIGIN,
+        "no manifest: the open gate does not cover plain http"
+    );
+    let mut https_only = runtime(&["https://localhost:8081"]);
+    assert_eq!(
+        call(&mut https_only, 0),
+        err::E_ORIGIN,
+        "the scheme is part of the origin"
+    );
+
+    assert_eq!(
+        origin_of("http://LOCALHOST:8081/a?b").as_deref(),
+        Some("http://localhost:8081")
+    );
+    assert_eq!(
+        origin_of("http://localhost").as_deref(),
+        Some("http://localhost")
+    );
+    assert_eq!(
+        origin_of("http://[::1]:9/").as_deref(),
+        Some("http://[::1]:9")
+    );
+    assert_eq!(
+        origin_of("http://127.0.0.1/").as_deref(),
+        Some("http://127.0.0.1")
+    );
+    for refused in [
+        "http://localhost.evil.example/",
+        "http://localhost:/",
+        "http://localhost:80a/",
+        "http://127.0.0.2/",
+        "http://[::1]x/",
+        "http://user@localhost/",
+        "http:///x",
+    ] {
+        assert_eq!(origin_of(refused), None, "{refused}");
+    }
+    assert_eq!(
+        origin_of("https://localhost:8081/").as_deref(),
+        Some("https://localhost:8081")
+    );
+
+    // The host process's rule for plain http, given the page's address:
+    // its own loopback origin and nothing else.
+    assert!(plain_http_allowed(
+        "http://localhost:8081",
+        "localhost:8081"
+    ));
+    assert!(plain_http_allowed(
+        "http://localhost:8081",
+        "LOCALHOST:8081"
+    ));
+    assert!(
+        !plain_http_allowed("http://localhost:8081", "localhost:8080"),
+        "another port"
+    );
+    assert!(
+        !plain_http_allowed("http://localhost:8081", "127.0.0.1:8081"),
+        "another name"
+    );
+    assert!(
+        !plain_http_allowed("http://localhost:8081", "page.example"),
+        "a remote page"
+    );
+    assert!(
+        !plain_http_allowed("http://page.example", "page.example"),
+        "not loopback"
+    );
+    assert!(
+        plain_http_allowed("https://api.example", "page.example"),
+        "https is not this rule"
+    );
+}
