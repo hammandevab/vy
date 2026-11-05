@@ -486,6 +486,9 @@ pub enum ToTab {
     /// succeeds without the `clipboard` capability (SPEC-8.2.4). One-shot:
     /// it arms exactly the event that follows it.
     CopyGesture,
+    /// Stop writing the `--record` file (SPEC-11.4.1, devtools): the file
+    /// is complete up to and including this frame, which a replay ignores.
+    StopRecording,
 }
 
 /// Messages from a tab process to the main process.
@@ -585,6 +588,7 @@ const T_SHUTDOWN: u8 = 10;
 const T_CLIPBOARD: u8 = 11;
 const T_RASTER: u8 = 12;
 const T_COPY_GESTURE: u8 = 13;
+const T_STOP_RECORDING: u8 = 14;
 
 const S_LOADED: u8 = 64;
 const S_FRAME: u8 = 65;
@@ -771,6 +775,7 @@ impl ToTab {
                 w.finish()
             }
             Self::CopyGesture => Writer::new(T_COPY_GESTURE).finish(),
+            Self::StopRecording => Writer::new(T_STOP_RECORDING).finish(),
         }
     }
 
@@ -869,6 +874,7 @@ impl ToTab {
                 budget: r.u64()?,
             },
             T_COPY_GESTURE => Self::CopyGesture,
+            T_STOP_RECORDING => Self::StopRecording,
             other => return Err(DecodeError::Tag(other)),
         };
         r.finish()?;
@@ -1236,6 +1242,7 @@ mod tests {
                 budget: 64 << 20,
             },
             ToTab::CopyGesture,
+            ToTab::StopRecording,
         ]
     }
 
@@ -1330,7 +1337,7 @@ mod tests {
             assert!(ToTab::decode(&body).is_err(), "tags are disjoint: {m:?}");
             shell_tags.insert(body[0]);
         }
-        assert_eq!(tab_tags.len(), 13, "every ToTab variant is covered");
+        assert_eq!(tab_tags.len(), 14, "every ToTab variant is covered");
         assert_eq!(shell_tags.len(), 14, "every ToShell variant is covered");
         assert!(tab_tags.is_disjoint(&shell_tags));
         // Over a byte stream: lengths first, little-endian.

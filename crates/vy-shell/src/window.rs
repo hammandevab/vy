@@ -68,6 +68,7 @@ impl App {
             return;
         };
         shell.drain();
+        shell.poll();
         let now = Instant::now();
         if shell.wants_tick() && !shell.tick_pending() {
             if shell.animating() && now < self.next_tick {
@@ -83,6 +84,14 @@ impl App {
             }
         } else {
             el.set_control_flow(ControlFlow::Wait);
+        }
+        // Live reload's next check (devtools).
+        if let Some(d) = shell.poll_in() {
+            let at = Instant::now() + d.max(Duration::from_millis(1));
+            el.set_control_flow(match el.control_flow() {
+                ControlFlow::WaitUntil(t) => ControlFlow::WaitUntil(t.min(at)),
+                _ => ControlFlow::WaitUntil(at),
+            });
         }
         if shell.quit() {
             // The last tab was closed: what its process answered (its

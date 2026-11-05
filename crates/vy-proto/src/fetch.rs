@@ -384,6 +384,25 @@ impl Fetcher {
         Ok((status, body))
     }
 
+    /// Ask the server whether a page changed, whatever the HTTP cache's
+    /// freshness says (SPEC-7.3.2): a stored response is revalidated with
+    /// `If-None-Match` (a 304 costs no body), anything else is fetched, and
+    /// the cache keeps the answer, so a [`Fetcher::fetch`] right after loads
+    /// what the server has now. Returns the SHA-256 of the manifest or
+    /// package the server answers with; two different answers mean the page
+    /// changed. For development: the client's live reload of a localhost
+    /// page (vy-shell devtools).
+    pub fn revalidate(&mut self, address: &Address) -> Result<Hash, Error> {
+        let url = address.fetch_url();
+        if let Some(mut rec) = self.http.get(&url) {
+            rec.max_age = 0;
+            let _ = self.http.put(&url, &rec);
+        }
+        let mut requests = 0;
+        let resp = self.get_with_http_cache(&url, address.is_localhost(), &mut requests)?;
+        Ok(Hash::of(&resp.body))
+    }
+
     /// Fetch a page.
     pub fn fetch(&mut self, address: &Address) -> Result<Fetched, Error> {
         let mut requests = 0;

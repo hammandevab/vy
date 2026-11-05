@@ -14,13 +14,14 @@ use crate::address::{AddressField, Edit};
 use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
 use crate::clipboard::{self, ClipboardBackend};
 use crate::compose::{blend, blit, fill_blend, physical};
+use crate::devtools::{self, Command, Pane};
 use crate::external::{is_external, Opener};
 use crate::find;
 use crate::grants::{GrantStore, Resolved};
 use crate::history::History;
 use crate::ipc::{LoadRequest, ToShell, ToTab};
 use crate::markdown::{self, Block};
-use crate::page::{self, Done, Job, LoadError, LoadedPage, Source};
+use crate::page::{self, Check, Done, Job, LoadError, LoadedPage, Source};
 use crate::process::{self, Inbound, TabConnection, TabId};
 use crate::selection::{self, Caret, Selection};
 use crate::storage;
@@ -164,7 +165,8 @@ struct Tab {
     sent_size: (u32, u32, f32),
     zoom: f32,
     ime: Option<(f32, f32, f32, f32)>,
-    logs: VecDeque<String>,
+    /// Log lines with the frame count they came at (devtools "Logg").
+    logs: VecDeque<(u64, String)>,
     net_window: (i64, u64),
     pressed_link: Option<String>,
     hidden: bool,
@@ -189,6 +191,16 @@ struct Tab {
     /// The selection's highlight in page coordinates, for the frame count
     /// and selection it was computed for.
     selection_rects: Option<(u64, Selection, Vec<Rect>)>,
+    /// The file the tab's process records its session to (devtools,
+    /// SPEC-11.4.1); the next process of the tab is started with it.
+    record: Option<PathBuf>,
+    /// The recording this tab replays; its last frame stays when the
+    /// replay ends.
+    replay: Option<PathBuf>,
+    /// Live reload: the hash of the page as its server last answered,
+    /// and whether a check is under way.
+    live_version: Option<[u8; 32]>,
+    check_pending: bool,
 }
 
 impl Tab {
@@ -237,6 +249,10 @@ impl Tab {
             focus: None,
             selection: Selection::default(),
             selection_rects: None,
+            record: None,
+            replay: None,
+            live_version: None,
+            check_pending: false,
         }
     }
 
@@ -270,6 +286,12 @@ impl Tab {
         if !self.capabilities().has(cap::NET) {
             return Err(vy_abi::err::E_DENIED);
         }
+        // Plain http (loopback only, SPEC-7.1.3) goes to the page's own
+        // loopback origin and nowhere else: a remote page never reaches
+        // localhost, a localhost page never another local port.
+        if url.starts_with("http://") && !plain_http_allowed(url, self.origin.as_deref()) {
+            return Err(vy_abi::err::E_ORIGIN);
+        }
         match vy_runtime::origin_of(url) {
             Some(origin) if self.net_origins.contains(&origin) => Ok(()),
             _ => Err(vy_abi::err::E_ORIGIN),
@@ -290,7 +312,7 @@ impl Tab {
         if self.logs.len() == MAX_TAB_LOGS {
             self.logs.pop_front();
         }
-        self.logs.push_back(line);
+        self.logs.push_back((self.frames, line));
     }
 
     fn badges(&self) -> Vec<(&'static str, bool)> {
@@ -346,6 +368,21 @@ struct Find {
     scrolling: bool,
     /// The highlight, for the search and current match it was made for.
     rects: Option<(FindKey, Vec<(Rect, bool)>)>,
+}
+
+/// The devtools panel (F12).
+struct Devtools {
+    pane: Pane,
+    /// First line shown.
+    scroll: usize,
+    /// The op of the frame outlined over the page.
+    selected_op: Option<usize>,
+    /// What the last recording command did.
+    status: String,
+    /// Hit rectangles from the last draw, in window coordinates.
+    hits: Vec<(Rect, chrome::DevHit)>,
+    /// The panel as last rasterized: its list and pixels.
+    cache: Option<(Vec<u8>, u32, u32, RgbaImage)>,
 }
 
 /// What a find highlight was computed for: the tab, its frame count, the
@@ -405,6 +442,12 @@ pub struct Shell {
     retired: VecDeque<Retired>,
     /// The find bar, while open.
     find: Option<Find>,
+    /// The devtools panel, while open.
+    devtools: Option<Devtools>,
+    /// Live reload of localhost pages (devtools "Studio"), and when the
+    /// next check is due on the shell's clock.
+    live_reload: bool,
+    next_live_check: i64,
 }
 
 impl Shell {
@@ -458,6 +501,9 @@ impl Shell {
             external_opens: Vec::new(),
             retired: VecDeque::new(),
             find: None,
+            devtools: None,
+            live_reload: false,
+            next_live_check: 0,
         };
         shell.relayout();
         Ok(shell)
@@ -599,7 +645,7 @@ impl Shell {
     /// The active tab's log lines.
     pub fn tab_logs(&self, id: TabId) -> Vec<String> {
         self.tab(id)
-            .map(|t| t.logs.iter().cloned().collect())
+            .map(|t| t.logs.iter().map(|(_, l)| l.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -808,6 +854,9 @@ impl Shell {
                 height: want_size.1,
                 scale: want_size.2,
             });
+            // A window change gets a frame (SPEC-6.2.1): without a tick
+            // the page kept its old layout until the next input.
+            tab.tick_due = true;
         }
         let under = tab
             .manifest
@@ -924,6 +973,9 @@ impl Shell {
             tab.focus = None;
             tab.selection.clear();
             tab.selection_rects = None;
+            tab.replay = None;
+            tab.live_version = None;
+            tab.check_pending = false;
         }
         if Some(id) == self.active_tab() {
             let display = self.tab(id).map(|t| t.display.clone()).unwrap_or_default();
@@ -1050,6 +1102,23 @@ impl Shell {
                     ) {
                         return;
                     }
+                    if tab.replay.is_some() {
+                        tab.conn = None;
+                        tab.loaded = false;
+                        tab.tick_pending = false;
+                        tab.wants_more = false;
+                        if tab.state == State::Running {
+                            // The recording ended: the last frame stays.
+                            tab.title = format!("Uppspelning klar: {}", tab.display);
+                        } else {
+                            tab.state = State::Stopped(
+                                "Inspelningen tog slut innan sidan laddats: filen är ofullständig eller ingen inspelning."
+                                    .into(),
+                            );
+                        }
+                        self.frame_dirty = true;
+                        return;
+                    }
                     let reason = match (error, status) {
                         (Some(e), _) => format!("Flikprocessen försvann: {e}"),
                         (None, Some(s)) => format!("Flikprocessen avslutades ({s})."),
@@ -1078,6 +1147,11 @@ impl Shell {
                     }
                 }
             }
+            Incoming::Load(Done::Check {
+                tab,
+                generation,
+                result,
+            }) => self.live_checked(tab, generation, result),
             Incoming::Load(Done::Request {
                 tab,
                 generation,
@@ -1159,6 +1233,7 @@ impl Shell {
             ),
         };
         let generation = self.tab(id).map_or(0, |t| t.generation);
+        let record = self.tab(id).and_then(|t| t.record.clone());
         let forward = move |tab_id: TabId, inbound: Inbound| {
             let ok = sink
                 .send(Incoming::Tab(tab_id, generation, inbound))
@@ -1167,7 +1242,7 @@ impl Shell {
             ok
         };
         let conn = match &exe {
-            Some(exe) => process::spawn_process(exe, id, forward, None, None),
+            Some(exe) => process::spawn_process(exe, id, forward, record.as_deref(), None),
             None => process::spawn_thread(id, forward),
         };
         let active = Some(id) == self.active_tab();
@@ -1706,6 +1781,7 @@ impl Shell {
             page: page_view,
             zoom: tab.map_or(1.0, |t| t.zoom),
             find: self.find.is_some(),
+            devtools: self.devtools.is_some(),
         };
         chrome::draw(&view, &mut self.chrome_text, &self.styles)
     }
@@ -1854,6 +1930,27 @@ impl Shell {
                             }
                         }
                     }
+                    // The op selected in devtools, outlined.
+                    let selected = self
+                        .devtools
+                        .as_ref()
+                        .filter(|d| d.pane == Pane::DisplayList)
+                        .and_then(|d| d.selected_op);
+                    if let Some(r) = selected
+                        .and_then(|i| devtools::op_rect(&tab.display_list, i, &mut tab.text))
+                    {
+                        let (x, y, w, h) = page_rect_physical(page, tab.zoom, scale, r);
+                        let t = (2.0 * scale).round().max(1.0) as i64;
+                        fill_blend(&mut self.frame, (x, y, w, h), chrome::OUTLINE_FILL, clip);
+                        for edge in [
+                            (x, y, w, t),
+                            (x, y + h - t, w, t),
+                            (x, y, t, h),
+                            (x + w - t, y, t, h),
+                        ] {
+                            fill_blend(&mut self.frame, edge, chrome::OUTLINE, clip);
+                        }
+                    }
                 }
             }
             if let Some(report) = raster_due {
@@ -1889,6 +1986,38 @@ impl Shell {
                 let x = (r.x * scale).round() as i64;
                 let y = (r.y * scale).round() as i64;
                 blend(&mut self.frame, &res.image, x, y);
+            }
+        }
+        if let Some(r) = self.layout.devtools {
+            let lines = self.devtools_lines();
+            if let Some(d) = self.devtools.as_mut() {
+                let (dl, hits) = chrome::draw_devtools(
+                    &mut self.chrome_text,
+                    &self.styles,
+                    d.pane,
+                    &lines,
+                    d.scroll,
+                    (r.w, r.h),
+                );
+                d.hits = hits
+                    .into_iter()
+                    .map(|(h, hit)| (Rect::new(r.x + h.x, r.y + h.y, h.w, h.h), hit))
+                    .collect();
+                let (dw, dh) = physical(r.w, r.h, scale);
+                let fresh =
+                    matches!(&d.cache, Some((c, w, h, _)) if *c == dl && (*w, *h) == (dw, dh));
+                if !fresh {
+                    if let Ok(res) =
+                        vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none)
+                    {
+                        d.cache = Some((dl, dw, dh, res.image));
+                    }
+                }
+                if let Some((_, _, _, img)) = &d.cache {
+                    let x = (r.x * scale).round() as i64;
+                    let y = (r.y * scale).round() as i64;
+                    blit(&mut self.frame, img, x, y, None);
+                }
             }
         }
         if let Some(url) = self.hover.clone() {
@@ -2194,6 +2323,25 @@ impl Shell {
             // The question's own surface: neither the page's nor a button.
             return;
         }
+        if layout.devtools.is_some_and(|r| r.contains(x, y)) {
+            let hit = self.devtools.as_ref().and_then(|d| {
+                d.hits
+                    .iter()
+                    .find(|(r, _)| r.contains(x, y))
+                    .map(|(_, h)| *h)
+            });
+            match hit {
+                Some(chrome::DevHit::Pane(p)) => self.set_devtools_pane(p),
+                Some(chrome::DevHit::Line(i)) => {
+                    if let Some(cmd) = self.devtools_lines().get(i).and_then(|l| l.command.clone())
+                    {
+                        self.devtools_run(cmd);
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
         if layout.find.is_some_and(|r| r.contains(x, y)) {
             if layout.find_close.is_some_and(|r| r.contains(x, y)) {
                 self.close_find();
@@ -2262,6 +2410,16 @@ impl Shell {
     /// Scrolling over the window.
     pub fn scroll(&mut self, dx: f32, dy: f32, lines: bool) {
         let (x, y) = self.pointer;
+        if self.layout.devtools.is_some_and(|r| r.contains(x, y)) {
+            let n = if lines { dy } else { dy / devtools::LINE_H };
+            let total = self.devtools_lines().len();
+            if let Some(d) = self.devtools.as_mut() {
+                let by = n.round() as i64;
+                d.scroll = (d.scroll as i64 + by).clamp(0, total.saturating_sub(1) as i64) as usize;
+            }
+            self.frame_dirty = true;
+            return;
+        }
         if self.page_point(x, y).is_some() {
             self.send_page_event(
                 event::SCROLL,
@@ -2293,6 +2451,10 @@ impl Shell {
                 }
                 (hid::F, true, _) => {
                     self.open_find();
+                    return true;
+                }
+                (hid::F12, _, _) => {
+                    self.toggle_devtools();
                     return true;
                 }
                 (hid::T, true, _) => {
@@ -2649,6 +2811,282 @@ impl Shell {
         self.draw_chrome().0
     }
 
+    // ---- devtools (F12, SPEC-11.4.1) --------------------------------------
+
+    /// Open or close the devtools panel; the page area narrows or widens
+    /// and the page gets its new size.
+    pub fn toggle_devtools(&mut self) {
+        self.devtools = match self.devtools.take() {
+            Some(_) => None,
+            None => Some(Devtools {
+                pane: Pane::DisplayList,
+                scroll: 0,
+                selected_op: None,
+                status: String::new(),
+                hits: Vec::new(),
+                cache: None,
+            }),
+        };
+        self.relayout();
+        self.show_active();
+        self.frame_dirty = true;
+    }
+
+    /// The open pane, while the panel is open.
+    pub fn devtools_pane(&self) -> Option<Pane> {
+        self.devtools.as_ref().map(|d| d.pane)
+    }
+
+    /// Show `pane`.
+    pub fn set_devtools_pane(&mut self, pane: Pane) {
+        if let Some(d) = self.devtools.as_mut() {
+            if d.pane != pane {
+                d.pane = pane;
+                d.scroll = 0;
+            }
+        }
+        self.frame_dirty = true;
+    }
+
+    /// The panel's hit rectangles as last drawn, in window coordinates.
+    pub fn devtools_hits(&self) -> Vec<(Rect, chrome::DevHit)> {
+        self.devtools
+            .as_ref()
+            .map(|d| d.hits.clone())
+            .unwrap_or_default()
+    }
+
+    /// Where recordings go: `recordings` in the data directory.
+    pub fn recordings_dir(&self) -> PathBuf {
+        self.config.data_dir.join("recordings")
+    }
+
+    /// The open pane's lines for the active tab.
+    pub fn devtools_lines(&self) -> Vec<devtools::Line> {
+        let Some(d) = &self.devtools else {
+            return Vec::new();
+        };
+        let tab = self.tabs.get(self.active);
+        match d.pane {
+            Pane::DisplayList => devtools::display_list_lines(
+                tab.map_or(&[][..], |t| &t.display_list),
+                d.selected_op,
+            ),
+            Pane::Semantic => {
+                devtools::tree_lines(tab.map_or(&[][..], |t| &t.sem), tab.and_then(|t| t.focus))
+            }
+            Pane::Log => {
+                let logs: Vec<(u64, String)> = tab
+                    .map(|t| t.logs.iter().cloned().collect())
+                    .unwrap_or_default();
+                devtools::log_lines(&logs)
+            }
+            Pane::Recording => devtools::recording_lines(
+                tab.and_then(|t| t.record.as_deref()),
+                self.config.exe.is_some()
+                    && tab.is_some_and(|t| t.running() && t.source.is_some() && t.replay.is_none()),
+                &devtools::list_recordings(&self.recordings_dir()),
+                &d.status,
+            ),
+            Pane::Studio => devtools::studio_lines(self.live_reload),
+        }
+    }
+
+    /// Do what a line of the panel says.
+    pub fn devtools_run(&mut self, cmd: Command) {
+        match cmd {
+            Command::SelectOp(i) => {
+                if let Some(d) = self.devtools.as_mut() {
+                    d.selected_op = (d.selected_op != Some(i)).then_some(i);
+                }
+            }
+            Command::StartRecording => self.start_recording(),
+            Command::StopRecording => self.stop_recording(),
+            Command::Replay(path) => {
+                self.open_replay(path);
+            }
+            Command::ToggleLiveReload => {
+                self.live_reload = !self.live_reload;
+                self.next_live_check = self.now_ms();
+            }
+            Command::OpenStudio => {
+                if let Ok(source) = Source::parse(devtools::STUDIO_ADDRESS) {
+                    self.open_tab(Some(source));
+                }
+            }
+        }
+        self.frame_dirty = true;
+    }
+
+    fn set_devtools_status(&mut self, status: String) {
+        if let Some(d) = self.devtools.as_mut() {
+            d.status = status;
+        }
+    }
+
+    /// Record the active tab's session (SPEC-11.4.1): the page is loaded
+    /// again in a process started with `--record`, so the file holds the
+    /// whole inbound stream from the load on.
+    fn start_recording(&mut self) {
+        let dir = self.recordings_dir();
+        let Some(id) = self.active_tab() else {
+            return;
+        };
+        let source = self.tab(id).and_then(|t| t.source.clone());
+        let (Some(source), true) = (source, self.config.exe.is_some()) else {
+            self.set_devtools_status("Inspelning kräver en sida i en egen flikprocess.".into());
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_devtools_status(format!("Kan inte skapa {}: {e}", dir.display()));
+            return;
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut path = dir.join(format!("vy-{secs}-{id}.vyrec"));
+        let mut n = 1;
+        while path.exists() {
+            path = dir.join(format!("vy-{secs}-{id}-{n}.vyrec"));
+            n += 1;
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            tab.record = Some(path.clone());
+        }
+        self.set_devtools_status(format!("Spelar in till {}", path.display()));
+        self.navigate_tab(id, source, false);
+    }
+
+    /// Stop recording: the file is complete.
+    fn stop_recording(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let Some(path) = tab.record.take() else {
+            return;
+        };
+        tab.send(&ToTab::StopRecording);
+        self.set_devtools_status(format!("Sparad: {}", path.display()));
+    }
+
+    /// The file the active tab records to, while it does.
+    pub fn recording(&self) -> Option<PathBuf> {
+        self.tabs.get(self.active).and_then(|t| t.record.clone())
+    }
+
+    /// Replay a recording in a new tab (SPEC-11.4.1): a tab process started
+    /// with `--replay` reads its whole inbound stream from the file and
+    /// produces the session's frames again; the last one stays.
+    pub fn open_replay(&mut self, path: PathBuf) -> Option<TabId> {
+        let Some(exe) = self.config.exe.clone() else {
+            self.set_devtools_status("Uppspelning kräver en flikprocess.".into());
+            return None;
+        };
+        let id = self.open_tab(None);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let sink = self.inbox_tx.clone();
+        let waker = self.config.waker.clone();
+        let tab = find_tab(&mut self.tabs, id)?;
+        tab.generation += 1;
+        let generation = tab.generation;
+        let forward = move |tab_id: TabId, inbound: Inbound| {
+            let ok = sink
+                .send(Incoming::Tab(tab_id, generation, inbound))
+                .is_ok();
+            waker.wake();
+            ok
+        };
+        tab.display = name.clone();
+        tab.title = format!("Uppspelning: {name}");
+        tab.replay = Some(path.clone());
+        match process::spawn_process(&exe, id, forward, None, Some(&path)) {
+            Ok(conn) => {
+                tab.conn = Some(conn);
+                tab.state = State::Loading;
+            }
+            Err(e) => tab.state = State::Gone(format!("Uppspelningen kunde inte startas: {e}")),
+        }
+        self.address.set_committed(&name);
+        self.address.blur();
+        self.frame_dirty = true;
+        Some(id)
+    }
+
+    /// A tab's title as the strip shows it.
+    pub fn tab_title(&self, id: TabId) -> String {
+        self.tab(id).map(|t| t.title.clone()).unwrap_or_default()
+    }
+
+    /// True while live reload of localhost pages is on.
+    pub fn live_reload(&self) -> bool {
+        self.live_reload
+    }
+
+    /// Live reload (devtools "Studio"): every `devtools::LIVE_RELOAD_MS`
+    /// on the shell's clock, ask the server of each running localhost page
+    /// whether it changed, with a conditional GET (SPEC-7.3.2); the loader
+    /// answers and [`Shell::handle`] reloads a page that changed. The
+    /// window calls this when [`Shell::poll_in`] says it is due.
+    pub fn poll(&mut self) {
+        if !self.live_reload {
+            return;
+        }
+        let now = self.now_ms();
+        if now < self.next_live_check {
+            return;
+        }
+        self.next_live_check = now + devtools::LIVE_RELOAD_MS;
+        for tab in &mut self.tabs {
+            let Some(Source::Address(address)) = &tab.source else {
+                continue;
+            };
+            if tab.running() && tab.is_localhost && address.is_localhost() && !tab.check_pending {
+                tab.check_pending = true;
+                let _ = self.loader.send(Job::Check(Check {
+                    tab: tab.id,
+                    generation: tab.generation,
+                    address: address.clone(),
+                }));
+            }
+        }
+    }
+
+    /// How long until [`Shell::poll`] has something to do; `None` while
+    /// live reload is off.
+    pub fn poll_in(&self) -> Option<std::time::Duration> {
+        self.live_reload.then(|| {
+            std::time::Duration::from_millis((self.next_live_check - self.now_ms()).max(0) as u64)
+        })
+    }
+
+    /// A live-reload answer: the first sets what the page is; a different
+    /// one later reloads the tab.
+    fn live_checked(&mut self, id: TabId, generation: u64, result: Result<[u8; 32], String>) {
+        let Some(tab) = find_tab(&mut self.tabs, id) else {
+            return;
+        };
+        if tab.generation != generation {
+            return;
+        }
+        tab.check_pending = false;
+        let Ok(version) = result else {
+            return;
+        };
+        match tab.live_version {
+            None => tab.live_version = Some(version),
+            Some(v) if v != version => {
+                tab.log("[host info] live reload: the page changed on its server".into());
+                if let Some(source) = tab.source.clone() {
+                    self.navigate_tab(id, source, false);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
     // ---- find on page (Ctrl+F) -------------------------------------------
 
     /// Open the find bar, or focus it and select its query.
@@ -2937,6 +3375,31 @@ impl Shell {
     }
 }
 
+/// Whether a plain-http `url` (SPEC-7.1.3: loopback only) may be fetched
+/// for a page at `page_origin` (`vy://host[:port]`): only when its
+/// authority is the page's own and that is a loopback host. No userinfo.
+/// The same rule as `vy_runtime::plain_http_allowed` on the m4/dev branch;
+/// the call in `Tab::request_verdict` switches to it at merge.
+pub fn plain_http_allowed(url: &str, page_origin: Option<&str>) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = rest[..end].to_ascii_lowercase();
+    let Some(page) = page_origin.and_then(|o| o.strip_prefix("vy://")) else {
+        return false;
+    };
+    if authority.is_empty() || authority.contains('@') || authority != page.to_ascii_lowercase() {
+        return false;
+    }
+    let host = if authority.starts_with('[') {
+        authority.split_inclusive(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
 /// The selection caret for page point `(px, py)` in `tab`: in the text
 /// node under it, or with `nearest` the closest one, at glyph granularity
 /// where the frame draws the node's text in one run (SPEC-10.2.2).
@@ -3058,4 +3521,66 @@ pub mod hid {
     pub const KP_PLUS: i32 = 0x57;
     /// Keypad 0.
     pub const KP_0: i32 = 0x62;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPEC-5.2.8, SPEC-7.1.3, SPEC-2.1.4: a plain-http request goes only
+    /// to the page's own loopback origin: not to another local port, not
+    /// from a remote page, not with userinfo, not to a non-loopback host;
+    /// the main process refuses the rest with `E_ORIGIN` before anything
+    /// reaches the loader.
+    #[test]
+    fn spec_5_2_8_plain_http_only_to_own_loopback_origin() {
+        let own = Some("vy://localhost:8081");
+        assert!(plain_http_allowed("http://localhost:8081/_dev/x", own));
+        assert!(plain_http_allowed("http://LOCALHOST:8081", own));
+        assert!(!plain_http_allowed("http://localhost:9000/", own));
+        assert!(!plain_http_allowed("http://127.0.0.1:8081/", own));
+        assert!(!plain_http_allowed(
+            "http://localhost:8081@evil.example/",
+            own
+        ));
+        assert!(!plain_http_allowed("https://localhost:8081/", own));
+        assert!(!plain_http_allowed("http://localhost:8081/", None));
+        assert!(!plain_http_allowed(
+            "http://localhost:8081/",
+            Some("vy://evil.example")
+        ));
+        assert!(!plain_http_allowed(
+            "http://evil.example/",
+            Some("vy://evil.example")
+        ));
+        assert!(plain_http_allowed(
+            "http://[::1]:7000/a",
+            Some("vy://[::1]:7000")
+        ));
+        assert!(plain_http_allowed(
+            "http://127.0.0.1/",
+            Some("vy://127.0.0.1")
+        ));
+        // In the gate: a remote page with `net` and a loopback origin in its
+        // list still cannot reach localhost.
+        let mut tab = Tab::new(1);
+        tab.caps = vec![Resolved {
+            name: "net",
+            granted: true,
+            ask: false,
+        }];
+        tab.net_origins = vec!["http://localhost:8081".into(), "https://api.example".into()];
+        tab.origin = Some("vy://evil.example".into());
+        assert_eq!(
+            tab.request_verdict("http://localhost:8081/secret"),
+            Err(vy_abi::err::E_ORIGIN)
+        );
+        assert_eq!(tab.request_verdict("https://api.example/x"), Ok(()));
+        tab.origin = Some("vy://localhost:8081".into());
+        assert_eq!(
+            tab.request_verdict("http://localhost:9000/"),
+            Err(vy_abi::err::E_ORIGIN),
+            "another local port"
+        );
+    }
 }

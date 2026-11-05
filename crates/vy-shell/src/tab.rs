@@ -139,6 +139,14 @@ impl<T: IpcTransport> TabLoop<T> {
                 }
             }
             ToTab::CopyGesture => self.copy_gesture_armed = true,
+            ToTab::StopRecording => {
+                // The frame itself is already in the file (see `run`); a
+                // replay reads it and does nothing.
+                if let Some(mut rec) = self.record.take() {
+                    use std::io::Write;
+                    rec.flush()?;
+                }
+            }
             ToTab::TextInput { text, clock_ms } => {
                 if let Some(rt) = self.alive() {
                     rt.set_clock_ms(clock_ms);

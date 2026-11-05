@@ -483,6 +483,39 @@ fn spec_4_1_4_declared_sizes_bound_blob_downloads() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// SPEC-7.3.2: `revalidate` asks the server even while the stored manifest
+/// is fresh: one conditional request each time, the same hash while the
+/// page is unchanged (304), a new one once it changed, and `fetch` right
+/// after loads the new page. The client's live reload is built on it.
+#[test]
+fn spec_7_3_2_revalidate_ignores_freshness() {
+    let p = package(&key(0), None);
+    let site = Site::new(p.clone(), Form::Manifest, &[key(0)]);
+    let server = serve(&site);
+    let (mut f, _dir) = fetcher("revalidate");
+    let at = addr(&server, "/hello");
+    f.fetch(&at).unwrap();
+    let a = f.revalidate(&at).unwrap();
+    let b = f.revalidate(&at).unwrap();
+    assert_eq!(a, b, "unchanged");
+    let conditional = server
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/hello" && r.header("if-none-match").is_some())
+        .count();
+    assert_eq!(conditional, 2, "both asked the server, both conditional");
+    let mut changed = p.clone();
+    changed.manifest.name = "Ny version".into();
+    changed.manifest.sign(&key(0));
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), changed.clone());
+    let c = f.revalidate(&at).unwrap();
+    assert_ne!(c, a, "changed");
+    assert_eq!(f.fetch(&at).unwrap().package.manifest.name, "Ny version");
+}
+
 /// SPEC-7.3.2: manifests use ordinary HTTP caching: `max-age` serves from
 /// disk without a request, `ETag` revalidates with 304, `no-store` never.
 #[test]

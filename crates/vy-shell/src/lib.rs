@@ -14,6 +14,7 @@ pub mod address;
 pub mod chrome;
 pub mod clipboard;
 pub mod compose;
+pub mod devtools;
 pub mod external;
 pub mod find;
 pub mod grants;
@@ -177,6 +178,7 @@ mod tests {
             page,
             zoom: 1.0,
             find: false,
+            devtools: false,
         };
         crate::chrome::draw(&view, &mut text, &styles).0
     }
@@ -1141,6 +1143,379 @@ mod tests {
         shell.pointer_move(close.x + 4.0, close.y + 4.0);
         shell.pointer_button(button::PRIMARY, true);
         assert!(!shell.find_open());
+        shell.shutdown();
+    }
+
+    /// SPEC-11.4.1, SPEC-9.6.1, SPEC-C.1.1: F12 opens the devtools panel
+    /// at the right of the window; the page area narrows (the page gets
+    /// the new size) and the panel is the shell's. "Display list" lists the
+    /// frame's ops with counts and bytes, and selecting one outlines its
+    /// rectangle over the page; the pane tabs are hit by the pointer;
+    /// "Semantik" marks the focused node; "Logg" carries frame numbers;
+    /// "Inspelning" needs a tab process; "Studio" turns live reload on and
+    /// opens Studio. F12 again closes it.
+    #[test]
+    fn spec_11_4_1_devtools_panel() {
+        use crate::chrome::DevHit;
+        use crate::devtools::{Command, Pane};
+        use crate::shell::hid;
+        let mut shell = headless_shell(None, 900.0, 600.0, 1.0).unwrap();
+        let form = shell.open_tab(Some(local("form")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let full = shell.layout().page;
+        assert!(shell.key(hid::F12, true, 0, false));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.frame();
+        let panel = shell.layout().devtools.expect("open");
+        let page = shell.layout().page;
+        assert_eq!(page.right(), panel.x);
+        assert_eq!(panel.right(), 900.0);
+        assert_eq!(panel.w, crate::devtools::PANEL_W);
+        assert!(page.w < full.w);
+        // The page laid itself out again for the narrower area (SPEC-6.2.1):
+        // its tree fits it.
+        assert!(shell
+            .tab_semantic(form)
+            .iter()
+            .all(|n| n.x + n.w <= page.w + 0.5));
+        // Display list: the frame's ops.
+        assert_eq!(shell.devtools_pane(), Some(Pane::DisplayList));
+        let list = shell.tab_display_list(form);
+        let ops = crate::devtools::ops(&list);
+        let lines = shell.devtools_lines();
+        assert_eq!(
+            lines[0].text,
+            format!("{} opkoder, {} byte", ops.len(), list.len())
+        );
+        let (i, op) = ops
+            .iter()
+            .enumerate()
+            .find(|(_, o)| {
+                o.rect.is_some_and(|r| {
+                    r.w > 4.0
+                        && r.h > 4.0
+                        && r.x >= 1.0
+                        && r.y >= 1.0
+                        && r.right() < page.w - 1.0
+                        && r.bottom() < page.h - 1.0
+                })
+            })
+            .unwrap_or_else(|| panic!("a rectangle to outline: {ops:?}"));
+        let before = shell.frame().clone();
+        shell.devtools_run(Command::SelectOp(i));
+        let after = shell.frame().clone();
+        let r = op.rect.unwrap();
+        let (px, py) = (
+            (page.x + r.x + 0.5) as u32,
+            (page.y + r.y + r.h / 2.0) as u32,
+        );
+        assert_ne!(after.pixel(px, py), before.pixel(px, py), "outlined");
+        assert!(shell
+            .devtools_lines()
+            .iter()
+            .any(|l| l.strong && l.command == Some(Command::SelectOp(i))));
+        assert_eq!(
+            shell.tab_display_list(form),
+            list,
+            "the page's list is untouched"
+        );
+        // The pane tabs, by pointer.
+        let hit = |shell: &crate::shell::Shell, want: DevHit| {
+            shell
+                .devtools_hits()
+                .into_iter()
+                .find(|(_, h)| *h == want)
+                .map(|(r, _)| r)
+                .unwrap()
+        };
+        let click = |shell: &mut crate::shell::Shell, r: crate::chrome::Rect| {
+            shell.pointer_move(r.x + 3.0, r.y + 3.0);
+            shell.pointer_button(button::PRIMARY, true);
+            shell.pointer_button(button::PRIMARY, false);
+            shell.frame();
+        };
+        let r = hit(&shell, DevHit::Pane(Pane::Semantic));
+        click(&mut shell, r);
+        assert_eq!(shell.devtools_pane(), Some(Pane::Semantic));
+        shell.key(key::TAB, true, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let focused = shell.tab_focus(form).unwrap();
+        assert!(
+            shell
+                .devtools_lines()
+                .iter()
+                .any(|l| l.strong && l.text.contains(&format!("▶ textbox #{focused}"))),
+            "{:?}",
+            shell.devtools_lines()
+        );
+        // Logg: with the frame it came at.
+        shell.set_devtools_pane(Pane::Log);
+        let generation = shell.tab_generation(form);
+        shell.handle(Incoming::Tab(
+            form,
+            generation,
+            Inbound::Message(ToShell::Log {
+                module: true,
+                level: vy_abi::level::INFO,
+                message: "hej från sidan".into(),
+            }),
+        ));
+        let frames = shell.tab_frames(form);
+        assert!(shell
+            .devtools_lines()
+            .iter()
+            .any(|l| l.text == format!("frame {frames} [module info] hej från sidan")));
+        // Inspelning: a thread-backed tab cannot record.
+        shell.set_devtools_pane(Pane::Recording);
+        assert!(shell
+            .devtools_lines()
+            .iter()
+            .all(|l| l.command != Some(Command::StartRecording)));
+        // Studio: live reload on, and Studio in a new tab, by pointer.
+        shell.set_devtools_pane(Pane::Studio);
+        shell.frame();
+        assert!(!shell.live_reload());
+        let lines = shell.devtools_lines();
+        let at = |cmd: Command| {
+            lines
+                .iter()
+                .position(|l| l.command == Some(cmd.clone()))
+                .unwrap()
+        };
+        let toggle = hit(&shell, DevHit::Line(at(Command::ToggleLiveReload)));
+        click(&mut shell, toggle);
+        assert!(shell.live_reload());
+        assert!(shell.poll_in().is_some());
+        let studio = hit(&shell, DevHit::Line(at(Command::OpenStudio)));
+        click(&mut shell, studio);
+        assert_eq!(shell.tab_ids().len(), 2);
+        assert_eq!(shell.address().committed(), crate::devtools::STUDIO_ADDRESS);
+        // Closed again: the page has the whole width.
+        shell.key(hid::F12, true, 0, false);
+        shell.frame();
+        assert!(shell.layout().devtools.is_none());
+        assert_eq!(shell.layout().page.w, 900.0);
+        shell.shutdown();
+    }
+
+    /// SPEC-11.4.1, SPEC-2.1.5: "Inspelning" records the active tab's
+    /// session from a fresh load (`--record`), stops on request with the
+    /// file complete, lists it, and replays it in a new tab (`--replay`):
+    /// the replayed session ends on the same display list, byte for byte,
+    /// as the recorded one when it was stopped.
+    #[test]
+    fn spec_11_4_1_devtools_record_and_replay() {
+        use crate::devtools::{Command, Pane};
+        let exe = shell_exe();
+        let mut shell = headless_shell(Some(exe), 800.0, 600.0, 1.0).unwrap();
+        let game = shell.open_tab(Some(local("game")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.toggle_devtools();
+        shell.set_devtools_pane(Pane::Recording);
+        assert!(shell
+            .devtools_lines()
+            .iter()
+            .any(|l| l.command == Some(Command::StartRecording)));
+        shell.devtools_run(Command::StartRecording);
+        let path = shell.recording().expect("recording");
+        assert!(path.starts_with(shell.recordings_dir()));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(game), "running");
+        shell.key(0x2C, true, 0, false);
+        shell.key(0x2C, false, 0, false);
+        settle(&mut shell, 6, TIMEOUT).unwrap();
+        let last = shell.tab_display_list(game);
+        shell.devtools_run(Command::StopRecording);
+        assert!(shell.recording().is_none());
+        // The tab handles its messages in order: once it has answered a
+        // tick sent after the stop (a key makes one due), the file is
+        // flushed and complete.
+        shell.key(0x04, true, 0, false);
+        shell.key(0x04, false, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        assert!(size > 0, "{}", path.display());
+        assert!(shell
+            .devtools_lines()
+            .iter()
+            .any(|l| l.command == Some(Command::Replay(path.clone()))));
+        shell.devtools_run(Command::Replay(path.clone()));
+        let replay = shell.active_tab().unwrap();
+        assert_ne!(replay, game);
+        let deadline = Instant::now() + TIMEOUT;
+        while !shell.tab_title(replay).starts_with("Uppspelning klar") {
+            assert!(Instant::now() < deadline, "{}", shell.tab_status(replay));
+            assert!(!shell.tab_terminal(replay), "{}", shell.tab_status(replay));
+            shell.tick();
+            if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(100)) {
+                shell.handle(m);
+            }
+        }
+        assert_eq!(shell.tab_display_list(replay), last, "the same session");
+        shell.shutdown();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A one-path HTTP server for live reload: `/` answers with the
+    /// current body, its hash as `ETag` and `max-age=60`, and 304 to a
+    /// matching `If-None-Match`; everything else is 404. Counts the
+    /// conditional requests.
+    struct PageServer {
+        port: u16,
+        body: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        conditional: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl PageServer {
+        fn start(body: Vec<u8>) -> Self {
+            use std::io::{BufRead, BufReader, Write};
+            use std::sync::atomic::Ordering;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let body = std::sync::Arc::new(std::sync::Mutex::new(body));
+            let conditional = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (b, c) = (body.clone(), conditional.clone());
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let mut reader = BufReader::new(stream);
+                    let mut first = String::new();
+                    let _ = reader.read_line(&mut first);
+                    let mut inm = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some((k, v)) = line.split_once(':') {
+                            if k.eq_ignore_ascii_case("if-none-match") {
+                                inm = Some(v.trim().to_string());
+                            }
+                        }
+                    }
+                    let path = first.split(' ').nth(1).unwrap_or("").to_string();
+                    let body = b.lock().unwrap().clone();
+                    let etag = format!("\"{}\"", &hex(&vy_runtime::sha256(&body))[..16]);
+                    let mut out = reader.into_inner();
+                    let head = if path != "/" {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    } else if inm.is_some() {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        if inm.as_deref() == Some(etag.as_str()) {
+                            format!("HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n")
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    if !head.is_empty() {
+                        let _ = out.write_all(head.as_bytes());
+                        continue;
+                    }
+                    let _ = out.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/vy-package+zstd\r\nContent-Length: {}\r\nETag: {etag}\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = out.write_all(&body);
+                }
+            });
+            Self {
+                port,
+                body,
+                conditional,
+            }
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The hello page as a package whose manifest is named `name`.
+    fn hello_package(name: &str) -> Vec<u8> {
+        let wasm = std::fs::read(module_path("hello")).unwrap();
+        let draft_path = root().join("conformance/manifests/hello.json");
+        let draft = Draft::from_json(&std::fs::read_to_string(&draft_path).unwrap()).unwrap();
+        let inputs = draft.load_resources(draft_path.parent().unwrap()).unwrap();
+        let mut manifest = draft.finish(&wasm, &inputs);
+        manifest.name = name.into();
+        manifest.sign(&SigningKey::from_seed(&[5; 32]));
+        vy_manifest::Package {
+            manifest,
+            module: wasm,
+            resources: inputs.into_iter().map(|i| i.bytes).collect(),
+        }
+        .pack()
+        .unwrap()
+    }
+
+    /// SPEC-7.3.2, SPEC-11.4.1: live reload (devtools "Studio") asks the
+    /// server of a localhost page every 500 ms on the shell's clock with a
+    /// conditional GET, even while the stored manifest is fresh
+    /// (`max-age=60`): an unchanged page (304) is left alone, a changed one
+    /// is reloaded, and the reload shows the new version.
+    #[test]
+    fn spec_7_3_2_live_reload_localhost() {
+        use crate::devtools::Command;
+        use std::sync::atomic::Ordering;
+        let server = PageServer::start(hello_package("Version 1"));
+        let mut shell = headless_shell(None, 640.0, 400.0, 1.0).unwrap();
+        let address = format!("vy://127.0.0.1:{}/", server.port);
+        let tab = shell.open_tab(Some(Source::parse(&address).unwrap()));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert_eq!(shell.tab_title(tab), "Version 1");
+        shell.toggle_devtools();
+        shell.devtools_run(Command::ToggleLiveReload);
+        let wait = |shell: &mut crate::shell::Shell,
+                    done: &dyn Fn(&crate::shell::Shell) -> bool| {
+            let deadline = Instant::now() + TIMEOUT;
+            while !done(shell) {
+                assert!(Instant::now() < deadline, "{}", shell.tab_status(tab));
+                shell.tick();
+                if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(50)) {
+                    shell.handle(m);
+                }
+            }
+        };
+        // The first check: conditional, answered 304; nothing reloads.
+        let generation = shell.tab_generation(tab);
+        shell.poll();
+        wait(&mut shell, &|_| {
+            server.conditional.load(Ordering::SeqCst) >= 1
+        });
+        shell.advance_clock(crate::devtools::LIVE_RELOAD_MS);
+        std::thread::sleep(Duration::from_millis(200));
+        shell.drain();
+        shell.poll();
+        wait(&mut shell, &|_| {
+            server.conditional.load(Ordering::SeqCst) >= 2
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        shell.drain();
+        assert_eq!(
+            shell.tab_generation(tab),
+            generation,
+            "unchanged: no reload"
+        );
+        // Not before 500 ms have passed on the shell's clock.
+        shell.poll();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(server.conditional.load(Ordering::SeqCst), 2);
+        // The page changes on its server: the next check reloads it.
+        *server.body.lock().unwrap() = hello_package("Version 2");
+        shell.advance_clock(crate::devtools::LIVE_RELOAD_MS);
+        shell.poll();
+        wait(&mut shell, &|s| s.tab_title(tab) == "Version 2");
+        assert!(shell.tab_generation(tab) > generation);
+        assert!(shell
+            .tab_logs(tab)
+            .iter()
+            .any(|l| l.contains("live reload")));
         shell.shutdown();
     }
 

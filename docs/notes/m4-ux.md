@@ -13,6 +13,7 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 | 3 | Textmarkering (SPEC-10.2.2), värdens egen (`selection.rs`): dra från en textnod markerar (sidan får pekarhändelserna ändå), Skift+klick utökar, Ctrl+A tar alla textnoder, Escape och ett tryck utanför text tömmer. Markeringen är noderna i dokumentordning mellan ändarna, med teckengranularitet i ändnoderna; Ctrl+C (och Ctrl+X) kopierar de logiska strängarna med `\n` mellan noder. Ritas av huvudprocessen som en genomskinlig överlagring i sidytan (`compose::fill_blend`, chromens accentfärg); sidans display list rörs inte. Flikprocessen rapporterar fokus (`ToShell::Focus`) så att Ctrl+A i ett fokuserat textfält går till sidan. | `spec_10_2_2_text_selection` (un-ignorerad, document- och form-sidan), `spec_10_2_2_selected_text_is_logical`, `spec_10_2_2_glyph_granularity_in_wrapped_runs` |
 | 4 | Sök på sidan (Ctrl+F, `find.rs`): en sökruta över sidytans övre högra hörn (egen display list, komponerad efter sidan som frågan; under den är ytan skalets), söker i det semantiska trädets text skiftlägesokänsligt med enkel Unicode-vikning (`char::to_lowercase`), visar "3 av 7"/"Inga träffar", Enter/Skift+Enter bläddrar med omlopp, Escape stänger, knapparna ‹ › × fungerar med pekaren. Träffarna markeras genom överlagringen (aktuell starkare). En träff utanför vyn hämtas in med syntetiska `SCROLL`. | `spec_10_1_1_find_on_page`, `spec_10_1_1_find_in_the_tree` |
 | 5 | AccessKit (SPEC-10.2.1, `a11y.rs`): skalets ögonblicksbild (fönster, adressfält, sidans träd och fokus) blir en hel `TreeUpdate` – fönstret som rot, adressfältet (`TextInput`), sidan (`Document`, klipper sina barn till sidytan) och modulens noder med plattformsroll, text som namn eller värde och rektangel i fysiska fönsterpixlar; fokus är värdens. Fönstret skapar `accesskit_winit::Adapter` medan fönstret är osynligt och skickar en uppdatering bara när ett hjälpmedel lyssnar och sammandraget ändrats. Åtgärder: Focus flyttar värdens fokus som Tab, Click trycker och släpper i nodens mitt (och följer en registrerad länk där), SetValue stöds inte. En sida utan träd märks "otillgänglig" även i trädet; felet att markören aldrig visades (fliken skickar bara ändrade träd, så en sida utan noder skickade inget) är rättat: en första frame utan träd betyder inget träd. | `spec_10_2_1_accesskit`, `spec_10_3_1_focus_order`, `spec_10_4_1_inaccessible_marker` (alla tre un-ignorerade), `spec_10_2_1_roles_and_ids`, `spec_10_2_1_any_tree_is_well_formed` |
+| 6 | Devtools (F12, SPEC-11.4.1, `devtools.rs`): en panel till höger om sidytan (sidan får den smalare ytan och lägger om sig; panelen är chrome) med flikarna "Display list" (framens opkoder med antal och byte per opkod; ett klick på en op ramar in dess rektangel över sidan), "Semantik" (trädet med nästling, roll, id, text och fokusmarkering), "Logg" (sidans loggrader med nivå och framenummer), "Inspelning" (spela in fliken från en ny laddning med `--record` till `<data>/recordings/vy-<tid>-<flik>.vyrec`, stoppa, lista, spela upp i en ny flik med `--replay`) och "Studio" ("Live-omladdning (localhost)": var 500:e ms en villkorlig GET mot varje localhost-sidas server och omladdning vid ändring; "Öppna Studio" öppnar `vy://localhost:8081/` i en ny flik). Dessutom rättat: efter en storleksändring fick sidan ingen frame förrän nästa inmatning (SPEC-6.2.1). | `spec_11_4_1_devtools_panel`, `spec_11_4_1_devtools_record_and_replay`, `spec_7_3_2_live_reload_localhost`, `spec_11_4_1_display_list_pane`, `spec_11_4_1_tree_log_recording_studio_panes`, i vy-proto `spec_7_3_2_revalidate_ignores_freshness` |
 
 ## Beslut
 
@@ -95,6 +96,32 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
   musen) och följer en länk sidan registrerat där; en nod utanför vyn klickas i sina egna koordinater.
   Focus/Click på adressfältet fokuserar det. Allt annat (`SetValue`, rullning) stöds inte: sidan äger sina
   värden och sin rullning.
+- **Devtools (steg 6) är chrome bredvid sidan, inte över den.** Panelen (440 px, högst halva fönstret) tar
+  sidytans högra del; sidan får `vy_resize` med den smalare ytan och ritar om sig (det krävde rättelsen
+  att en storleksändring ger en frame). Panelens innehåll är en egen display list, rasteriserad bara när den
+  ändrats, och sidans display list rörs aldrig – markeringen av en vald op ritas av huvudprocessen som en ram
+  i överlagringen (en `TEXT`-op mäts med sidans egna stilar). Listorna kapas vid 4 000 rader; mushjulet
+  rullar panelen. **Inspelning** återanvänder `--record`/`--replay`: att börja spelar in från en ny laddning
+  av sidan (processen startas om med `--record`, så filen bär hela den inkommande strömmen från `Load`), en
+  ny ram `ToTab::StopRecording` (tagg 14) tömmer och stänger filen (ramen hamnar själv sist i filen och gör
+  inget vid uppspelning). Uppspelning startar en flikprocess med `--replay` i en ny flik; när filen är slut
+  ligger sista framen kvar och fliken heter "Uppspelning klar: …". Kräver en flikprocess (inte trådläget i
+  tester utan `exe`). **Live-omladdning** gäller bara sidor vars adress är localhost: `Fetcher::revalidate`
+  (ny, additiv i vy-proto) gör den villkorliga GET:en med `If-None-Match` oavsett om den lagrade posten
+  fortfarande är färsk (`max-age=60` från vy-serve) och lämnar svaret i HTTP-cachen, så omladdningen direkt
+  efter laddar det servern har nu. Första svaret är utgångsläget; ett annat hashvärde senare laddar om fliken
+  (ersätter historikposten). Klockan är skalets: var 500:e ms, och fönstret väcks med `WaitUntil` när en
+  kontroll är due (`Shell::poll_in`).
+- **Plain http bara till sidans egen loopback-origin.** `Tab::request_verdict` släpper en `http://`-förfrågan
+  bara om dess authority är sidans egen och en loopback-värd (`localhost`, `127.0.0.1`, `[::1]`), utan
+  userinfo (`shell::plain_http_allowed`, test `spec_5_2_8_plain_http_only_to_own_loopback_origin`): en
+  fjärrsida når aldrig localhost, en localhost-sida aldrig en annan lokal port. På den här grenen avvisar
+  `vy_runtime::origin_of` dessutom all `http://`, så inget släpps igenom än; m4/dev:s
+  `vy_runtime::plain_http_allowed(origin, page_authority)` (commit 182477a) har samma regel – anropet byts
+  mot den vid sammanslagningen.
+- **Live-omladdning mot vy-dev** hämtar sidans egen manifestadress igen (aldrig `/_dev/`, som kräver en
+  token per körning): vy-dev serverar manifest med `no-cache`, och identiteten (och därmed svarets hash) byts
+  efter varje lyckat bygge, vilket är det som laddar om.
 
 ## Tangentbordstabell
 
@@ -112,6 +139,7 @@ Det testguiden skrivs från. "Sidan" betyder att tangenten går till modulen som
 | Enter, Skift+Enter | sökrutan | nästa respektive föregående träff, med omlopp |
 | Escape | sökrutan | stänger sökrutan och träffmarkeringarna |
 | ‹ › × | sökrutan (pekare) | föregående, nästa, stäng; ett klick i sidan lämnar rutan öppen men ger sidan tangentbordet |
+| F12 | överallt | öppnar/stänger devtools-panelen till höger; flikarna och raderna klickas med pekaren, mushjulet rullar |
 | Ctrl+V | adressfältet | klistra in (radbrytningar tas bort, högst 8 KB) |
 | Ctrl+C, Ctrl+X | adressfältet | kopiera/klipp ut markeringen till systemets urklipp |
 | AltGr+tangent | överallt | tecknet (t.ex. `@`, `{`, `\`), aldrig en genväg |
@@ -182,20 +210,55 @@ Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
   utanför modulens intervall. Ett träd med 65 536 noder och 16 MB text (taket i SPEC-9.3.2) byggs om bara
   när det ändrats och bara när ett hjälpmedel lyssnar. På Linux pratar `accesskit_unix` med AT-SPI över
   sessionens D-Bus (zbus): en ny lokal yta i huvudprocessen, aldrig i flikprocessen.
+- **Inspelningsfiler** innehåller hela den inkommande strömmen: modulen, resurserna, sidans lagring vid
+  laddning, slumpnyckeln och allt användaren matat in (även inklistrad text). De skrivs bara när användaren
+  begärt det, i datakatalogen (`recordings/`), och spelas bara upp på begäran. En uppspelad session kör
+  samma modul i en flikprocess som vilken sida som helst; den får inget nätverk (huvudprocessen svarar inte
+  på dess förfrågningar annorlunda än för en vanlig flik utan grants: fliken har inga capabilities alls).
+- **Live-omladdning** frågar bara servrar på localhost (adressens värd är `localhost`, `127.0.0.1` eller
+  `[::1]`), bara medan användaren slagit på den, och gör inget annat än en villkorlig GET av sidans adress;
+  en ändrad sida laddas om genom den vanliga vägen (signatur, nyckel, grants som förut).
 
 ## Berör andra spår
 
 - `crates/vy-runtime/src/host.rs`, `src/lib.rs` (m4/perf): additivt – fälten `Host::copy_gesture` och
   `Host::clipboard_written`, `Runtime::event_as_copy_gesture`, `Runtime::take_clipboard_write`; grinden i
   `clipboard_write` släpper igenom under kopieringsgesten. Inget befintligt API ändrat. (Commit 26e77b6.)
-- `crates/vy-shell/src/ipc.rs`: nya ramar `ToTab::CopyGesture` (tagg 13) och `ToShell::Focus` (tagg 77).
+- `crates/vy-proto/src/fetch.rs`, `src/tests.rs` (m4/security): additivt – `Fetcher::revalidate` (villkorlig
+  GET oavsett färskhet, SPEC-7.3.2) och testet `spec_7_3_2_revalidate_ignores_freshness`. Inget befintligt
+  ändrat.
+- `crates/vy-shell/src/window.rs` och `main.rs`: m4/security byter `current_exe()` mot en ny
+  `process::self_exe()` på självstartsställena (bl.a. `window.rs`, där `Config` byggs); en liten konflikt
+  väntas där vid sammanslagning – raden med `exe:` i `Config`.
+- `crates/vy-shell/src/ipc.rs`: nya ramar `ToTab::CopyGesture` (tagg 13), `ToTab::StopRecording` (tagg 14)
+  och `ToShell::Focus` (tagg 77).
   Om ett annat spår (m4/security fuzzar ramningen) också lagt till varianter med samma taggar måste en av
-  dem numreras om vid sammanslagning; testet `ipc::tests` räknar varianterna (13 respektive 14 här).
+  dem numreras om vid sammanslagning; testet `ipc::tests` räknar varianterna (14 respektive 14 här).
 - `SPEC.md`: ny mening SPEC-8.2.4 (eget `spec:`-commit, §8 är inte fryst).
 - `Cargo.toml`, `Cargo.lock`: `arboard` i `[workspace.dependencies]`.
 - `crates/vy-shell/src/process.rs` (m4/security) är **inte** ändrad; steg 2 bygger på att
   `TabConnection::shutdown` väntar in processen och läsartråden. Ändras det (t.ex. till asynkron
   nedstängning) måste `Shell::retired_message` fortfarande få svaret före laddarens nästa svar.
+
+## Kvar och öppet
+
+- **Laddartråden är seriell** (granskning 0004, fynd 7, oförändrat): sidornas egna förfrågningar, sidladdningar
+  och live-omladdningens kontroller går genom en tråd i tur och ordning, så Studios long-poll (upp till 1 s)
+  kan fördröja andra flikars laddning och en kontroll lika länge. En förfrågningstråd per flik (med egen
+  `ureq`-agent) är nästa steg; inte gjort här.
+- **Förifyllning av urklipp i flikprocessen** sker vid varje färsk gest för sidor med `clipboard` beviljad; på
+  X11 är det en rundtur till urklippets ägare per tangentnedtryckning (normalt några ms).
+- **Markering:** höger-till-vänster-text, ord bredare än raden och noder vars text är flera körningar har
+  approximativ eller nodvis granularitet; dubbelklick på ord och tangentbordsmarkering (Skift+pilar i sidan)
+  finns inte (pilarna är sidans).
+- **Sök:** rullningen är en heuristik (se *Beslut*); träffar i text som inte är en enda körning markeras som
+  hela noden.
+- **AccessKit på Linux** är frivilligt (`a11y-linux`, spec-fråga 54). Fönsterintegrationen (adapter,
+  händelser, `WaitUntil` för live-omladdning) är bara typkontrollerad och manuellt beskriven, inte körd här.
+- **Devtools:** inspelning kräver flikprocess; en uppspelning ersätter inte en öppen flik; panelen saknar
+  tangentbordsnavigering (pekare och mushjul).
+- **SDK:t har ingen textrutewidget** (`crates/vy-sdk`), så kopiering från en textruta på Ctrl+C/X (SPEC-8.2.4)
+  är upp till varje modul; `form` skriver inte urklippet. Ingen ändring i SDK eller moduler i det här spåret.
 
 ## Kräver ett riktigt fönster – manuell kontroll på Windows
 
@@ -213,7 +276,11 @@ Allt ovan är testat huvudlöst; detta går bara att se i fönstret.
    Skärmläsaren läser fältets namn och innehåll; Caps Lock+pil navigerar texten på sidan; aktivera en knapp
    med Skärmläsarens standardåtgärd: sidan reagerar som på ett klick. På en sida utan träd säger den
    "otillgänglig". Accessibility Insights for Windows visar trädet (fönster → Adress, sidans dokument → noder).
-6. **Devtools.** F12 (se steg 6).
+6. **Devtools.** F12 på `form`: panelen till höger, sidan lägger om sig smalare. "Display list": klicka en
+   rad, rektangeln ramas in rosa på sidan. "Semantik": Tab i sidan flyttar ▶-markeringen. "Inspelning":
+   "Spela in…", rör sidan, "Stoppa", klicka filen under "Spela upp": en ny flik spelar sessionen och slutar på
+   samma bild. "Studio": "Öppna Studio" öppnar `vy://localhost:8081/` (kräver m4/dev:s vy-dev igång); med
+   "Live-omladdning" på och en sida från `vy-serve` på localhost: bygg om sidan, fliken laddas om inom en sekund.
 
 ## Spec-frågor
 

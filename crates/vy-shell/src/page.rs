@@ -288,6 +288,8 @@ pub enum Job {
         /// What to load.
         source: Source,
     },
+    /// Live reload: has the page changed?
+    Check(Check),
     /// Perform a page's own request (SPEC-5.2.7).
     Request {
         /// The tab.
@@ -307,9 +309,32 @@ pub enum Job {
     },
 }
 
+/// Live reload (devtools, SPEC-7.3.2): ask a page's server whether the
+/// page changed, with a conditional GET whatever the HTTP cache's
+/// freshness says.
+#[derive(Debug)]
+pub struct Check {
+    /// The tab.
+    pub tab: u32,
+    /// The tab's navigation count.
+    pub generation: u64,
+    /// The page's address.
+    pub address: Address,
+}
+
 /// What the loader thread reports back.
 #[derive(Debug)]
 pub enum Done {
+    /// A live-reload check finished: the SHA-256 of what the server answers
+    /// for the page now, or why not.
+    Check {
+        /// The tab.
+        tab: u32,
+        /// The navigation count the job carried.
+        generation: u64,
+        /// The answer's hash.
+        result: Result<[u8; 32], String>,
+    },
     /// A page load finished.
     Page {
         /// The tab.
@@ -374,6 +399,25 @@ pub fn start_loader(
                             tab,
                             generation,
                             result: Box::new(result),
+                        });
+                    }
+                    Job::Check(Check {
+                        tab,
+                        generation,
+                        address,
+                    }) => {
+                        let result = open(&mut fetcher).and_then(|()| {
+                            fetcher
+                                .as_mut()
+                                .expect("opened")
+                                .revalidate(&address)
+                                .map(|h| h.0)
+                                .map_err(|e| e.to_string())
+                        });
+                        report(Done::Check {
+                            tab,
+                            generation,
+                            result,
                         });
                     }
                     Job::Request {
