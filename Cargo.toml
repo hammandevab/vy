@@ -12,6 +12,7 @@ members = [
     "crates/vy-cli",
     "crates/vy-publish",
     "crates/vy-serve",
+    "crates/vy-dev",
 ]
 # modules/* byggs separat för wasm32 (tools/build_modules.sh)
 exclude = ["modules"]

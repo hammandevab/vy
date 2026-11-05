@@ -1,0 +1,19 @@
+[package]
+name = "vy-dev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Developer tool: scaffold a page project, build and serve it on localhost, run Claude Code from Studio"
+
+[[bin]]
+name = "vy-dev"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+vy-manifest.workspace = true
+# `check_abi_bytes`: the check `vy-cli check-abi` runs.
+vy-runtime.workspace = true

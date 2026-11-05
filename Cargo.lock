@@ -2582,6 +2582,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vy-dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "vy-manifest",
+ "vy-runtime",
+]
+
+[[package]]
 name = "vy-dl"
 version = "0.1.0"
 dependencies = [
