@@ -333,8 +333,11 @@ impl MockHost {
         self.dl_open = true;
         self.op_count = 0;
         self.clip_depth = 0;
-        // Links live per frame (SPEC-5.2.10).
+        // Links live per frame (SPEC-5.2.10), and the runtime starts a new
+        // semantic tree for every `vy_frame`, which a page enters through
+        // `Frame::begin` (SPEC-10.1.1).
         self.links.clear();
+        self.new_frame();
         self.ops.push(Op::Begin);
         err::OK
     }
@@ -754,7 +757,8 @@ impl MockHost {
     }
 
     /// Start a new frame as the runtime does before `vy_frame`: the semantic
-    /// tree of the previous frame is dropped (SPEC-10.1.1).
+    /// tree of the previous frame is dropped (SPEC-10.1.1). `dl_begin` does
+    /// this too; call it directly for a tree built from events alone.
     pub fn new_frame(&mut self) {
         self.sem.clear();
     }
