@@ -181,7 +181,15 @@ mod tests {
         dl.clip_push(0.0, 0.0, 20.0, 40.0).unwrap();
         dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0x00FF_00FF).unwrap();
         dl.clip_pop().unwrap();
-        dl.line(0.0, 35.0, 40.0, 35.0, 2.0, 0x0000_FFFF).unwrap();
+        dl.path(
+            0x0000_FFFF,
+            2.0,
+            &[
+                vy_dl::PathCmd::MoveTo(0.0, 35.0),
+                vy_dl::PathCmd::LineTo(40.0, 35.0),
+            ],
+        )
+        .unwrap();
         dl.end().unwrap();
         let img = render(dl.bytes(), 40, 40, 1.0, &mut t).unwrap();
         assert_eq!(
@@ -197,7 +205,7 @@ mod tests {
         assert_eq!(img.pixel(30, 35).unwrap(), [0, 0, 255, 255], "line on top");
     }
 
-    /// SPEC-C.1.2: paths fill (stroke_w 0) and stroke; shadows and images draw something.
+    /// SPEC-C.1.2: paths fill (stroke_w 0) and stroke; images draw something.
     #[test]
     fn spec_c_1_2_path_fill_and_stroke() {
         use vy_dl::PathCmd;
@@ -217,8 +225,6 @@ mod tests {
             &[PathCmd::MoveTo(0.0, 39.0), PathCmd::LineTo(40.0, 39.0)],
         )
         .unwrap();
-        dl.shadow(50.0, 50.0, 20.0, 20.0, 0.0, 4.0, 0x0000_00FF)
-            .unwrap();
         dl.image(80.0, 80.0, 10.0, 10.0, 1, Fit::Contain).unwrap();
         dl.end().unwrap();
         let img = render(dl.bytes(), 100, 100, 1.0, &mut t).unwrap();
@@ -229,13 +235,6 @@ mod tests {
             "outside triangle"
         );
         assert_eq!(img.pixel(30, 39).unwrap(), [255, 0, 0, 255], "stroked line");
-        let shadow = img.pixel(60, 60).unwrap();
-        assert!(shadow[0] <= 2, "shadow centre is opaque: {shadow:?}");
-        let edge = img.pixel(48, 60).unwrap();
-        assert!(
-            edge[0] > shadow[0] && edge[0] < 255,
-            "shadow fades: {edge:?}"
-        );
         assert_eq!(
             img.pixel(85, 85).unwrap(),
             [128, 128, 128, 255],
@@ -565,8 +564,6 @@ mod tests {
             dl.text(v, 0.0, 100.0, s, b"hej").unwrap();
             dl.text(0.0, v, 100.0, s, b"hej").unwrap();
             dl.image(v, v, v, v, 1, vy_dl::Fit::Cover).unwrap();
-            dl.line(0.0, 0.0, v, 10.0, 1.0, 0xFF).unwrap();
-            dl.line(0.0, 0.0, 10.0, 10.0, v, 0xFF).unwrap();
             dl.path(
                 0xFF,
                 0.0,
@@ -589,7 +586,6 @@ mod tests {
                 ],
             )
             .unwrap();
-            dl.shadow(0.0, 0.0, 10.0, 10.0, 0.0, v, 0xFF).unwrap();
             dl.clip_push(v, 0.0, 10.0, 10.0).unwrap();
             dl.rect(0.0, 0.0, 40.0, 40.0, 0.0, 0xFF00_00FF).unwrap();
             dl.clip_pop().unwrap();
@@ -608,8 +604,6 @@ mod tests {
         let mut dl = DisplayList::new();
         dl.begin().unwrap();
         dl.rect(-m, -m, 2.0 * m, 2.0 * m, m, 0xFF).unwrap();
-        dl.line(-m, -m, m, m, m, 0xFF).unwrap();
-        dl.shadow(-m, -m, m, m, m, m, 0xFF).unwrap();
         dl.path(0xFF, m, &[PathCmd::MoveTo(-m, m), PathCmd::LineTo(m, -m)])
             .unwrap();
         dl.clip_push(-m, -m, 2.0 * m, 2.0 * m).unwrap();

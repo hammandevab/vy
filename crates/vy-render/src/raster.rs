@@ -14,12 +14,6 @@ use tiny_skia::{
 use vy_abi::fit;
 use vy_dl::{DecodeError, Op, PathCmd};
 
-/// Number of nested rectangles used to approximate a blurred shadow (M1).
-///
-/// A real Gaussian blur arrives with the GPU path in M3. Until then a shadow
-/// is `SHADOW_STEPS` concentric rounded rectangles, each with `alpha /
-/// SHADOW_STEPS`, spread linearly from `-blur` to `+blur` around the edge.
-pub const SHADOW_STEPS: u32 = 8;
 /// Colour of the placeholder drawn for an `IMAGE` whose resource is not in
 /// the cache: never decoded (a display list rendered outside a runtime) or
 /// refused (`E_RESOURCE` was logged when `dl_image` ran).
@@ -28,7 +22,7 @@ pub const IMAGE_PLACEHOLDER_COLOR: u32 = 0x8080_80FF;
 /// largest side [`RgbaImage::decode_png`] accepts, since what it reads back
 /// (goldens, SPEC-12.2.2) is what `render` wrote.
 pub const MAX_CANVAS_SIDE_PX: u32 = 16_384;
-/// Largest magnitude accepted for a coordinate, size, radius, blur or stroke
+/// Largest magnitude accepted for a coordinate, size, radius or stroke
 /// width, in logical pixels. The canvas is at most 16384 physical pixels, so a
 /// larger value cannot be visible; it only serves to overflow the fixed-point
 /// arithmetic in the rasterizer. An op carrying a non-finite or larger value
@@ -331,42 +325,6 @@ impl Canvas<'_> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn shadow(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, rgba: u32) {
-        let blur = blur.max(0.0);
-        if blur == 0.0 {
-            self.rect(x, y, w, h, radius, rgba);
-            return;
-        }
-        // Source-over accumulation: after step k the coverage is alpha * k / N,
-        // a linear ramp from the outer edge (+blur) to the inner edge (-blur).
-        let alpha = (rgba & 0xFF) as f32 / 255.0;
-        let n = SHADOW_STEPS as f32;
-        for k in 1..=SHADOW_STEPS {
-            let step_alpha = alpha / (n - alpha * (k as f32 - 1.0));
-            let step_color =
-                (rgba & !0xFF) | ((step_alpha * 255.0).round().clamp(0.0, 255.0) as u32);
-            let d = blur * (1.0 - (2.0 * k as f32 - 1.0) / n);
-            self.rect(
-                x - d,
-                y - d,
-                w + 2.0 * d,
-                h + 2.0 * d,
-                radius + d,
-                step_color,
-            );
-        }
-    }
-
-    fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, w: f32, rgba: u32) {
-        let mut pb = PathBuilder::new();
-        pb.move_to(x1, y1);
-        pb.line_to(x2, y2);
-        if let Some(path) = pb.finish() {
-            self.stroke(&path, rgba, w);
-        }
-    }
-
     fn path(&mut self, cmds: &[PathCmd], rgba: u32, stroke_w: f32) {
         let mut pb = PathBuilder::new();
         for c in cmds {
@@ -580,31 +538,7 @@ pub fn render(
             } if sane_path(cmds, *stroke_w) => canvas.path(cmds, *color, *stroke_w),
             Op::ClipPush { x, y, w, h } => canvas.clip_push(*x, *y, *w, *h),
             Op::ClipPop => canvas.clip.pop(),
-            Op::Line {
-                x1,
-                y1,
-                x2,
-                y2,
-                w,
-                color,
-            } if sane(&[*x1, *y1, *x2, *y2, *w]) => canvas.line(*x1, *y1, *x2, *y2, *w, *color),
-            Op::Shadow {
-                x,
-                y,
-                w,
-                h,
-                radius,
-                blur,
-                color,
-            } if sane(&[*x, *y, *w, *h, *radius, *blur]) => {
-                canvas.shadow(*x, *y, *w, *h, *radius, *blur, *color)
-            }
-            Op::Rect { .. }
-            | Op::Text { .. }
-            | Op::Image { .. }
-            | Op::Path { .. }
-            | Op::Line { .. }
-            | Op::Shadow { .. } => {}
+            Op::Rect { .. } | Op::Text { .. } | Op::Image { .. } | Op::Path { .. } => {}
         }
     }
     Ok(RgbaImage {

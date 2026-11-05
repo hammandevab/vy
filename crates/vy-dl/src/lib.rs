@@ -106,38 +106,6 @@ pub enum Op {
     },
     /// Pop the last clip rectangle.
     ClipPop,
-    /// Line segment.
-    Line {
-        /// Start x.
-        x1: f32,
-        /// Start y.
-        y1: f32,
-        /// End x.
-        x2: f32,
-        /// End y.
-        y2: f32,
-        /// Stroke width.
-        w: f32,
-        /// `0xRRGGBBAA`.
-        color: u32,
-    },
-    /// Drop shadow under a rounded rectangle.
-    Shadow {
-        /// Left.
-        x: f32,
-        /// Top.
-        y: f32,
-        /// Width.
-        w: f32,
-        /// Height.
-        h: f32,
-        /// Corner radius.
-        radius: f32,
-        /// Blur radius.
-        blur: f32,
-        /// `0xRRGGBBAA`.
-        color: u32,
-    },
 }
 
 /// Encoder with the validation rules of SPEC §5.3 and §6.1.
@@ -148,7 +116,6 @@ pub struct DisplayList {
     buf: Vec<u8>,
     ops: u32,
     clip_depth: u32,
-    shadows: u32,
     text_bytes: usize,
     open: bool,
 }
@@ -170,7 +137,6 @@ impl DisplayList {
         self.buf.clear();
         self.ops = 0;
         self.clip_depth = 0;
-        self.shadows = 0;
         self.text_bytes = 0;
         self.open = true;
         Ok(())
@@ -374,52 +340,6 @@ impl DisplayList {
         self.ops += 1;
         Ok(())
     }
-
-    /// `LINE`.
-    pub fn line(
-        &mut self,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-        w: f32,
-        color: u32,
-    ) -> Result<(), i32> {
-        self.gate()?;
-        self.buf.push(op::LINE);
-        for v in [x1, y1, x2, y2, w] {
-            self.f(v);
-        }
-        self.u32(color);
-        self.ops += 1;
-        Ok(())
-    }
-
-    /// `SHADOW`. More than 64 per frame is `E_DL_FULL` (SPEC-C.1.3).
-    #[allow(clippy::too_many_arguments)]
-    pub fn shadow(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        radius: f32,
-        blur: f32,
-        color: u32,
-    ) -> Result<(), i32> {
-        self.gate()?;
-        if self.shadows >= limits::MAX_SHADOWS_PER_FRAME {
-            return Err(err::E_DL_FULL);
-        }
-        self.buf.push(op::SHADOW);
-        for v in [x, y, w, h, radius, blur] {
-            self.f(v);
-        }
-        self.u32(color);
-        self.shadows += 1;
-        self.ops += 1;
-        Ok(())
-    }
 }
 
 /// Why a buffer failed to decode.
@@ -576,23 +496,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Op>, DecodeError> {
                 h: c.f32()?,
             }),
             op::CLIP_POP => out.push(Op::ClipPop),
-            op::LINE => out.push(Op::Line {
-                x1: c.f32()?,
-                y1: c.f32()?,
-                x2: c.f32()?,
-                y2: c.f32()?,
-                w: c.f32()?,
-                color: c.u32()?,
-            }),
-            op::SHADOW => out.push(Op::Shadow {
-                x: c.f32()?,
-                y: c.f32()?,
-                w: c.f32()?,
-                h: c.f32()?,
-                radius: c.f32()?,
-                blur: c.f32()?,
-                color: c.u32()?,
-            }),
+            // 0x07 and 0x08 are reserved (SPEC-C.1.3) and decode as unknown.
             other => return Err(DecodeError::UnknownOp(at, other)),
         }
         if c.i >= bytes.len() {
@@ -611,7 +515,7 @@ mod tests {
         dl
     }
 
-    /// SPEC-C.1.1: RECT is 25 bytes, CLIP_PUSH 17, CLIP_POP 1, LINE 25, SHADOW 29, END 1.
+    /// SPEC-C.1.1: RECT is 25 bytes, CLIP_PUSH 17, CLIP_POP 1, END 1.
     #[test]
     fn spec_c_1_1_fixed_sizes() {
         let mut dl = open();
@@ -621,13 +525,22 @@ mod tests {
         assert_eq!(dl.bytes().len(), 25 + 17);
         dl.clip_pop().unwrap();
         assert_eq!(dl.bytes().len(), 25 + 17 + 1);
-        dl.line(0.0, 0.0, 1.0, 1.0, 1.0, 0).unwrap();
-        assert_eq!(dl.bytes().len(), 25 + 17 + 1 + 25);
-        dl.shadow(0.0, 0.0, 1.0, 1.0, 0.0, 2.0, 0).unwrap();
-        assert_eq!(dl.bytes().len(), 25 + 17 + 1 + 25 + 29);
         dl.end().unwrap();
-        assert_eq!(dl.bytes().len(), 25 + 17 + 1 + 25 + 29 + 1);
+        assert_eq!(dl.bytes().len(), 25 + 17 + 1 + 1);
         assert_eq!(*dl.bytes().last().unwrap(), op::END);
+    }
+
+    /// SPEC-C.1.3, SPEC-C.1.1: the withdrawn `LINE` (0x07) and `SHADOW`
+    /// (0x08) opcodes are reserved; the encoder has no way to write them and
+    /// the decoder rejects them like any unknown byte.
+    #[test]
+    fn spec_c_1_3_line_and_shadow_withdrawn() {
+        for reserved in [0x07u8, 0x08] {
+            let mut bytes = vec![reserved];
+            bytes.extend_from_slice(&[0; 28]);
+            bytes.push(op::END);
+            assert_eq!(decode(&bytes), Err(DecodeError::UnknownOp(0, reserved)));
+        }
     }
 
     /// SPEC-C.1.1: TEXT is 17 + len and IMAGE is 20.
@@ -675,19 +588,6 @@ mod tests {
         assert_eq!(decode_path_cmds(&bad), Err(DecodeError::UnknownOp(0, 7)));
     }
 
-    /// SPEC-C.1.3: at most 64 shadows per frame.
-    #[test]
-    fn spec_c_1_3_shadow_limit() {
-        let mut dl = open();
-        for _ in 0..64 {
-            dl.shadow(0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0).unwrap();
-        }
-        assert_eq!(
-            dl.shadow(0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0),
-            Err(err::E_DL_FULL)
-        );
-    }
-
     /// SPEC-5.3.2: dl_* outside begin/end is E_DL_STATE and ignored; a second
     /// begin inside an open list is E_DL_STATE too and leaves the list alone.
     #[test]
@@ -721,12 +621,17 @@ mod tests {
         let mut dl = open();
         dl.rect(1.0, 2.0, 3.0, 4.0, 5.0, 6).unwrap();
         dl.text(1.0, 2.0, 3.0, 4, b"ab").unwrap();
-        dl.line(0.0, 0.0, 1.0, 1.0, 2.0, 7).unwrap();
+        dl.path(
+            7,
+            2.0,
+            &[PathCmd::MoveTo(0.0, 0.0), PathCmd::LineTo(1.0, 1.0)],
+        )
+        .unwrap();
         dl.end().unwrap();
         let ops = decode(dl.bytes()).unwrap();
         assert!(matches!(ops[0], Op::Rect { .. }));
         assert!(matches!(ops[1], Op::Text { .. }));
-        assert!(matches!(ops[2], Op::Line { .. }));
+        assert!(matches!(ops[2], Op::Path { .. }));
         assert_eq!(ops.len(), 3);
     }
 

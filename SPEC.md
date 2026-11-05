@@ -292,10 +292,10 @@ little-endian. Koordinater `f32` i logiska pixlar, färger `u32` som `0xRRGGBBAA
 | 0x04 | `PATH` | color: u32; stroke_w: f32; n: u16; n × (u8 typ + 2 × f32) | 11 + 9n |
 | 0x05 | `CLIP_PUSH` | x, y, w, h: f32 | 17 |
 | 0x06 | `CLIP_POP` | – | 1 |
-| 0x07 | `LINE` | x1, y1, x2, y2, w: f32; color: u32 | 25 |
-| 0x08 | `SHADOW` | x, y, w, h, radius, blur: f32; color: u32 | 29 |
+| 0x07 | – | reserverad (`LINE` utgick före frysningen) | – |
+| 0x08 | – | reserverad (`SHADOW` utgick före frysningen) | – |
 | 0xFF | `END` | – | 1 |
 
-- **[SPEC-C.1.1]** Opkoderna ovan med angivna fältordningar och storlekar är display list-formatet i 1.0.
+- **[SPEC-C.1.1]** Opkoderna ovan med angivna fältordningar och storlekar är display list-formatet i 1.0; 0x07 och 0x08 är reserverade och förekommer aldrig i en 1.x-lista; linjer ritas med `dl_path`.
 - **[SPEC-C.1.2]** Path-kommandon är 9 byte: `u8` typ (0 moveTo, 1 lineTo, 2 quadTo, 3 close) följt av två `f32`; `quadTo` följs av ett extra kommando med kontrollpunkten.
-- **[SPEC-C.1.3]** Högst 64 `SHADOW` per frame.
+- **[SPEC-C.1.3]** *utgått* (gällde `SHADOW`, som inte finns i 1.0).

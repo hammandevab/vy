@@ -252,15 +252,13 @@ pub mod op {
     pub const CLIP_PUSH: u8 = 0x05;
     /// Pop clip rectangle.
     pub const CLIP_POP: u8 = 0x06;
-    /// Line: x1, y1, x2, y2, w: f32; color: u32.
-    pub const LINE: u8 = 0x07;
-    /// Shadow: x, y, w, h, radius, blur: f32; color: u32.
-    pub const SHADOW: u8 = 0x08;
+    // 0x07 (`LINE`) and 0x08 (`SHADOW`) were withdrawn before the freeze and
+    // stay reserved: no import produced them (SPEC-C.1.1, SPEC-C.1.3).
     /// End of list.
     pub const END: u8 = 0xFF;
 }
 
-/// Hard limits enforced by the host (SPEC-6.1.4, SPEC-6.1.6, SPEC-C.1.3, SPEC-9.3.1).
+/// Hard limits enforced by the host (SPEC-6.1.4, SPEC-6.1.6, SPEC-9.3.1).
 ///
 /// The byte caps (`MAX_*_BYTES`) bound every copy the host makes out of module
 /// memory on an import call. They are the host's own resource limits in the
@@ -275,8 +273,6 @@ pub mod limits {
     pub const MAX_OPS_PER_FRAME: u32 = 65_536;
     /// Maximum clip stack depth.
     pub const MAX_CLIP_DEPTH: u32 = 32;
-    /// Maximum `SHADOW` ops per frame.
-    pub const MAX_SHADOWS_PER_FRAME: u32 = 64;
     /// Frame budget in milliseconds of logical time (SPEC-5.3.3).
     pub const FRAME_BUDGET_MS: u32 = 8;
     /// Maximum `memory_max` in wasm pages (SPEC-8.1.3).
@@ -798,7 +794,8 @@ mod tests {
         const _: () = assert!(limits::MAX_STATE_KEY_BYTES < limits::MAX_STATE_VALUE_BYTES);
     }
 
-    /// SPEC-C.1.1: opcode values are fixed.
+    /// SPEC-C.1.1, SPEC-C.1.3: opcode values are fixed; 0x07 and 0x08 are
+    /// reserved (the withdrawn `LINE` and `SHADOW`) and no opcode uses them.
     #[test]
     fn spec_c_1_1_opcodes_fixed() {
         assert_eq!(op::RECT, 0x01);
@@ -807,8 +804,16 @@ mod tests {
         assert_eq!(op::PATH, 0x04);
         assert_eq!(op::CLIP_PUSH, 0x05);
         assert_eq!(op::CLIP_POP, 0x06);
-        assert_eq!(op::LINE, 0x07);
-        assert_eq!(op::SHADOW, 0x08);
         assert_eq!(op::END, 0xFF);
+        let defined = [
+            op::RECT,
+            op::TEXT,
+            op::IMAGE,
+            op::PATH,
+            op::CLIP_PUSH,
+            op::CLIP_POP,
+            op::END,
+        ];
+        assert!(!defined.contains(&0x07) && !defined.contains(&0x08));
     }
 }
