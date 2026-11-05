@@ -23,6 +23,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use vy_sdk::math::snap;
 use vy_sdk::prelude::*;
 
 const SURFACE: Color = Color::rgb(0xFC, 0xFC, 0xFB);
@@ -260,6 +261,12 @@ impl Dashboard {
         Hover::None
     }
 
+    /// A 1 px line's edge and thickness, snapped to device pixels (SPEC-6.3.1).
+    fn hairline(&self, v: f32) -> (f32, f32) {
+        let scale = self.window.scale;
+        (snap(v, scale), snap(1.0, scale))
+    }
+
     fn card(&self, f: &mut Frame, r: Rect) -> Result<(), VyError> {
         f.rect(r, 10.0, CARD_BORDER)?;
         f.rect(r.inset(1.0), 9.0, CARD)
@@ -290,7 +297,8 @@ impl Dashboard {
         while v <= max + 0.5 {
             let y = plot.bottom() - plot.h * v / max;
             let color = if v == 0.0 { AXIS } else { GRID };
-            f.rect(Rect::new(plot.x, y - 0.5, plot.w, 1.0), 0.0, color)?;
+            let (ly, lh) = self.hairline(y - 0.5);
+            f.rect(Rect::new(plot.x, ly, plot.w, lh), 0.0, color)?;
             let label = if v > 0.0 && max >= 10_000.0 {
                 format!("{} k", (v / 1000.0) as u32)
             } else {
@@ -381,7 +389,8 @@ impl Dashboard {
         };
         if let Some(i) = hovered {
             let cx = Self::month_x(plot, i);
-            f.rect(Rect::new(cx - 0.5, plot.y, 1.0, plot.h), 0.0, AXIS)?;
+            let (lx, lw) = self.hairline(cx - 0.5);
+            f.rect(Rect::new(lx, plot.y, lw, plot.h), 0.0, AXIS)?;
         }
         for (series, color) in [(&VISITS, SERIES_1), (&RETURNING, SERIES_2)] {
             let mut path = Path::new();

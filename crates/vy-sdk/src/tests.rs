@@ -6,7 +6,7 @@ use crate::event::key;
 use crate::heap::{Grow, Heap, ALIGN, HEADER, PAGE};
 use crate::mock::{self, Op};
 use crate::prelude::*;
-use crate::{api, arena};
+use crate::{api, arena, math};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::alloc::Layout;
@@ -880,4 +880,59 @@ fn spec_4_2_4_heap_within_cap() {
         assert_eq!(heap.free_blocks(), 1);
     }
     drop(backing);
+}
+
+/// SPEC-6.3.1: `math` rounds like `std` does, with casts only, and `snap`
+/// lands on physical-pixel boundaries at every scale: a 1 px rule at scale
+/// 1.5 becomes two whole device pixels, never one and a half.
+#[test]
+fn spec_6_3_1_math_rounds_like_std_and_snaps_to_device_pixels() {
+    let samples = [
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        1.0,
+        1.5,
+        2.5,
+        -0.25,
+        -0.5,
+        -0.75,
+        -1.5,
+        -2.5,
+        76.5,
+        120.3,
+        1e7,
+        -1e7,
+        0.499_999_97,
+        16_777_217.0,
+        f32::MAX,
+        f32::MIN,
+    ];
+    for v in samples {
+        assert_eq!(math::floor(v), v.floor(), "floor {v}");
+        assert_eq!(math::ceil(v), v.ceil(), "ceil {v}");
+        assert_eq!(math::round(v), v.round(), "round {v}");
+    }
+    assert!(math::floor(f32::NAN).is_nan() && math::round(f32::NAN).is_nan());
+    assert_eq!(math::ceil(f32::INFINITY), f32::INFINITY);
+
+    for scale in [1.0, 1.5, 2.0, 0.75, 3.0] {
+        for v in [0.0, 0.3, 76.5, 100.2, 1.0, 999.49] {
+            let s = math::snap(v, scale);
+            let device = s * scale;
+            assert_eq!(device, device.round(), "snap({v}, {scale}) = {s}");
+            assert!((s - v).abs() <= 0.5 / scale + 1e-4);
+        }
+    }
+    assert_eq!(math::snap(76.5, 1.0), 77.0);
+    assert_eq!(math::snap(76.4, 2.0), 76.5);
+    assert_eq!(
+        math::snap(1.0, 1.5) * 1.5,
+        2.0,
+        "a hairline is two device pixels at 1.5"
+    );
+    assert_eq!(math::snap(1.0, 2.0), 1.0);
+    assert_eq!(math::snap(3.3, 0.0), 3.3, "no scale: unchanged");
+    assert_eq!(math::snap(3.3, f32::NAN), 3.3);
 }

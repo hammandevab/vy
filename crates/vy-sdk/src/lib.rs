@@ -27,6 +27,7 @@ pub mod arena;
 pub mod error;
 pub mod event;
 pub mod frame;
+pub mod math;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
 mod raw;

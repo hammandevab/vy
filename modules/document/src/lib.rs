@@ -32,6 +32,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use content::{Block, BODY, NOTES, SECTIONS, TABLE_HEAD, TABLE_ROWS};
 use vy_sdk::event::key;
+use vy_sdk::math::snap;
 use vy_sdk::prelude::*;
 use vy_sdk::{link_register, navigate};
 
@@ -361,6 +362,12 @@ impl DocumentPage {
         })
     }
 
+    /// A 1 px rule's top and height, snapped to device pixels (SPEC-6.3.1).
+    fn hairline(&self, y: f32) -> (f32, f32) {
+        let scale = self.window.scale;
+        (snap(y, scale), snap(1.0, scale))
+    }
+
     fn visible(&self, r: Rect) -> bool {
         let y = r.y - self.scroll;
         y + r.h > 0.0 && y < self.window.height
@@ -378,7 +385,8 @@ impl DocumentPage {
                 f.rect(r.inset(-2.0), 3.0, PAPER)?;
             }
             f.text(r.x, r.y, 0.0, style, info.label)?;
-            f.rect(Rect::new(r.x, r.bottom() - 1.0, r.w, 1.0), 0.0, ACCENT)?;
+            let (uy, uh) = self.hairline(r.bottom() - 1.0);
+            f.rect(Rect::new(r.x, uy, r.w, uh), 0.0, ACCENT)?;
         }
         let id = f.sem.node(Role::Link, r, info.label)?;
         self.link_ids[i] = id.0;
@@ -444,7 +452,8 @@ impl DocumentPage {
             draw_row(f, y, &head_labels, head, Some(HEAD_BG))?;
             y += ROW_H;
             if table_on {
-                f.rect(Rect::new(t.x, y - 1.0, t.w, 1.0), 0.0, RULE)?;
+                let (ry, rh) = self.hairline(y - 1.0);
+                f.rect(Rect::new(t.x, ry, t.w, rh), 0.0, RULE)?;
             }
             for (i, row) in TABLE_ROWS.iter().enumerate() {
                 let fill = if i % 2 == 1 { Some(STRIPE) } else { None };
@@ -452,7 +461,8 @@ impl DocumentPage {
                 y += ROW_H;
             }
             if table_on {
-                f.rect(Rect::new(t.x, y, t.w, 1.0), 0.0, RULE)?;
+                let (ry, rh) = self.hairline(y);
+                f.rect(Rect::new(t.x, ry, t.w, rh), 0.0, RULE)?;
             }
             Ok(())
         })
@@ -542,7 +552,8 @@ impl App for DocumentPage {
                 })?;
                 let ry = self.layout.rule_y - scroll;
                 if ry > -1.0 && ry < self.window.height {
-                    f.rect(Rect::new(col_x, ry, col_w, 1.0), 0.0, RULE)?;
+                    let (ry, rh) = self.hairline(ry);
+                    f.rect(Rect::new(col_x, ry, col_w, rh), 0.0, RULE)?;
                 }
 
                 // Lead.

@@ -11,6 +11,7 @@ mod article;
 
 use article::{Block, ARTICLE, BLOCKS};
 use vy_sdk::event::key;
+use vy_sdk::math::snap;
 use vy_sdk::prelude::*;
 
 const PAPER: Color = Color::rgb(0xFB, 0xFA, 0xF6);
@@ -147,6 +148,8 @@ impl App for TextPage {
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
         let window = Rect::new(0.0, 0.0, self.window.width, self.window.height);
         let col = self.column();
+        let scale = self.window.scale;
+        let hairline = snap(1.0, scale);
         f.rect(window, 0.0, PAPER)?;
         f.clipped(window, 0.0, |f| {
             f.group(Role::Main, col, "", |f| {
@@ -163,8 +166,12 @@ impl App for TextPage {
                                 f.text(col.x, y, col.w, style, t)?;
                                 let r = Rect::new(col.x, y, col.w, h);
                                 f.sem.node(Role::Heading, r, t)?;
-                                // A rule under the title.
-                                f.rect(Rect::new(col.x, y + h + 10.0, col.w, 1.0), 0.0, RULE)?;
+                                // A rule under the title, on a device pixel.
+                                f.rect(
+                                    Rect::new(col.x, snap(y + h + 10.0, scale), col.w, hairline),
+                                    0.0,
+                                    RULE,
+                                )?;
                             }
                             Block::Heading(t) => {
                                 f.text(col.x, y, col.w, style, t)?;
