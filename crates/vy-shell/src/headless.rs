@@ -9,7 +9,7 @@
 //! static page or after a fixed number of ticks of an animating one.
 
 use crate::external::RecordingOpener;
-use crate::page::Source;
+use crate::page::{LoadedPage, Source};
 use crate::paths::scratch_dir;
 use crate::shell::{Config, Shell, Waker};
 use std::path::PathBuf;
@@ -116,14 +116,31 @@ pub fn settle(shell: &mut Shell, max_ticks: u32, timeout: Duration) -> Result<u6
 /// Load `source` in a fresh headless shell and return the composited
 /// frame once the page has settled.
 pub fn screenshot(source: Source, options: &Options) -> Result<RgbaImage, String> {
-    let mut shell = headless_shell(
+    let mut shell = fresh(options)?;
+    shell.open_tab(Some(source));
+    capture(shell, options)
+}
+
+/// [`screenshot`] of a page already in hand (see
+/// `Shell::open_tab_loaded`): one the caller fetched and judged, trusted
+/// or not, so the frame can show grants and the capability question.
+pub fn screenshot_loaded(page: LoadedPage, options: &Options) -> Result<RgbaImage, String> {
+    let mut shell = fresh(options)?;
+    shell.open_tab_loaded(page);
+    capture(shell, options)
+}
+
+fn fresh(options: &Options) -> Result<Shell, String> {
+    headless_shell(
         options.exe.clone(),
         options.width,
         options.height,
         options.scale,
     )
-    .map_err(|e| e.to_string())?;
-    shell.open_tab(Some(source));
+    .map_err(|e| e.to_string())
+}
+
+fn capture(mut shell: Shell, options: &Options) -> Result<RgbaImage, String> {
     settle(&mut shell, options.max_ticks, options.timeout)?;
     let image = shell.frame().clone();
     shell.shutdown();

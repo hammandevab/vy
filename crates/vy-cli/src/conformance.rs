@@ -12,9 +12,10 @@ use crate::{render, CannedResponse, RenderRequest, ScriptedEvent, Step};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use vy_manifest::{mime_for_path, CapabilityRequests, Draft, Manifest, ResourceInput};
+use vy_manifest::{mime_for_path, CapabilityRequests, Draft, Manifest, ResourceInput, SigningKey};
 use vy_render::{diff_ratio, Resource, RgbaImage};
 use vy_runtime::{Capabilities, SemNode};
+use vy_shell::page::{LoadedPage, Source};
 
 /// Largest accepted fraction of differing pixels (0.1 %, SPEC-12.2.2).
 pub const MAX_DIFF_RATIO: f64 = 0.001;
@@ -54,9 +55,22 @@ pub struct Case {
     /// module runs in a tab process of the headless shell, with its
     /// manifest draft, and the golden is the composited frame, chrome
     /// included; `width` × `height` is the window. Such a case has no
-    /// events and no semantic tree.
+    /// events, no semantic tree and grants nothing itself.
     pub shell: bool,
+    /// For a shell case: the `vy://` address the page is taken to have
+    /// been fetched from, signed with the suite's key and verified
+    /// (SPEC-7.4.2), so the default policy decides its grants
+    /// (SPEC-8.2.3) and the chrome shows the badges and the question.
+    /// Without it a shell case is a local file in restricted mode
+    /// (SPEC-7.4.3).
+    pub address: Option<String>,
 }
+
+/// Seed of the key the suite signs a shell case's package with when the
+/// case has an `address`; the headless shell trusts the page because the
+/// suite verified the signature, as the client does for a fetched page
+/// under a pinned key (SPEC-7.4.2). Only ever used here.
+const SHELL_TRUST_SEED: [u8; 32] = *b"vy-conformance-shell-trust-key!!";
 
 /// One entry of a case's `resources`: a bare path, or a table with the
 /// declared image size.
@@ -426,13 +440,22 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         resources: Vec<CaseResource>,
         fetch: Vec<CannedResponse>,
         shell: bool,
+        address: Option<String>,
     }
     fn finish(d: Draft, line: usize) -> Result<Case> {
         let name = d
             .name
             .ok_or_else(|| anyhow!("case before line {line}: missing name"))?;
-        if d.shell && (!d.events.is_empty() || d.semantic.is_some() || !d.fetch.is_empty()) {
-            bail!("case {name}: a shell case has no events, fetch or semantic tree");
+        if d.shell
+            && (!d.events.is_empty()
+                || d.semantic.is_some()
+                || !d.fetch.is_empty()
+                || d.capabilities != Capabilities::default())
+        {
+            bail!("case {name}: a shell case has no events, fetch, semantic tree or capabilities (the policy grants, SPEC-8.2.3)");
+        }
+        if d.address.is_some() && !d.shell {
+            bail!("case {name}: address is for shell cases");
         }
         Ok(Case {
             module: d
@@ -453,6 +476,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             resources: d.resources,
             fetch: d.fetch,
             shell: d.shell,
+            address: d.address,
             name,
         })
     }
@@ -509,6 +533,13 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             }
             "scale" => d.scale = Some(Scalar::parse(value, line)?.num(key, line)? as f32),
             "shell" => d.shell = Scalar::parse(value, line)?.bool(key, line)?,
+            "address" => {
+                let address = Scalar::parse(value, line)?.str(key, line)?.to_string();
+                if !address.starts_with("vy://") {
+                    bail!("line {line}: address must be a vy:// address");
+                }
+                d.address = Some(address);
+            }
             "capabilities" => {
                 let mut caps = Capabilities::default();
                 for e in parse_array(value, line)? {
@@ -755,8 +786,23 @@ pub fn tab_executable() -> Result<PathBuf> {
 }
 
 /// A shell case: the module and its draft through the headless shell,
-/// this executable serving as the tab process (`vy-cli --tab`).
+/// this executable serving as the tab process (`vy-cli --tab`). With an
+/// `address`, the page is handed to the shell as fetched and trusted
+/// (see [`load_shell_page`]); without one it is a local file.
 fn run_shell_case(root: &Path, case: &Case) -> Result<RgbaImage> {
+    let options = vy_shell::headless::Options {
+        width: case.width as f32,
+        height: case.height as f32,
+        scale: case.scale,
+        max_ticks: case.frames.max(1),
+        exe: Some(tab_executable()?),
+        timeout: std::time::Duration::from_secs(120),
+    };
+    if let Some(address) = &case.address {
+        let page = load_shell_page(root, case, address)?;
+        return vy_shell::headless::screenshot_loaded(page, &options)
+            .map_err(|e| anyhow!("shell: {e}"));
+    }
     let module_path = root
         .join("target/wasm")
         .join(format!("{}.wasm", case.module));
@@ -770,15 +816,48 @@ fn run_shell_case(root: &Path, case: &Case) -> Result<RgbaImage> {
         path: module_path,
         draft: Some(case.manifest_path(root)),
     };
-    let options = vy_shell::headless::Options {
-        width: case.width as f32,
-        height: case.height as f32,
-        scale: case.scale,
-        max_ticks: case.frames.max(1),
-        exe: Some(tab_executable()?),
-        timeout: std::time::Duration::from_secs(120),
-    };
     vy_shell::headless::screenshot(source, &options).map_err(|e| anyhow!("shell: {e}"))
+}
+
+/// The page of a shell case with an `address`: the case's package, signed
+/// with the suite's key and verified, as if fetched from the address
+/// under a pinned key (SPEC-7.4.2). The default policy then decides the
+/// grants (SPEC-8.2.3) with the address's authority as the page's own
+/// origin (SPEC-9.5.1): `net` to another origin, `clipboard` and
+/// `persist_frame` are questions, which the chrome shows over the page.
+fn load_shell_page(root: &Path, case: &Case, address: &str) -> Result<LoadedPage> {
+    let CasePackage {
+        wasm,
+        mut manifest,
+        resources,
+    } = load_case_package(root, case)?;
+    let Source::Address(address) =
+        Source::parse(address).map_err(|e| anyhow!("case {}: {e}", case.name))?
+    else {
+        bail!("case {}: address must be a vy:// address", case.name);
+    };
+    let key = SigningKey::from_seed(&SHELL_TRUST_SEED);
+    manifest.sign(&key);
+    let trust = manifest
+        .verify(&key.public())
+        .ok_or_else(|| anyhow!("case {}: the package did not verify", case.name))?;
+    let origin = address.origin();
+    let authority = origin.trim_start_matches("vy://");
+    let own = [origin.clone(), format!("https://{authority}")];
+    let verdicts = manifest
+        .capabilities
+        .default_grants(Some(&trust), |n| n.origins.iter().all(|o| own.contains(o)));
+    Ok(LoadedPage {
+        display: address.to_string(),
+        origin: Some(origin),
+        sha256: manifest.module.hash.0,
+        manifest: Some(manifest),
+        wasm,
+        resources: resources.into_iter().map(|r| (r.bytes, r.pixels)).collect(),
+        trusted: true,
+        verdicts,
+        is_localhost: address.is_localhost(),
+    })
 }
 
 fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResult) -> Result<()> {
@@ -1198,6 +1277,29 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         .unwrap();
         assert_eq!(explicit[0].frames, 1, "explicit frames wins");
         assert_eq!(explicit[0].events[0].after_frames, None);
+        // A shell case takes an address and nothing the headless host
+        // would do itself; the address is for shell cases only.
+        let shell = parse_cases(&format!(
+            "{base}shell = true\naddress = \"vy://pages.example/x\"\n"
+        ))
+        .unwrap();
+        assert!(shell[0].shell);
+        assert_eq!(shell[0].address.as_deref(), Some("vy://pages.example/x"));
+        assert_eq!(
+            parse_cases(&format!("{base}shell = true\n")).unwrap()[0].address,
+            None
+        );
+        for bad in [
+            "address = \"vy://pages.example/x\"",
+            "shell = true\naddress = \"https://pages.example/x\"",
+            "shell = true\naddress = 1",
+            "shell = true\ncapabilities = [\"ime\"]",
+            "shell = true\nsemantic = \"m\"",
+            "shell = true\nevents = [{kind = \"pointer_leave\"}]",
+            "shell = true\nfetch = [{url = \"x\"}]",
+        ] {
+            assert!(parse_cases(&format!("{base}{bad}\n")).is_err(), "{bad}");
+        }
     }
 
     /// SPEC-10.4.2, SPEC-8.2.2: a page with input fields whose manifest does
