@@ -27,7 +27,9 @@ RUN rustup toolchain install 1.97.0 --profile minimal --component rustfmt --comp
     && rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl wasm32-unknown-unknown \
     && rustup target list --toolchain 1.97.0 --installed
 COPY . .
-ENV CC_x86_64_unknown_linux_musl=musl-gcc
+ENV CC_x86_64_unknown_linux_musl=musl-gcc CARGO_NET_RETRY=10 CARGO_BUILD_JOBS=4
+# Diagnostik i loggen om något steg faller: vilken kedja och vilka targets som används.
+RUN rustup show && cargo --version && rustc --print sysroot && ls "$(rustc --print sysroot)/lib/rustlib"
 # Servern som statisk binär; publiceringsverktygen körs bara här i bygget.
 RUN cargo build --release --locked --target x86_64-unknown-linux-musl -p vy-serve
 RUN cargo build --release --locked -p vy-cli -p vy-publish
