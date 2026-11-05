@@ -106,6 +106,27 @@ impl PublicKey {
     }
 }
 
+/// The `vy-key` text form of a publisher's public keys: one 64-hex-digit
+/// Ed25519 key per line, `#` comments and blank lines ignored. This is the
+/// body of `https://<host>/.well-known/vy-key` (SPEC-7.4.2) and of the
+/// `.pub` file `vy-publish keygen` writes.
+pub fn key_file(keys: &[PublicKey]) -> String {
+    let mut out = String::from("# vy-key: ed25519 public keys, one per line\n");
+    for k in keys {
+        out.push_str(&format!("# key_id {}\n{k}\n", k.key_id()));
+    }
+    out
+}
+
+/// Parse the `vy-key` text form; every non-comment line must be a key.
+pub fn parse_key_file(text: &str) -> Result<Vec<PublicKey>, Error> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::parse)
+        .collect()
+}
+
 impl Manifest {
     /// Sign the canonical encoding without `sig` (SPEC-7.4.1) and store
     /// the result in `sig` with the key's id.

@@ -2,9 +2,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use vy_manifest::parse_key_file;
 use vy_publish::{
-    build, inspect, keygen, load_resources, parse_public_keys, read_key, write_key, BuildError,
-    SignatureStatus,
+    build, inspect, keygen, load_resources, read_key, write_key, BuildError, SignatureStatus,
 };
 
 fn usage() -> ExitCode {
@@ -140,7 +140,7 @@ fn cmd_inspect(args: &[String]) -> Result<ExitCode, String> {
     let key = match a.value("public-key") {
         Some(p) => {
             let text = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
-            let keys = parse_public_keys(&text).map_err(|e| format!("{p}: {e}"))?;
+            let keys = parse_key_file(&text).map_err(|e| format!("{p}: {e}"))?;
             keys.into_iter().next()
         }
         None => None,

@@ -8,8 +8,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use vy_manifest::{
-    mime_for_path, Draft, Error as ManifestError, Package, PackageError, Problem, PublicKey,
-    ResourceInput, SigningKey,
+    key_file, mime_for_path, Draft, Error as ManifestError, Package, PackageError, Problem,
+    PublicKey, ResourceInput, SigningKey,
 };
 
 /// Why a package could not be built.
@@ -141,7 +141,7 @@ pub fn write_key(path: &Path, key: &SigningKey) -> Result<PathBuf, BuildError> {
     let mut f = options.open(path).map_err(|e| io_err(path, e))?;
     f.write_all(&key.seed()).map_err(|e| io_err(path, e))?;
     let pub_path = public_key_path(path);
-    std::fs::write(&pub_path, public_key_file(&key.public())).map_err(|e| io_err(&pub_path, e))?;
+    std::fs::write(&pub_path, key_file(&[key.public()])).map_err(|e| io_err(&pub_path, e))?;
     Ok(pub_path)
 }
 
@@ -150,24 +150,6 @@ pub fn public_key_path(key_path: &Path) -> PathBuf {
     let mut s = key_path.as_os_str().to_os_string();
     s.push(".pub");
     PathBuf::from(s)
-}
-
-/// The `vy-key` text form of a public key: one hex key per line, `#`
-/// comments. This is also what `/.well-known/vy-key` serves (SPEC-7.4.2).
-pub fn public_key_file(key: &PublicKey) -> String {
-    format!(
-        "# vy-key: ed25519 public keys, one per line\n# key_id {}\n{key}\n",
-        key.key_id()
-    )
-}
-
-/// Parse the `vy-key` text form.
-pub fn parse_public_keys(text: &str) -> Result<Vec<PublicKey>, ManifestError> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::parse)
-        .collect()
 }
 
 /// Read a seed file written by [`write_key`].
@@ -298,7 +280,10 @@ mod tests {
         assert_eq!(pub_path, dir.join("dev.key.pub"));
         assert_eq!(read_key(&path).unwrap().seed(), key.seed());
         let text = std::fs::read_to_string(&pub_path).unwrap();
-        assert_eq!(parse_public_keys(&text).unwrap(), vec![key.public()]);
+        assert_eq!(
+            vy_manifest::parse_key_file(&text).unwrap(),
+            vec![key.public()]
+        );
         assert!(write_key(&path, &key).is_err(), "never overwrites a key");
         assert_ne!(keygen().unwrap().seed(), key.seed());
         let _ = std::fs::remove_dir_all(&dir);

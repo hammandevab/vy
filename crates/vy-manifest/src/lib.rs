@@ -25,7 +25,7 @@ pub use package::{
     ENTRY_RESOURCE_PREFIX, MAX_PACKAGE_BYTES, MEDIA_MANIFEST, MEDIA_PACKAGE, ZSTD_LEVEL,
 };
 pub use policy::{default_grant, Grant, Requested};
-pub use sign::{key_id, PublicKey, SigningKey, KEY_ID_HEX_LEN};
+pub use sign::{key_file, key_id, parse_key_file, PublicKey, SigningKey, KEY_ID_HEX_LEN};
 pub use validate::{
     is_bcp47, is_date, is_origin, module_initial_pages, png_dimensions, Problem,
     AUTO_STORAGE_QUOTA_KB, MAX_MODULE_BYTES, MAX_RESOURCES_BYTES, RESOURCE_MIMES,
@@ -810,6 +810,15 @@ mod tests {
         assert!(!m.verify(&other.public()));
         let unsigned = Manifest { sig: None, ..m };
         assert!(!unsigned.verify(&key.public()));
+        // The vy-key text form round-trips and rejects junk lines.
+        let other_key = SigningKey::from_seed(&[7u8; 32]);
+        let text = key_file(&[key.public(), other_key.public()]);
+        assert_eq!(
+            parse_key_file(&text).unwrap(),
+            vec![key.public(), other_key.public()]
+        );
+        assert!(parse_key_file("# only a comment\n").unwrap().is_empty());
+        assert!(parse_key_file("not hex\n").is_err());
     }
 
     /// Decision 7: image resources carry `w`/`h`, checked against the PNG
