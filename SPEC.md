@@ -149,6 +149,7 @@ Loggen gör varje nyckel en utgivare tagit i bruk synlig i efterhand; den är en
 
 - **[SPEC-9.1.1]** Varje flik körs i en egen OS-process med en egen wasmtime-instans.
 - **[SPEC-9.1.2]** Rasterisering och GPU-kontext finns endast i huvudprocessen; sandboxad kod delar aldrig GPU-kontext.
+- **[SPEC-9.1.3]** Flikprocessen körs utan filsystems- och nätverksåtkomst efter uppstart; värden kan verifiera det med en sond.
 - **[SPEC-9.2.1]** Beviljade capabilities visas i adressfältet och kan återkallas var för sig av användaren.
 - **[SPEC-9.3.1]** Resursgränser per flik verkställs av värden: minne enligt `memory_max`, 8 ms CPU per frame, 0 CPU i bakgrund utan `persist_frame`, 64 samtidiga nätverksanrop, 256 MB/min nätverk, `quota_kb` lagring.
 - **[SPEC-9.3.2]** Värden kopierar högst dessa byte ur modulminnet per anrop: `log` 4 KB; `dl_text`, `text_measure`, `text_caret` 65 535; `dl_path` 65 535 × 9; `sem_node` 4 KB; `navigate`, `link_register` och `fetch_begin`-URL 2 KB; `fetch_begin`-kropp 1 MB; `state_*`-nyckel 256 byte; `state_put`-värde 1 MB; `clipboard_write` 1 MB. Ett `len` över taket ger `E_ARG` utan kopia. Per frame håller värden högst 65 536 semantiska noder, högst 4 096 länkar och högst 16 MB text i semantiskt träd och display list tillsammans; överskott ger `E_DL_FULL`.
