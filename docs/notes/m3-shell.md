@@ -125,6 +125,13 @@ från referensmaskinen; `bench` mäter dem), vy-runtime (6.2.2 bevisas nu av 13.
 skalnivå men meningen refereras därifrån; 9.3.1, 9.5.1), vy-render 13.2.1 (mäts i bench).
 Backloggen: 29 → 19 (`cargo test --workspace -- --ignored --list`).
 
+## Grindar och tal
+
+248 gröna tester i workspace (var 207), 19 ignorerade (var 28). Spec-id 132/132. 54
+konformansfall à 0,000 % (50 som förr, oförändrade, plus fyra skalfall), 26 träd lika.
+`abi-dump` = `docs/ABI-1.0.md`. Modulerna 11/11 bygger, `test_modules` 11/11, `check-abi` 11/11.
+`cargo build --release -p vy-shell` går på Linux (26,2 MB); Windows och macOS verifieras av CI.
+
 ## Vad som kräver ett riktigt fönster – manuell kontroll på Windows
 
 CI bygger `vy-shell.exe` på `windows-latest` och tar en huvudlös skärmdump, men ingen i kedjan
@@ -204,6 +211,8 @@ Läsning:
 - **Input till pixel** 10,6 ms P50 i dashboard (1280×822 sida + chrome): två rundturer över
   rören, flikens frame, rasterisering och kompositering. Chromen rasteriseras bara om dess lista
   ändrats (cache i `compose`). P95 på budgetgränsen på den här maskinen.
+- **Minne (SPEC-13.3.1):** skalet + 11 flikprocesser = 225 MB RSS i release på Linux
+  (19–20 MB per flik), under 400 MB.
 - Binären `vy-shell` är 26,2 MB på Linux (release, thin LTO, ostrippad; strippad 21,8 MB).
   SPEC-12.3.1 (≤ 25 MB) är M5-grinden; `strip = true` i release-profilen räcker.
 
@@ -221,7 +230,8 @@ Läsning:
 - **Lagring sparas** vid suspend/dold/avslut, inte vid varje `state_put`; en krasch i
   huvudprocessen mellan två suspend förlorar ändringar sedan senaste.
 - **`spec_13_3_1` i debug** rapporterar bara RSS (45 MB per flikprocess i debug på Linux);
-  gränsen 400 MB hävdas i release.
+  gränsen 400 MB hävdas i release, där skalet + 11 flikprocesser (spelet och tio textsidor)
+  är 225 MB på Linux (19–20 MB per flik).
 
 ## Spec-frågor
 
