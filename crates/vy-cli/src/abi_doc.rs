@@ -8,7 +8,7 @@
 //! same commit, and after the freeze no such commit is allowed within 1.x.
 
 use std::fmt::Write;
-use vy_abi::{cap, err, event, key, level, limits, method, modifier, op, role, Sig};
+use vy_abi::{button, cap, err, event, key, level, limits, method, modifier, op, role, Sig};
 
 /// Path of the listing relative to the repository root.
 pub const PATH: &str = "docs/ABI-1.0.md";
@@ -158,6 +158,28 @@ pub fn abi_listing() -> String {
         key::ESCAPE
     );
     let _ = writeln!(w);
+    let _ = writeln!(
+        w,
+        "## Pekarknappar (`c` i `POINTER_DOWN` och `POINTER_UP`; bitar i `POINTER_MOVE`)"
+    );
+    let _ = writeln!(w);
+    let _ = writeln!(w, "| Knapp | Namn | Bit i `POINTER_MOVE.c` |");
+    let _ = writeln!(w, "| --- | --- | --- |");
+    for b in 1..=button::MAX {
+        let _ = writeln!(
+            w,
+            "| {b} | {} | {} |",
+            button::name(b).unwrap_or("?"),
+            button::mask(b)
+        );
+    }
+    let _ = writeln!(w);
+    let _ = writeln!(
+        w,
+        "`POINTER_DOWN` och `POINTER_UP` bär knappen i `c`; `POINTER_MOVE` bär en mask där bit \\\n\
+         `n − 1` är satt för varje nedtryckt knapp `n` (`vy_abi::button`, SPEC-A.2.2)."
+    );
+    let _ = writeln!(w);
 
     let _ = writeln!(w, "## Semantiska roller");
     let _ = writeln!(w);
@@ -222,7 +244,7 @@ pub fn abi_listing() -> String {
     let _ = writeln!(w);
     let _ = writeln!(w, "| Konstant | Värde | Betydelse |");
     let _ = writeln!(w, "| --- | --- | --- |");
-    let rows: [(&str, u64, &str); 22] = [
+    let rows: [(&str, u64, &str); 23] = [
         (
             "MAX_OPS_PER_FRAME",
             limits::MAX_OPS_PER_FRAME.into(),
@@ -332,6 +354,11 @@ pub fn abi_listing() -> String {
             "method::MAX",
             method::MAX as u64,
             "högsta `fetch_begin.method` (SPEC-5.2.7)",
+        ),
+        (
+            "button::MAX",
+            button::MAX as u64,
+            "högsta pekarknapp (SPEC-A.2.2)",
         ),
     ];
     for (name, value, meaning) in rows {

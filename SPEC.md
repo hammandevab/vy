@@ -270,6 +270,18 @@ registret sist.
 
 - **[SPEC-A.2.1]** Event-typerna ovan och deras argumentordning ändras aldrig inom 1.x; nya typer får nya nummer.
 
+### Pekarknappar (`c` i `POINTER_DOWN` och `POINTER_UP`; bitar i `POINTER_MOVE`)
+
+| Knapp | Namn |
+| --- | --- |
+| 1 | primär |
+| 2 | sekundär |
+| 3 | mitten |
+| 4 | bakåt |
+| 5 | framåt |
+
+- **[SPEC-A.2.2]** `POINTER_DOWN` och `POINTER_UP` bär knappen i `c` enligt tabellen ovan; `POINTER_MOVE` bär i `c` en mask där bit `n − 1` är satt för varje nedtryckt knapp `n`; de fem knapparna ovan är de enda i 1.0.
+
 ### Semantiska roller
 
 1 text, 2 heading, 3 link, 4 button, 5 textbox, 6 checkbox, 7 radio, 8 list, 9 listitem, 10 image, 11 table,

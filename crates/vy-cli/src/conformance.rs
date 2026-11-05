@@ -347,13 +347,13 @@ fn parse_event(table: &str, line: usize) -> Result<Step> {
         "pointer_down" => ScriptedEvent::PointerDown {
             x: need("x")?.num("x", line)? as f32,
             y: need("y")?.num("y", line)? as f32,
-            button: int("button", 1)?,
+            button: int("button", i64::from(vy_abi::button::PRIMARY))?,
             modifiers: int("modifiers", 0)?,
         },
         "pointer_up" => ScriptedEvent::PointerUp {
             x: need("x")?.num("x", line)? as f32,
             y: need("y")?.num("y", line)? as f32,
-            button: int("button", 1)?,
+            button: int("button", i64::from(vy_abi::button::PRIMARY))?,
             modifiers: int("modifiers", 0)?,
         },
         "pointer_leave" => ScriptedEvent::PointerLeave,

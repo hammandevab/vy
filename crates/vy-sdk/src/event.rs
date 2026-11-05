@@ -4,6 +4,11 @@ use crate::from_x100;
 use crate::sem::NodeId;
 use vy_abi::{cap, event as kind, modifier};
 
+/// Pointer buttons as `POINTER_DOWN`/`POINTER_UP` name them and
+/// `POINTER_MOVE` masks them: 1 primary, 2 secondary, 3 middle, 4 back,
+/// 5 forward, with `button::mask(n)` the bit for a held button (SPEC-A.2.2).
+pub use vy_abi::button;
+
 /// The six capabilities of 1.0 (SPEC-8.2.1), numbered as `KIND_CAPABILITY`
 /// carries them (SPEC-A.4.1). A page never needs `vy_abi` for this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +89,7 @@ pub enum Event<'a> {
         x: f32,
         /// Y.
         y: f32,
-        /// Buttons held.
+        /// Buttons held: bit `n - 1` for button `n` (`button::mask`, SPEC-A.2.2).
         buttons: i32,
         /// Modifier keys.
         modifiers: Modifiers,
@@ -95,7 +100,7 @@ pub enum Event<'a> {
         x: f32,
         /// Y.
         y: f32,
-        /// The button.
+        /// The button, 1 primary .. 5 forward (`button`, SPEC-A.2.2).
         button: i32,
         /// Modifier keys.
         modifiers: Modifiers,
@@ -106,7 +111,7 @@ pub enum Event<'a> {
         x: f32,
         /// Y.
         y: f32,
-        /// The button.
+        /// The button, 1 primary .. 5 forward (`button`, SPEC-A.2.2).
         button: i32,
         /// Modifier keys.
         modifiers: Modifiers,

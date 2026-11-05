@@ -312,6 +312,46 @@ pub mod cap {
     }
 }
 
+/// Pointer buttons (SPEC-A.2.2): the `c` argument of `POINTER_DOWN` and
+/// `POINTER_UP` names one button; the `c` argument of `POINTER_MOVE` is a
+/// mask with bit `n - 1` set for every held button `n`.
+pub mod button {
+    /// Left button, or the only one on a touch or pen device.
+    pub const PRIMARY: i32 = 1;
+    /// Right button.
+    pub const SECONDARY: i32 = 2;
+    /// Middle button or wheel press.
+    pub const MIDDLE: i32 = 3;
+    /// Back (the fourth button).
+    pub const BACK: i32 = 4;
+    /// Forward (the fifth button).
+    pub const FORWARD: i32 = 5;
+    /// Highest button number in 1.0.
+    pub const MAX: i32 = 5;
+
+    /// Names in button order, as the spec writes them.
+    pub const NAMES: [&str; 5] = ["primär", "sekundär", "mitten", "bakåt", "framåt"];
+
+    /// The bit of `POINTER_MOVE.c` that says `button` is held:
+    /// `1 << (button - 1)`, or 0 for a number 1.0 does not define.
+    pub const fn mask(button: i32) -> i32 {
+        if button >= PRIMARY && button <= MAX {
+            1 << (button - 1)
+        } else {
+            0
+        }
+    }
+
+    /// Name of a button, or `None` outside 1..=5.
+    pub fn name(button: i32) -> Option<&'static str> {
+        if (PRIMARY..=MAX).contains(&button) {
+            Some(NAMES[(button - 1) as usize])
+        } else {
+            None
+        }
+    }
+}
+
 /// Modifier bits in the `modifierare` argument of pointer, scroll and key
 /// events (SPEC-A.5.1, SPEC-A.2.1).
 pub mod modifier {
@@ -1158,6 +1198,39 @@ mod tests {
         }
         assert!(!role::is_focusable(0) && !role::is_focusable(25));
         assert_eq!(role::FOCUSABLE.len(), 8);
+    }
+
+    /// SPEC-A.2.2, SPEC-A.2.1: the buttons are 1 primary, 2 secondary,
+    /// 3 middle, 4 back, 5 forward and nothing else; `POINTER_MOVE` carries
+    /// them as a mask with bit `n - 1` per button `n`.
+    #[test]
+    fn spec_a_2_2_pointer_buttons() {
+        assert_eq!(
+            (
+                button::PRIMARY,
+                button::SECONDARY,
+                button::MIDDLE,
+                button::BACK,
+                button::FORWARD
+            ),
+            (1, 2, 3, 4, 5)
+        );
+        assert_eq!(button::MAX, 5);
+        assert_eq!(
+            [1, 2, 3, 4, 5].map(button::mask),
+            [1, 2, 4, 8, 16],
+            "bit n - 1 for button n"
+        );
+        assert_eq!(button::mask(0), 0);
+        assert_eq!(button::mask(6), 0);
+        assert_eq!(button::mask(-1), 0);
+        let held = button::mask(button::PRIMARY) | button::mask(button::BACK);
+        assert_eq!(held, 0b1001);
+        assert_eq!(button::name(button::PRIMARY), Some("primär"));
+        assert_eq!(button::name(button::FORWARD), Some("framåt"));
+        assert_eq!(button::name(0), None);
+        assert_eq!(button::name(6), None);
+        assert_eq!(button::NAMES.len(), button::MAX as usize);
     }
 
     /// SPEC-A.5.1, SPEC-A.2.1: the modifier bits are Shift 1, Ctrl 2, Alt 4,

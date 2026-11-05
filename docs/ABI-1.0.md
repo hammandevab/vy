@@ -123,6 +123,19 @@ nätverksanrop:
 Tangenter värden själv agerar på (USB HID): Tab 0x2B (blir `FOCUS`, når aldrig modulen), \
 Enter 0x28 och Escape 0x29 (levereras som `KEY_DOWN`) (SPEC-10.3.1).
 
+## Pekarknappar (`c` i `POINTER_DOWN` och `POINTER_UP`; bitar i `POINTER_MOVE`)
+
+| Knapp | Namn | Bit i `POINTER_MOVE.c` |
+| --- | --- | --- |
+| 1 | primär | 1 |
+| 2 | sekundär | 2 |
+| 3 | mitten | 4 |
+| 4 | bakåt | 8 |
+| 5 | framåt | 16 |
+
+`POINTER_DOWN` och `POINTER_UP` bär knappen i `c`; `POINTER_MOVE` bär en mask där bit \
+`n − 1` är satt för varje nedtryckt knapp `n` (`vy_abi::button`, SPEC-A.2.2).
+
 ## Semantiska roller
 
 | Roll | Namn | Fokuserbar |
@@ -217,3 +230,4 @@ Reserverade och aldrig använda i 1.x: 0x07, 0x08.
 | `cap::MAX` | 6 | högsta capability-id (SPEC-A.4.1) |
 | `level::MAX` | 3 | högsta `log.level`; högre klampas hit (SPEC-5.2.1) |
 | `method::MAX` | 3 | högsta `fetch_begin.method` (SPEC-5.2.7) |
+| `button::MAX` | 5 | högsta pekarknapp (SPEC-A.2.2) |

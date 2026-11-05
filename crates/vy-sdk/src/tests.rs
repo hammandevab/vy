@@ -2,7 +2,7 @@
 //! rule the SDK mirrors; the host-side tests of the same rules live in
 //! `vy-runtime` and `vy-dl`.
 
-use crate::event::key;
+use crate::event::{button, key};
 use crate::heap::{Grow, Heap, ALIGN, HEADER, PAGE};
 use crate::mock::{self, Op};
 use crate::prelude::*;
@@ -428,9 +428,10 @@ fn spec_9_3_2_byte_caps_checked_locally() {
     mock::with(|h| assert_eq!(h.refusals, ["text_measure: E_STYLE"]));
 }
 
-/// SPEC-A.2.1, SPEC-5.1.3: every event kind decodes with the argument order
-/// of appendix A; text events resolve their buffer; unknown kinds and
-/// unresolvable buffers are delivered as `Unknown`.
+/// SPEC-A.2.1, SPEC-A.2.2, SPEC-5.1.3: every event kind decodes with the
+/// argument order of appendix A; a press names its button and a move
+/// carries the held buttons as a mask; text events resolve their buffer;
+/// unknown kinds and unresolvable buffers are delivered as `Unknown`.
 #[test]
 fn spec_a_2_1_event_decoding() {
     let none = |_, _| None;
@@ -440,10 +441,17 @@ fn spec_a_2_1_event_decoding() {
         Event::PointerMove {
             x: 10.5,
             y: 20.0,
-            buttons: 1,
+            buttons: button::mask(button::PRIMARY),
             modifiers: Modifiers(3)
         }
     );
+    let held = button::mask(button::PRIMARY) | button::mask(button::MIDDLE);
+    let Event::PointerMove { buttons, .. } = dec(kind::POINTER_MOVE, 0, 0, held, 0) else {
+        panic!()
+    };
+    assert_eq!(buttons, 0b101, "bit n - 1 per held button n");
+    assert!(buttons & button::mask(button::MIDDLE) != 0);
+    assert!(buttons & button::mask(button::SECONDARY) == 0);
     let Event::PointerMove { modifiers, .. } = dec(kind::POINTER_MOVE, 0, 0, 0, 3) else {
         panic!()
     };
@@ -453,13 +461,16 @@ fn spec_a_2_1_event_decoding() {
         Event::PointerDown {
             x: 1.0,
             y: 2.0,
-            button: 2,
+            button: button::SECONDARY,
             modifiers: Modifiers(0)
         }
     );
     assert!(matches!(
         dec(kind::POINTER_UP, 0, 0, 1, 0),
-        Event::PointerUp { button: 1, .. }
+        Event::PointerUp {
+            button: button::PRIMARY,
+            ..
+        }
     ));
     assert_eq!(
         dec(kind::SCROLL, 0, -12000, 0, 0),
