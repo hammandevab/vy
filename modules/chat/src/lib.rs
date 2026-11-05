@@ -610,8 +610,8 @@ impl App for ChatPage {
                 status,
                 bytes,
             } => self.finish(request, status, bytes),
-            Event::Capability { id, granted } => {
-                if id != vy_abi::cap::NET {
+            Event::Capability { cap, granted } => {
+                if cap != Capability::Net {
                     return false;
                 }
                 if granted {

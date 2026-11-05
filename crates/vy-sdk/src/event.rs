@@ -2,7 +2,54 @@
 
 use crate::from_x100;
 use crate::sem::NodeId;
-use vy_abi::{event as kind, modifier};
+use vy_abi::{cap, event as kind, modifier};
+
+/// The six capabilities of 1.0 (SPEC-8.2.1), numbered as `KIND_CAPABILITY`
+/// carries them (SPEC-A.4.1). A page never needs `vy_abi` for this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Capability {
+    /// `net`: `fetch_*` to the origins the manifest lists.
+    Net = cap::NET,
+    /// `storage`: `state_*`.
+    Storage = cap::STORAGE,
+    /// `clipboard`: `clipboard_*`.
+    Clipboard = cap::CLIPBOARD,
+    /// `hires_time`: 10 µs resolution from `now_ms`.
+    HiresTime = cap::HIRES_TIME,
+    /// `ime`: `ime_begin`/`ime_end`.
+    Ime = cap::IME,
+    /// `persist_frame`: frames while the tab is hidden.
+    PersistFrame = cap::PERSIST_FRAME,
+}
+
+impl Capability {
+    /// All six, in id order.
+    pub const ALL: [Capability; 6] = [
+        Capability::Net,
+        Capability::Storage,
+        Capability::Clipboard,
+        Capability::HiresTime,
+        Capability::Ime,
+        Capability::PersistFrame,
+    ];
+
+    /// The capability with this id, or `None` outside 1..=6 (a later
+    /// version's capability, SPEC-A.4.1).
+    pub fn from_id(id: i32) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.id() == id)
+    }
+
+    /// The id as `KIND_CAPABILITY` carries it.
+    pub const fn id(self) -> i32 {
+        self as i32
+    }
+
+    /// The canonical manifest name (SPEC-8.2.1).
+    pub fn name(self) -> &'static str {
+        cap::name(self.id()).unwrap_or("")
+    }
+}
 
 /// Modifier keys held during an input event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,14 +186,16 @@ pub enum Event<'a> {
         /// True on the final warning before a forced `vy_suspend`.
         last_warning: bool,
     },
-    /// A capability was granted or revoked (`vy_abi::cap`).
+    /// A capability was granted or revoked (SPEC-A.4.1). A capability id
+    /// this SDK does not know arrives as [`Event::Unknown`].
     Capability {
-        /// Capability id.
-        id: i32,
+        /// The capability.
+        cap: Capability,
         /// True when granted.
         granted: bool,
     },
-    /// A kind this SDK does not know (SPEC-A.2.1: new kinds get new numbers).
+    /// A kind, or a capability id, this SDK does not know (SPEC-A.2.1,
+    /// SPEC-A.4.1: new kinds and capabilities get new numbers).
     Unknown {
         /// Kind.
         kind: i32,
@@ -233,9 +282,12 @@ impl<'a> Event<'a> {
                 allowed_ms: b,
                 last_warning: c == 1,
             },
-            kind::CAPABILITY => Event::Capability {
-                id: a,
-                granted: b == 1,
+            kind::CAPABILITY => match Capability::from_id(a) {
+                Some(cap) => Event::Capability {
+                    cap,
+                    granted: b == 1,
+                },
+                None => unknown,
             },
             _ => unknown,
         }

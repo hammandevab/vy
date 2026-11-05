@@ -43,7 +43,7 @@ pub use api::{
 };
 pub use app::{App, Window};
 pub use error::VyError;
-pub use event::{Event, Modifiers};
+pub use event::{Capability, Event, Modifiers};
 pub use frame::{Fit, Frame, Path};
 pub use layout::{Column, Row};
 pub use sem::{NodeId, Role, Sem};
@@ -187,7 +187,7 @@ pub mod prelude {
     pub use crate::api::{log, request_frame, text_measure, text_style, Level};
     pub use crate::app::{App, Window};
     pub use crate::error::VyError;
-    pub use crate::event::{Event, Modifiers};
+    pub use crate::event::{Capability, Event, Modifiers};
     pub use crate::frame::{Fit, Frame, Path};
     pub use crate::layout::{Column, Row};
     pub use crate::sem::{NodeId, Role, Sem};

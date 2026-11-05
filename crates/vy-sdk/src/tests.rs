@@ -474,9 +474,26 @@ fn spec_a_2_1_event_decoding() {
     assert_eq!(
         dec(kind::CAPABILITY, vy_abi::cap::IME, 0, 0, 0),
         Event::Capability {
-            id: 5,
+            cap: Capability::Ime,
             granted: false
         }
+    );
+    assert_eq!(
+        dec(kind::CAPABILITY, 1, 1, 0, 0),
+        Event::Capability {
+            cap: Capability::Net,
+            granted: true
+        }
+    );
+    for c in Capability::ALL {
+        assert_eq!(Capability::from_id(c.id()), Some(c));
+        assert_eq!(vy_abi::cap::name(c.id()), Some(c.name()), "{c:?}");
+    }
+    assert_eq!(Capability::PersistFrame.id(), vy_abi::cap::PERSIST_FRAME);
+    assert_eq!(Capability::Net.name(), "net");
+    assert!(
+        matches!(dec(kind::CAPABILITY, 7, 1, 0, 0), Event::Unknown { .. }),
+        "a 1.1 capability id is unknown to a 1.0 SDK (SPEC-A.4.1)"
     );
     assert_eq!(
         dec(99, 1, 2, 3, 4),
