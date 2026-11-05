@@ -154,3 +154,66 @@ formningen, är resten av textkostnaden (steg 2b). Kontrollraderna utan text (`r
 väggklocka på 1 s i debug och föll tre gånger i rad (1,0–1,6 s) medan de andra spåren byggde
 om efter en omstart; samma test med och utan textcachen gick sedan på 1,4–1,7 s för hela
 binären. Det testet har ingen text. Gränsen lämnas (steg 2b gör ramen billigare).
+
+## Steg 2b: rasteriseringens snabbvägar, med samma byte och samma budget (SPEC-13.2.1)
+
+Regeln: guldbilderna är det tiny-skia ritade genom en klippmask, och budgeten är det M3 debiterade;
+ingenting får ändra en byte eller en enhet. Varje ändring nedan bygger på en egenskap i tiny-skias
+aritmetik som ett test bevisar, och `raster_reference.rs` (M3:s rasterisering ordagrant, bara i
+tester) jämförs byte för byte och rapport för rapport med den nya.
+
+| Ändring | Varför det är samma byte | Bevis |
+| --- | --- | --- |
+| **Raka klipp utan mask.** Under en stack av raka klipp (ingen radie) skärs op:en till klippets pixlar och ritas utan mask; maskens kostnad debiteras ändå, en gång per nivå, där den förr byggdes. Rundade klipp har mask som förr. | En rak nivås mask är 255 i klippets pixlar, och `MaskU8` med 255 är identiteten i båda pipelinerna (`(255x + 255) >> 8 = x`, `x × 1.0 = x`). Men tiny-skia blandar en *opak* färg utan mask som "source" (lerp) och med mask som "source over" – de skiljer en enhet vid AA-kanter (spec-fråga 41). Opaka fyllningar under raka klipp ritas därför med alfa `ALPHA_BELOW_ONE` (största `f32` under 1): inte opak för tiny-skia, så source over behålls, men `(v·a·255 + 0,5)` trunkerar till samma byte. Rundade rektanglar och fyllda banor tar snabbvägen när hela deras täckning ligger inom klippet; strykningar (fogar når utanför) alltid masken. | `alpha_below_one_stores_the_same_colour` (alla 256 värden), `fast_paths_draw_what_m3_drew`, `fast_paths_spend_the_budget_m3_spent` |
+| **Hela pixlar fylls direkt.** En rektangel med alla kanter på pixelgränser fylls här: opak som en memcpy per rad, genomskinlig med lowp:s `s + (d·(255 − sa) + 255) >> 8`. | En sådan rektangel täcker sina pixlar helt (täckning 255) och inga andra, och då är både "source" och "source over" färgen respektive den formeln. | samma differentialtest (heltalskoordinater vid skala 1 och 2 är en fjärdedel av slumpens rektanglar) |
+| **Glyfer och bilder kompositeras direkt** (`over_highp`), utan en `Pixmap` och tre kompilerade pipelines per glyf. | `draw_pixmap` kör alltid högprecisionspipelinen (mönsterskuggningens `Gather` finns inte i lowp): kanal som `v·(1/255)`, mask som `m/255`, `d·(1 − sa) + s`, klämt, ×255, avrundat halvt-till-jämnt (`cvtps2dq`/`vcvtnq`). Samma operationer i samma ordning i skalär `f32` ger samma bitar; avrundningen görs med 2²³-tricket (`round_ties_even` är ett libm-anrop på x86_64 utan SSE4.1 och stod för 15 % av instruktionerna). Glyfens färgning (M3:s heltalsformel) räknas en gång per textrad i en tabell över 256 täckningar; bildens källkolumn en gång per kolumn. | `over_highp_is_what_draw_pixmap_does`: varje källalfa, varje premultiplicerad kanal ≤ alfa och varje destinationsvärde (release; debug var sjunde destinationsvärde), opak och varierande destinationsalfa, och tio maskvärden; `round_even_u8_is_round_ties_even` |
+| **Maskpool.** Rundade nivåers masker tas ur en pool och nollas vid pop över det område de skrev (plus en pixel). | Masken är densamma som en ny nollställd; poolen ändrar bara allokeringen (en 1 MB-mask per push vid 1280 × 800 förut). | differentialtestets nästlade rundade klipp, `spec_6_1_4_clip_levels_restore_on_pop` |
+| **Duken** är en vektor med 0xFF (premultiplicerad opak vit) och tas ut utan avmultiplicering. | Duken börjar opak och varje op blandar source over (eller opak source), så alfa förblir 255 och avmultiplicering är identiteten; `debug_assert` i debug. | alla jämförelser ovan, konformans |
+| **Banor återanvänds** (`PathBuilder` ur förra banan); fyllda banor skalas med `Path::transform` före `fill_path`. | `fill_path` gör själv `clone().transform(t)` och fyller med identitet; samma funktion på samma punkter. | konformans, differentialtest |
+
+**Profil** (callgrind, `frame_2000` tre gånger, release med radtabeller): 1 133 M instruktioner före
+steg 2b:s sista två ändringar, 893 M efter avrundningstricket, 713 M efter färgtabellen och
+radvisa glyfslingor. Det som återstår är till ⅓ tiny-skias kantutjämnade banfyllning av de rundade
+rektanglarna (`path_aa`, med tre pipelines som kompileras per anrop i `RasterPipelineBlitter::new`) –
+inte nåbart utan att ändra tiny-skia eller byta rasterisering, vilket ändrar guldbilderna.
+
+**Testerna med väggklocka.** `spec_5_3_3_bench_65000_fullscreen_rects` och
+`spec_5_3_3_bench_32_rounded_clips_2000_rects` (M2.7) föll då och då i debug vid load ≈ 5 (1,0–1,6 s mot
+1 s), också på andra spår med orörd `vy-render`. De deterministiska kontrollerna (avbrott, antal
+ops, enheter) gäller i alla byggen; väggklockan hävdas nu bara i release (`time_bound`) och skrivs
+ut i debug. Mina tunga tester och väggklocktesterna delar dessutom ett lås (`tests::serial`), så en
+tidtagning aldrig delar binärens två CPU:er med en jämförelse.
+
+**Tal, hela steg 2** (2a + 2b), interfolierad A/B under load 4–5: binären före (steg 1) som A,
+efter som B, fyra block à 20 körningar per rad växelvis, median av blockens P50 och P95.
+
+```
+id                              A p50    A p95    B p50    B p95  B/A p50  budget
+raster.ops-2000                144.47   179.04    56.59    61.26     0.39  2.0
+raster.ops-2000-cold           140.37   157.24    56.11    74.48     0.40  None
+raster.rects-2000               25.93    39.24    24.25    32.09     0.94  2.0
+raster.text-200                 26.27    28.81     8.87    11.83     0.34  2.0
+raster.mix-1800-200             42.62    52.28    26.45    29.59     0.62  2.0
+raster.cards-2000              160.62   169.58    35.45    39.45     0.22  None
+raster.page.hello                1.26     5.96     0.32     2.68     0.25  2.0
+raster.page.text                 9.02    11.05     1.36     5.50     0.15  2.0
+raster.page.form                 1.56     5.86     0.50     2.86     0.32  2.0
+raster.page.list                 4.41     8.46     0.64     4.84     0.15  2.0
+raster.page.gallery             20.05    24.19    10.16    12.67     0.51  2.0
+raster.page.game                 5.50     7.65     3.28     7.23     0.60  2.0
+raster.page.dashboard            9.58    11.59     3.63     7.64     0.38  2.0
+raster.page.chat                 5.32     8.64     1.37     5.63     0.26  2.0
+raster.page.shop                32.23    35.90    14.42    18.87     0.45  2.0
+raster.page.document            15.42    21.75     2.44     6.59     0.16  2.0
+raster.page.settings             8.86    10.42     2.48     6.72     0.28  2.0
+scroll.text.frame               14.13    14.79     2.45     6.37     0.17  16.67
+input.dashboard                 13.73    16.01    10.02    13.52     0.73  16.0
+first-frame.hello               43.37    56.77    38.15    44.85     0.88  100.0
+first-frame.text                79.14   130.99    70.13   102.83     0.89  100.0
+```
+
+Varje referenssida rasteriseras 2–7 gånger snabbare; textsidans rullning tar 2,5 ms (var 14).
+Ramen i sidornas proportioner (2 000 opkoder) tar 57 ms P50 här, 28 gånger SPEC-13.2.1:s 2 ms;
+lika många kantutjämnade rundade rektanglar och glyfpixlar ryms inte på den här maskinen med en
+CPU-rasterisering som ger guldbildernas byte (se *Kvar*). De patologiska genomskinliga rundade
+rektanglarna (`rects-2000`) flyttar sig knappt: allt där är tiny-skias `path_aa`.
