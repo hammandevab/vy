@@ -78,10 +78,13 @@ crates/vy-runtime    wasmtime-instans, ABI-importer, budget
 crates/vy-render     rasterisering (wgpu, mjukvarureserv), text
 crates/vy-shell      fönster, flikar, adressfält (rörs ej före M3)
 crates/vy-cli        headless: render, check-abi, conformance, bench
+crates/vy-publish    keygen, build, inspect – utkast + modul + resurser till signerat paket
+crates/vy-serve      statisk server: paket, nycklar, index, HTML-reserv
 modules/hello        referensmodul 0 – text och en rektangel
-conformance/         guldbilder och förväntade semantiska träd
+conformance/         guldbilder, förväntade semantiska träd och manifestutkast per modul
 tools/               spec_trace.py, build_modules.sh, test_modules.sh
 docs/reviews/        granskningssidor, en per PR
+docs/notes/          byggagentens noteringar per gren
 ```
 
 ## Språk
