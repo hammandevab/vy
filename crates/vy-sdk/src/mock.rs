@@ -16,7 +16,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use vy_abi::{err, fit, limits, ABI_VERSION};
+use vy_abi::{err, fit, level, limits, ABI_VERSION};
 
 /// Width of one character relative to the font size in the mock's text model.
 pub const CHAR_WIDTH_FACTOR: f32 = 0.6;
@@ -322,13 +322,16 @@ impl MockHost {
         ABI_VERSION
     }
 
-    pub(crate) fn log(&mut self, level: i32, bytes: &[u8]) -> i32 {
+    pub(crate) fn log(&mut self, lvl: i32, bytes: &[u8]) -> i32 {
         if bytes.len() > limits::MAX_LOG_BYTES as usize {
             self.refuse("log", err::E_ARG);
             return err::E_ARG;
         }
-        self.logs
-            .push((level, String::from_utf8_lossy(bytes).into_owned()));
+        // Any level outside 0..=3 is recorded as 3, like the host (SPEC-5.2.1).
+        self.logs.push((
+            level::clamp(lvl),
+            String::from_utf8_lossy(bytes).into_owned(),
+        ));
         err::OK
     }
 

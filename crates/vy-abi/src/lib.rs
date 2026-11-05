@@ -196,6 +196,66 @@ pub mod event {
     }
 }
 
+/// `level` argument of `log` (SPEC-5.2.1). A value outside 0..=3 is logged
+/// as `ERROR`: a log call never fails on its level.
+pub mod level {
+    /// Development chatter.
+    pub const DEBUG: i32 = 0;
+    /// Normal operation.
+    pub const INFO: i32 = 1;
+    /// Something is off but the page goes on.
+    pub const WARN: i32 = 2;
+    /// The page cannot do what it meant to.
+    pub const ERROR: i32 = 3;
+    /// Highest level.
+    pub const MAX: i32 = 3;
+
+    /// Names in level order (SPEC-5.2.1).
+    pub const NAMES: [&str; 4] = ["debug", "info", "warn", "error"];
+
+    /// The level a host records a `log` call at: the argument when it is
+    /// one of the four, else `ERROR` (SPEC-5.2.1).
+    pub const fn clamp(level: i32) -> i32 {
+        if level >= DEBUG && level <= MAX {
+            level
+        } else {
+            MAX
+        }
+    }
+
+    /// Name of a level after [`clamp`].
+    pub fn name(level: i32) -> &'static str {
+        NAMES[clamp(level) as usize]
+    }
+}
+
+/// `method` argument of `fetch_begin` (SPEC-5.2.7). Any other value is
+/// `E_ARG` and no request is made.
+pub mod method {
+    /// `GET`.
+    pub const GET: i32 = 0;
+    /// `POST`.
+    pub const POST: i32 = 1;
+    /// `PUT`.
+    pub const PUT: i32 = 2;
+    /// `DELETE`.
+    pub const DELETE: i32 = 3;
+    /// Highest valid method.
+    pub const MAX: i32 = 3;
+
+    /// HTTP method names in value order (SPEC-5.2.7).
+    pub const NAMES: [&str; 4] = ["GET", "POST", "PUT", "DELETE"];
+
+    /// HTTP method name of a value, or `None` outside 0..=3.
+    pub fn name(method: i32) -> Option<&'static str> {
+        if (GET..=MAX).contains(&method) {
+            Some(NAMES[method as usize])
+        } else {
+            None
+        }
+    }
+}
+
 /// `fit` argument of `dl_image` (SPEC-5.2.3) and the `fit` field of the
 /// `IMAGE` opcode (SPEC-C.1.1). Any other value is `E_ARG`.
 pub mod fit {
@@ -910,6 +970,46 @@ mod tests {
         assert!(import("log").is_some());
         assert!(import("request_frame").is_some());
         assert!(import("exit").is_some());
+    }
+
+    /// SPEC-5.2.1: `log.level` is 0 debug, 1 info, 2 warn, 3 error, and a
+    /// host records any other value as 3.
+    #[test]
+    fn spec_5_2_1_log_levels() {
+        assert_eq!(
+            (level::DEBUG, level::INFO, level::WARN, level::ERROR),
+            (0, 1, 2, 3)
+        );
+        assert_eq!(level::MAX, 3);
+        assert_eq!(level::NAMES, ["debug", "info", "warn", "error"]);
+        for l in 0..=3 {
+            assert_eq!(level::clamp(l), l);
+        }
+        for bad in [-1, 4, 99, i32::MIN, i32::MAX] {
+            assert_eq!(level::clamp(bad), level::ERROR, "{bad}");
+            assert_eq!(level::name(bad), "error");
+        }
+        assert_eq!(level::name(level::WARN), "warn");
+    }
+
+    /// SPEC-5.2.7: `fetch_begin.method` is 0 GET, 1 POST, 2 PUT, 3 DELETE
+    /// and nothing else.
+    #[test]
+    fn spec_5_2_7_fetch_methods() {
+        assert_eq!(
+            (method::GET, method::POST, method::PUT, method::DELETE),
+            (0, 1, 2, 3)
+        );
+        assert_eq!(method::MAX, 3);
+        assert_eq!(method::name(method::GET), Some("GET"));
+        assert_eq!(method::name(method::DELETE), Some("DELETE"));
+        assert_eq!(
+            method::name(4),
+            None,
+            "HEAD, PATCH and the rest are not in 1.0"
+        );
+        assert_eq!(method::name(-1), None);
+        assert_eq!(method::NAMES.len(), method::MAX as usize + 1);
     }
 
     /// SPEC-5.2.3, SPEC-5.2.5, SPEC-5.2.6, SPEC-5.2.7, SPEC-5.2.9, SPEC-5.2.10,

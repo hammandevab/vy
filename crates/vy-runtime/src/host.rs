@@ -22,7 +22,7 @@
 
 use crate::FUEL_PER_HOST_BYTE;
 use std::collections::{BTreeMap, HashSet};
-use vy_abi::{cap, err, fit, limits, ABI_VERSION};
+use vy_abi::{cap, err, fit, level, limits, method, ABI_VERSION};
 use vy_dl::DisplayList;
 use vy_render::{pack_x100, ImageCache, Resource, TextEngine};
 use wasmtime::{Caller, Linker, Memory, StoreLimits, Trap};
@@ -160,10 +160,12 @@ pub enum LogSource {
 pub struct LogEntry {
     /// Origin.
     pub source: LogSource,
-    /// Module-chosen level (0 debug .. 3 error). Host entries are 2 (warn)
-    /// for a refused call, and 0 (debug) for a call the headless host has
-    /// no implementation for although its capability is granted, or for an
-    /// outcome that is normal for the page (a key without a value).
+    /// Level as `vy_abi::level` numbers them: the module's argument to
+    /// `log`, any value outside 0..=3 recorded as 3 (SPEC-5.2.1). Host
+    /// entries are `WARN` for a refused call, and `DEBUG` for a call the
+    /// headless host has no implementation for although its capability is
+    /// granted, or for an outcome that is normal for the page (a key
+    /// without a value).
     pub level: i32,
     /// Message text.
     pub message: String,
@@ -315,7 +317,7 @@ impl Host {
     }
 
     pub(crate) fn host_log(&mut self, message: String) {
-        self.log(LogSource::Host, 2, message);
+        self.log(LogSource::Host, level::WARN, message);
     }
 
     /// Log a denied call and return `E_DENIED` (SPEC-5.3.1).
@@ -333,7 +335,7 @@ impl Host {
     fn denied_headless(&mut self, name: &str, what: &str) -> i32 {
         self.log(
             LogSource::Host,
-            0,
+            level::DEBUG,
             format!("{name}: E_DENIED ({what}: not available in the headless host)"),
         );
         err::E_DENIED
@@ -536,13 +538,15 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     linker.func_wrap(
         m,
         "log",
-        |mut c: Caller<'_, Host>, level: i32, ptr: i32, len: i32| -> wasmtime::Result<i32> {
+        |mut c: Caller<'_, Host>, lvl: i32, ptr: i32, len: i32| -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 match slice(data, ptr, len, "message", limits::MAX_LOG_BYTES) {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(bytes).into_owned();
                         host.charge(text.len());
-                        host.log(LogSource::Module, level, text);
+                        // A level outside 0..=3 is recorded as error; the
+                        // call itself never fails on its level (SPEC-5.2.1).
+                        host.log(LogSource::Module, level::clamp(lvl), text);
                         err::OK
                     }
                     Err(fault) => host.refuse("log", &fault),
@@ -888,12 +892,13 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
 
     // network (SPEC-5.2.7): the headless host answers from canned responses
     // and otherwise denies; the capability gate comes first (SPEC-5.3.1),
-    // then the byte caps (SPEC-9.3.2), then the origin gate (SPEC-5.2.8).
+    // then the method and the byte caps (SPEC-9.3.2), then the origin gate
+    // (SPEC-5.2.8).
     linker.func_wrap(
         m,
         "fetch_begin",
         |mut c: Caller<'_, Host>,
-         _method: i32,
+         http_method: i32,
          url_ptr: i32,
          url_len: i32,
          body_ptr: i32,
@@ -902,6 +907,12 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
             with_memory(&mut c, |data, host| {
                 if !host.caps.net {
                     return host.denied("fetch_begin", "net");
+                }
+                if method::name(http_method).is_none() {
+                    host.host_log(format!(
+                        "fetch_begin: E_ARG (method {http_method} is not 0 GET, 1 POST, 2 PUT or 3 DELETE; no request made)"
+                    ));
+                    return err::E_ARG;
                 }
                 let checked = (|| {
                     let url = string(data, url_ptr, url_len, "url", limits::MAX_URL_BYTES)?;

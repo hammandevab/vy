@@ -8,7 +8,7 @@
 //! same commit, and after the freeze no such commit is allowed within 1.x.
 
 use std::fmt::Write;
-use vy_abi::{cap, err, event, key, limits, modifier, op, role, Sig};
+use vy_abi::{cap, err, event, key, level, limits, method, modifier, op, role, Sig};
 
 /// Path of the listing relative to the repository root.
 pub const PATH: &str = "docs/ABI-1.0.md";
@@ -109,6 +109,34 @@ pub fn abi_listing() -> String {
     }
     let _ = writeln!(w);
 
+    let _ = writeln!(w, "## Argumentvärden");
+    let _ = writeln!(w);
+    let _ = writeln!(
+        w,
+        "`log.level` (`vy_abi::level`, SPEC-5.2.1); ett annat värde loggas som {} (`{}`):",
+        level::MAX,
+        level::name(level::MAX)
+    );
+    let _ = writeln!(w);
+    let _ = writeln!(w, "| Nivå | Namn |");
+    let _ = writeln!(w, "| --- | --- |");
+    for (i, name) in level::NAMES.iter().enumerate() {
+        let _ = writeln!(w, "| {i} | `{name}` |");
+    }
+    let _ = writeln!(w);
+    let _ = writeln!(
+        w,
+        "`fetch_begin.method` (`vy_abi::method`, SPEC-5.2.7); ett annat värde ger `E_ARG` utan \\\n\
+         nätverksanrop:"
+    );
+    let _ = writeln!(w);
+    let _ = writeln!(w, "| Värde | Metod |");
+    let _ = writeln!(w, "| --- | --- |");
+    for (i, name) in method::NAMES.iter().enumerate() {
+        let _ = writeln!(w, "| {i} | `{name}` |");
+    }
+    let _ = writeln!(w);
+
     let _ = writeln!(w, "## Händelsetyper (`kind` i `vy_event`)");
     let _ = writeln!(w);
     let _ = writeln!(w, "| Kind | Namn | a | b | c | d |");
@@ -194,7 +222,7 @@ pub fn abi_listing() -> String {
     let _ = writeln!(w);
     let _ = writeln!(w, "| Konstant | Värde | Betydelse |");
     let _ = writeln!(w, "| --- | --- | --- |");
-    let rows: [(&str, u64, &str); 20] = [
+    let rows: [(&str, u64, &str); 22] = [
         (
             "MAX_OPS_PER_FRAME",
             limits::MAX_OPS_PER_FRAME.into(),
@@ -294,6 +322,16 @@ pub fn abi_listing() -> String {
             "cap::MAX",
             cap::MAX as u64,
             "högsta capability-id (SPEC-A.4.1)",
+        ),
+        (
+            "level::MAX",
+            level::MAX as u64,
+            "högsta `log.level`; högre klampas hit (SPEC-5.2.1)",
+        ),
+        (
+            "method::MAX",
+            method::MAX as u64,
+            "högsta `fetch_begin.method` (SPEC-5.2.7)",
         ),
     ];
     for (name, value, meaning) in rows {

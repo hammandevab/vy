@@ -10,32 +10,35 @@
 use crate::error::{check, check64, VyError};
 use crate::raw::{self, pl};
 use crate::{from_x100, Color, Font, Rect, Size, StyleId};
-use vy_abi::limits;
+use vy_abi::{level, limits, method};
 
-/// Log level for [`log`].
+/// Log level for [`log`], numbered as `vy_abi::level` (SPEC-5.2.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
 pub enum Level {
     /// Development chatter.
-    Debug = 0,
+    Debug = level::DEBUG,
     /// Normal operation.
-    Info = 1,
+    Info = level::INFO,
     /// Something is off but the page goes on.
-    Warn = 2,
+    Warn = level::WARN,
     /// The page cannot do what it meant to.
-    Error = 3,
+    Error = level::ERROR,
 }
 
-/// HTTP method for [`fetch_begin`].
+/// HTTP method for [`fetch_begin`], numbered as `vy_abi::method`
+/// (SPEC-5.2.7); the host refuses any other number with `Arg`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
 pub enum Method {
     /// `GET`.
-    Get = 0,
+    Get = method::GET,
     /// `POST`.
-    Post = 1,
+    Post = method::POST,
     /// `PUT`.
-    Put = 2,
+    Put = method::PUT,
     /// `DELETE`.
-    Delete = 3,
+    Delete = method::DELETE,
 }
 
 /// A network request started with [`fetch_begin`].

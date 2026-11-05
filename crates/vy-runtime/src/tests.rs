@@ -187,9 +187,11 @@ fn spec_5_3_1_denied_call_is_harmless() {
 /// A module driven by `vy_event`: kind 200 calls `fetch_begin` with URL
 /// `a` (0 the listed API, 1 a foreign origin, 2 not https) and returns
 /// the result; 201 returns `fetch_poll(a)`; 202 returns `fetch_read(a,
-/// 2048, b)`; 203 returns `fetch_cancel(a)`. Every `FETCH_DONE` is
-/// recorded as three `i32`s at 4096; kind 100 returns field `a` of the
-/// records, 101 clears them, 102 returns the count. `FETCH_DONE` answers 1.
+/// 2048, b)`; 203 returns `fetch_cancel(a)`; 204 calls `fetch_begin` on
+/// the listed API with method `a` and returns the result. Every
+/// `FETCH_DONE` is recorded as three `i32`s at 4096; kind 100 returns
+/// field `a` of the records, 101 clears them, 102 returns the count.
+/// `FETCH_DONE` answers 1.
 fn fetch_module() -> Vec<u8> {
     wasm(&format!(
         r#"(module
@@ -218,6 +220,8 @@ fn fetch_module() -> Vec<u8> {
                 (if (i32.eq (local.get 0) (i32.const 202)) (then
                     (return (call $fetch_read (local.get 1) (i32.const 2048) (local.get 2)))))
                 (if (i32.eq (local.get 0) (i32.const 203)) (then (return (call $fetch_cancel (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 204)) (then
+                    (return (call $fetch_begin (local.get 1) (i32.const 0) (i32.const 33) (i32.const 256) (i32.const 14)))))
                 (if (i32.eq (local.get 0) (i32.const 100)) (then
                     (return (i32.load (i32.add (i32.const 4096) (i32.mul (local.get 1) (i32.const 4)))))))
                 (if (i32.eq (local.get 0) (i32.const 101)) (then
@@ -424,6 +428,79 @@ fn spec_5_2_8_origin_gate() {
     );
     assert_eq!(origin_of("http://chat.example/"), None);
     assert_eq!(origin_of("https:///x"), None);
+}
+
+/// SPEC-5.2.7: `method` is 0 GET, 1 POST, 2 PUT or 3 DELETE; any other
+/// value is `E_ARG`, logged, and no request is opened. The capability gate
+/// still comes first (SPEC-5.3.1).
+#[test]
+fn spec_5_2_7_fetch_method_values() {
+    let canned = CannedResponse {
+        url: API.into(),
+        status: 200,
+        body: b"ok".to_vec(),
+    };
+    let mut rt = fetch_runtime(vec![canned], &["https://chat.example"]);
+    let begin = |rt: &mut Runtime, method: i32| {
+        rt.event(204, method, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    for (m, id) in [
+        (vy_abi::method::GET, 1),
+        (vy_abi::method::POST, 2),
+        (vy_abi::method::PUT, 3),
+        (vy_abi::method::DELETE, 4),
+    ] {
+        assert_eq!(begin(&mut rt, m), id, "method {m} opens a request");
+    }
+    assert_eq!(rt.open_fetches(), 4);
+    for bad in [4, -1, 7, i32::MAX] {
+        assert_eq!(begin(&mut rt, bad), err::E_ARG, "method {bad}");
+    }
+    assert_eq!(rt.open_fetches(), 4, "a refused method opens nothing");
+    let refused: Vec<String> = host_logs(&rt)
+        .into_iter()
+        .filter(|l| l.starts_with("fetch_begin: E_ARG (method"))
+        .collect();
+    assert_eq!(refused.len(), 4, "{refused:?}");
+    assert!(refused[0].contains("method 4 is not 0 GET, 1 POST, 2 PUT or 3 DELETE"));
+
+    // Without `net` the method is never looked at: E_DENIED (SPEC-5.3.1).
+    let bytes = fetch_module();
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), Options::default()).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    assert_eq!(begin(&mut rt, 99), err::E_DENIED);
+}
+
+/// SPEC-5.2.1: `log.level` is 0 debug, 1 info, 2 warn, 3 error; the host
+/// records any other value as 3 and the call still succeeds.
+#[test]
+fn spec_5_2_1_log_level_clamps() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "lvl")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (call $log (local.get 0) (i32.const 0) (i32.const 3)))
+            {STUBS})"#
+    ));
+    let mut rt = load(&bytes);
+    rt.init(10, 10, 1.0).unwrap();
+    for lvl in [0, 1, 2, 3, 4, -1, 1000] {
+        rt.frame_with_dt(lvl).unwrap();
+        assert_eq!(rt.last_frame().ops_reported, err::OK, "level {lvl}");
+    }
+    let levels: Vec<i32> = rt
+        .logs()
+        .iter()
+        .filter(|l| l.source == LogSource::Module)
+        .map(|l| l.level)
+        .collect();
+    assert_eq!(levels, [0, 1, 2, 3, 3, 3, 3]);
+    assert_eq!(vy_abi::level::name(levels[4]), "error");
+    assert!(host_logs(&rt).is_empty(), "nothing was refused");
 }
 
 fn budget_module() -> Vec<u8> {

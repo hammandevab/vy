@@ -80,6 +80,27 @@ värde är alltid en felkod (SPEC-5.2.5).
 | -32 | `E_TOO_LARGE` |
 | -40 | `E_GESTURE` |
 
+## Argumentvärden
+
+`log.level` (`vy_abi::level`, SPEC-5.2.1); ett annat värde loggas som 3 (`error`):
+
+| Nivå | Namn |
+| --- | --- |
+| 0 | `debug` |
+| 1 | `info` |
+| 2 | `warn` |
+| 3 | `error` |
+
+`fetch_begin.method` (`vy_abi::method`, SPEC-5.2.7); ett annat värde ger `E_ARG` utan \
+nätverksanrop:
+
+| Värde | Metod |
+| --- | --- |
+| 0 | `GET` |
+| 1 | `POST` |
+| 2 | `PUT` |
+| 3 | `DELETE` |
+
 ## Händelsetyper (`kind` i `vy_event`)
 
 | Kind | Namn | a | b | c | d |
@@ -194,3 +215,5 @@ Reserverade och aldrig använda i 1.x: 0x07, 0x08.
 | `MAX_FRAME_TEXT_BYTES` | 16777216 | text i träd och display list per frame (SPEC-9.3.2) |
 | `fit::MAX` | 2 | högsta `fit` (SPEC-5.2.3) |
 | `cap::MAX` | 6 | högsta capability-id (SPEC-A.4.1) |
+| `level::MAX` | 3 | högsta `log.level`; högre klampas hit (SPEC-5.2.1) |
+| `method::MAX` | 3 | högsta `fetch_begin.method` (SPEC-5.2.7) |

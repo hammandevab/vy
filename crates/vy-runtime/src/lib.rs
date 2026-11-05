@@ -23,7 +23,7 @@ use host::Host;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::OnceLock;
-use vy_abi::{err, event, key, limits, modifier, role, ABI_MINOR};
+use vy_abi::{err, event, key, level, limits, modifier, role, ABI_MINOR};
 use vy_render::{ImageCache, TextEngine};
 use wasmtime::{
     Config, Engine, Instance, Linker, Module, Store, StoreLimitsBuilder, Trap, TypedFunc,
@@ -493,7 +493,7 @@ impl Runtime {
             if host.dl.is_open() {
                 host.log(
                     LogSource::Host,
-                    2,
+                    level::WARN,
                     "display list left open before vy_frame; list closed by host".into(),
                 );
                 let _ = host.dl.end();
@@ -554,7 +554,7 @@ impl Runtime {
                     if host.dl.is_open() {
                         host.log(
                             LogSource::Host,
-                            2,
+                            level::WARN,
                             "vy_frame returned without dl_end; list closed by host".into(),
                         );
                         let _ = host.dl.end();
@@ -743,7 +743,7 @@ impl Runtime {
         let Ok(len) = i32::try_from(text.len()) else {
             self.host_mut().log(
                 LogSource::Host,
-                2,
+                level::WARN,
                 "TEXT_INPUT dropped: text longer than i32 (SPEC-5.1.6)".into(),
             );
             return Ok(false);
@@ -759,7 +759,7 @@ impl Runtime {
         let Some(range) = room else {
             self.host_mut().log(
                 LogSource::Host,
-                2,
+                level::WARN,
                 format!("TEXT_INPUT dropped: vy_alloc({len}) returned {ptr} (SPEC-5.1.6)"),
             );
             return Ok(false);
