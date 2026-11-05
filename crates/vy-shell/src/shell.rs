@@ -1125,9 +1125,17 @@ impl Shell {
                 }
             }
             ToShell::Navigate { url, replace } => {
+                // `navigate` takes `vy://` and `https://` only
+                // (SPEC-5.2.10); the same rule here, since `Source::parse`
+                // also reads a bare path as a local file, which is the
+                // user's to open from the address bar, never a tab's.
                 if is_external(&url) {
                     self.open_external(&url);
-                } else if let Ok(source) = Source::parse(&url) {
+                } else if let Some(source) = url
+                    .starts_with("vy://")
+                    .then(|| Source::parse(&url).ok())
+                    .flatten()
+                {
                     self.navigate_tab(id, source, !replace);
                 } else if let Some(tab) = self.tab_mut(id) {
                     tab.log(format!("[host] navigate refused: {url}"));

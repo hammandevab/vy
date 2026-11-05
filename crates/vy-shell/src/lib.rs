@@ -498,6 +498,37 @@ mod tests {
             .iter()
             .any(|l| l.contains("fetch 7: E_DENIED")));
 
+        // A tab's `navigate` is `vy://` or `https://` (SPEC-5.2.10); a
+        // path names a local file, which only the address bar opens.
+        let generation = shell.tab_generation(plain);
+        inject(
+            &mut shell,
+            plain,
+            ToShell::Navigate {
+                url: module_path("text").to_string_lossy().into_owned(),
+                replace: false,
+            },
+        );
+        assert_eq!(
+            shell.tab_generation(plain),
+            generation,
+            "nothing was loaded"
+        );
+        assert!(shell
+            .tab_logs(plain)
+            .iter()
+            .any(|l| l.starts_with("[host] navigate refused: ")));
+        inject(
+            &mut shell,
+            plain,
+            ToShell::Navigate {
+                url: "http://x.example/".into(),
+                replace: false,
+            },
+        );
+        assert_eq!(shell.tab_generation(plain), generation);
+        assert_eq!(shell.external_opens(), &[] as &[String]);
+
         // Clipboard and storage follow their grants.
         inject(
             &mut shell,
