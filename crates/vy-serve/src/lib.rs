@@ -584,15 +584,28 @@ fn not_modified(etag: &str) -> Reply {
     }
 }
 
-/// True when the `Accept` media range list names `media` exactly.
+/// True when the `Accept` media range list names `media` exactly, with a
+/// quality above zero: `type;q=0` means "not acceptable" (RFC 9110 §12.4.2),
+/// so a client that lists a type only to refuse it is not served it.
 pub fn accepts(accept: &str, media: &str) -> bool {
     accept.split(',').any(|range| {
-        range
-            .split(';')
+        let mut parts = range.split(';');
+        let named = parts
             .next()
             .unwrap_or("")
             .trim()
-            .eq_ignore_ascii_case(media)
+            .eq_ignore_ascii_case(media);
+        let refused = parts.any(|p| {
+            let p = p.trim();
+            p.len() > 2
+                && p[..2].eq_ignore_ascii_case("q=")
+                && p[2..]
+                    .trim()
+                    .parse::<f32>()
+                    .map(|q| q <= 0.0)
+                    .unwrap_or(false)
+        });
+        named && !refused
     })
 }
 
@@ -817,6 +830,24 @@ mod tests {
         assert_eq!(p.get("content-type"), Some(MEDIA_PACKAGE));
         assert_eq!(Package::unpack(&p.body).unwrap(), package);
         assert_ne!(p.get("etag"), Some(etag.as_str()));
+        // A quality of zero refuses the type (RFC 9110 §12.4.2): the
+        // manifest is listed but not wanted, so the package is served.
+        let q0 = format!("{MEDIA_MANIFEST};q=0, {MEDIA_PACKAGE};q=1");
+        assert_eq!(
+            get(&site, "/hello", &q0).get("content-type"),
+            Some(MEDIA_PACKAGE)
+        );
+        assert!(accepts(" Text/HTML ; q=0.8 ,*/*", "text/html"));
+        assert!(!accepts("text/html;q=0", "text/html"));
+        assert!(!accepts("text/html; Q=0.0", "text/html"));
+        assert!(
+            accepts("text/html;q=x", "text/html"),
+            "unparsable q is ignored"
+        );
+        assert!(
+            !accepts("*/*", "text/html"),
+            "no wildcards: the fallback is the default"
+        );
 
         let same = site.reply(&RequestInfo {
             method: "GET".into(),
@@ -836,7 +867,7 @@ mod tests {
         assert_eq!(head.status, 200);
         assert!(head.body.is_empty());
         let s = site.stats().snapshot();
-        assert_eq!((s.manifests, s.packages, s.not_modified), (2, 1, 1));
+        assert_eq!((s.manifests, s.packages, s.not_modified), (2, 2, 1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
