@@ -290,8 +290,7 @@ pub mod op {
 /// whose `len` exceeds its cap returns `E_ARG`, is logged, and copies nothing,
 /// so a module cannot make the host allocate more than it would for a
 /// well-formed call. The per-frame caps bound what the host holds for one
-/// frame. SPEC 1.0 does not list the numbers; `docs/BUILD-NOTES.md` proposes
-/// them as a new normative sentence in §9.3.
+/// frame. The numbers are normative since v0.2 (SPEC-9.3.2).
 pub mod limits {
     /// Maximum opcodes per frame.
     pub const MAX_OPS_PER_FRAME: u32 = 65_536;
