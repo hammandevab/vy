@@ -1,9 +1,8 @@
 //! Opening `https://` links outside the client (SPEC-2.1.7): the client
 //! never renders them, the system browser does. Nothing else leaves the
 //! client this way: only an `https://` URL made of printable ASCII is
-//! handed over, as one argument, to the platform's opener.
-
-use std::process::{Command, Stdio};
+//! handed over, as one argument, to the platform's opener, and never
+//! through a shell that could read anything in it.
 
 /// Something that opens an `https://` URL elsewhere.
 pub trait Opener {
@@ -23,8 +22,13 @@ pub fn is_external(url: &str) -> bool {
             .all(|b| (0x21..0x7f).contains(&b) && !b"\"<>\\^|`{}".contains(&b))
 }
 
-/// The platform's opener: `cmd /C start` on Windows, `open` on macOS,
-/// `xdg-open` elsewhere.
+/// The platform's opener: `ShellExecuteW` on Windows, `open` on macOS,
+/// `xdg-open` elsewhere. On every platform the URL is one argument of
+/// one program; no command interpreter is in between. (`cmd /C start`
+/// was: `cmd.exe` reads `&` as a command separator and `%NAME%` as an
+/// environment variable in an unquoted argument, and `std::process`
+/// quotes an argument only when it has a space, which an `https://` URL
+/// never has – so a page could have run a command with `navigate`.)
 #[derive(Debug, Default)]
 pub struct SystemOpener;
 
@@ -33,26 +37,71 @@ impl Opener for SystemOpener {
         if !is_external(url) {
             return Err(format!("{url:?} is not an https:// address"));
         }
-        let mut cmd = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            // `start` takes the first quoted argument as a window title;
-            // the URL has no quotes (not printable-ASCII safe) and is
-            // quoted so `&` in a query is not a command separator.
-            c.args(["/C", "start", "", url]);
-            c
-        } else if cfg!(target_os = "macos") {
-            let mut c = Command::new("open");
-            c.arg(url);
-            c
-        } else {
-            let mut c = Command::new("xdg-open");
-            c.arg(url);
-            c
+        platform::open(url)
+    }
+}
+
+#[cfg(windows)]
+mod platform {
+    /// `ShellExecuteW(NULL, "open", url, NULL, NULL, SW_SHOWNORMAL)`: the
+    /// URL goes to the handler registered for `https` as one string.
+    pub fn open(url: &str) -> Result<(), String> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let wide = |s: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
         };
-        cmd.stdin(Stdio::null())
+        let verb = wide("open");
+        let file = wide(url);
+        // SAFETY: both pointers are to NUL-terminated UTF-16 buffers that
+        // outlive the call; null for the window, the parameters and the
+        // directory is what the API documents for "none".
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // Documented contract: a value above 32 means success.
+        if result as usize > 32 {
+            Ok(())
+        } else {
+            Err(format!(
+                "ShellExecuteW failed with code {}",
+                result as usize
+            ))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    use std::process::{Command, Stdio};
+
+    /// `open` on macOS, `xdg-open` elsewhere, with the URL as its one
+    /// argument (an `argv` element, never a shell line).
+    pub fn open(url: &str) -> Result<(), String> {
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        Command::new(program)
+            .arg(url)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 

@@ -2680,6 +2680,7 @@ dependencies = [
  "vy-render",
  "vy-runtime",
  "wat",
+ "windows-sys 0.61.2",
  "winit",
 ]
 

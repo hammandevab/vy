@@ -32,5 +32,11 @@ getrandom.workspace = true
 winit = { workspace = true, optional = true }
 softbuffer = { workspace = true, optional = true }
 
+# `ShellExecuteW` for https:// links (SPEC-2.1.7), instead of `cmd /C start`,
+# which parses the URL. The same crate, version and features softbuffer
+# already pulls in on Windows: nothing new in the tree.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 wat.workspace = true
