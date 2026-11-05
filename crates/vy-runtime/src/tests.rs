@@ -49,7 +49,13 @@ fn spec_5_2_all_imports_linked() {
     let limits = StoreLimitsBuilder::new().build();
     let mut store = Store::new(
         engine(),
-        Host::new(limits, Capabilities::default(), Vec::new()),
+        Host::new(
+            limits,
+            Capabilities::default(),
+            Vec::new(),
+            Storage::new(),
+            DEFAULT_STORAGE_QUOTA_BYTES,
+        ),
     );
     let mut linked = 0;
     for sig in vy_abi::IMPORTS {
@@ -1354,13 +1360,11 @@ fn spec_5_1_6_alloc_failure_drops_the_event() {
     assert!(!rt.is_suspended());
 }
 
-/// SPEC-5.2.7, SPEC-5.2.9, SPEC-5.3.1: the headless host has no transport
-/// and no storage, so every `fetch_*` and `state_*` call is `E_DENIED` even
-/// with `net` and `storage` granted, logged as such; the page runs on. The
-/// transport semantics of SPEC-5.2.7 (64 open requests, `E_RATE`, the body
-/// held until `fetch_read` returns 0 or `fetch_cancel`) and the missing-key
-/// `E_RESOURCE` of SPEC-5.2.9 are the shell's (M3); the SDK mock proves the
-/// latter for pages today.
+/// SPEC-5.2.7, SPEC-5.3.1: the headless host has no transport, so every
+/// `fetch_*` call is `E_DENIED` even with `net` granted (noted at debug
+/// level, since the capability is there: it is the host that lacks a
+/// network), and the page runs on. Storage is served (SPEC-5.2.9): a key
+/// nobody wrote is `E_RESOURCE`.
 #[test]
 fn spec_5_2_7_fetch_and_storage_denied_headless() {
     let bytes = wasm(&format!(
@@ -1394,21 +1398,143 @@ fn spec_5_2_7_fetch_and_storage_denied_headless() {
     };
     let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
     rt.init(10, 10, 1.0).unwrap();
-    for (case, name) in [
-        (1, "fetch_begin"),
-        (2, "fetch_poll"),
-        (3, "fetch_read"),
-        (4, "fetch_cancel"),
-        (5, "state_get"),
+    for (case, name, code, level) in [
+        (1, "fetch_begin", err::E_DENIED, 0),
+        (2, "fetch_poll", err::E_DENIED, 2),
+        (3, "fetch_read", err::E_DENIED, 2),
+        (4, "fetch_cancel", err::E_DENIED, 2),
+        (5, "state_get", err::E_RESOURCE, 0),
     ] {
         let before = rt.logs().len();
         rt.frame_with_dt(case).unwrap();
-        assert_eq!(rt.last_frame().ops_reported, err::E_DENIED, "{name}");
-        let new = host_logs(&rt)[before..].to_vec();
+        assert_eq!(rt.last_frame().ops_reported, code, "{name}");
+        let new: Vec<&LogEntry> = rt.logs()[before..]
+            .iter()
+            .filter(|l| l.source == LogSource::Host)
+            .collect();
         assert_eq!(new.len(), 1, "{name}: {new:?}");
-        assert!(new[0].starts_with(&format!("{name}: E_DENIED")), "{new:?}");
+        assert!(
+            new[0]
+                .message
+                .starts_with(&format!("{name}: {}", host::err_name(code))),
+            "{new:?}"
+        );
+        assert_eq!(
+            new[0].level, level,
+            "{name}: debug for the host's own limits"
+        );
     }
     assert!(!rt.is_suspended());
+}
+
+/// A module driven by `vy_event`: kind 200 puts key `k` with `a` bytes of
+/// value from offset 16 (the digits "0123456789" repeated); 201 gets `k`
+/// into offset 2048 with `max = a` and returns the code; 202 deletes `k`;
+/// 203 puts key `big` with `a` bytes. The result of the call is the
+/// event's return value.
+fn storage_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "state_put" (func $state_put (param i32 i32 i32 i32) (result i32)))
+            (import "vy" "state_get" (func $state_get (param i32 i32 i32 i32) (result i32)))
+            (import "vy" "state_delete" (func $state_delete (param i32 i32) (result i32)))
+            (memory (export "memory") 2)
+            (data (i32.const 0) "k")
+            (data (i32.const 4) "big")
+            (data (i32.const 16) "0123456789012345678901234567890123456789")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 200)) (then
+                    (return (call $state_put (i32.const 0) (i32.const 1) (i32.const 16) (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 201)) (then
+                    (return (call $state_get (i32.const 0) (i32.const 1) (i32.const 2048) (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 202)) (then
+                    (return (call $state_delete (i32.const 0) (i32.const 1)))))
+                (if (i32.eq (local.get 0) (i32.const 203)) (then
+                    (return (call $state_put (i32.const 4) (i32.const 3) (i32.const 16) (local.get 1)))))
+                i32.const 0)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ))
+}
+
+/// SPEC-5.2.9, SPEC-9.3.1, SPEC-5.1.5: with `storage` granted the headless
+/// host keeps a key space in memory: `state_get` on a key nobody wrote is
+/// `E_RESOURCE`; `state_put` stores; `state_get` reports the full length
+/// and copies at most `max` bytes; `state_delete` makes the key missing
+/// again; the quota is enforced as `E_QUOTA`; and the storage taken from
+/// one instance seeds the next, which is how values survive a suspend and
+/// a fresh `vy_init`.
+#[test]
+fn spec_5_2_9_headless_storage() {
+    let bytes = storage_module();
+    let opts = Options {
+        capabilities: Capabilities::from_names(["storage"]).unwrap(),
+        storage_quota_bytes: 40,
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    let call = |rt: &mut Runtime, kind: i32, a: i32| {
+        rt.event(kind, a, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    assert_eq!(call(&mut rt, 201, 64), err::E_RESOURCE, "nothing saved yet");
+    assert_eq!(call(&mut rt, 200, 10), err::OK);
+    assert_eq!(rt.storage().get(b"k".as_slice()).unwrap(), b"0123456789");
+    assert_eq!(call(&mut rt, 201, 4), 10, "full length, four copied");
+    assert_eq!(rt.read_memory(2048, 6), b"0123\0\0");
+    assert_eq!(call(&mut rt, 201, 64), 10);
+    assert_eq!(rt.read_memory(2048, 10), b"0123456789");
+    assert_eq!(call(&mut rt, 200, 0), err::OK, "an empty value");
+    assert_eq!(call(&mut rt, 201, 64), 0, "exists, zero bytes");
+    assert_eq!(call(&mut rt, 202, 0), err::OK);
+    assert_eq!(call(&mut rt, 201, 64), err::E_RESOURCE, "deleted");
+    assert_eq!(
+        call(&mut rt, 202, 0),
+        err::OK,
+        "deleting a missing key is fine"
+    );
+
+    // Quota: 40 bytes for keys and values together (SPEC-9.3.1).
+    assert_eq!(call(&mut rt, 200, 20), err::OK, "k + 20 = 21 bytes");
+    assert_eq!(call(&mut rt, 203, 20), err::E_QUOTA, "big + 20 would be 44");
+    assert_eq!(call(&mut rt, 203, 16), err::OK, "big + 16 = 19: exactly 40");
+    assert_eq!(
+        call(&mut rt, 200, 21),
+        err::E_QUOTA,
+        "replacing k: 22 + 19 = 41"
+    );
+    assert_eq!(call(&mut rt, 200, 5), err::OK, "replacing k with less");
+    assert!(host_logs(&rt).iter().any(|l| l == "state_put: E_QUOTA"));
+
+    // Persistence: the next instance starts with what this one saved.
+    rt.suspend().unwrap();
+    let saved = rt.take_storage();
+    assert_eq!(saved.len(), 2);
+    assert!(rt.storage().is_empty(), "taken, not copied");
+    let opts = Options {
+        capabilities: Capabilities::from_names(["storage"]).unwrap(),
+        storage: saved,
+        ..Options::default()
+    };
+    let mut again = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    again.init(10, 10, 1.0).unwrap();
+    assert_eq!(call(&mut again, 201, 64), 5, "k came back");
+    assert_eq!(again.read_memory(2048, 5), b"01234");
+
+    // Without the capability nothing is stored, whatever was handed in.
+    let opts = Options {
+        storage: again.take_storage(),
+        ..Options::default()
+    };
+    let mut denied = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    denied.init(10, 10, 1.0).unwrap();
+    assert_eq!(call(&mut denied, 201, 64), err::E_DENIED);
+    assert_eq!(call(&mut denied, 200, 1), err::E_DENIED);
+    assert_eq!(denied.storage().len(), 2, "untouched");
 }
 
 /// A module with a fixed tree (main 1; button 2 at y 0, textbox 3 at y 20,

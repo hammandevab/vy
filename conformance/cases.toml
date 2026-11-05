@@ -583,10 +583,9 @@ events = [
 ]
 
 # settings: vippknappar, radiogrupper, en slider som dras med pekaren och
-# persistens via state_get/state_put (modules/settings). Headless har ingen lagring:
-# state_get och state_put svarar E_DENIED även med `storage` beviljad, så sidan visar
-# standardvärden och en statusrad om det (SPEC-5.3.1). Persistens bevisas av modulens
-# nativa test mot SDK-mocken (`cd modules/settings && cargo test`).
+# persistens via state_get/state_put (modules/settings). Headless har lagring i minnet
+# när `storage` beviljas (kvoten ur manifestet): första starten ser ingen sparad nyckel
+# (E_RESOURCE, SPEC-5.2.9) och visar standardvärden; en ändring sparas.
 
 [[case]]
 name = "settings-800x600@1"

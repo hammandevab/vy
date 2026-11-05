@@ -21,10 +21,20 @@
 //!   cost bounded by the manifest, charged to nobody (SPEC-6.5.1).
 
 use crate::FUEL_PER_HOST_BYTE;
+use std::collections::BTreeMap;
 use vy_abi::{cap, err, fit, limits, ABI_VERSION};
 use vy_dl::DisplayList;
 use vy_render::{pack_x100, ImageCache, Resource, TextEngine};
 use wasmtime::{Caller, Linker, Memory, StoreLimits, Trap};
+
+/// Storage behind `state_*` (SPEC-5.2.9): key to value. The headless host
+/// keeps it in memory for the instance's life; the conformance runner hands
+/// it from one instance to the next to prove persistence across `vy_suspend`
+/// and a fresh `vy_init` (SPEC-5.1.5).
+pub type Storage = BTreeMap<Vec<u8>, Vec<u8>>;
+/// Storage quota the headless host applies when the caller names none:
+/// 1 MB, the policy default of SPEC-8.2.3.
+pub const DEFAULT_STORAGE_QUOTA_BYTES: u64 = 1 << 20;
 
 /// Milliseconds the headless clock advances per completed frame.
 pub const HEADLESS_FRAME_MS: i64 = 16;
@@ -112,7 +122,10 @@ pub enum LogSource {
 pub struct LogEntry {
     /// Origin.
     pub source: LogSource,
-    /// Module-chosen level (0 debug .. 3 error); host entries use 2 (warn).
+    /// Module-chosen level (0 debug .. 3 error). Host entries are 2 (warn)
+    /// for a refused call, and 0 (debug) for a call the headless host has
+    /// no implementation for although its capability is granted, or for an
+    /// outcome that is normal for the page (a key without a value).
     pub level: i32,
     /// Message text.
     pub message: String,
@@ -175,6 +188,10 @@ pub struct Host {
     pub(crate) keys_down: Vec<i32>,
     pub(crate) ime_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) sem_full_logged: bool,
+    /// Storage behind `state_*` when `storage` is granted (SPEC-5.2.9).
+    pub(crate) state: Storage,
+    /// Most bytes (keys and values together) `state` may hold (SPEC-9.3.1).
+    pub(crate) state_quota: u64,
     /// Fuel owed for host work in the current import call; settled by
     /// [`with_host`] / [`with_memory`] before the call returns to wasm.
     pending_fuel: u64,
@@ -183,7 +200,13 @@ pub struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(limits: StoreLimits, caps: Capabilities, resources: Vec<Resource>) -> Self {
+    pub(crate) fn new(
+        limits: StoreLimits,
+        caps: Capabilities,
+        resources: Vec<Resource>,
+        state: Storage,
+        state_quota: u64,
+    ) -> Self {
         Self {
             memory: None,
             limits,
@@ -202,6 +225,8 @@ impl Host {
             keys_down: Vec::new(),
             ime_rect: None,
             sem_full_logged: false,
+            state,
+            state_quota,
             pending_fuel: 0,
             host_fuel: 0,
         }
@@ -227,6 +252,27 @@ impl Host {
             "{name}: E_DENIED (capability `{capability}` not granted)"
         ));
         err::E_DENIED
+    }
+
+    /// `E_DENIED` for a call whose capability is granted but which the
+    /// headless host cannot serve (no window to navigate, no clipboard, no
+    /// transport without a canned response); logged at debug level, since
+    /// it is the host's limitation and not the page's mistake.
+    fn denied_headless(&mut self, name: &str, what: &str) -> i32 {
+        self.log(
+            LogSource::Host,
+            0,
+            format!("{name}: E_DENIED ({what}: not available in the headless host)"),
+        );
+        err::E_DENIED
+    }
+
+    /// Bytes `state` holds: keys and values together.
+    fn state_bytes(&self) -> u64 {
+        self.state
+            .iter()
+            .map(|(k, v)| (k.len() + v.len()) as u64)
+            .sum()
     }
 
     /// Log a refusal and return its status code.
@@ -816,7 +862,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                         host.report("fetch_begin", &fault);
                         fault.code()
                     }
-                    Ok(()) => host.denied("fetch_begin", "net (headless host)"),
+                    Ok(()) => host.denied_headless("fetch_begin", "a transport"),
                 }
             })
         },
@@ -841,7 +887,9 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // storage (SPEC-5.2.9): M3 implements storage; same gate order as above.
+    // storage (SPEC-5.2.9): a key space in host memory, capped by the quota
+    // (SPEC-9.3.1); the capability gate comes first (SPEC-5.3.1), then the
+    // byte caps (SPEC-9.3.2).
     linker.func_wrap(
         m,
         "state_put",
@@ -855,23 +903,32 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 if !host.caps.storage {
                     return host.denied("state_put", "storage");
                 }
-                let checked = (|| {
-                    slice(data, key_ptr, key_len, "key", limits::MAX_STATE_KEY_BYTES)?;
-                    slice(
+                let copied = (|| {
+                    let key = slice(data, key_ptr, key_len, "key", limits::MAX_STATE_KEY_BYTES)?;
+                    let val = slice(
                         data,
                         val_ptr,
                         val_len,
                         "value",
                         limits::MAX_STATE_VALUE_BYTES,
                     )?;
-                    Ok::<(), Fault>(())
+                    Ok::<(Vec<u8>, Vec<u8>), Fault>((key.to_vec(), val.to_vec()))
                 })();
-                match checked {
-                    Err(fault) => {
-                        host.report("state_put", &fault);
-                        fault.code()
+                match copied {
+                    Err(fault) => host.refuse("state_put", &fault),
+                    Ok((key, val)) => {
+                        let old = host
+                            .state
+                            .get(&key)
+                            .map_or(0, |v| (key.len() + v.len()) as u64);
+                        let after = host.state_bytes() - old + (key.len() + val.len()) as u64;
+                        if after > host.state_quota {
+                            return host.refuse("state_put", &err::E_QUOTA.into());
+                        }
+                        host.charge(key.len() + val.len());
+                        host.state.insert(key, val);
+                        err::OK
                     }
-                    Ok(()) => host.denied("state_put", "storage (headless host)"),
                 }
             })
         },
@@ -882,20 +939,46 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         |mut c: Caller<'_, Host>,
          key_ptr: i32,
          key_len: i32,
-         _dst_ptr: i32,
-         _max: i32|
+         dst_ptr: i32,
+         max: i32|
          -> wasmtime::Result<i32> {
             with_memory(&mut c, |data, host| {
                 if !host.caps.storage {
                     return host.denied("state_get", "storage");
                 }
-                match slice(data, key_ptr, key_len, "key", limits::MAX_STATE_KEY_BYTES) {
-                    Err(fault) => {
-                        host.report("state_get", &fault);
-                        fault.code()
-                    }
-                    Ok(_) => host.denied("state_get", "storage (headless host)"),
+                let key = match slice(data, key_ptr, key_len, "key", limits::MAX_STATE_KEY_BYTES) {
+                    Ok(k) => k.to_vec(),
+                    Err(fault) => return host.refuse("state_get", &fault),
+                };
+                let Some(value) = host.state.get(&key).cloned() else {
+                    // Nothing saved yet is a normal outcome for a page
+                    // (SPEC-5.2.9); noted, not warned about.
+                    host.log(
+                        LogSource::Host,
+                        0,
+                        "state_get: E_RESOURCE (no value for the key)".into(),
+                    );
+                    return err::E_RESOURCE;
+                };
+                // The full length is reported even above `max`; at most
+                // `max` bytes are copied (SPEC-5.2.9).
+                let Ok(total) = i32::try_from(value.len()) else {
+                    return host.refuse("state_get", &err::E_ARG.into());
+                };
+                let n = value.len().min(usize::try_from(max).unwrap_or(0));
+                if dst_ptr < 0 || max < 0 {
+                    return host.refuse("state_get", &err::E_ARG.into());
                 }
+                let start = dst_ptr as usize;
+                let Some(dst) = start
+                    .checked_add(n)
+                    .and_then(|end| data.get_mut(start..end))
+                else {
+                    return host.refuse("state_get", &err::E_ARG.into());
+                };
+                dst.copy_from_slice(&value[..n]);
+                host.charge(n);
+                total
             })
         },
     )?;
@@ -909,7 +992,11 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 }
                 match slice(data, key_ptr, key_len, "key", limits::MAX_STATE_KEY_BYTES) {
                     Err(fault) => host.refuse("state_delete", &fault),
-                    Ok(_) => host.denied("state_delete", "storage (headless host)"),
+                    Ok(key) => {
+                        let key = key.to_vec();
+                        host.state.remove(&key);
+                        err::OK
+                    }
                 }
             })
         },
@@ -929,7 +1016,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     Ok(url) => {
                         host.charge(url.len());
                         if url.starts_with("vy://") || url.starts_with("https://") {
-                            host.denied("navigate", "navigation (headless host)")
+                            host.denied_headless("navigate", "navigation")
                         } else {
                             host.refuse("navigate", &err::E_ARG.into())
                         }
@@ -1008,12 +1095,17 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // clipboard (SPEC-5.2.12): never granted headless; same gate order as above.
+    // clipboard (SPEC-5.2.12): the headless host has no clipboard; the
+    // capability gate comes first (SPEC-5.3.1), then the byte cap.
     linker.func_wrap(
         m,
         "clipboard_read",
         |mut c: Caller<'_, Host>, _dst_ptr: i32, _max: i32| -> i32 {
-            c.data_mut().denied("clipboard_read", "clipboard")
+            let host = c.data_mut();
+            if !host.caps.clipboard {
+                return host.denied("clipboard_read", "clipboard");
+            }
+            host.denied_headless("clipboard_read", "the clipboard")
         },
     )?;
     linker.func_wrap(
@@ -1026,7 +1118,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 }
                 match slice(data, ptr, len, "text", limits::MAX_CLIPBOARD_BYTES) {
                     Err(fault) => host.refuse("clipboard_write", &fault),
-                    Ok(_) => host.denied("clipboard_write", "clipboard (headless host)"),
+                    Ok(_) => host.denied_headless("clipboard_write", "the clipboard"),
                 }
             })
         },

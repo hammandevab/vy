@@ -13,7 +13,9 @@ pub mod abi_check;
 pub mod host;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
-pub use host::{Capabilities, Link, LogEntry, LogSource, SemNode};
+pub use host::{
+    Capabilities, Link, LogEntry, LogSource, SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES,
+};
 pub use vy_render::Resource;
 
 use host::Host;
@@ -151,6 +153,13 @@ pub struct Options {
     /// the manifest declares for them when the caller passes it
     /// (SPEC-8.1.2). Until the package loader (M3) the caller supplies them.
     pub resources: Vec<Resource>,
+    /// Storage the instance starts with (SPEC-5.2.9): what an earlier
+    /// instance of the same origin saved, taken with
+    /// [`Runtime::take_storage`]. Served only when `storage` is granted.
+    pub storage: Storage,
+    /// Most bytes the storage may hold, keys and values together; the
+    /// manifest's `quota_kb` × 1024, or [`DEFAULT_STORAGE_QUOTA_BYTES`].
+    pub storage_quota_bytes: u64,
 }
 
 impl Default for Options {
@@ -159,6 +168,8 @@ impl Default for Options {
             memory_max_pages: DEFAULT_MEMORY_MAX_PAGES,
             capabilities: Capabilities::default(),
             resources: Vec::new(),
+            storage: Storage::new(),
+            storage_quota_bytes: DEFAULT_STORAGE_QUOTA_BYTES,
         }
     }
 }
@@ -267,7 +278,13 @@ impl Runtime {
             .build();
         let mut store = Store::new(
             engine,
-            Host::new(limits, options.capabilities, options.resources),
+            Host::new(
+                limits,
+                options.capabilities,
+                options.resources,
+                options.storage,
+                options.storage_quota_bytes,
+            ),
         );
         store.limiter(|host| &mut host.limits);
         store
@@ -793,6 +810,24 @@ impl Runtime {
     /// Log lines from the module and about it.
     pub fn logs(&self) -> &[LogEntry] {
         &self.host().log
+    }
+
+    /// What the module has saved with `state_put` (SPEC-5.2.9).
+    pub fn storage(&self) -> &Storage {
+        &self.host().state
+    }
+
+    /// Take the storage out of the instance, to start the next instance of
+    /// the same origin with it (`Options::storage`, SPEC-5.1.5).
+    pub fn take_storage(&mut self) -> Storage {
+        std::mem::take(&mut self.host_mut().state)
+    }
+
+    /// `len` bytes of the module's memory from `ptr`, for tests.
+    #[cfg(test)]
+    pub(crate) fn read_memory(&self, ptr: usize, len: usize) -> Vec<u8> {
+        let memory = self.host().memory.expect("memory");
+        memory.data(&self.store)[ptr..ptr + len].to_vec()
     }
 
     /// Headless clock as the module sees it through `now_ms`.

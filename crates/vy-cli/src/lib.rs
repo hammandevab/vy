@@ -262,6 +262,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         memory_max_pages: req.memory_max_pages,
         capabilities: req.capabilities,
         resources: req.resources.to_vec(),
+        ..Options::default()
     };
     let mut rt = Runtime::load(req.wasm, &hash, options).map_err(|e| anyhow!("{e}"))?;
     rt.init(req.width, req.height, req.scale)
