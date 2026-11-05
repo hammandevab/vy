@@ -15,8 +15,8 @@ M4-spåren kan ha valt samma nummer, så de kan behöva numreras om vid merge.
 | --- | --- | --- |
 | 1 | DNS TXT `_vy.<värd>` (SPEC-7.4.2, ny 7.4.5) | klart |
 | 2 | Rotation end-to-end, pensionering av den gamla nyckeln (SPEC-7.4.4, ny 7.4.6) | klart |
-| 3 | Transparenslogg (ny §7.6) | – |
-| 4 | OS-sandlåda för flikprocessen (SPEC-9.1.1, 9.1.2, 11.2.2, ny 9.1.3) | – |
+| 3 | Transparenslogg (ny §7.6, SPEC-7.6.1–7.6.3) | klart |
+| 4 | OS-sandlåda för flikprocessen (SPEC-9.1.1, 9.1.2, 11.2.2, ny 9.1.3) | klart (Linux provat, Windows/macOS typkontrollerat) |
 | 5 | Resursgränser (SPEC-9.3.1) och isolering per origin (SPEC-9.5.1) | – |
 | 6 | Fuzzning | – |
 
@@ -171,6 +171,124 @@ gånger i testet).
 - **Test som bevisar begränsningen.** `spec_7_4_4_key_rotation`,
   `spec_7_4_4_next_key_id_cannot_forge_pins`, `keys::tests::pins_and_successors_persist`.
 
+## Steg 3 – transparenslogg (§7.6, SPEC-7.6.1–7.6.3)
+
+**Formatet (SPEC-7.6.1, `vy_manifest::{LogEntry, KeyLog}`).** En textfil, en post per rad: gemen
+hex av den kanoniska CBOR-kodningen av `{host, key_id, key, published, prev_hash}` (nyckelordning
+`key`, `host`, `key_id`, `prev_hash`, `published`). `host` är originens auktoritet som i
+`vy://`-adressen (`exempel.se`, `localhost:8080`), `key_id` måste vara nyckelns härledda id,
+`published` `ÅÅÅÅ-MM-DD`, `prev_hash` SHA-256 av föregående posts kodning (32 nollbyte för den
+första). Huvudet är SHA-256 av sista posten. `#`-rader och tomma rader är kommentarer; högst 1 MB.
+Varje rad avkodas strikt (kanonisk form, inga okända fält, host bara `[a-z0-9.-:[]]`, så en post
+kan inte smuggla en rad till nyckelförrådet). Speglingsbar: vem som helst kan kopiera filen och
+kontrollera kedjan; en logg kan bära poster för flera värdar (projektets egen logg i §15/§17 är
+samma format).
+
+**Utgivarens sida.** `vy-publish log-append --log <sajt>/vy-log --host <värd> --public-key
+<dev.key.pub>` vid keygen och vid varje rotation (keygen skriver kommandot); en bruten logg
+förlängs aldrig, en nyckel som redan står för värden läggs inte till igen, filen ersätts atomärt.
+`vy-serve` serverar `<katalog>/vy-log` som den är på `/.well-known/vy-log` (läst per förfrågan,
+`no-cache`) och skriver längd och huvud vid start, eller en varning om kedjan inte håller.
+
+**Klientens sida (SPEC-7.6.2, 7.6.3).** Loggen hämtas bara när en nyckel avgörs: vid första besök
+och vid rotation, aldrig för en pinnad nyckel. Serveras en logg pinnas bara nycklar som loggen
+listar för originens host (utöver vy-key och DNS), och längd + huvud sparas bredvid pinnen
+(`log <origin> <n> <hex>` i `keys`). Vid nästa nyckelbeslut måste loggen fortfarande ha det
+sparade huvudet på samma plats (bara vuxit), annars `LogRewritten`. **Beslut: ingen logg (404) är
+tillåten i 1.0** – annars vore varje befintlig sajt begränsad – men bara tills origin en gång
+serverat en: därefter är en saknad logg `LogWithdrawn` (en spärrhake, så att en angripare inte
+kan kringgå loggen genom att ta bort den). En logg som inte går att hämta eller tolka är
+`LogInvalid`. Alla fall är begränsat läge utan att pinnarna ändras.
+
+### Hotbild – transparensloggen
+
+- **Vad.** Ny indata (loggfilen över TLS, vid nyckelbeslut), ny rad i nyckelförrådet, ny
+  route i vy-serve, nytt kommando i vy-publish.
+- **Vem kan missbruka.** (1) Den som stulit utgivarens nyckel och styr servern: kan rotera
+  till en egen nyckel – men måste då lägga den i loggen, där den syns för speglar och
+  utgivaren; att skriva om historiken upptäcks av varje klient som sett huvudet. (2) En server
+  som visar olika loggar för olika klienter (split view): upptäcks bara genom speglar som
+  jämför huvuden – utanför 1.0 (spec-fråga 56). (3) En fientlig logg mot tolken: storlek,
+  kanonisk form, injektion i förrådet.
+- **Hur begränsas det.** Kedjan kontrolleras rad för rad; huvudet sparas och måste finnas kvar;
+  spärrhaken efter första loggen; 1 MB-tak före tolkning; strikt avkodning; host-tecken som
+  inte kan bryta en rad; loggen ändrar aldrig pinnar på egen hand – den kan bara säga nej.
+- **Test som bevisar begränsningen.** `spec_7_6_1_log_format_and_chain` (ändrad byte, tappad,
+  bytt och omordnad post, annan kodning, okänt fält, förfalskat id, farlig host, för stor),
+  `spec_7_6_2_7_6_3_key_log_checked_at_key_decisions` (saknad nyckel, trasig logg, annan host,
+  listad, rotation utan loggpost, omskriven, borttagen, vuxen, ingen logg),
+  `spec_7_6_1_log_served`, `spec_7_6_1_log_append`.
+
+## Steg 4 – OS-sandlåda för flikprocessen (SPEC-9.1.3)
+
+Vad flikprocessen gör efter uppstart, ur `strace -f` av `vy-shell --screenshot` med shop och
+game: `read(0)`, `write(1)`, `mmap`/`mprotect`/`munmap`/`brk`, `memfd_create` + `write` +
+`fcntl(F_ADD_SEALS)` (wasmtimes minnesavbilder), `sigaltstack`/`rt_sigaction` (wasmtimes
+fällor), `getrandom`, `getpid`/`gettid`, `exit_group`. Typsnitten är inbyggda (`include_bytes!`
+i vy-render), lagring och hämtning går över IPC: inget i fliken behöver en fil eller en socket.
+Spelinspelning (`--record`/`--replay`) öppnar en fil i loopen och låses därför inte (bara
+tester använder flaggorna). Låsningen sker i `--tab`-grenen i `vy-shell` och `vy-cli` innan
+första meddelandet läses (`sandbox::lockdown`), så ingen sidkod kör med mer.
+
+| Plattform | Standard | `VY_SANDBOX=strict` | Provat |
+| --- | --- | --- | --- |
+| Linux | fd > 2 stängda (`close_range`), `no_new_privs`, Landlock (alla fs-rättigheter, från ABI 4 TCP, från ABI 6 abstrakta socketar och signaler; tyst utan), seccomp-bpf-tillåtelselista: allt annat `EPERM`, `clone` bara med `CLONE_THREAD`, `tgkill` bara till egen pid, `clone3` `ENOSYS`, främmande arkitektur/x32 dödas | samma | ja: sonden nekar alla fyra (Landlock ABI 7 på 6.18), alla flikprocesstester och sviten (55/55 à 0,000 %) kör sandlådade, ingen `EPERM` i strace |
+| Windows | skalet: jobbobjekt per flik (`KILL_ON_JOB_CLOSE`, `ACTIVE_PROCESS_LIMIT` 1, minnestak 256 MB + 1 GB, `DIE_ON_UNHANDLED_EXCEPTION`, alla UI-begränsningar); fliken: låg integritet på sin egen token, inga extension points, inga bilder från fjärrresurser eller låg-märkta filer, inga icke-systemtypsnitt | i stället för std:s spawn: `CreateProcessW` i AppContainern `vy.tab` utan capabilities, `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (stdin, stdout, NUL som stderr), `CHILD_PROCESS_RESTRICTED`, startad suspenderad, i jobbet, sedan återupptagen; fliken lägger till strikt handtagskontroll; går det inte: meddelande och standard | bara typkontroll och clippy (`x86_64-pc-windows-msvc`) |
+| macOS | fd > 2 stängda, `sandbox_init` med `(deny default)` + signal/process-info till sig själv + `sysctl-read`; misslyckas anropet: varning, osandlådad | samma | bara typkontroll och clippy (`aarch64-apple-darwin`) |
+
+`VY_SANDBOX=off` stänger av barnets låsning (felsökning; jobbobjektet på Windows står kvar).
+`vy-shell --tab --sandbox-probe` låser och försöker sedan läsa den egna binären, skriva en fil i
+temp, binda en UDP-socket och starta binären; rapporten är en rad per försök och exitkod 0 bara
+om allt nekades. `process::probe_process` startar sonden exakt som skalet startar en flik (jobb,
+strict), och `spec_9_1_3_tab_sandbox` (vy-shell/tests/sandbox.rs) kör den: Linux kräver alla fyra
+nekade när seccomp finns, Windows skrivning och process när tokenen sänkts, macOS alla fyra när
+profilen tagits; annars skriver testet varför det hoppar. Testet visar också att `off` är av.
+
+**Windows standard uppfyller SPEC-9.1.3 bara till hälften:** låg integritet hindrar skrivning
+till användarens filer och register, jobbet hindrar barnprocesser, men *läsning* av filer och
+*nätverk* stoppas bara av AppContainern i strict. Att göra AppContainern till standard kräver
+att någon kört den på en riktig maskin (spec-fråga 57).
+
+### Vad människan ska se på Windows
+
+1. **Standard (ingen miljövariabel).** Allt som i testomgång 1. I Aktivitetshanteraren →
+   Detaljer, kolumnen "Integritetsnivå" (lägg till via högerklick på rubriken → Välj kolumner):
+   `vy-shell.exe` = Medel, varje flikprocess (`vy-shell.exe --tab`) = **Låg**. Process Explorer
+   (Sysinternals) visar dessutom flikprocessen i ett jobb (fliken "Job": 1 aktiv process,
+   minnesgräns ~1,25 GB). Stäng skalet med Aktivitetshanteraren ("Avsluta aktivitet" på
+   huvudprocessen): flikprocesserna ska försvinna direkt (kill on job close), inte först när röret
+   stängs.
+2. **Sonden.** I en kommandotolk: `vy-shell.exe --tab --sandbox-probe` (utan jobb, eftersom
+   skalet inte startar den): väntat `file-write: refused` (låg integritet), `file-read: allowed`,
+   `socket: allowed`, `process: allowed` (inget jobb här). Exitkod 1 är väntat i det läget.
+3. **Strict.** `set VY_SANDBOX=strict` och starta `vy-shell.exe` från samma kommandotolk. Väntat
+   om binären ligger där `ALL APPLICATION PACKAGES` får läsa den (t.ex. under
+   `C:\Program Files\Vy\`): sidorna fungerar som förut, flikprocesserna visar Integritetsnivå
+   **AppContainer**. Ligger binären i Hämtade filer kan AppContainern inte läsa den: då skriver
+   skalet (i en debug-build på konsolen) "VY_SANDBOX=strict: … this tab starts with the default
+   sandbox" och fliken startar som i 1. Om sidorna i strict visar "Sidan stannade": rapportera
+   det med Windows-version – det betyder att wasmtime eller rören inte klarar AppContainern.
+4. **Om något i standardläget går sönder** (flikar startar inte, "Sidan stannade" på allt):
+   `set VY_SANDBOX=off` och starta igen; fungerar det då är det barnets låsning (låg integritet
+   eller en policy) – rapportera vilket.
+
+### Hotbild – flikprocessens sandlåda
+
+- **Vad.** Ingen ny yta mot sidor; en minskad: processen som kör sidans kod tappar fil-, nät- och
+  processrättigheter. Ny kod i skalet: jobbobjekt och AppContainer-start (Windows), en sond.
+- **Vem kan missbruka.** Den som tar sig ut ur wasmtime (en bugg i Cranelift eller wasmtimes
+  körning) och får kod att köra i flikprocessen; därifrån: läsa användarens filer, nå nätet eller
+  andra processer, skriva m4/perf:s kompileringscache, prata med X11/Wayland genom ett ärvt fd.
+- **Hur begränsas det.** Se tabellen. Linux: inga öppna, inga socketar, inga exec, inga
+  fork-lika clone, inga signaler till andra, inga ärvda fd utöver 0–2; Landlock under. Windows:
+  ingen skrivning till medelnivå (kompileringscachen under `%LOCALAPPDATA%` är medelnivå), inga
+  barnprocesser, inget UI; i strict ingen läsning, inget nät. macOS: deny default. Rören och
+  minnet är kvar – det är flikens jobb; IPC-avkodaren i huvudprocessen litar inte på fliken
+  (granskning 0004 fynd 2).
+- **Test som bevisar begränsningen.** `spec_9_1_3_tab_sandbox`; `sandbox::platform::tests::
+  filter_layout` (filtrets hopp); alla befintliga flikprocesstester (`spec_9_1_1`, `spec_11_2_1`,
+  `spec_11_4_1` utan inspelning, `spec_13_3_1`, skalfallen i sviten) kör sandlådade.
+
 ## Byggmiljön (för den som tar över)
 
 - `target/` är delad mellan fyra arbetsträd. Cargos metadatahash för en sökvägscrate räknas
@@ -203,6 +321,22 @@ unika rader på Linux, 72 för Windows-målet; inget nytt i `Cargo.lock` utom de
 - `crates/vy-serve/src/lib.rs` (m4/dev lägger till funktioner): ny route
   `/.well-known/vy-dns`, `Site::dns_zone_lines`, `pub fn is_loopback_host`, fältet `keys` i
   `Site` och en doc-rad på `Stats::keys`. Inga publika namn ändrade eller borttagna.
+- `crates/vy-shell/Cargo.toml` (m4/ux): `libc` för unix och fler windows-sys-features (samma
+  crates som fanns). `src/lib.rs`: `pub mod sandbox;`. `src/main.rs`: `--tab` tar
+  `--sandbox-probe` och låser innan `tab::main`. `crates/vy-cli/src/main.rs` (m4/perf): samma
+  tre rader i `--tab`-grenen. `process.rs` (min) fick `probe_process` och
+  `TabConnection::limit_memory(memory_max_pages)`: **m4/ux bör anropa den när `Load` skickas**
+  (shell.rs känner manifestets `memory_max`), så att Windows-jobbets tak blir sidans
+  `memory_max` + 1 GB i stället för 256 MB + 1 GB.
+- **m4/perf (kompileringscache):** flikprocessen kan inte öppna någon fil efter uppstart (Linux,
+  macOS) och inte skriva på medelnivå (Windows). En cache måste alltså läsas och skrivas av
+  huvudprocessen och nå fliken över IPC; läggs den under `%LOCALAPPDATA%Low` på Windows kan
+  en flik med låg integritet skriva den – gör inte det.
+- **m4/dev (loopback):** inget i det här spåret låter en sida utanför loopback nå en
+  loopback-origin: nyckelfil, DNS och logg hämtas för sidans egen adress, http bara när sidans
+  egen adress är loopback (granskning 0003 fynd 5); DNS-uppslaget går till systemets resolver
+  (kanske 127.0.0.53) men sidan väljer bara namnet `_vy.<värd>`, aldrig servern. Regeln står i
+  checklistan för den externa granskningen.
 - **m4/ux (vy-shell):** `vy_proto::Fetched::restriction()` finns nu; SPEC-7.4.5 vill att orsaken
   kan visas – t.ex. som verktygstips eller rad under markören "begränsat läge". `page.rs`
   kopierar i dag bara `trusted`.
@@ -215,6 +349,12 @@ unika rader på Linux, 72 för Windows-målet; inget nytt i `Cargo.lock` utom de
 54. **SPEC-7.4.5 – väntetid.** Ett uppslag som inte svarar tar upp till 6 s och sker i skalets
     laddartråd (som är seriell, granskning 0004 fynd 7). Bör specen ge en tidsgräns, och bör
     sidan visas i begränsat läge medan uppslaget pågår?
+56. **§7.6 – split view.** En server kan visa olika loggar för olika klienter. Bara speglar som
+    jämför huvuden upptäcker det; ska 1.0 ha en mekanism (en andra källa för huvudet, t.ex. ett
+    huvud i DNS bredvid TXT-posten), eller räcker det att formatet är speglingsbart?
+57. **SPEC-9.1.3 på Windows.** Standardläget hindrar skrivning och barnprocesser men inte läsning
+    och nätverk; AppContainern (strict) hindrar allt men är inte provad. Bör meningen gälla
+    strict, och standard bli strict när en människa kört det?
 55. **SPEC-7.4.5 – IP-literaler.** `vy://192.0.2.1/` frågar `_vy.192.0.2.1` och faller till
     begränsat läge. Det finns ingen DNS-zon för en adress; ska IP-adresser (utom loopback) vara
     otillåtna i `vy://`, eller alltid begränsade?
