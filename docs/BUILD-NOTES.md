@@ -1,7 +1,113 @@
 # Byggnoteringar
 
 Skrivna av byggagenten. Granskningssidorna skrivs av en annan agent (`docs/reviews/`).
-M2-delen står först; M1-delen därunder är oförändrad utom där M2 ändrat läget (markerat).
+M2.5-delen står först, sedan M2 och M1; äldre delar är oförändrade utom där senare milstolpar
+ändrat läget (markerat).
+
+# M2.5 – ABI-ändringar före frysning
+
+Beslutslistan i `docs/reviews/0002-m2-sdk-referenssidor.md` genomförd för beslut 1–22 och
+29–31 (ABI och spec-text); 23–28 och 32–34 (SDK och verktyg) är kvar. Specen är v0.3,
+*ABI-kandidat inför frysning*. Varje spec-ändring är ett eget `spec:`-commit med sina tester;
+guldbyten är egna `golden:`-commits.
+
+## Vad som ändrades i ABI:t
+
+| Beslut | Ändring | Var |
+| --- | --- | --- |
+| 1 | 17 importer som kunde misslyckas returnerar `i32`: `log`, `dl_begin`, `dl_end`, `dl_rect`, `dl_image`, `dl_path`, `dl_clip_push`, `dl_clip_pop`, `ime_begin`, `ime_end`, `fetch_cancel`, `state_delete`, `navigate`, `link_register`, `random`, `clipboard_write`, `sem_node`. `request_frame` och `exit` kan inte misslyckas och förblir utan returvärde. `dl_begin` i en öppen lista ger `E_DL_STATE`. | SPEC-5.2.*, `vy_abi::IMPORTS`, `host.rs`, SDK |
+| 2, 30 | `dl_text -> i64`: bredd × 100 högt, höjd × 100 lågt, samma packning som `text_measure`; varje halva ≤ 2³¹ − 1 så en negativ `i64` alltid är ett fel. `Frame::text` ger `Size`. | SPEC-5.2.4, 5.2.5, `pack_x100` |
+| 3 | `dl_clip_push(x, y, w, h, radius)`; `CLIP_PUSH` är 21 byte. Rasteriseraren bygger masken ur rundade former så snart en radie finns på stacken (anti-aliasad), annars den gamla kantskarpa rektangelsnittningen. gallery och shop klipper bildkort rundat (8 guldbilder bytta). | SPEC-5.2.3, C.1.1, `raster.rs::Clip` |
+| 4 | `pointer_get` utgår (33 → 32 importer). | SPEC-5.2.6 |
+| 5 | `LINE` (0x07) och `SHADOW` (0x08) utgår; numren reserverade; `MAX_SHADOWS_PER_FRAME` borta; SPEC-C.1.3 *utgått*. | bilaga C |
+| 6 | `POINTER_LEAVE` = 9 utan argument; `Event::PointerLeave`; `pointer_leave` i `cases.toml`; dashboard släcker verktygstipset (nytt fall `dashboard-1280x800@1-leave`). | bilaga A |
+
+## Vad som ändrades i värden (spec-text med test)
+
+- **`dt_ms`** (SPEC-5.1.2, beslut 8): `Runtime::frame()` tar inget argument utan räknar `dt_ms` ur
+  sin klocka: 0 i första framen efter `init` och efter `VISIBILITY` synlig, annars klockans
+  framsteg sedan föregående frame (headless 16 ms). `vy-cli`:s `HEADLESS_DT_MS` utgår. Tester i
+  `vy-runtime` som använde `dt_ms` som kanal in i modulen kör `frame_with_dt` (bara `cfg(test)`).
+- **Tangentläge** (SPEC-5.2.6, beslut 9): `key_down` hålls till `KEY_UP` och nollställs vid
+  `VISIBILITY` dold. Fokusförlust är skalets sak (M3); enklast genom att skalet skickar `KEY_UP`
+  för hållna tangenter – då stämmer modulens egen bokföring också.
+- **Dold flik** (SPEC-6.2.1, beslut 10): `wants_frame()` är falsk dold utan `persist_frame`,
+  begäran kvarstår; `frame()` svarar `Error::Hidden` om värden ändå försöker.
+- **`vy_alloc`** (SPEC-5.1.6, beslut 12): 0 eller en pekare utan plats loggas
+  (`TEXT_INPUT dropped: …`) och händelsen släpps; `Error::Alloc` utgår.
+- **Fokus** (SPEC-10.3.1–10.3.3, 10.1.1, beslut 15, 16, 19): värden äger fokus. `Runtime::event`
+  konsumerar Tab/Skift+Tab (även `KEY_UP`), går genom trädets fokuserbara noder (`link`,
+  `button`, `textbox`, `checkbox`, `radio`, `menuitem`, `tab`, `slider`) i dokumentordning med
+  omlopp och levererar `FOCUS` ut/in med `c = 1`. Ett `POINTER_DOWN` hit-testar trädet och
+  flyttar fokus (`c = 0`) *före* trycket – samma ordning som webbläsare (mousedown → focus →
+  click) och den ordning som gör att sidornas egen klickfokus och värdens sammanfaller, så inget
+  guldbyte behövdes. Ett scriptat `focus` i `cases.toml` sätter värdens fokus. Modulerna form,
+  document och settings tappade sin Tab-hantering (nås aldrig). Enter/Escape är `KEY_DOWN`;
+  `KIND_ACTIVATE` avslås. Modulen ritar fokusringen.
+- **Länkar per frame** (SPEC-5.2.10, 9.3.2, beslut 17): `dl_begin` tömmer länklistan; samma id
+  ersätter; högst 4 096 per frame (`E_DL_FULL`). 4 096-taket per instans är borta.
+- **Dubbla nod-id** (SPEC-5.2.13, beslut 18): `E_ARG` i värden och mocken. SDK:t gör fasta id
+  negativa (`node_with_id` kräver `id < 0`) och automatiska positiva; sju semantiska träd bytta.
+- **Avkodning utanför budgeten** (SPEC-5.3.3, 6.5.1, beslut 20): `dl_image` debiterar bara
+  opkodens byte. `IMAGE_READY` avslås; M3 avkodar utanför UI-tråden.
+- **Bilaga A** (beslut 21): capability-id 1–6 (SPEC-A.4.1) och modifierarbitar Skift 1, Ctrl 2,
+  Alt 4, Meta 8 (SPEC-A.5.1).
+- **Spec-text utan kodändring**: SPEC-6.4.3 `w ≤ 0` = ingen radbrytning (beslut 11); SPEC-5.2.9
+  `state_get` på saknad nyckel = `E_RESOURCE` (13, mocken gör det; headless har ingen lagring);
+  SPEC-5.2.7/A `FETCH_DONE.status`, 64 öppna → `E_RATE`, kroppen frigörs av `fetch_cancel` eller
+  `fetch_read` = 0 (14, transporten är M3).
+
+## Manifestet (beslut 7, 22, 29, 31)
+
+- `vy-manifest` har nu en typad `Manifest` ur JSON-formen (`conformance/manifests/*.json`), en
+  egen JSON-läsare (`json.rs`, RFC 8259, under 200 rader, ingen ny beroende) och validering av
+  §4 och §8: obligatoriska fält med gränser, okända fält avvisas, `abi` major = 1,
+  `memory_max` 1–4096, resurstyper enligt SPEC-4.1.5, capabilities som map namn → objekt med
+  gränser. Sex M1-tester är un-ignorerade (4.1.1, 4.3.1, 4.3.2, 4.5.1, 8.1.1, 8.1.2).
+- **Bildstorlekar** (SPEC-8.1.2, 6.5.1): `w`/`h` är obligatoriska för `image/*`-resurser och
+  förbjudna för andra. `Manifest::check_resource_sizes` jämför med PNG-huvudet (test mot
+  gallery- och shop-filerna). Värden (`vy_render::Resource { bytes, pixels }`) avvisar en bild
+  vars avkodade storlek avviker: `E_RESOURCE` med båda storlekarna i loggen. `cases.toml` tar
+  `resources = [{path, w, h}]` (strängformen utan kontroll finns kvar); `resource_info` avslås –
+  modulen har storlekarna vid byggtid (gallery: `PICTURES`).
+- **`memory_max ≥ initialt + 1`** (SPEC-8.1.3): `Manifest::check_memory(initial_pages)`,
+  `Runtime::load` vägrar annars (`Error::MemoryMax`), `check-abi` varnar (`warnings` i
+  `AbiReport`) när initialt minne är ≥ 4095 sidor. Alla elva moduler: 18 sidor, manifest 32–64.
+- **Capabilities som map** (SPEC-8.2.1): alla elva manifest i formen
+  `{"ime": {}, "net": {"origins": [...]}}`; top-level `net`/`storage` avvisas. Fyra manifest som
+  saknades är tillagda (gallery, list, game, dashboard).
+- **Sviten läser manifestet** (SPEC-10.4.2, 8.2.2): varje fall laddar `manifests/<modul>.json`,
+  kontrollerar `memory_max` mot modulens initiala sidor, att fallet bara beviljar vad manifestet
+  begär, och att en sida med `textbox`-noder begär `ime`. Fallens `resources`-listor och
+  manifestets `resources` är ännu två källor; en förenkling (läs sökvägar ur manifestet) är
+  möjlig i M3 när paketladdaren finns.
+
+## Grindar och tal
+
+44 → 45 konformansfall (nytt: `dashboard-1280x800@1-leave`); 23 semantiska träd. Guldbyten:
+8 bilder (rundade klipp), 1 ny bild (POINTER_LEAVE), 7 träd (negativa fasta id). Importer: 32.
+Tester: 133 gröna i workspace (var 104), 42 ignorerade (var 48). Spec-id: 131 (var 127; nya
+10.3.2, 10.3.3, A.4.1, A.5.1), alla spårade. Inga nya beroenden.
+
+## Spec-frågor (M2.5)
+
+17. **Programmatisk fokus saknas.** Värden äger fokus (SPEC-10.3.1), men en modul kan inte be om
+    det: `form` vill fokusera namnfältet vid fel och `set_focus(Name)` är då bara sidans egen
+    bokföring – värdens fokus ligger kvar på knappen tills nästa Tab eller klick. Det syns inte
+    i någon guldbild (modulen ritar ringen där den själv tror fokus är) men Tab-ordningen utgår
+    från värdens nod. Antingen en import `focus_request(id) -> i32` (33 importer, kräver
+    hotanalys: en sida kan inte stjäla fokus från adressfältet eftersom trädet bara täcker
+    sidans yta) eller en regel att modulen följer värden. Bör avgöras före frysen.
+18. **Pekarfokus i värden** (SPEC-10.3.1) är byggagentens tillägg till beslut 15: utan det hade
+    Tab efter ett klick utgått från ingenting. Ordningen FOCUS före POINTER_DOWN är vald så att
+    aktivering på `POINTER_DOWN` sker med fokus redan satt. Specägaren bör bekräfta ordningen.
+19. **Fokuserbara roller** (SPEC-10.3.2) är listan ovan; `listitem`, `cell` och `tab`-paneler
+    är inte fokuserbara i 1.0. En sida som vill ha fokus på en rad gör den till `button` eller
+    `link`. Bekräftas.
+20. **Fokus över frames.** Värden håller ett nod-id; försvinner noden ur trädet startar Tab om
+    från början. Ett `FOCUS` ut skickas inte när noden försvinner (modulen vet redan). Bekräftas.
+21. **`fetch_read` = 0 som slut** (SPEC-5.2.7) antar att en tom läsning bara sker vid slutet;
+    M3:s transport måste blockera eller returnera `E_RATE`/`0` konsekvent. Avgörs med M3.
 
 # M2 (första halvan) – SDK, referenssidor, bilder
 
@@ -42,9 +148,8 @@ SDK-glue, allokator och den 64 KB stora `vy_alloc`-arenan (i bss, kostar inte by
 - **Cachetak**: `MAX_IMAGE_CACHE_BYTES` = 256 MB avkodat per instans (= en maximal bild) så ett
   paket med 32 MB PNG (SPEC-4.1.5) inte kan få värden att hålla gigabyte (SPEC-9.3.1). Värdpolicy,
   inte ABI.
-- **Bränsle**: resursbyte som läses vid avkodning debiteras `FUEL_PER_HOST_BYTE` (SPEC-5.3.3),
-  en gång. En PNG över 2 MB (64 M / 32) spränger därmed den hårda gränsen i den frame som först
-  ritar den – se specfråga 11.
+- **Bränsle**: resursbyte som lästes vid avkodning debiterades i M2 (specfråga 11); sedan M2.5
+  debiteras avkodningen inte (beslut 20, SPEC-5.3.3).
 - **Sampling** är närmaste granne i heltals- och IEEE-754-aritmetik: `cover` skalar likformigt
   och beskär, `contain` skalar likformigt och lämnar rest, `stretch` skalar per axel; destina-
   tionspixlar vars centrum ligger i snittet av rektangel, ritad bild och duk fylls. Bilinjär och
@@ -159,17 +264,15 @@ Radhöjd är `size_px × 1.25` (`vy_render::text::LINE_HEIGHT_FACTOR`). Locale i
 
 ## Approximationer i M1
 
-- **SHADOW** ritas som 8 koncentriska rundade rektanglar (`SHADOW_STEPS`) med alfa valt så att
-  ackumulerad täckning växer linjärt från `+blur` till `−blur` runt kanten. Riktig gaussisk oskärpa
-  kommer med GPU-vägen i M3.
+- **SHADOW** ritades i M1 som 8 koncentriska rundade rektanglar; opkoden utgick i M2.5 (beslut 5).
 - **IMAGE** ritades i M1 som en grå platshållare; sedan M2 avkodas PNG (se M2 ovan).
   Platshållaren finns kvar för resurser som inte avkodats.
 - **PATH** med `stroke_w = 0` fylls med nonzero-regeln; `> 0` strukes med butt-ändar.
-- **Klippstacken** är rektanglar; masken byggs om när stacken ändras.
+- **Klippstacken** är rektanglar, sedan M2.5 med hörnradie; masken byggs om när stacken ändras.
 - `dl_text` layoutar texten en gång för höjden och rasteriseraren en gång till; ingen glyfcache
   utöver cosmic-texts egen. Prestandabudgeten (SPEC §13) mäts från M3.
 - `text_caret` layoutar utan radbrytning.
-- `max_w ≤ 0` i `dl_text`/`text_measure` betyder ingen radbrytning.
+- `max_w ≤ 0` i `dl_text`/`text_measure` betyder ingen radbrytning (normativt sedan v0.3, SPEC-6.4.3).
 
 ## Bränsle och logisk tid
 
@@ -243,8 +346,7 @@ Inga normativa meningar har ändrats. Följande tolkningar gjordes och bör avg�
    navigera. Tolkning: loggas som nekad i headless-läge; `vy-shell` (M3) kopplar in den.
 7. **SPEC-5.2.3 / `dl_image` och `fit`.** Avgjord i v0.2: `dl_image` har `fit` (M2).
 8. **SPEC-5.2.11 / CSPRNG headless.** Se ovan: headless använder seedad PRNG för determinism.
-9. **SPEC-5.2.6 / `pointer_get`.** Packningen är inte specificerad; tolkning som `text_measure`:
-   x × 100 i höga 32 bitarna, y × 100 i låga.
+9. **SPEC-5.2.6 / `pointer_get`.** Utgick i M2.5 (beslut 4).
 10. **SPEC-9.3.1 / bytetak – föreslagen SPEC-9.3.2.** Meningen räknar upp minne, CPU, nätverk och
     lagring men inte hur mycket värden får kopiera ur modulminnet per anrop; utan tak kunde en modul
     få värden att allokera hela sitt minne per `sem_node` (65 536 × 16 MB per frame) och display

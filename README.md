@@ -8,15 +8,16 @@ CSS, ingen JavaScript-motor.
 - `CLAUDE.md` – arbetsbeskrivning för agenterna som bygger klienten.
 - `crates/` – klienten i Rust. `modules/` – referensmoduler. `conformance/` – guldbilder.
 
-## Status: M2, första halvan
+## Status: M2.5, ABI-kandidat inför frysning
 
 `vy-cli render` kör en modul headless i wasmtime, rasteriserar display listen i mjukvara
-(text, rektanglar, banor, PNG-bilder) och skriver en deterministisk PNG; `conformance` jämför
-14 fall mot guldbilderna i `conformance/golden/`, med scriptade händelser och capabilities per
-fall. `crates/vy-sdk` är modulsidans SDK (`App` + `export!`, `Frame`, layout, `Event`, mock för
-nativa tester); referenssidorna `hello`, `text` (lång artikel med rullning) och `form`
-(textfält, IME, kryssruta, knapp) bygger på det. Andra halvan av M2: fler referenssidor och
-ABI-frys.
+(text, rektanglar, banor, PNG-bilder, rundade klipp) och skriver en deterministisk PNG;
+`conformance` jämför 45 fall mot guldbilderna i `conformance/golden/`, med scriptade händelser,
+capabilities, resurser och manifest per fall. `crates/vy-sdk` är modulsidans SDK (`App` +
+`export!`, `Frame`, layout, `Event`, mock för nativa tester); elva referenssidor under `modules/`
+bygger på det. Specen är v0.3: beslutslistan ur granskning 0002 är genomförd för ABI och
+spec-text (32 importer, statuskod från varje import som kan misslyckas, värden äger fokus);
+kvar före frysen är SDK- och verktygsbesluten.
 
 ```sh
 tools/build_modules.sh                 # modules/* -> target/wasm/*.wasm (före cargo test)

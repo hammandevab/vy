@@ -1,8 +1,11 @@
 # vy-sdk
 
 Modulsidans SDK: en Vy-sida är en `struct` som implementerar `App`, och `vy_sdk::export!` genererar
-de sex exporterna i SPEC-5.1 runt den. Alla 33 importer i namnrymden `vy` (SPEC-5.2) finns som
+de sex exporterna i SPEC-5.1 runt den. Alla 32 importer i namnrymden `vy` (SPEC-5.2) finns som
 typade funktioner – en per import, inga alias (SPEC-2.1.1) – med statuskoder som `Result<_, VyError>`.
+Sedan v0.3 returnerar varje import som kan misslyckas sin kod (SPEC-5.3.1), så ett `Err` från
+`Frame::rect`, `ime_begin`, `link_register`, `random` med flera är värdens svar, inte bara SDK:ts
+egen kontroll.
 
 - `#![no_std]` + `alloc`. På `wasm32-unknown-unknown` är bindningarna riktiga importer, och SDK:t
   bidrar med allokator (`heap`), `vy_alloc`-arena (`arena`) och `panic_handler`. Nativt går samma
@@ -10,11 +13,19 @@ typade funktioner – en per import, inga alias (SPEC-2.1.1) – med statuskoder
 - `Frame` är display listen för ett `vy_frame`: den finns bara mellan `dl_begin` och `dl_end`
   (SPEC-5.3.2) och säger nej lokalt till det värden skulle neka – 65 537:e opkoden (SPEC-6.1.6),
   33:e klippet (SPEC-6.1.4), text över 65 535 byte (SPEC-9.3.2) – så sidan ser felet före loggen.
+  `Frame::text` returnerar `Size` (bredd och höjd, SPEC-5.2.4); `Frame::clip_push(r, radius)` och
+  `Frame::clipped(r, radius, |f| …)` klipper till en rektangel med hörnradie (SPEC-5.2.3).
 - `Frame::sem` bygger det semantiska trädet medan du ritar (SPEC-10.1.1): `heading`, `text`,
   `button`, `textbox`, `checkbox`, `link`, `image`, eller `f.group(Role::Main, …, |f| …)` för nästning.
+  Automatiska id är positiva; ett id sidan väljer med `node_with_id` är negativt (SPEC-5.2.13).
+  Registrera hela trädet varje frame: värden äger fokus och går Tab-ordningen ur trädets
+  fokuserbara noder (SPEC-10.3.1); sidan får `Event::Focus` och ritar ringen själv.
 - `Column`/`Row` är en liten immediate-mode-layout: padding, gap, nästa rektangel, text som mäter
   sig själv via värden. Ingen flexbox; layouten bor i modulen (SPEC-2.1.3).
-- `Event` avkodar `vy_event` enligt bilaga A; `event::key` har de vanligaste USB HID-koderna.
+- `Event` avkodar `vy_event` enligt bilaga A (med `PointerLeave`); `event::key` har de vanligaste
+  USB HID-koderna. Tab når aldrig en sida – värden gör `FOCUS` av den; Enter och Escape kommer
+  som `KeyDown`. `dt_ms` i `App::frame` är tiden sedan föregående frame och 0 efter start och
+  efter att fliken visats igen (SPEC-5.1.2).
 
 ## Exempel
 
@@ -42,7 +53,7 @@ impl App for Page {
             f.sem.text(r, "Klicka var som helst.")?;
             let button = col.next(36.0);
             f.rect(button, 6.0, Color::rgb(0x1A, 0x1A, 0x2E))?;
-            f.sem.button(button, "Räkna")
+            f.sem.node_with_id(-1, Role::Button, button, "Räkna")
         })?;
         Ok(())
     }
@@ -50,6 +61,7 @@ impl App for Page {
     fn event(&mut self, event: Event<'_>) -> bool {
         match event {
             Event::PointerDown { .. } => { self.clicks += 1; true }
+            Event::Focus { node, gained, .. } => node == NodeId(-1) && gained, // rita ringen
             _ => false,
         }
     }
