@@ -796,6 +796,8 @@ fn run_case(root: &Path, case: &Case, update: bool) -> CaseResult {
 /// (`vy-cli --tab`); from a test binary under `deps/`, the `vy-cli` next
 /// to it, which cargo builds for the integration tests.
 pub fn tab_executable() -> Result<PathBuf> {
+    // The path only locates the test profile's `vy-cli`; this process's
+    // own image is started through `self_exe` below.
     let exe = std::env::current_exe()?;
     if let Some(deps) = exe.parent().filter(|p| p.ends_with("deps")) {
         if let Some(profile) = deps.parent() {

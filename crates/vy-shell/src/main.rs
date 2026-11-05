@@ -43,7 +43,9 @@ fn main() -> ExitCode {
         // The OS sandbox (SPEC-9.1.3) before anything from the shell is
         // read. A recording or replay opens its file inside the loop, so
         // those developer runs are not locked down.
-        let exe = std::env::current_exe().unwrap_or_default();
+        // The probe tries to read and start this executable: the same
+        // image every self-spawn names (`process::self_exe`).
+        let exe = vy_shell::process::self_exe().unwrap_or_default();
         let report = if record.is_none() && replay.is_none() {
             vy_shell::sandbox::lockdown(vy_shell::sandbox::Mode::from_env())
         } else {
