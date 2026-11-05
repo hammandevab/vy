@@ -10,7 +10,7 @@
 //! the file and check the chain without trusting the server.
 
 use crate::cbor::{self, Enc, MapWriter, Reader};
-use crate::manifest::{from_hex, hex};
+use crate::manifest::hex;
 use crate::sign::PublicKey;
 use crate::validate::{is_date, is_key_id};
 use crate::Error;
@@ -207,12 +207,20 @@ impl KeyLog {
     }
 }
 
+/// Lower-case hex to bytes, on bytes: a line of any text, multi-byte
+/// characters included, is refused rather than sliced.
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    let b = s.as_bytes();
+    if !b.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len() / 2)
-        .map(|i| from_hex::<1>(&s[2 * i..2 * i + 2]).map(|b| b[0]))
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    b.chunks(2)
+        .map(|p| Some(digit(p[0])? << 4 | digit(p[1])?))
         .collect()
 }
 
@@ -290,6 +298,10 @@ mod tests {
             KeyLog::parse(&"#".repeat(MAX_LOG_BYTES + 1)),
             Err(Error::TooLarge { .. })
         ));
+        // Found by the fuzz replay: a multi-byte character inside a line
+        // was sliced through and panicked; it is refused.
+        assert!(KeyLog::parse("a\u{e9}b").is_err());
+        assert!(KeyLog::parse(&format!("{}\u{e9}", &lines[0][1..])).is_err());
 
         // Another encoding of the same entry, an unknown field, a forged
         // id, a host that could break a line-oriented store.
