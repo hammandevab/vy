@@ -807,13 +807,20 @@ fn spec_5_2_6_bindings_pass_through() {
     api::clipboard_write("hej").unwrap();
     let mut out = [0u8; 8];
     assert_eq!(api::clipboard_read(&mut out).unwrap(), 3);
+    assert_eq!(&out[..3], b"hej");
+    // An empty buffer asks for the length; a too small one is refused
+    // without a copy (SPEC-5.2.12).
+    assert_eq!(api::clipboard_read(&mut []).unwrap(), 3);
+    let mut two = [0u8; 2];
+    assert_eq!(api::clipboard_read(&mut two), Err(VyError::Arg));
+    assert_eq!(two, [0, 0]);
     assert_eq!(api::navigate("ftp://x", false), Err(VyError::Arg));
     api::navigate("vy://exempel.se/", true).unwrap();
     api::link_register(3, Rect::new(0.0, 0.0, 1.0, 1.0), "https://exempel.se/").unwrap();
     api::request_frame();
     api::exit(3);
     mock::with(|h| {
-        assert!(h.refusals.is_empty(), "{:?}", h.refusals);
+        assert_eq!(h.refusals, ["clipboard_read: E_ARG"], "the small buffer");
         assert_eq!(h.navigations, [("vy://exempel.se/".into(), true)]);
         assert_eq!(h.links[0].5, "https://exempel.se/");
         assert_eq!(h.frame_requests, 1);

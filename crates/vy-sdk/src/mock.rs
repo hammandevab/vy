@@ -709,9 +709,18 @@ impl MockHost {
             self.refuse("clipboard_read", err::E_DENIED);
             return err::E_DENIED;
         }
+        // The mock has no clock: every read counts as within a gesture.
+        // An empty `dst` asks for the length; otherwise the whole
+        // clipboard is copied or nothing is (SPEC-5.2.12).
         let b = self.clipboard.as_bytes();
-        let n = b.len().min(dst.len());
-        dst[..n].copy_from_slice(&b[..n]);
+        if dst.is_empty() {
+            return b.len() as i32;
+        }
+        if b.len() > dst.len() {
+            self.refuse("clipboard_read", err::E_ARG);
+            return err::E_ARG;
+        }
+        dst[..b.len()].copy_from_slice(b);
         b.len() as i32
     }
 

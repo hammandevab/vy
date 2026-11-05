@@ -152,8 +152,8 @@ pub fn fetch_begin(method: Method, url: &str, body: &[u8]) -> Result<Request, Vy
 }
 
 /// `fetch_poll`: 0 while the response is on its way, 1 once `FETCH_DONE`
-/// has been delivered and the body can be read (SPEC-5.2.7); `Arg` for a
-/// request that is not open.
+/// has been delivered and the body can be read (SPEC-5.2.7); `Err` with
+/// the host's code, `Arg` for a request that is not open.
 pub fn fetch_poll(req: Request) -> Result<i32, VyError> {
     // SAFETY: no pointers.
     check(unsafe { raw::fetch_poll(req.0) })
@@ -236,8 +236,11 @@ pub fn random(dst: &mut [u8]) -> Result<(), VyError> {
     check(unsafe { raw::random(dst.as_mut_ptr(), len) }).map(|_| ())
 }
 
-/// `clipboard_read`: copy the clipboard into `dst`; returns its full length
-/// (SPEC-5.2.12; capability `clipboard`, user gesture within 1 s).
+/// `clipboard_read` (SPEC-5.2.12; capability `clipboard`, else `Denied`;
+/// a user gesture within 1 s, else `Gesture`): with an empty `dst` the
+/// clipboard's length in bytes, nothing copied; otherwise the whole
+/// clipboard copied into `dst` and its length, or `Arg` without a copy
+/// when it does not fit.
 pub fn clipboard_read(dst: &mut [u8]) -> Result<usize, VyError> {
     let max = len_i32(dst.len())?;
     // SAFETY: `dst` is valid for `max` bytes during the call.

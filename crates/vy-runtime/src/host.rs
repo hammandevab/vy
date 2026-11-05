@@ -24,7 +24,7 @@ use crate::FUEL_PER_HOST_BYTE;
 use std::collections::{BTreeMap, HashSet};
 use vy_abi::{cap, err, fit, level, limits, method, ABI_VERSION};
 use vy_dl::DisplayList;
-use vy_render::{pack_x100, ImageCache, Resource, TextEngine};
+use vy_render::{pack_x100, ImageCache, TextEngine};
 use wasmtime::{Caller, Linker, Memory, StoreLimits, Trap};
 
 /// Storage behind `state_*` (SPEC-5.2.9): key to value. The headless host
@@ -80,6 +80,8 @@ pub const HEADLESS_FRAME_MS: i64 = 16;
 pub const HEADLESS_RANDOM_SEED: u64 = 0x5EED_5EED_0000_0001;
 /// Upper bound on retained log entries per instance.
 pub const MAX_LOG_ENTRIES: usize = 10_000;
+/// How long after a user gesture `clipboard_read` is allowed (SPEC-5.2.12).
+pub const GESTURE_WINDOW_MS: i64 = 1000;
 
 /// Capabilities granted to the instance (SPEC-8.2.1). All false by default:
 /// the headless host grants only what the caller names (`vy-cli render
@@ -242,6 +244,13 @@ pub struct Host {
     /// Open requests in the order they were begun.
     pub(crate) fetches: Vec<Fetch>,
     pub(crate) next_fetch_id: i32,
+    /// The headless clipboard, when the caller gave the host one
+    /// (SPEC-5.2.12).
+    pub(crate) clipboard: Option<Vec<u8>>,
+    /// Clock reading of the last user gesture (a pointer press or release,
+    /// a key, committed text), for the 1 s window of `clipboard_read`
+    /// (SPEC-5.2.12); `None` before the first.
+    pub(crate) last_gesture_ms: Option<i64>,
     /// Fuel owed for host work in the current import call; settled by
     /// [`with_host`] / [`with_memory`] before the call returns to wasm.
     pending_fuel: u64,
@@ -250,15 +259,19 @@ pub struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(
-        limits: StoreLimits,
-        caps: Capabilities,
-        resources: Vec<Resource>,
-        state: Storage,
-        state_quota: u64,
-        canned: Vec<CannedResponse>,
-        net_origins: Vec<String>,
-    ) -> Self {
+    /// Host state for one instance: the store limits and everything in
+    /// [`crate::Options`] except the memory cap, which the limits carry.
+    pub(crate) fn new(limits: StoreLimits, options: crate::Options) -> Self {
+        let crate::Options {
+            capabilities: caps,
+            resources,
+            storage: state,
+            storage_quota_bytes: state_quota,
+            fetch: canned,
+            net_origins,
+            clipboard,
+            memory_max_pages: _,
+        } = options;
         Self {
             memory: None,
             limits,
@@ -284,9 +297,18 @@ impl Host {
             net_origins: net_origins.iter().filter_map(|o| origin_of(o)).collect(),
             fetches: Vec::new(),
             next_fetch_id: 1,
+            clipboard,
+            last_gesture_ms: None,
             pending_fuel: 0,
             host_fuel: 0,
         }
+    }
+
+    /// True when a user gesture happened within the last second of the
+    /// host's clock (SPEC-5.2.12).
+    fn recent_gesture(&self) -> bool {
+        self.last_gesture_ms
+            .is_some_and(|at| self.clock_ms - at <= GESTURE_WINDOW_MS)
     }
 
     /// The open request with this id, or `E_ARG`.
@@ -1245,17 +1267,51 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // clipboard (SPEC-5.2.12): the headless host has no clipboard; the
-    // capability gate comes first (SPEC-5.3.1), then the byte cap.
+    // clipboard (SPEC-5.2.12): the capability gate comes first
+    // (SPEC-5.3.1), then the gesture window, then the arguments; the
+    // headless host serves the clipboard the caller gave it, if any.
     linker.func_wrap(
         m,
         "clipboard_read",
-        |mut c: Caller<'_, Host>, _dst_ptr: i32, _max: i32| -> i32 {
-            let host = c.data_mut();
-            if !host.caps.clipboard {
-                return host.denied("clipboard_read", "clipboard");
-            }
-            host.denied_headless("clipboard_read", "the clipboard")
+        |mut c: Caller<'_, Host>, dst_ptr: i32, max: i32| -> wasmtime::Result<i32> {
+            with_memory(&mut c, |data, host| {
+                if !host.caps.clipboard {
+                    return host.denied("clipboard_read", "clipboard");
+                }
+                if !host.recent_gesture() {
+                    return host.refuse("clipboard_read", &err::E_GESTURE.into());
+                }
+                let Some(clip) = host.clipboard.clone() else {
+                    return host.denied_headless("clipboard_read", "the clipboard");
+                };
+                if dst_ptr < 0 || max < 0 {
+                    return host.refuse("clipboard_read", &err::E_ARG.into());
+                }
+                let Ok(len) = i32::try_from(clip.len()) else {
+                    return host.refuse("clipboard_read", &err::E_ARG.into());
+                };
+                // `max` = 0 asks for the length; otherwise the whole
+                // clipboard is copied or nothing is.
+                if max == 0 {
+                    return len;
+                }
+                if len > max {
+                    host.host_log(format!(
+                        "clipboard_read: E_ARG (clipboard is {len} bytes, buffer is {max}; nothing copied)"
+                    ));
+                    return err::E_ARG;
+                }
+                let start = dst_ptr as usize;
+                let Some(dst) = start
+                    .checked_add(clip.len())
+                    .and_then(|end| data.get_mut(start..end))
+                else {
+                    return host.refuse("clipboard_read", &err::E_ARG.into());
+                };
+                dst.copy_from_slice(&clip);
+                host.charge(clip.len());
+                len
+            })
         },
     )?;
     linker.func_wrap(
@@ -1268,7 +1324,15 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 }
                 match slice(data, ptr, len, "text", limits::MAX_CLIPBOARD_BYTES) {
                     Err(fault) => host.refuse("clipboard_write", &fault),
-                    Ok(_) => host.denied_headless("clipboard_write", "the clipboard"),
+                    Ok(bytes) => {
+                        if host.clipboard.is_none() {
+                            return host.denied_headless("clipboard_write", "the clipboard");
+                        }
+                        let bytes = bytes.to_vec();
+                        host.charge(bytes.len());
+                        host.clipboard = Some(bytes);
+                        err::OK
+                    }
                 }
             })
         },

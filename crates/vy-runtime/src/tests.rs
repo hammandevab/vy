@@ -32,10 +32,14 @@ fn module_logs(rt: &Runtime) -> Vec<String> {
         .collect()
 }
 
+/// The host's log lines, without the one note about a `vy_event` result
+/// other than 0 or 1 (SPEC-5.1.3): the test modules here use that return
+/// value as a channel out of the module, so nearly every test would carry
+/// the note; `spec_5_1_3_event_result_other_than_0_or_1` checks it alone.
 fn host_logs(rt: &Runtime) -> Vec<String> {
     rt.logs()
         .iter()
-        .filter(|l| l.source == LogSource::Host)
+        .filter(|l| l.source == LogSource::Host && !l.message.starts_with("vy_event returned "))
         .map(|l| l.message.clone())
         .collect()
 }
@@ -47,18 +51,7 @@ fn spec_5_2_all_imports_linked() {
     let mut linker: Linker<Host> = Linker::new(engine());
     host::link_imports(&mut linker).unwrap();
     let limits = StoreLimitsBuilder::new().build();
-    let mut store = Store::new(
-        engine(),
-        Host::new(
-            limits,
-            Capabilities::default(),
-            Vec::new(),
-            Storage::new(),
-            DEFAULT_STORAGE_QUOTA_BYTES,
-            Vec::new(),
-            Vec::new(),
-        ),
-    );
+    let mut store = Store::new(engine(), Host::new(limits, Options::default()));
     let mut linked = 0;
     for sig in vy_abi::IMPORTS {
         let ext = linker
@@ -319,6 +312,11 @@ fn spec_5_2_7_fetch_read_zero_only_at_end() {
     assert_eq!(rt.open_fetches(), 0, "closed and freed by the 0");
     assert_eq!(call(&mut rt, 202, 1, 5), err::E_ARG, "no such request now");
     assert_eq!(call(&mut rt, 203, 1, 0), err::E_ARG);
+    assert_eq!(
+        call(&mut rt, 201, 1, 0),
+        err::E_ARG,
+        "poll: 0 pending, 1 done, else a negative code"
+    );
     assert_eq!(call(&mut rt, 202, 1, 0), err::E_ARG, "max must be positive");
 
     // Cancel before FETCH_DONE: nothing is delivered for it afterwards.
@@ -910,9 +908,11 @@ fn spec_5_2_4_dl_text_size() {
     rt.frame_with_dt(1000).unwrap();
     let one_line = rt.last_frame().ops_reported;
     assert_eq!(one_line, 2000, "16 px * 1.25 line height * 100");
-    // The high half is the width: one line is wider than 100 px.
+    // The high half is the width: one line is wider than 100 px (the
+    // width comes back through vy_event's result, which the host then
+    // takes as a redraw request, SPEC-5.1.3).
     let r = rt.event(1, 0, 0, 0, 0);
-    assert!(matches!(r, Ok(false)), "{r:?}");
+    assert!(matches!(r, Ok(true)), "{r:?}");
     let wide_w = rt.last_event_result();
     assert!(wide_w > 100 * 100, "width x100: {wide_w}");
     assert!(!rt.event(2, 0, 0, 0, 0).unwrap(), "non-negative i64");
@@ -930,9 +930,10 @@ fn spec_5_2_4_dl_text_size() {
     let dl = rt.frame_with_dt(100).unwrap().to_vec();
     let ops = vy_dl::decode(&dl).unwrap();
     assert!(matches!(ops[0], vy_dl::Op::Text { max_w, .. } if max_w == 100.0));
-    // text_measure's low 32 bits are the same height (SPEC-5.2.5); vy_event here
-    // returns them, so "redraw" is reported exactly when they equal 1, which they never do.
-    assert!(!rt.event(0, 100, 0, 0, 0).unwrap());
+    // text_measure's low 32 bits are the same height (SPEC-5.2.5); vy_event
+    // here returns them, a value other than 0 or 1, which the host takes
+    // as a redraw request (SPEC-5.1.3).
+    assert!(rt.event(0, 100, 0, 0, 0).unwrap());
     let m = rt
         .text_engine_mut()
         .measure(1, 100.0, "ett två tre fyra fem sex sju åtta nio tio")
@@ -1348,7 +1349,8 @@ fn spec_9_3_1_frame_caps() {
 
     // The display list shares the budget: with 16 MB in the tree, a one-byte
     // text run does not fit; an empty one does.
-    assert!(!rt.event(1, 1, 0, 0, 0).unwrap());
+    rt.event(1, 1, 0, 0, 0).unwrap();
+    assert_eq!(rt.last_event_result(), err::E_DL_FULL);
     assert_eq!(
         host_logs(&rt),
         vec!["sem_node: E_DL_FULL", "dl_text: E_DL_FULL"]
@@ -1761,6 +1763,169 @@ fn spec_5_2_7_fetch_and_storage_denied_headless() {
         );
     }
     assert!(!rt.is_suspended());
+}
+
+/// A module driven by `vy_event`: kind 200 returns `clipboard_read(2048,
+/// a)`; 201 returns `clipboard_write(0, a)` of the digits at offset 0;
+/// every other kind returns `a`, so a test can hand the host any
+/// `vy_event` result it likes.
+fn clipboard_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "clipboard_read" (func $clipboard_read (param i32 i32) (result i32)))
+            (import "vy" "clipboard_write" (func $clipboard_write (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "0123456789")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 200)) (then
+                    (return (call $clipboard_read (i32.const 2048) (local.get 1)))))
+                (if (i32.eq (local.get 0) (i32.const 201)) (then
+                    (return (call $clipboard_write (i32.const 0) (local.get 1)))))
+                local.get 1)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ))
+}
+
+fn clipboard_runtime(clipboard: Option<&[u8]>, granted: bool) -> Runtime {
+    let bytes = clipboard_module();
+    let opts = Options {
+        capabilities: if granted {
+            Capabilities::from_names(["clipboard"]).unwrap()
+        } else {
+            Capabilities::default()
+        },
+        clipboard: clipboard.map(<[u8]>::to_vec),
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    rt
+}
+
+/// SPEC-5.2.12, SPEC-5.3.1: `clipboard_read` is `E_DENIED` without the
+/// capability, `E_GESTURE` without a pointer press, key or text input
+/// within the last second of the host's clock, returns the clipboard's
+/// length without copying when `max` is 0, copies the whole clipboard and
+/// returns its length when it fits, and is `E_ARG` without a copy when it
+/// does not; `clipboard_write` replaces the clipboard.
+#[test]
+fn spec_5_2_12_clipboard_read_returns_length_or_code() {
+    let call = |rt: &mut Runtime, kind: i32, a: i32| {
+        rt.event(kind, a, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    let mut rt = clipboard_runtime(Some(b"hej du"), false);
+    assert_eq!(call(&mut rt, 200, 64), err::E_DENIED, "capability first");
+    assert!(host_logs(&rt)[0].starts_with("clipboard_read: E_DENIED"));
+
+    let mut rt = clipboard_runtime(Some(b"hej du"), true);
+    // Kind 7 is TEXT_INPUT; the key events are gestures, pointer moves are not.
+    assert_eq!(call(&mut rt, event::POINTER_MOVE, 64), 64);
+    assert_eq!(call(&mut rt, 200, 64), err::E_GESTURE, "no gesture yet");
+    assert_eq!(host_logs(&rt), vec!["clipboard_read: E_GESTURE"]);
+    rt.event(event::KEY_DOWN, 0x04, 0, 0, 0).unwrap();
+    assert_eq!(
+        call(&mut rt, 200, 0),
+        6,
+        "max = 0: the length, nothing copied"
+    );
+    assert_eq!(rt.read_memory(2048, 6), [0; 6]);
+    assert_eq!(
+        call(&mut rt, 200, 5),
+        err::E_ARG,
+        "too small: nothing copied"
+    );
+    assert!(host_logs(&rt)
+        .last()
+        .unwrap()
+        .starts_with("clipboard_read: E_ARG (clipboard is 6 bytes, buffer is 5"));
+    assert_eq!(rt.read_memory(2048, 6), [0; 6]);
+    assert_eq!(call(&mut rt, 200, 6), 6, "fits exactly: bytes written");
+    assert_eq!(rt.read_memory(2048, 6), b"hej du");
+    assert_eq!(
+        call(&mut rt, 200, 64),
+        6,
+        "a bigger buffer: still the length"
+    );
+    assert_eq!(call(&mut rt, 200, -1), err::E_ARG);
+
+    // The gesture window is one second of the host's clock: 16 ms per
+    // frame headless, so 62 frames keep it open and the 63rd closes it.
+    for _ in 0..62 {
+        rt.frame_with_dt(0).unwrap();
+    }
+    assert_eq!(
+        call(&mut rt, 200, 64),
+        6,
+        "1 s after the key: still allowed"
+    );
+    rt.frame_with_dt(0).unwrap();
+    assert_eq!(call(&mut rt, 200, 64), err::E_GESTURE, "1 016 ms: closed");
+    rt.event(event::POINTER_UP, 100, 100, 1, 0).unwrap();
+    assert_eq!(call(&mut rt, 200, 64), 6, "a release reopens it");
+
+    // Writing replaces the clipboard; reading it back needs no new gesture
+    // within the window.
+    assert_eq!(call(&mut rt, 201, 10), err::OK);
+    assert_eq!(call(&mut rt, 200, 0), 10);
+    assert_eq!(call(&mut rt, 200, 10), 10);
+    assert_eq!(rt.read_memory(2048, 10), b"0123456789");
+    assert_eq!(call(&mut rt, 201, 0), err::OK, "an empty clipboard");
+    assert_eq!(call(&mut rt, 200, 0), 0);
+    assert_eq!(call(&mut rt, 200, 8), 0, "nothing to copy, nothing refused");
+
+    // A host without a clipboard denies after the gates, at debug level.
+    let mut rt = clipboard_runtime(None, true);
+    rt.event(event::POINTER_DOWN, 0, 0, 1, 0).unwrap();
+    assert_eq!(call(&mut rt, 200, 64), err::E_DENIED);
+    assert_eq!(call(&mut rt, 201, 3), err::E_DENIED);
+    let unavailable: Vec<&LogEntry> = rt
+        .logs()
+        .iter()
+        .filter(|l| l.message.contains("not available in the headless host"))
+        .collect();
+    assert_eq!(unavailable.len(), 2);
+    assert!(unavailable.iter().all(|l| l.level == vy_abi::level::DEBUG));
+}
+
+/// SPEC-5.1.3: `vy_event` returning 1 asks for a redraw and 0 does not;
+/// any other value is treated as 1, and the host notes it once per
+/// instance at debug level.
+#[test]
+fn spec_5_1_3_event_result_other_than_0_or_1() {
+    let mut rt = clipboard_runtime(None, false);
+    rt.frame_with_dt(0).unwrap();
+    assert!(!rt.event(1, 0, 0, 0, 0).unwrap(), "0: no redraw");
+    assert!(!rt.wants_frame());
+    assert!(rt.event(1, 1, 0, 0, 0).unwrap(), "1: redraw");
+    assert!(rt.wants_frame());
+    rt.frame_with_dt(0).unwrap();
+    let notes = |rt: &Runtime| {
+        rt.logs()
+            .iter()
+            .filter(|l| l.source == LogSource::Host && l.message.starts_with("vy_event returned "))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(notes(&rt).is_empty(), "0 and 1 are not noted");
+    for odd in [2, -1, i32::MAX, i32::MIN] {
+        assert!(rt.event(1, odd, 0, 0, 0).unwrap(), "{odd} counts as 1");
+        assert!(rt.wants_frame(), "{odd}");
+        rt.frame_with_dt(0).unwrap();
+        assert_eq!(rt.last_event_result(), odd, "the raw value is kept");
+    }
+    let notes = notes(&rt);
+    assert_eq!(notes.len(), 1, "noted once per instance: {notes:?}");
+    assert_eq!(
+        notes[0].message,
+        "vy_event returned 2; treated as 1 (redraw) (SPEC-5.1.3)"
+    );
+    assert_eq!(notes[0].level, vy_abi::level::DEBUG);
+    assert!(host_logs(&rt).is_empty(), "nothing was refused");
 }
 
 /// A module driven by `vy_event`: kind 200 puts key `k` with `a` bytes of

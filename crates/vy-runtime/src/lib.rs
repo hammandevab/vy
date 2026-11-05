@@ -168,6 +168,11 @@ pub struct Options {
     /// any other origin is `E_ORIGIN`. Empty when there is no manifest,
     /// which skips the gate.
     pub net_origins: Vec<String>,
+    /// The headless host's clipboard (SPEC-5.2.12): `None` means there is
+    /// none and `clipboard_*` are denied as unavailable; `Some(bytes)` is
+    /// what `clipboard_read` copies and `clipboard_write` replaces. Served
+    /// only when `clipboard` is granted.
+    pub clipboard: Option<Vec<u8>>,
 }
 
 impl Default for Options {
@@ -180,6 +185,7 @@ impl Default for Options {
             storage_quota_bytes: DEFAULT_STORAGE_QUOTA_BYTES,
             fetch: Vec::new(),
             net_origins: Vec::new(),
+            clipboard: None,
         }
     }
 }
@@ -249,6 +255,9 @@ pub struct Runtime {
     /// The next frame is reported as over budget whatever it cost
     /// ([`Runtime::force_budget_breach`]).
     force_breach: bool,
+    /// True once the host has noted a `vy_event` result other than 0 or 1
+    /// (SPEC-5.1.3): the note is logged once per instance.
+    event_result_noted: bool,
 }
 
 impl Runtime {
@@ -289,18 +298,7 @@ impl Runtime {
             .tables(1)
             .instances(1)
             .build();
-        let mut store = Store::new(
-            engine,
-            Host::new(
-                limits,
-                options.capabilities,
-                options.resources,
-                options.storage,
-                options.storage_quota_bytes,
-                options.fetch,
-                options.net_origins,
-            ),
-        );
+        let mut store = Store::new(engine, Host::new(limits, options));
         store.limiter(|host| &mut host.limits);
         store
             .set_fuel(CALL_HARD_LIMIT_FUEL)
@@ -336,6 +334,7 @@ impl Runtime {
             visible: true,
             focus: None,
             force_breach: false,
+            event_result_noted: false,
         })
     }
 
@@ -603,6 +602,19 @@ impl Runtime {
     /// that a frame leaves out loses focus (see [`Runtime::frame`]).
     pub fn event(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) -> Result<bool, Error> {
         self.gate()?;
+        if matches!(
+            kind,
+            event::POINTER_DOWN
+                | event::POINTER_UP
+                | event::KEY_DOWN
+                | event::KEY_UP
+                | event::TEXT_INPUT
+        ) {
+            // A user gesture, for the 1 s window of `clipboard_read`
+            // (SPEC-5.2.12); pointer moves and scrolls are not gestures.
+            let host = self.host_mut();
+            host.last_gesture_ms = Some(host.clock_ms);
+        }
         match kind {
             event::KEY_DOWN if a == key::TAB => {
                 return self.focus_step(b & modifier::SHIFT != 0);
@@ -639,12 +651,22 @@ impl Runtime {
         self.deliver(kind, a, b, c, d)
     }
 
-    /// Call `vy_event` and note whether the module wants a frame.
+    /// Call `vy_event` and note whether the module wants a frame: 1 asks
+    /// for a redraw, 0 does not, and any other value is treated as 1 and
+    /// noted once per instance at debug level (SPEC-5.1.3).
     fn deliver(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) -> Result<bool, Error> {
         let ev = self.exports.event.clone();
         let (r, _) = self.call(&ev, (kind, a, b, c, d)).map_err(|(e, _)| e)?;
         self.last_event = r;
-        let redraw = r == 1;
+        let redraw = r != 0;
+        if r != 0 && r != 1 && !self.event_result_noted {
+            self.event_result_noted = true;
+            self.host_mut().log(
+                LogSource::Host,
+                level::DEBUG,
+                format!("vy_event returned {r}; treated as 1 (redraw) (SPEC-5.1.3)"),
+            );
+        }
         if redraw {
             self.host_mut().wants_frame = true;
         }
@@ -726,8 +748,9 @@ impl Runtime {
         Ok(redraw)
     }
 
-    /// The raw value the last `vy_event` returned (1 asks for a redraw,
-    /// SPEC-5.1.3; anything else is the module's own business).
+    /// The raw value the last `vy_event` returned (SPEC-5.1.3: 1 asks for
+    /// a redraw, 0 does not, anything else counts as 1); tests use it as a
+    /// channel out of a module.
     pub fn last_event_result(&self) -> i32 {
         self.last_event
     }
