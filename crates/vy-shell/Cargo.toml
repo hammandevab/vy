@@ -4,6 +4,33 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "The Vy client: window, tabs, address bar, one sandboxed process per tab"
+
+[lib]
+name = "vy_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vy-shell"
+path = "src/main.rs"
+
+[features]
+# The window itself (winit + softbuffer). Off, the crate is the shell's
+# model, chrome, tab processes and the headless screenshot pipeline, which
+# is what `vy-cli conformance` links.
+default = ["window"]
+window = ["dep:winit", "dep:softbuffer"]
 
 [dependencies]
 vy-abi.workspace = true
+vy-dl.workspace = true
+vy-manifest.workspace = true
+vy-proto.workspace = true
+vy-render.workspace = true
+vy-runtime.workspace = true
+getrandom.workspace = true
+winit = { workspace = true, optional = true }
+softbuffer = { workspace = true, optional = true }
+
+[dev-dependencies]
+wat.workspace = true

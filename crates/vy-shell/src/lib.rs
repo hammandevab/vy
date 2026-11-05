@@ -1,8 +1,17 @@
 //! Shell: window, tabs, address bar, history, capability dialogs (SPEC §9, §11).
 //!
-//! Not touched before M3 (see CLAUDE.md). Headless work lives in `vy-cli`.
-//! The client has no extension system (SPEC-11.5.1) and never renders HTML (SPEC-1.1.1).
+//! The main process draws the chrome and rasterizes (SPEC-9.1.2,
+//! SPEC-9.6.1); every tab is a child process running one `vy_runtime::Runtime`
+//! (SPEC-9.1.1), reached over the frames of [`ipc`]. Everything but the
+//! window itself is platform-independent and runs without one:
+//! [`headless::screenshot`] drives the same shell, tab processes and
+//! compositing to a PNG. The client has no extension system (SPEC-11.5.1)
+//! and never renders HTML (SPEC-1.1.1).
 #![deny(missing_docs)]
+
+pub mod ipc;
+pub mod process;
+pub mod tab;
 
 #[cfg(test)]
 mod tests {

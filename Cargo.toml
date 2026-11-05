@@ -58,8 +58,17 @@ zstd = { version = "0.14", default-features = false }
 # Blocking HTTPS client: rustls with ring and bundled Mozilla roots, no gzip, no cookies.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 tiny_http = "0.12"
-# OS entropy for `vy-publish keygen` only (same version ring uses).
+# OS entropy for `vy-publish keygen` and the key of each tab's CSPRNG in
+# vy-shell (same version ring uses).
 getrandom = "0.2"
+# M3 del 2 (vy-shell); motiveringar i docs/notes/m3-shell.md.
+# Window, input and DPI on Windows, macOS, X11 and Wayland. No client-side
+# decorations on Wayland (saves sctk-adwaita and a font stack); X11 and
+# Wayland libraries are loaded at run time, so nothing is needed to build.
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+# Presents a CPU-rasterized frame to the window without a GPU context
+# (the wgpu path is M4/M5). No KMS/DRM backend.
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 
 [profile.release]
 lto = "thin"
