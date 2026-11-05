@@ -45,7 +45,7 @@ const LINE_PX: f32 = 48.0;
 const BUTTON_W: f32 = 88.0;
 const BUTTON_H: f32 = 32.0;
 /// Fixed semantic id of the lightbox's close button (SPEC-10.3.1).
-const ID_CLOSE: i32 = 900;
+const ID_CLOSE: i32 = -900;
 
 /// One picture of the package: resource id is index + 1.
 struct Picture {

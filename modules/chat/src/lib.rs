@@ -80,8 +80,8 @@ const LINE_PX: f32 = 24.0;
 const BASE_MINUTES: i64 = 9 * 60 + 12;
 
 /// Fixed semantic ids of the interactive nodes (SPEC-10.3.1).
-const ID_COMPOSER: i32 = 1000;
-const ID_SEND: i32 = 1001;
+const ID_COMPOSER: i32 = -1000;
+const ID_SEND: i32 = -1001;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sender {

@@ -8,7 +8,9 @@
 //! rely on (SPEC-10.3.1); the host walks the focusable nodes in the order
 //! they were registered (SPEC-10.3.2), so register the whole tree every
 //! frame, on screen or not (SPEC-10.1.1). An id used twice in one frame is
-//! refused by the host as `Arg` (SPEC-5.2.13) and surfaces here as `Err`.
+//! refused by the host as `Arg` (SPEC-5.2.13); the SDK keeps the two kinds
+//! of id apart so that never happens by accident: automatic ids are
+//! positive, ids a page chooses with [`Sem::node_with_id`] are negative.
 
 use crate::error::{check, VyError};
 use crate::raw::{self, pl};
@@ -107,14 +109,16 @@ impl Sem {
         self.parents.last().copied().unwrap_or(0)
     }
 
-    /// Register a node under the current parent with the next free id.
+    /// Register a node under the current parent with the next free
+    /// (positive) id.
     pub fn node(&mut self, role: Role, rect: Rect, text: &str) -> Result<NodeId, VyError> {
         let id = self.next_id;
-        self.node_with_id(id, role, rect, text)
+        self.register(id, role, rect, text)
     }
 
-    /// Register a node with an id of the page's choosing. Later automatic
-    /// ids continue above it.
+    /// Register a node with an id of the page's choosing, which must be
+    /// negative: automatic ids are positive, so the two never collide
+    /// (SPEC-5.2.13). A non-negative id is `Arg` and registers nothing.
     pub fn node_with_id(
         &mut self,
         id: i32,
@@ -122,6 +126,13 @@ impl Sem {
         rect: Rect,
         text: &str,
     ) -> Result<NodeId, VyError> {
+        if id >= 0 {
+            return Err(VyError::Arg);
+        }
+        self.register(id, role, rect, text)
+    }
+
+    fn register(&mut self, id: i32, role: Role, rect: Rect, text: &str) -> Result<NodeId, VyError> {
         if self.count >= limits::MAX_SEM_NODES_PER_FRAME {
             return Err(VyError::DlFull);
         }
@@ -144,7 +155,9 @@ impl Sem {
             )
         })?;
         self.count += 1;
-        self.next_id = self.next_id.max(id.saturating_add(1));
+        if id > 0 {
+            self.next_id = id.saturating_add(1);
+        }
         Ok(NodeId(id))
     }
 

@@ -41,11 +41,12 @@ const SECTION: f32 = 20.0;
 /// Longest value a field accepts, in bytes.
 const MAX_VALUE: usize = 200;
 
-/// Fixed semantic ids of the interactive nodes (SPEC-10.3.1).
-const ID_NAME: i32 = 10;
-const ID_EMAIL: i32 = 11;
-const ID_NEWS: i32 = 12;
-const ID_SUBMIT: i32 = 13;
+/// Fixed semantic ids of the interactive nodes (SPEC-10.3.1); a page's own
+/// ids are negative (SPEC-5.2.13).
+const ID_NAME: i32 = -10;
+const ID_EMAIL: i32 = -11;
+const ID_NEWS: i32 = -12;
+const ID_SUBMIT: i32 = -13;
 
 /// What can hold keyboard focus, in Tab order.
 #[derive(Clone, Copy, PartialEq, Eq)]

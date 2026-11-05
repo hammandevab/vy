@@ -44,7 +44,7 @@ const DIALOG_W: f32 = 480.0;
 const DIALOG_PAD: f32 = 24.0;
 const BUTTON_H: f32 = 40.0;
 /// Fixed semantic id of the dialog's close button (SPEC-10.3.1).
-const ID_CLOSE: i32 = 900;
+const ID_CLOSE: i32 = -900;
 
 const CUSTOMERS: [&str; 12] = [
     "Nordlund Bygg",

@@ -590,7 +590,9 @@ fn spec_5_2_4_text_size_and_layout() {
 }
 
 /// SPEC-10.1.1, SPEC-5.2.13: `Sem` numbers nodes in call order from 1,
-/// nests parents with `begin`/`end`/`group`, and continues above explicit ids.
+/// nests parents with `begin`/`end`/`group`; a page's own ids are negative
+/// and leave the automatic numbering alone, and a non-negative one is
+/// refused, so no id is ever used twice in a frame.
 #[test]
 fn spec_10_1_1_sem_ids_and_parents() {
     mock::reset();
@@ -601,8 +603,21 @@ fn spec_10_1_1_sem_ids_and_parents() {
     assert_eq!(sem.heading(r, "H").unwrap(), NodeId(2));
     sem.group(Role::List, r, "", |sem| {
         assert_eq!(sem.node(Role::ListItem, r, "a")?, NodeId(4));
-        sem.node_with_id(10, Role::ListItem, r, "b")?;
-        assert_eq!(sem.next_id(), NodeId(11));
+        assert_eq!(sem.node_with_id(-10, Role::ListItem, r, "b")?, NodeId(-10));
+        assert_eq!(
+            sem.next_id(),
+            NodeId(5),
+            "fixed ids do not move the counter"
+        );
+        assert_eq!(
+            sem.node_with_id(10, Role::ListItem, r, "c"),
+            Err(VyError::Arg),
+            "fixed ids are negative"
+        );
+        assert_eq!(
+            sem.node_with_id(0, Role::ListItem, r, "c"),
+            Err(VyError::Arg)
+        );
         Ok(())
     })
     .unwrap();
@@ -610,7 +625,7 @@ fn spec_10_1_1_sem_ids_and_parents() {
     sem.end();
     sem.end();
     assert_eq!(sem.parent(), 0, "extra end is harmless");
-    assert_eq!(sem.button(r, "Ok").unwrap(), NodeId(11));
+    assert_eq!(sem.button(r, "Ok").unwrap(), NodeId(5));
     assert_eq!(sem.count(), 6);
     mock::with(|h| {
         let tree: Vec<(i32, i32, i32)> =
@@ -622,11 +637,12 @@ fn spec_10_1_1_sem_ids_and_parents() {
                 (2, 1, 2),
                 (3, 1, 8),
                 (4, 3, 9),
-                (10, 3, 9),
-                (11, 0, 4)
+                (-10, 3, 9),
+                (5, 0, 4)
             ]
         );
         assert_eq!(h.sem[5].text, "Ok");
+        assert!(h.refusals.is_empty(), "the host never saw the refused ids");
     });
 }
 
@@ -775,9 +791,9 @@ fn spec_5_2_13_duplicate_ids_and_links_per_frame() {
     mock::reset();
     let r = Rect::new(0.0, 0.0, 1.0, 1.0);
     let mut f = Frame::begin();
-    f.sem.node_with_id(5, Role::Button, r, "a").unwrap();
+    f.sem.node_with_id(-5, Role::Button, r, "a").unwrap();
     assert_eq!(
-        f.sem.node_with_id(5, Role::Button, r, "b"),
+        f.sem.node_with_id(-5, Role::Button, r, "b"),
         Err(VyError::Arg)
     );
     assert_eq!(f.sem.count(), 1);
