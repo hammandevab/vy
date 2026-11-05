@@ -5,7 +5,8 @@
 //! (SPEC-7.2.1), with the module and resources available by hash under
 //! `/_vy/<sha256>` as immutable blobs (SPEC-7.3.1), `ETag` and `max-age`
 //! on manifests (SPEC-7.3.2), the publisher key at `/.well-known/vy-key`
-//! (SPEC-7.4.2), an optional `index.json` under `/.well-known/vy-index/`,
+//! (SPEC-7.4.2), the DNS TXT records the operator must publish for it at
+//! `/.well-known/vy-dns` (SPEC-7.4.5, plain text for people), an optional `index.json` under `/.well-known/vy-index/`,
 //! and, for ordinary browsers, an HTML rendering of the manifest's
 //! `fallback`, an index of every package at `/` and preview images from
 //! `<dir>/previews/<name>.png` at `/_previews/<name>.png`. No trust lives
@@ -24,12 +25,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
-use vy_manifest::{parse_key_file, Hash, Manifest, Package, MEDIA_MANIFEST, MEDIA_PACKAGE};
+use vy_manifest::{
+    dns_txt_zone_line, parse_key_file, Hash, Manifest, Package, PublicKey, MEDIA_MANIFEST,
+    MEDIA_PACKAGE,
+};
 
 pub use html::{index as index_page, markdown, page as fallback_page, Entry};
 
 /// Path of the publisher key file (SPEC-7.4.2).
 pub const WELL_KNOWN_KEY_PATH: &str = "/.well-known/vy-key";
+/// Path of the DNS TXT records the operator must publish for the keys
+/// (SPEC-7.4.5), as plain text for the operator; no client reads it.
+pub const WELL_KNOWN_DNS_PATH: &str = "/.well-known/vy-dns";
 /// Prefix of the text index route.
 pub const WELL_KNOWN_INDEX_PREFIX: &str = "/.well-known/vy-index/";
 /// Prefix of content-addressed blobs.
@@ -114,7 +121,7 @@ pub struct Stats {
     pub blobs: AtomicU64,
     /// HTML pages served.
     pub html: AtomicU64,
-    /// Key files served.
+    /// Key files served (`vy-key`, and `vy-dns` for the operator).
     pub keys: AtomicU64,
     /// Index files served.
     pub index: AtomicU64,
@@ -139,7 +146,7 @@ pub struct StatsSnapshot {
     pub blobs: u64,
     /// HTML pages served.
     pub html: u64,
-    /// Key files served.
+    /// Key files served (`vy-key`, and `vy-dns` for the operator).
     pub keys: u64,
     /// Index files served.
     pub index: u64,
@@ -276,6 +283,7 @@ pub struct Site {
     host_name: Mutex<String>,
     host_fixed: bool,
     key_text: Option<String>,
+    keys: Vec<PublicKey>,
     loaded: Mutex<HashMap<String, Arc<Loaded>>>,
     blobs: Mutex<HashMap<Hash, Blob>>,
     stats: Stats,
@@ -335,7 +343,7 @@ fn package_name(path: &str) -> Option<String> {
 impl Site {
     /// Open `dir`, read the key file if any and load every package found.
     pub fn open(config: &Config) -> Result<Site, Error> {
-        let key_text = match &config.public_key_file {
+        let (key_text, keys) = match &config.public_key_file {
             Some(p) => {
                 let text = std::fs::read_to_string(p)
                     .map_err(|e| Error::Io(format!("{}: {e}", p.display())))?;
@@ -343,9 +351,9 @@ impl Site {
                 if keys.is_empty() {
                     return Err(Error::KeyFile("no keys in file".into()));
                 }
-                Some(text)
+                (Some(text), keys)
             }
-            None => None,
+            None => (None, Vec::new()),
         };
         if !config.dir.is_dir() {
             return Err(Error::Io(format!(
@@ -358,6 +366,7 @@ impl Site {
             host_name: Mutex::new(config.host_name.clone().unwrap_or_default()),
             host_fixed: config.host_name.is_some(),
             key_text,
+            keys,
             loaded: Mutex::new(HashMap::new()),
             blobs: Mutex::new(HashMap::new()),
             stats: Stats::default(),
@@ -422,6 +431,35 @@ impl Site {
             }
         }
         self.host_name.lock().unwrap().clone()
+    }
+
+    /// The zone-file lines of the TXT records a client's first visit
+    /// needs (SPEC-7.4.5), one per published key, for `host` (with or
+    /// without a port; the DNS name has none).
+    pub fn dns_zone_lines(&self, host: &str) -> Vec<String> {
+        let hostname = hostname_of(host);
+        self.keys
+            .iter()
+            .map(|k| dns_txt_zone_line(hostname, k))
+            .collect()
+    }
+
+    /// The text served at [`WELL_KNOWN_DNS_PATH`] for `host`.
+    fn dns_text(&self, host: &str) -> String {
+        let mut out = format!(
+            "; DNS TXT records for vy://{host} (SPEC-7.4.2, SPEC-7.4.5).\n\
+             ; Publish every line at the DNS provider: a client's first visit trusts\n\
+             ; only keys that stand both here and in {WELL_KNOWN_KEY_PATH}; without\n\
+             ; the record every page of the site runs in restricted mode (SPEC-7.4.3).\n"
+        );
+        if is_loopback_host(host) {
+            out.push_str("; Loopback has no DNS and needs no record (SPEC-7.4.5).\n");
+        }
+        for line in self.dns_zone_lines(host) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out
     }
 
     fn package_path(&self, name: &str) -> PathBuf {
@@ -541,6 +579,17 @@ impl Site {
                 ),
                 None => (self.not_found(path, accept), Counted::None),
             };
+        }
+        if path == WELL_KNOWN_DNS_PATH {
+            if self.keys.is_empty() {
+                return (self.not_found(path, accept), Counted::None);
+            }
+            let text = self.dns_text(&self.host_for(req));
+            return (
+                Reply::new(200, text.into_bytes(), "text/plain; charset=utf-8")
+                    .header("Cache-Control", CACHE_CONTROL_PAGE),
+                Counted::Keys,
+            );
         }
         if let Some(rest) = path.strip_prefix(WELL_KNOWN_INDEX_PREFIX) {
             let Some(name) = package_name(&format!("/{rest}")) else {
@@ -684,6 +733,26 @@ impl Site {
         } else {
             Reply::new(404, b"not found\n".to_vec(), "text/plain; charset=utf-8")
         }
+    }
+}
+
+/// True for the loopback names a client exempts from TLS (SPEC-7.1.3)
+/// and DNS (SPEC-7.4.5), with or without a port: `localhost`,
+/// `127.0.0.1`, `[::1]`.
+pub fn is_loopback_host(host: &str) -> bool {
+    matches!(
+        hostname_of(host).to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1]"
+    )
+}
+
+/// The host name without its port: `exempel.se:8443` is `exempel.se`,
+/// `[::1]:8080` is `[::1]`.
+fn hostname_of(host: &str) -> &str {
+    if host.starts_with('[') {
+        host.find(']').map_or(host, |i| &host[..=i])
+    } else {
+        host.split(':').next().unwrap_or(host)
     }
 }
 
@@ -1236,6 +1305,72 @@ mod tests {
         // Without a key file the route is 404.
         let no_key = Site::open(&Config::local(&dir)).unwrap();
         assert_eq!(get(&no_key, WELL_KNOWN_KEY_PATH, "*/*").status, 404);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-7.4.5: the TXT records the operator must publish are served
+    /// as plain text at `/.well-known/vy-dns`, one zone line per key at
+    /// `_vy.<host>` without the port, for the configured host name or the
+    /// request's; without a key file the route is 404.
+    #[test]
+    fn spec_7_4_5_dns_records_for_the_operator() {
+        let (dir, _, key) = site_dir();
+        let site = Site::open(&config(&dir)).unwrap();
+        let r = get(&site, WELL_KNOWN_DNS_PATH, "text/plain");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.get("content-type"), Some("text/plain; charset=utf-8"));
+        let text = String::from_utf8(r.body).unwrap();
+        let line = format!("_vy.vy.example. IN TXT \"v=vy1; k={}\"", key.public());
+        assert!(text.contains(&line), "{text}");
+        assert!(text.contains("SPEC-7.4.5"));
+        assert_eq!(
+            text.lines().filter(|l| !l.starts_with(';')).count(),
+            1,
+            "one record per key"
+        );
+        assert_eq!(
+            site.dns_zone_lines("vy.example:8443"),
+            std::slice::from_ref(&line)
+        );
+        assert_eq!(site.dns_zone_lines("vy.example"), [line]);
+        assert_eq!(
+            site.dns_zone_lines("[::1]:8080"),
+            [format!("_vy.[::1]. IN TXT \"v=vy1; k={}\"", key.public())]
+        );
+        assert_eq!(
+            vy_manifest::parse_dns_txt(&vy_manifest::dns_txt_record(&key.public())),
+            Some(key.public())
+        );
+        // Without a configured name the request's host is used.
+        let open = Site::open(&Config {
+            public_key_file: Some(dir.join("dev.key.pub")),
+            host_name: None,
+            ..Config::local(&dir)
+        })
+        .unwrap();
+        let r = open.reply(&RequestInfo {
+            method: "GET".into(),
+            url: WELL_KNOWN_DNS_PATH.into(),
+            accept: None,
+            if_none_match: None,
+            host: Some("sajt.example:8443".into()),
+        });
+        assert!(String::from_utf8(r.body)
+            .unwrap()
+            .contains("_vy.sajt.example. IN TXT"));
+        let no_key = Site::open(&Config::local(&dir)).unwrap();
+        assert_eq!(get(&no_key, WELL_KNOWN_DNS_PATH, "*/*").status, 404);
+        for (host, loopback) in [
+            ("localhost:8080", true),
+            ("LOCALHOST", true),
+            ("127.0.0.1:1", true),
+            ("[::1]:8080", true),
+            ("vy.example", false),
+            ("localhost.example", false),
+        ] {
+            assert_eq!(is_loopback_host(host), loopback, "{host}");
+        }
+        assert_eq!(site.stats().snapshot().keys, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

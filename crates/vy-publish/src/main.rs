@@ -89,6 +89,10 @@ fn cmd_keygen(args: &[String]) -> Result<ExitCode, String> {
     println!("public: {}", key.public());
     println!("seed:   {out} (keep private, never commit)");
     println!("pub:    {}", pub_path.display());
+    println!(
+        "dns:    {} (TXT record at _vy.<host>, SPEC-7.4.5)",
+        vy_manifest::dns_txt_record(&key.public())
+    );
     Ok(ExitCode::SUCCESS)
 }
 
