@@ -5,7 +5,9 @@
 //!
 //! Measured, with the row id in brackets:
 //! - compile time of every reference module (SPEC-13.1.4, `Runtime::load`
-//!   with the ABI check and hash) [`compile.<module>`];
+//!   with the ABI check and hash) [`compile.<module>`], and the time to
+//!   get the compiled module on a compilation-cache hit
+//!   [`compile-hit.<module>`];
 //! - rasterization of 2 000-op frames at 1280 × 800 (SPEC-13.2.1): the
 //!   frame of `vy_render::bench` in the proportions of the reference
 //!   pages, warm [`raster.ops-2000`] and with a fresh text engine per run
@@ -204,12 +206,13 @@ fn modules(root: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     Ok(out)
 }
 
-/// SPEC-13.1.4: compile (load) time per module.
+/// SPEC-13.1.4: compile (load) time per module without a cache, and the
+/// time to get the compiled module on a compilation-cache hit.
 fn compile_times(mods: &[(String, Vec<u8>)], sel: &Selection<'_>) -> Vec<Row> {
-    mods.iter()
-        .filter(|(name, _)| sel.wants(&format!("compile.{name}")))
-        .map(|(name, wasm)| {
-            let hash = vy_runtime::sha256(wasm);
+    let mut rows = Vec::new();
+    for (name, wasm) in mods {
+        let hash = vy_runtime::sha256(wasm);
+        if sel.wants(&format!("compile.{name}")) {
             let samples = (0..sel.runs)
                 .map(|_| {
                     let t = Instant::now();
@@ -219,15 +222,66 @@ fn compile_times(mods: &[(String, Vec<u8>)], sel: &Selection<'_>) -> Vec<Row> {
                     d
                 })
                 .collect();
-            time_row(
+            rows.push(time_row(
                 format!("compile.{name}"),
                 format!("kompilering {name} ({} KB)", wasm.len() / 1024),
                 "SPEC-13.1.4",
                 Some(60.0),
                 samples,
-            )
-        })
-        .collect()
+            ));
+        }
+        let id = format!("compile-hit.{name}");
+        if sel.wants(&id) {
+            if let Ok(samples) = cache_hit_times(wasm, sel.runs) {
+                rows.push(time_row(
+                    id,
+                    format!("kompileringscache-träff {name}: modulen ur cachen"),
+                    "SPEC-13.1.4",
+                    Some(CACHE_HIT_BUDGET_MS),
+                    samples,
+                ));
+            }
+        }
+    }
+    rows
+}
+
+/// "0 ms vid kompileringscache-träff" (SPEC-13.1.4) in whole milliseconds:
+/// under one.
+pub const CACHE_HIT_BUDGET_MS: f64 = 1.0;
+
+/// The time [`Runtime::load`] spends getting the compiled module when the
+/// compilation cache holds it, `runs` times: one load writes the entry,
+/// then each read-only load takes it from there (SPEC-13.1.4).
+pub(crate) fn cache_hit_times(wasm: &[u8], runs: usize) -> Result<Vec<Duration>> {
+    let dir = std::env::temp_dir().join(format!(
+        "vy-bench-code-{}-{}",
+        std::process::id(),
+        vy_runtime::hex(&vy_runtime::sha256(wasm)[..8])
+    ));
+    let hash = vy_runtime::sha256(wasm);
+    let load = |cache: vy_runtime::CompileCache| {
+        let options = Options {
+            compile_cache: cache,
+            ..Options::default()
+        };
+        Runtime::load(wasm, &hash, options).map_err(|e| anyhow!("{e}"))
+    };
+    let result = (|| {
+        load(vy_runtime::CompileCache::ReadWrite(dir.clone()))?;
+        (0..runs)
+            .map(|_| {
+                let rt = load(vy_runtime::CompileCache::ReadOnly(dir.clone()))?;
+                let stats = rt.load_stats();
+                if stats.source != vy_runtime::CompileSource::CacheHit {
+                    return Err(anyhow!("the compilation cache missed"));
+                }
+                Ok(stats.module_time)
+            })
+            .collect()
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// Rasterize `list` `runs` times at `w` × `h` physical pixels.

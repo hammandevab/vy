@@ -3158,3 +3158,165 @@ fn spec_5_2_11_external_clock_and_keyed_random() {
     headless.frame().unwrap();
     assert_eq!(headless.last_frame().ops_reported, 0);
 }
+
+/// A fresh directory under the temporary directory for one test.
+fn cache_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("vy-code-{tag}-{}-{nanos}", std::process::id()))
+}
+
+/// The entries (`*.code`) in a cache directory.
+fn entries(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "code"))
+        .collect();
+    out.sort();
+    out
+}
+
+fn cached_load(bytes: &[u8], cache: CompileCache) -> Runtime {
+    let opts = Options {
+        compile_cache: cache,
+        ..Options::default()
+    };
+    Runtime::load(bytes, &sha256(bytes), opts).unwrap()
+}
+
+/// The first two frames of a loaded module, for comparing instances.
+fn two_frames(mut rt: Runtime) -> Vec<Vec<u8>> {
+    rt.init(120, 60, 1.0).unwrap();
+    let a = rt.frame().unwrap().to_vec();
+    let b = rt.frame().unwrap().to_vec();
+    vec![a, b]
+}
+
+/// SPEC-13.1.4: the client's main process compiles a module once and
+/// writes the machine code to its cache; every later load, its own or a
+/// tab's that may only read, takes the code from there instead of
+/// compiling, and the module draws exactly what a compiled one draws. The
+/// default is no cache, which writes nothing.
+#[test]
+fn spec_13_1_4_compile_cache_hit_skips_compilation() {
+    let bytes = drawing_module();
+    let dir = cache_dir("hit");
+    let off = cached_load(&bytes, CompileCache::Off);
+    assert_eq!(off.load_stats().source, CompileSource::Compiled);
+    assert!(!off.load_stats().written);
+    let reference = two_frames(off);
+    assert!(
+        entries(&dir).is_empty() && !dir.exists(),
+        "Off touches nothing"
+    );
+
+    let first = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
+    assert_eq!(first.load_stats().source, CompileSource::Compiled);
+    assert!(first.load_stats().written);
+    assert_eq!(entries(&dir).len(), 1);
+    assert_eq!(two_frames(first), reference);
+
+    for cache in [
+        CompileCache::ReadWrite(dir.clone()),
+        CompileCache::ReadOnly(dir.clone()),
+    ] {
+        let rt = cached_load(&bytes, cache.clone());
+        let stats = rt.load_stats();
+        assert_eq!(stats.source, CompileSource::CacheHit, "{cache:?}");
+        assert!(!stats.written);
+        assert_eq!(two_frames(rt), reference, "{cache:?}");
+    }
+    assert_eq!(entries(&dir).len(), 1, "a hit writes nothing");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700, "the directory is the user's alone");
+        assert_eq!(mode(&entries(&dir)[0]), 0o600);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SPEC-13.1.4 and the threat in docs/notes/m4-perf.md: a tab process
+/// that may only read the cache never writes it, a damaged or truncated
+/// entry is a miss (and the writer replaces it), another module's entry is
+/// never taken, and a directory others may write is not used at all.
+#[test]
+fn compile_cache_trusts_only_the_writer() {
+    let bytes = drawing_module();
+    let other = budget_module();
+    let dir = cache_dir("trust");
+
+    // Read-only: no directory made, nothing written.
+    let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+    assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+    assert!(!rt.load_stats().written && !dir.exists());
+
+    // The main process precompiles; the hash is checked first.
+    let wrong = sha256(b"not the module");
+    assert!(matches!(
+        precompile(&dir, &bytes, &wrong),
+        Err(Error::HashMismatch { .. })
+    ));
+    assert!(entries(&dir).is_empty());
+    let stats = precompile(&dir, &bytes, &sha256(&bytes)).unwrap();
+    assert!(stats.written);
+    assert_eq!(
+        precompile(&dir, &bytes, &sha256(&bytes)).unwrap().source,
+        CompileSource::CacheHit
+    );
+    let reference = two_frames(cached_load(&bytes, CompileCache::Off));
+    let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+    assert_eq!(rt.load_stats().source, CompileSource::CacheHit);
+    assert_eq!(two_frames(rt), reference);
+
+    // Another module finds nothing of this one's.
+    let rt = cached_load(&other, CompileCache::ReadOnly(dir.clone()));
+    assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+
+    // A flipped payload byte, then a truncated file: misses; read-only
+    // leaves them, the writer replaces them.
+    let entry = entries(&dir).pop().unwrap();
+    let good = std::fs::read(&entry).unwrap();
+    let mut flipped = good.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x40;
+    for damaged in [
+        flipped,
+        good[..good.len() / 2].to_vec(),
+        b"VYCODE01".to_vec(),
+    ] {
+        std::fs::write(&entry, &damaged).unwrap();
+        let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+        assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+        assert_eq!(two_frames(rt), reference);
+        assert_eq!(
+            std::fs::read(&entry).unwrap(),
+            damaged,
+            "read-only never writes"
+        );
+        let rt = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
+        assert!(rt.load_stats().written);
+        let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+        assert_eq!(rt.load_stats().source, CompileSource::CacheHit);
+    }
+
+    // A directory group or others may write is not trusted.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let rt = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
+        assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+        assert!(!rt.load_stats().written);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

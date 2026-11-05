@@ -250,6 +250,7 @@ impl<T: IpcTransport> TabLoop<T> {
             random: req.random,
             transport: Transport::External,
             navigation: true,
+            compile_cache: vy_runtime::CompileCache::Off,
         };
         let pid = std::process::id();
         let outcome = Runtime::load(&req.wasm, &req.sha256, options).and_then(|mut rt| {

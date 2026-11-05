@@ -10,10 +10,12 @@
 #![deny(missing_docs)]
 
 pub mod abi_check;
+pub mod compile_cache;
 pub mod host;
 mod rng;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
+pub use compile_cache::{CompileCache, CompileSource, LoadStats, COMPILE_CACHE_CAP_BYTES};
 pub use host::{
     origin_of, CannedResponse, Capabilities, FetchRequest, Link, LogEntry, LogSource, Navigation,
     SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES,
@@ -27,9 +29,7 @@ use std::fmt;
 use std::sync::OnceLock;
 use vy_abi::{err, event, key, level, limits, modifier, role, ABI_MINOR};
 use vy_render::{ImageCache, TextEngine};
-use wasmtime::{
-    Config, Engine, Instance, Linker, Module, Store, StoreLimitsBuilder, Trap, TypedFunc,
-};
+use wasmtime::{Config, Engine, Instance, Linker, Store, StoreLimitsBuilder, Trap, TypedFunc};
 
 /// Fuel units per millisecond of logical time (SPEC-5.3.3).
 ///
@@ -213,6 +213,10 @@ pub struct Options {
     /// True when the host carries out `navigate` (SPEC-5.2.10); the
     /// headless host answers `E_DENIED`.
     pub navigation: bool,
+    /// Where compiled machine code is kept between loads (SPEC-13.1.4):
+    /// off by default, so headless rendering keeps nothing on disk; the
+    /// client's main process writes, a tab process only reads.
+    pub compile_cache: CompileCache,
 }
 
 impl Default for Options {
@@ -230,6 +234,7 @@ impl Default for Options {
             random: RandomSource::default(),
             transport: Transport::Canned,
             navigation: false,
+            compile_cache: CompileCache::Off,
         }
     }
 }
@@ -277,9 +282,47 @@ fn engine() -> &'static Engine {
     })
 }
 
+/// Check `wasm` against its expected SHA-256, before the bytes are even
+/// parsed (SPEC-9.4.1), and against the ABI (SPEC-4.2.*, SPEC-5.*).
+fn verify(wasm: &[u8], expected_sha256: &[u8; 32]) -> Result<AbiReport, Error> {
+    let actual = sha256(wasm);
+    if &actual != expected_sha256 {
+        return Err(Error::HashMismatch {
+            expected: *expected_sha256,
+            actual,
+        });
+    }
+    let report = check_abi_bytes(wasm)?;
+    if !report.ok() {
+        return Err(Error::Abi(Box::new(report)));
+    }
+    Ok(report)
+}
+
+/// Compile `wasm` into the compilation cache at `dir` unless a good entry
+/// is there (SPEC-13.1.4): what the client's main process does with a
+/// module it fetched, so a tab process that may only read the cache
+/// ([`CompileCache::ReadOnly`]) finds the code. The hash and the ABI are
+/// checked first, as [`Runtime::load`] checks them; nothing runs.
+pub fn precompile(
+    dir: &std::path::Path,
+    wasm: &[u8],
+    expected_sha256: &[u8; 32],
+) -> Result<LoadStats, Error> {
+    verify(wasm, expected_sha256)?;
+    compile_cache::module(
+        engine(),
+        wasm,
+        expected_sha256,
+        &CompileCache::ReadWrite(dir.to_path_buf()),
+    )
+    .map(|(_, stats)| stats)
+}
+
 /// One loaded, verified module instance.
 pub struct Runtime {
     store: Store<Host>,
+    load_stats: LoadStats,
     exports: Exports,
     initialized: bool,
     suspended: bool,
@@ -315,17 +358,7 @@ impl Runtime {
     ///
     /// A hash mismatch is reported before the bytes are even parsed (SPEC-9.4.1).
     pub fn load(wasm: &[u8], expected_sha256: &[u8; 32], options: Options) -> Result<Self, Error> {
-        let actual = sha256(wasm);
-        if &actual != expected_sha256 {
-            return Err(Error::HashMismatch {
-                expected: *expected_sha256,
-                actual,
-            });
-        }
-        let report = check_abi_bytes(wasm)?;
-        if !report.ok() {
-            return Err(Error::Abi(Box::new(report)));
-        }
+        let report = verify(wasm, expected_sha256)?;
         let pages = options.memory_max_pages;
         if pages == 0 || pages > limits::MAX_MEMORY_PAGES {
             return Err(Error::MemoryMax(pages));
@@ -339,7 +372,8 @@ impl Runtime {
         }
 
         let engine = engine();
-        let module = Module::new(engine, wasm).map_err(|e| Error::Instantiate(e.to_string()))?;
+        let (module, load_stats) =
+            compile_cache::module(engine, wasm, expected_sha256, &options.compile_cache)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size((u64::from(pages) * WASM_PAGE_BYTES) as usize)
             .memories(1)
@@ -365,6 +399,7 @@ impl Runtime {
         let exports = Self::exports(&instance, &mut store)?;
         Ok(Self {
             store,
+            load_stats,
             exports,
             initialized: false,
             suspended: false,
@@ -385,6 +420,11 @@ impl Runtime {
             frame_over: false,
             event_result_noted: false,
         })
+    }
+
+    /// How the compiled module was obtained and what it cost (SPEC-13.1.4).
+    pub fn load_stats(&self) -> LoadStats {
+        self.load_stats
     }
 
     fn exports(instance: &Instance, store: &mut Store<Host>) -> Result<Exports, Error> {

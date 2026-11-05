@@ -330,7 +330,8 @@ pub struct Host {
 
 impl Host {
     /// Host state for one instance: the store limits and everything in
-    /// [`crate::Options`] except the memory cap, which the limits carry.
+    /// [`crate::Options`] except the memory cap, which the limits carry, and
+    /// the compilation cache, which only [`crate::Runtime::load`] uses.
     pub(crate) fn new(limits: StoreLimits, options: crate::Options) -> Self {
         let crate::Options {
             capabilities: caps,
@@ -341,6 +342,7 @@ impl Host {
             net_origins,
             clipboard,
             memory_max_pages: _,
+            compile_cache: _,
             clock,
             random,
             transport,

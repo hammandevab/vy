@@ -242,6 +242,82 @@ värd utan schema. Ingen guldbild berörs (chat-fallen har `https://chat.example
 visas som beviljat i adressfältet. Förslag: `net` med tom origin-lista beviljas inte (eller avvisas
 av valideringen). Spec-fråga 53 nedan.
 
+## Steg 3: kompileringscache i `vy-runtime` (SPEC-13.1.4)
+
+**Vad.** `Options::compile_cache` (`CompileCache::Off` som standard, `ReadOnly(dir)`,
+`ReadWrite(dir)`). `Runtime::load` kontrollerar hash och ABI som förut och hämtar sedan den
+kompilerade modulen ur cachen, eller kompilerar och – bara med `ReadWrite` – skriver den.
+`Runtime::load_stats()` säger hur (`CompileSource::{Compiled, CacheHit}`), vad det kostade
+(`module_time`: kompilering, eller läsning, kontroll och deserialisering) och om en post skrevs.
+`vy_runtime::precompile(dir, wasm, sha256)` är huvudprocessens väg: kontrollera, kompilera om
+posten saknas, skriv. Huvudlöst (`vy-cli render`, konformanssviten, testerna) är cachen av och
+inget skrivs; utdata är oberoende av cachen (samma maskinkod, samma bränsle).
+
+**Post.** `<dir>/<namn>.code`, namnet hex SHA-256 över formatet (`VYCODE01`), motorns
+kompatibilitetshash (`Engine::precompile_compatibility_hash`: wasmtimes version och varje
+kompileringsinställning, alltså också bränslemätning, NaN-kanonisering och avstängd relaxed SIMD)
+och modulens SHA-256. Innehåll: `VYCODE01`, SHA-256 av nyttolasten, nyttolasten
+(`Module::serialize`). Skrivs till en temporär fil i katalogen och döps om (atomärt); över
+`COMPILE_CACHE_CAP_BYTES` = 256 MB tas de äldsta posterna bort. Wasmtime kontrollerar själv
+version och inställningar igen vid deserialisering.
+
+**Tal** (release, 100 körningar, load ≈ 3; `compile.<modul>` är hela `Runtime::load` utan cache,
+`compile-hit.<modul>` bara `module_time` vid träff, budget 1 ms = "0 ms" i hela millisekunder):
+
+```
+modul       kompilering p50      p95  träff p50    p95
+hello                 14.04    16.76       0.29   0.35
+text                  18.82    27.56       0.46   0.51
+game                  36.39    46.11       0.53   0.60
+form                  36.85    42.13       0.54   0.61
+gallery               37.02    50.48       0.55   0.88
+list                  40.82    61.34       0.56   1.00
+dashboard             50.42    59.30       0.75   1.37
+document              48.15    58.29       0.70   1.16
+settings              53.88    73.39       0.72   1.09
+shop                  52.21    73.97       0.71   0.82
+chat                  51.84    60.26       0.71   0.76
+```
+
+En träff tar 0,3–0,75 ms P50 mot 14–54 ms för kompileringen. P95 vid träff går över 1 ms för tre
+moduler under last; `spec_13_1_4_compile_time` hävdar P95 < 1 ms för varje modul i release (se
+steg 4). Den kalla halvan av SPEC-13.1.4 (≤ 60 ms för 300 KB) mäts på `hello` som förut: ingen
+referensmodul är större än 31 KB, och 22–31 KB-modulerna ligger redan kring 50 ms P50 här, så
+300 KB hålls inte utan cache på den här maskinen (ingen parallell kompilering, se M1).
+
+### Hotbild
+
+`Module::deserialize` validerar inte maskinkoden: den mappas körbar som den är. **Den som kan
+skriva en post kan köra kod** i varje process som läser den – i flikprocessen förbi wasm-sandlådan,
+i huvudprocessen med användarens alla rättigheter. Det är cachens enda nya yta, och den är
+lokal: ingen post kommer från nätet, och nyckeln är modulens hash som redan kontrollerats mot
+manifestet (SPEC-9.4.1) innan cachen ens slås upp.
+
+| Hot | Begränsning | Test |
+| --- | --- | --- |
+| En sida (flikprocess som kör sidans kod) skriver en post som en annan flik eller huvudprocessen sedan kör | Bara klienten skriver: `ReadWrite` är huvudprocessens, flikprocessen får `ReadOnly` eller `Off`; `ReadOnly` skapar inte ens katalogen. **Flikprocessen får aldrig kunna skriva katalogen** – det kräver OS-sandlådan (m4/security, granskning 0004 fynd 8): tills den finns kör fliken med användarens rättigheter och kan skriva vad som helst användaren kan, cachen inräknad. | `compile_cache_trusts_only_the_writer` (läsläge skriver aldrig, inte ens vid skadad post) |
+| Ett annat konto eller program skriver i katalogen | Katalogen skapas 0700 och posterna 0600 (Unix); en katalog som grupp eller andra får skriva används inte alls. Windows: `%APPDATA%\vy` ärver användarens ACL. | samma test (0777 → ingen träff, ingen skrivning); `spec_13_1_4_compile_cache_hit_skips_compilation` (lägen 0700/0600) |
+| En post byts mellan kontroll och användning | Posten läses hel till minnet och deserialiseras därifrån; ingen `deserialize_file` (som mappar filen, vars sidor kan ändras under modulen). | – (konstruktion) |
+| En post från en annan wasmtime eller konfiguration | Namnet innehåller kompatibilitetshashen; wasmtime vägrar dessutom själv främmande version och inställningar. | – |
+| Trasig eller avhuggen fil (krasch mitt i skrivning) | Atomär skrivning; SHA-256 över nyttolasten kontrolleras (fångar fel, inte en angripare som kan skriva katalogen) och en miss skrivs om av skrivaren. | samma test (vänd byte, halv fil, bara huvud) |
+| En annan moduls post | Namnet innehåller modulens SHA-256. | samma test |
+| Katalogen växer utan gräns | 256 MB, äldst bort först. | – |
+
+En HMAC med en nyckel som bara huvudprocessen läser skulle skydda också mot den som kan skriva
+katalogen men inte läsa nyckeln; inom samma konto ger det inget, så det väntar på sandlådan.
+
+### Berör andra spår
+
+- `crates/vy-shell/src/tab.rs` (m4/ux): en rad, `compile_cache: vy_runtime::CompileCache::Off` –
+  `Options` byggs där med alla fält uppräknade, så fältet måste stå med för att det ska kompilera.
+  **Skalet använder alltså inte cachen än.** Att slå på den rätt kräver mer än en rad i två andra
+  spårs filer, så det är gjort här bara som API: (1) huvudprocessens laddartråd (`page.rs`,
+  m4/ux) anropar `vy_runtime::precompile(&cache_dir.join("code"), &page.wasm, &page.sha256)`
+  för en hämtad, verifierad sida, utom huvudlöst; (2) fliken får `CompileCache::ReadOnly(dir)`,
+  via ett nytt fält i `LoadRequest` (`ipc.rs`, m4/ux) eller miljön vid start (`process.rs`,
+  m4/security); (3) OS-sandlådan (m4/security) ger flikprocessen bara läsrätt till katalogen.
+  Utan (3) ska (2) ändå vara `ReadOnly`, inte `ReadWrite`.
+
 ## Spec-frågor
 
 53. **`net` med tom origin-lista.** SPEC-8.2.1 sätter ett tak (≤ 16) men inget golv, och
