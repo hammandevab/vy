@@ -244,6 +244,9 @@ pub struct Shell {
     layout: Layout,
     frame: RgbaImage,
     frame_dirty: bool,
+    /// The chrome as last rasterized: its list and pixels, reused while
+    /// the list is the same (a page frame changes nothing in it).
+    chrome_cache: Option<(Vec<u8>, u32, u32, RgbaImage)>,
     pointer: (f32, f32),
     in_page: bool,
     buttons: i32,
@@ -295,6 +298,7 @@ impl Shell {
             layout: Layout::default(),
             frame: RgbaImage::new(1, 1),
             frame_dirty: true,
+            chrome_cache: None,
             pointer: (-1.0, -1.0),
             in_page: false,
             buttons: 0,
@@ -1363,11 +1367,29 @@ impl Shell {
         self.layout = layout;
         let (pw, ph) = physical(self.width, self.height, self.scale);
         let none = ImageCache::empty(0);
-        let chrome =
-            vy_render::render(&chrome_dl, pw, ph, self.scale, &mut self.chrome_text, &none);
-        self.frame = match chrome {
-            Ok(r) => r.image,
-            Err(_) => RgbaImage::new(pw, ph),
+        // The chrome is rasterized again only when its list changed: a
+        // page frame alone reuses the cached pixels.
+        let cached = match &self.chrome_cache {
+            Some((dl, w, h, img)) if *dl == chrome_dl && (*w, *h) == (pw, ph) => Some(img.clone()),
+            _ => None,
+        };
+        self.frame = match cached {
+            Some(img) => img,
+            None => {
+                let img = match vy_render::render(
+                    &chrome_dl,
+                    pw,
+                    ph,
+                    self.scale,
+                    &mut self.chrome_text,
+                    &none,
+                ) {
+                    Ok(r) => r.image,
+                    Err(_) => RgbaImage::new(pw, ph),
+                };
+                self.chrome_cache = Some((chrome_dl, pw, ph, img.clone()));
+                img
+            }
         };
         let page = self.layout.page;
         let scale = self.scale;

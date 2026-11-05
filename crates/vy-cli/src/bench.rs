@@ -6,7 +6,8 @@
 //! Measured:
 //! - compile time of every reference module (SPEC-13.1.4, `Runtime::load`
 //!   with the ABI check and hash);
-//! - rasterization of a 2 000-op frame at 1280 × 800 (SPEC-13.2.1);
+//! - rasterization of 2 000-op frames at 1280 × 800 (SPEC-13.2.1):
+//!   rectangles, text, and both;
 //! - a tab process's cold start: spawn `--tab`, load `hello`, first
 //!   display list back (the process half of SPEC-13.1.1 and 13.1.2);
 //! - Enter to first composited frame headless for `hello` and `text`
@@ -111,47 +112,60 @@ fn compile_times(mods: &[(String, Vec<u8>)], n: usize) -> Vec<Row> {
         .collect()
 }
 
-/// SPEC-13.2.1: a 2 000-op frame rasterized at 1280 × 800.
-fn raster_time(n: usize) -> Result<Row> {
+/// SPEC-13.2.1: 2 000-op frames rasterized at 1280 × 800: rectangles
+/// alone, text alone (200 runs of 40 characters), and the mix of 1 800
+/// rectangles and 200 runs, so the shaping cost shows by itself.
+fn raster_times(n: usize) -> Result<Vec<Row>> {
     let mut text = vy_render::TextEngine::new();
     let style = text
         .style(vy_abi::font::SANS, 14.0, 400, 0x2221_1FFF)
         .map_err(|c| anyhow!("style: {c}"))?;
-    let mut dl = vy_dl::DisplayList::new();
-    dl.begin().map_err(|c| anyhow!("dl: {c}"))?;
-    for i in 0..1_800u32 {
-        let (x, y) = ((i % 40) as f32 * 32.0, (i / 40) as f32 * 17.0);
-        dl.rect(x, y, 30.0, 15.0, 3.0, 0x3366_9980 + (i % 5) * 0x0010_0000)
-            .map_err(|c| anyhow!("rect: {c}"))?;
-    }
-    for i in 0..200u32 {
-        let (x, y) = ((i % 4) as f32 * 320.0, (i / 4) as f32 * 16.0);
-        dl.text(
-            x,
-            y,
-            300.0,
-            style,
-            "Vy ritar text i värden, aldrig i modulen".as_bytes(),
-        )
-        .map_err(|c| anyhow!("text: {c}"))?;
-    }
-    dl.end().map_err(|c| anyhow!("end: {c}"))?;
+    let list = |rects: u32, runs: u32| -> Result<Vec<u8>> {
+        let mut dl = vy_dl::DisplayList::new();
+        dl.begin().map_err(|c| anyhow!("dl: {c}"))?;
+        for i in 0..rects {
+            let (x, y) = ((i % 40) as f32 * 32.0, (i / 40) as f32 * 17.0);
+            dl.rect(x, y, 30.0, 15.0, 3.0, 0x3366_9980 + (i % 5) * 0x0010_0000)
+                .map_err(|c| anyhow!("rect: {c}"))?;
+        }
+        for i in 0..runs {
+            let (x, y) = ((i % 4) as f32 * 320.0, (i / 4) as f32 * 16.0);
+            dl.text(
+                x,
+                y,
+                300.0,
+                style,
+                "Vy ritar text i värden, aldrig i modulen".as_bytes(),
+            )
+            .map_err(|c| anyhow!("text: {c}"))?;
+        }
+        dl.end().map_err(|c| anyhow!("end: {c}"))?;
+        Ok(dl.bytes().to_vec())
+    };
     let images = vy_render::ImageCache::empty(0);
-    let samples = (0..n)
-        .map(|_| {
-            let t = Instant::now();
-            let r = vy_render::render(dl.bytes(), 1280, 800, 1.0, &mut text, &images);
-            let d = t.elapsed();
-            drop(r);
-            d
-        })
-        .collect();
-    Ok(row(
-        "rasterisering 2 000 opkoder 1280×800".into(),
-        "SPEC-13.2.1",
-        Some(2.0),
-        samples,
-    ))
+    let mut rows = Vec::new();
+    for (what, rects, runs) in [
+        ("rasterisering 2 000 rektanglar 1280×800", 2_000, 0),
+        ("rasterisering 200 textrader à 40 tecken 1280×800", 0, 200),
+        (
+            "rasterisering 1 800 rektanglar + 200 textrader 1280×800",
+            1_800,
+            200,
+        ),
+    ] {
+        let bytes = list(rects, runs)?;
+        let samples = (0..n)
+            .map(|_| {
+                let t = Instant::now();
+                let r = vy_render::render(&bytes, 1280, 800, 1.0, &mut text, &images);
+                let d = t.elapsed();
+                drop(r);
+                d
+            })
+            .collect();
+        rows.push(row(what.into(), "SPEC-13.2.1", Some(2.0), samples));
+    }
+    Ok(rows)
 }
 
 /// A tab process: spawn, load `wasm`, tick, first display list back.
@@ -290,7 +304,7 @@ pub fn run(root: &Path, n: usize) -> Result<Vec<Row>> {
     let exe = crate::conformance::tab_executable()?;
     let mods = modules(root)?;
     let mut rows = compile_times(&mods, n);
-    rows.push(raster_time(n)?);
+    rows.extend(raster_times(n)?);
     let hello = mods
         .iter()
         .find(|(name, _)| name == "hello")

@@ -1,7 +1,10 @@
 # Grindar enligt SPEC-12.2.1: fmt, clippy, test, spec-spårning, modulbygge + ABI-kontroll,
 # och från M1 headless-rendering samt pixeldiff mot guldbilder (SPEC-12.2.2).
 # `gates` på Ubuntu är grinden för allt; `platform` bygger, testar och kör konformans
-# på macOS så att guldbilderna bevisas plattformsoberoende (SPEC-2.1.5, M1-grinden).
+# på macOS och Windows så att guldbilderna (sedan M3 även skalets) bevisas
+# plattformsoberoende (SPEC-2.1.5, M1-grinden) och klienten bygger där den ska köras
+# (Windows först, M3). `bench` körs informativt (SPEC-12.2.3 blir grind med tal från
+# referensmaskinen).
 name: ci
 on:
   push:
@@ -45,16 +48,30 @@ jobs:
       # SPEC-11.3.1: headless render without a window.
       - name: Headless render
         run: cargo run -p vy-cli -- render target/wasm/hello.wasm --out /tmp/hello.png --size 800x600
-      # SPEC-12.2.2: pixel diff at most 0.1 % against conformance/golden/.
+      # SPEC-12.2.2: pixel diff at most 0.1 % against conformance/golden/,
+      # the shell cases included (a tab process per case, SPEC-9.1.1).
       - name: Conformance
         run: cargo run -p vy-cli -- conformance
+      # SPEC-9.6.1, SPEC-11.3.2: the windowed client builds, and its headless
+      # screenshot is the same pipeline the window presents.
+      - name: Build the client
+        run: cargo build --release -p vy-shell
+      - name: Shell screenshot
+        run: target/release/vy-shell --screenshot /tmp/shell.png --size 1024x720 --manifest conformance/manifests/shop.json target/wasm/shop.wasm
+      # SPEC §13, informational until SPEC-12.2.3 has reference numbers.
+      - name: Bench (informational)
+        run: cargo run --release -p vy-cli -- bench --iterations 10
 
   platform:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # The tools are bash scripts; GitHub's Windows runners have bash.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
@@ -72,6 +89,10 @@ jobs:
       # with a looser threshold (docs/BUILD-NOTES.md, spec-fråga).
       - name: Conformance
         run: cargo run -p vy-cli -- conformance
+      - name: Build the client
+        run: cargo build --release -p vy-shell
+      - name: Shell screenshot
+        run: ./target/release/vy-shell --screenshot shell.png --size 1024x720 --manifest conformance/manifests/shop.json target/wasm/shop.wasm
       - name: Conformance diffs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4

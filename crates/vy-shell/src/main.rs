@@ -6,6 +6,10 @@
 //! vy-shell --screenshot <png> --size WxH [--scale S] [--manifest <draft.json>] <address or file>
 //! vy-shell --tab [--record <file>] [--replay <file>]      a tab process (started by the shell)
 //! ```
+//!
+//! A release build on Windows is a GUI program (no console window on a
+//! double-click); its tab processes talk over pipes, which need no console.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use std::process::ExitCode;

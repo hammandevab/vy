@@ -82,10 +82,17 @@ pub fn spawn_process(
     if let Some(r) = replay {
         cmd.arg("--replay").arg(r);
     }
+    // The child's stderr (panics) goes where the shell's goes; a Windows
+    // release build is a GUI program without one, so nowhere.
+    let stderr = if cfg!(all(windows, not(debug_assertions))) {
+        Stdio::null()
+    } else {
+        Stdio::inherit()
+    };
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(stderr)
         .spawn()?;
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
