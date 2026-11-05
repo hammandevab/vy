@@ -452,7 +452,7 @@ fn spec_2_1_5_determinism() {
         for _ in 0..3 {
             dls.push(rt.frame_with_dt(16).unwrap().to_vec());
         }
-        let images = vy_render::ImageCache::new(Vec::new());
+        let images = vy_render::ImageCache::from_bytes(Vec::new());
         let img = vy_render::render(&dls[2], 120, 60, 1.0, rt.text_engine_mut(), &images).unwrap();
         (dls, img.encode_png().unwrap())
     };
@@ -654,15 +654,24 @@ fn spec_4_2_4_memory_cap() {
     assert_eq!(rt.last_frame().ops_reported, -1);
     assert_eq!(rt.memory_pages(), 4);
 
-    // A module whose initial memory is already above the cap never instantiates.
+    // A module whose initial memory leaves no page to grow is refused before
+    // it is compiled (SPEC-8.1.3): 8 initial pages need memory_max >= 9.
     let big = wasm(&format!(
         r#"(module (memory (export "memory") 8) {INIT_OK}
             (func (export "vy_frame") (param i32) (result i32) i32.const 0) {STUBS})"#
     ));
     assert!(matches!(
         Runtime::load(&big, &sha256(&big), opts),
-        Err(Error::Instantiate(_))
+        Err(Error::MemoryMax(4))
     ));
+    for pages in [8, 9] {
+        let opts = Options {
+            memory_max_pages: pages,
+            ..Options::default()
+        };
+        let r = Runtime::load(&big, &sha256(&big), opts).map(|_| ());
+        assert_eq!(r.is_ok(), pages == 9, "memory_max {pages}: {r:?}");
+    }
     for pages in [0, limits::MAX_MEMORY_PAGES + 1] {
         let opts = Options {
             memory_max_pages: pages,
@@ -1629,7 +1638,11 @@ fn spec_5_2_3_dl_image_fit_and_resources() {
     let huge = png(limits::MAX_IMAGE_SIDE_PX + 1, 1, [0, 255, 0, 255]);
     let bad = b"not an image".to_vec();
     let opts = Options {
-        resources: vec![red, huge, bad],
+        resources: vec![
+            vy_render::Resource::with_size(red, 2, 1),
+            vy_render::Resource::new(huge),
+            vy_render::Resource::new(bad),
+        ],
         ..Options::default()
     };
     let bytes = image_module();
@@ -1698,6 +1711,58 @@ fn spec_5_2_3_dl_image_fit_and_resources() {
         "each resource decoded at most once"
     );
     assert!(!rt.is_suspended());
+}
+
+/// SPEC-8.1.2, SPEC-6.5.1: an image whose decoded size differs from the
+/// size the manifest declares for it is `E_RESOURCE` at its first
+/// `dl_image`, logged with both sizes, and never drawn; the right size and
+/// an undeclared size both decode.
+#[test]
+fn spec_8_1_2_declared_image_size_is_checked() {
+    let two = png(2, 1, [255, 0, 0, 255]);
+    let opts = Options {
+        resources: vec![
+            vy_render::Resource::with_size(two.clone(), 2, 1),
+            vy_render::Resource::with_size(two.clone(), 1, 2),
+            vy_render::Resource::new(two),
+        ],
+        ..Options::default()
+    };
+    let bytes = image_module();
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(4, 2, 1.0).unwrap();
+    for (id, ok) in [(1, true), (2, false), (3, true)] {
+        let before = rt.logs().len();
+        let dl = rt.frame_with_dt(id * 10).unwrap().to_vec();
+        assert_eq!(
+            vy_dl::decode(&dl).unwrap().len(),
+            usize::from(ok),
+            "resource {id}"
+        );
+        assert_eq!(rt.last_frame().ops_reported, 1);
+        let new = host_logs(&rt)[before..].to_vec();
+        if ok {
+            assert!(new.is_empty(), "{new:?}");
+        } else {
+            assert_eq!(
+                new,
+                vec![
+                    "dl_image: resource 2: 2x1 px but the manifest says 1x2 (SPEC-8.1.2)"
+                        .to_string(),
+                    "dl_image: E_RESOURCE".to_string()
+                ]
+            );
+        }
+    }
+    assert!(matches!(
+        rt.image_cache().get(2),
+        Err(vy_render::ImageError::SizeMismatch { .. })
+    ));
+    assert_eq!(
+        rt.image_cache().decoded_bytes(),
+        2 * 8,
+        "the refused image holds no pixels"
+    );
 }
 
 /// SPEC-8.2.1, SPEC-8.2.2: the headless host grants capabilities by their

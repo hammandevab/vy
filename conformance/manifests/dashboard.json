@@ -1,0 +1,13 @@
+{
+  "abi": "1.0",
+  "name": "Översikt",
+  "summary": "Referensmodul 6: fyra nyckeltal, linje- och stapeldiagram ur en fast tabell, förklaring och verktygstips som följer pekaren och försvinner vid POINTER_LEAVE. Inga capabilities.",
+  "lang": "sv",
+  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
+  "memory_max": 64,
+  "capabilities": {},
+  "fallback": "# Översikt\n\nÖversikten kräver en Vy-klient.",
+  "published": "2026-11-05",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/dashboard",
+  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+}

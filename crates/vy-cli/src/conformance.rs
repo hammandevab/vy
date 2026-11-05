@@ -10,7 +10,8 @@ use crate::{render, RenderRequest, ScriptedEvent};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use vy_render::{diff_ratio, RgbaImage};
+use vy_manifest::Manifest;
+use vy_render::{diff_ratio, Resource, RgbaImage};
 use vy_runtime::{Capabilities, SemNode};
 
 /// Largest accepted fraction of differing pixels (0.1 %, SPEC-12.2.2).
@@ -40,14 +41,31 @@ pub struct Case {
     /// Events replayed after the first frame.
     pub events: Vec<ScriptedEvent>,
     /// Package resources as paths relative to the repository root;
-    /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1).
-    pub resources: Vec<String>,
+    /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1), with the
+    /// size the manifest declares for an image when the case states it
+    /// (SPEC-8.1.2).
+    pub resources: Vec<CaseResource>,
+}
+
+/// One entry of a case's `resources`: a bare path, or a table with the
+/// declared image size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaseResource {
+    /// Path relative to the repository root.
+    pub path: String,
+    /// `(w, h)` as the manifest declares it, when stated.
+    pub pixels: Option<(u32, u32)>,
 }
 
 impl Case {
     fn golden(&self, root: &Path) -> PathBuf {
         root.join("conformance/golden")
             .join(format!("{}.png", self.name))
+    }
+    /// The module's manifest, `conformance/manifests/<module>.json`.
+    fn manifest_path(&self, root: &Path) -> PathBuf {
+        root.join("conformance/manifests")
+            .join(format!("{}.json", self.module))
     }
     fn semantic_path(&self, root: &Path) -> Option<PathBuf> {
         self.semantic
@@ -202,6 +220,43 @@ fn parse_table(v: &str, line: usize) -> Result<Vec<(String, Scalar)>> {
         .collect()
 }
 
+/// One resource from a bare string or a `{path, w, h}` table.
+fn parse_resource(entry: &str, line: usize) -> Result<CaseResource> {
+    if entry.trim_start().starts_with('{') {
+        let pairs = parse_table(entry, line)?;
+        let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+        for (k, _) in &pairs {
+            if !["path", "w", "h"].contains(&k.as_str()) {
+                bail!("line {line}: resource has no key {k:?}");
+            }
+        }
+        let path = get("path")
+            .ok_or_else(|| anyhow!("line {line}: resource needs path"))?
+            .str("path", line)?
+            .to_string();
+        let side = |key: &str| -> Result<u32> {
+            let v = get(key)
+                .ok_or_else(|| anyhow!("line {line}: resource needs {key}"))?
+                .int(key, line)?;
+            u32::try_from(v)
+                .ok()
+                .filter(|v| *v > 0)
+                .ok_or_else(|| anyhow!("line {line}: {key} must be a positive integer"))
+        };
+        let pixels = match (get("w"), get("h")) {
+            (None, None) => None,
+            _ => Some((side("w")?, side("h")?)),
+        };
+        return Ok(CaseResource { path, pixels });
+    }
+    Ok(CaseResource {
+        path: Scalar::parse(entry, line)?
+            .str("resources", line)?
+            .to_string(),
+        pixels: None,
+    })
+}
+
 /// One event from its inline table: `kind` plus the arguments of that kind.
 fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
     let pairs = parse_table(table, line)?;
@@ -280,8 +335,9 @@ fn parse_event(table: &str, line: usize) -> Result<ScriptedEvent> {
 
 /// Parse the restricted TOML used by `cases.toml`: `[[case]]` tables holding
 /// `key = value` lines with quoted strings, numbers, booleans, arrays of
-/// strings (`capabilities`, `resources`) and arrays of inline tables
-/// (`events`, which may span lines); `#` comments.
+/// strings (`capabilities`), arrays of strings or `{path, w, h}` tables
+/// (`resources`) and arrays of inline tables (`events`, which may span
+/// lines); `#` comments.
 ///
 /// This is deliberately not a TOML parser (CLAUDE.md: no dependency for what
 /// fits in 200 lines); anything outside the subset is an error.
@@ -297,7 +353,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         semantic: Option<String>,
         capabilities: Capabilities,
         events: Vec<ScriptedEvent>,
-        resources: Vec<String>,
+        resources: Vec<CaseResource>,
     }
     fn finish(d: Draft, line: usize) -> Result<Case> {
         let name = d
@@ -395,7 +451,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             "resources" => {
                 d.resources = parse_array(value, line)?
                     .into_iter()
-                    .map(|e| Ok(Scalar::parse(e, line)?.str(key, line)?.to_string()))
+                    .map(|e| parse_resource(e, line))
                     .collect::<Result<_>>()?;
             }
             other => bail!("line {line}: unknown key {other:?}"),
@@ -419,19 +475,27 @@ pub fn load_cases(root: &Path) -> Result<Vec<Case>> {
     parse_cases(&text)
 }
 
-/// SPEC-10.4.2: a page with input fields (`textbox` nodes) that was not
-/// granted `ime` is rejected. Returns the problem, if any.
-pub fn ime_requirement(semantic: &[SemNode], caps: Capabilities) -> Option<String> {
+/// SPEC-10.4.2: a page with input fields (`textbox` nodes) whose manifest
+/// does not request `ime` is rejected. Returns the problem, if any.
+pub fn ime_requirement(semantic: &[SemNode], manifest: &Manifest) -> Option<String> {
     let textboxes = semantic
         .iter()
         .filter(|n| n.role == vy_abi::role::TEXTBOX)
         .count();
-    if textboxes > 0 && !caps.ime {
+    if textboxes > 0 && !manifest.requests("ime") {
         return Some(format!(
-            "{textboxes} textbox node(s) but capability `ime` is not granted (SPEC-10.4.2)"
+            "{textboxes} textbox node(s) but the manifest does not request `ime` (SPEC-10.4.2)"
         ));
     }
     None
+}
+
+/// SPEC-8.2.2: a case may grant only what the manifest requests. Returns
+/// the first capability granted without being requested.
+pub fn grants_within_manifest(caps: Capabilities, manifest: &Manifest) -> Option<&'static str> {
+    vy_abi::cap::NAMES
+        .into_iter()
+        .find(|name| caps.has(vy_abi::cap::id(name).unwrap_or(0)) && !manifest.requests(name))
 }
 
 /// Outcome of one case.
@@ -492,12 +556,32 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
             module_path.display()
         )
     })?;
+    let manifest_path = case.manifest_path(root);
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {} (SPEC-4.1.1)", manifest_path.display()))?;
+    let manifest = Manifest::from_json(&manifest_text)
+        .with_context(|| format!("{}", manifest_path.display()))?;
+    let report = vy_runtime::check_abi_bytes(&wasm).map_err(|e| anyhow!("{e}"))?;
+    if let Some((initial, _)) = report.memory {
+        let initial = u32::try_from(initial).unwrap_or(u32::MAX);
+        manifest
+            .check_memory(initial)
+            .with_context(|| format!("{}", manifest_path.display()))?;
+    }
+    if let Some(name) = grants_within_manifest(case.capabilities, &manifest) {
+        bail!("case grants `{name}` but the manifest does not request it (SPEC-8.2.2)");
+    }
     let resources = case
         .resources
         .iter()
-        .map(|p| {
-            let path = root.join(p);
-            fs::read(&path).with_context(|| format!("reading resource {}", path.display()))
+        .map(|r| {
+            let path = root.join(&r.path);
+            let bytes =
+                fs::read(&path).with_context(|| format!("reading resource {}", path.display()))?;
+            Ok(Resource {
+                bytes,
+                pixels: r.pixels,
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     let req = RenderRequest {
@@ -512,7 +596,7 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         events: &case.events,
     };
     let out = render(&req)?;
-    if let Some(problem) = ime_requirement(&out.semantic, case.capabilities) {
+    if let Some(problem) = ime_requirement(&out.semantic, &manifest) {
         bail!("{problem}");
     }
     let golden_path = case.golden(root);
@@ -720,7 +804,7 @@ events = [                                      # comment after the bracket
   {kind = "focus", node = 12, gained = false, keyboard = false},
   {kind = "focus", node = 13},
 ]
-resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
+resources = ["modules/shop/assets/01.png", {path = "modules/shop/assets/02.png", w = 240, h = 240}]
 "#;
         let cases = parse_cases(text).unwrap();
         assert_eq!(cases.len(), 1);
@@ -730,8 +814,14 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
         assert_eq!(
             c.resources,
             vec![
-                "modules/shop/assets/01.png".to_string(),
-                "modules/shop/assets/02.png".to_string()
+                CaseResource {
+                    path: "modules/shop/assets/01.png".into(),
+                    pixels: None
+                },
+                CaseResource {
+                    path: "modules/shop/assets/02.png".into(),
+                    pixels: Some((240, 240))
+                }
             ]
         );
         assert_eq!(
@@ -800,6 +890,10 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
             "events = [{kind = \"focus\", node = 1, gained = 1}]",
             "resources = \"a.png\"",
             "resources = [1]",
+            "resources = [{path = \"a.png\", w = 1}]",
+            "resources = [{path = \"a.png\", w = 0, h = 1}]",
+            "resources = [{w = 1, h = 1}]",
+            "resources = [{path = \"a.png\", w = 1, h = 1, hash = \"x\"}]",
         ] {
             assert!(parse_cases(&format!("{base}{bad}\n")).is_err(), "{bad}");
         }
@@ -810,8 +904,11 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
         assert_eq!(explicit[0].frames, 1, "explicit frames wins");
     }
 
-    /// SPEC-10.4.2: a page with input fields but no `ime` capability fails
-    /// conformance; with `ime` granted, or without input fields, it passes.
+    /// SPEC-10.4.2, SPEC-8.2.2: a page with input fields whose manifest does
+    /// not request `ime` fails conformance; with `ime` requested, or without
+    /// input fields, it passes. A case may grant only what the manifest
+    /// requests, and every module in the suite has a manifest whose
+    /// `memory_max` leaves its module room to grow (SPEC-8.1.3).
     #[test]
     fn spec_10_4_2_ime_required_for_input() {
         let node = |role: i32| SemNode {
@@ -826,18 +923,28 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
         };
         let textbox = [node(vy_abi::role::TEXTBOX)];
         let button = [node(vy_abi::role::BUTTON)];
-        let ime = Capabilities::from_names(["ime"]).unwrap();
-        assert!(ime_requirement(&textbox, Capabilities::default())
+        let read = |name: &str| {
+            Manifest::from_json(
+                &fs::read_to_string(root().join(format!("conformance/manifests/{name}.json")))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let (form_manifest, hello_manifest) = (read("form"), read("hello"));
+        assert!(form_manifest.requests("ime") && !hello_manifest.requests("ime"));
+        assert!(ime_requirement(&textbox, &hello_manifest)
             .unwrap()
             .contains("SPEC-10.4.2"));
-        assert_eq!(ime_requirement(&textbox, ime), None);
-        assert_eq!(ime_requirement(&button, Capabilities::default()), None);
-        assert_eq!(ime_requirement(&[], Capabilities::default()), None);
+        assert_eq!(ime_requirement(&textbox, &form_manifest), None);
+        assert_eq!(ime_requirement(&button, &hello_manifest), None);
+        assert_eq!(ime_requirement(&[], &hello_manifest), None);
+        let ime = Capabilities::from_names(["ime"]).unwrap();
+        assert_eq!(grants_within_manifest(ime, &hello_manifest), Some("ime"));
+        assert_eq!(grants_within_manifest(ime, &form_manifest), None);
 
-        // The real page: every form case grants ime, and the suite rejects
-        // the same page when a case does not. With ime granted the host
-        // accepts `ime_begin` on focus (SPEC-5.2.6); without it the call is
-        // denied and logged (SPEC-5.3.1), and the page runs on regardless.
+        // The real suite: every form case grants ime (its manifest requests
+        // it), a case granting what the manifest does not request is
+        // refused, and every module's manifest fits its module.
         let cases = load_cases(&root()).unwrap();
         let form: Vec<_> = cases.iter().filter(|c| c.module == "form").collect();
         assert!(!form.is_empty(), "the form page is in the suite");
@@ -846,14 +953,40 @@ resources = ["modules/shop/assets/01.png", "modules/shop/assets/02.png"]
             .iter()
             .find(|c| c.name == "form-800x600@1-filled")
             .unwrap();
-        let mut no_ime = (*filled).clone();
-        no_ime.name = "form-no-ime".into();
-        no_ime.capabilities = Capabilities::default();
-        let r = run_case(&root(), &no_ime, false);
+        let mut too_much = (*filled).clone();
+        too_much.name = "form-net".into();
+        too_much.capabilities = Capabilities::from_names(["ime", "net"]).unwrap();
+        let r = run_case(&root(), &too_much, false);
         assert!(
-            r.problem.as_deref().unwrap_or("").contains("SPEC-10.4.2"),
+            r.problem.as_deref().unwrap_or("").contains("SPEC-8.2.2"),
             "{r:?}"
         );
+        let mut modules: Vec<String> = cases.iter().map(|c| c.module.clone()).collect();
+        modules.sort();
+        modules.dedup();
+        assert_eq!(modules.len(), 11);
+        for m in &modules {
+            let manifest = read(m);
+            let wasm = fs::read(root().join(format!("target/wasm/{m}.wasm"))).unwrap();
+            let report = vy_runtime::check_abi_bytes(&wasm).unwrap();
+            let (initial, _) = report.memory.unwrap();
+            manifest
+                .check_memory(initial as u32)
+                .unwrap_or_else(|e| panic!("{m}: {e}"));
+            for c in cases.iter().filter(|c| &c.module == m) {
+                assert_eq!(
+                    grants_within_manifest(c.capabilities, &manifest),
+                    None,
+                    "{}",
+                    c.name
+                );
+            }
+        }
+
+        // Without ime granted the host denies `ime_begin` on focus and logs
+        // it (SPEC-5.3.1); the page runs on regardless.
+        let mut no_ime = (*filled).clone();
+        no_ime.capabilities = Capabilities::default();
         let wasm = fs::read(root().join("target/wasm/form.wasm")).unwrap();
         let logs = |caps: Capabilities| {
             let req = RenderRequest {

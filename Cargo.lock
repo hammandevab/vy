@@ -1231,6 +1231,7 @@ dependencies = [
  "png",
  "vy-abi",
  "vy-dl",
+ "vy-manifest",
  "vy-render",
  "vy-runtime",
  "wat",

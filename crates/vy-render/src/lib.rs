@@ -8,7 +8,7 @@ pub mod image;
 pub mod raster;
 pub mod text;
 
-pub use image::{diff_ratio, ImageCache, ImageError, RgbaImage, MAX_IMAGE_CACHE_BYTES};
+pub use image::{diff_ratio, ImageCache, ImageError, Resource, RgbaImage, MAX_IMAGE_CACHE_BYTES};
 pub use raster::{render, RenderError};
 pub use text::{pack_x100, Size, TextEngine};
 
@@ -32,7 +32,7 @@ mod tests {
         scale: f32,
         t: &mut TextEngine,
     ) -> Result<RgbaImage, RenderError> {
-        raster::render(dl, w, h, scale, t, &ImageCache::new(Vec::new()))
+        raster::render(dl, w, h, scale, t, &ImageCache::from_bytes(Vec::new()))
     }
 
     /// PNG of a `w` × `h` image whose pixel `(x, y)` is `f(x, y)`.
@@ -337,7 +337,8 @@ mod tests {
         let too_wide = png(max + 1, 1, |_, _| [0, 255, 0, 255]);
         let too_tall = png(1, max + 1, |_, _| [0, 255, 0, 255]);
         let garbage = b"RIFF....WEBPVP8 ".to_vec();
-        let mut cache = ImageCache::new(vec![small, wide, too_wide, too_tall, garbage.clone()]);
+        let mut cache =
+            ImageCache::from_bytes(vec![small, wide, too_wide, too_tall, garbage.clone()]);
         assert_eq!(cache.resource_count(), 5);
         assert_eq!(cache.decodes(), 0, "nothing decoded before first use");
         assert_eq!(
@@ -406,7 +407,7 @@ mod tests {
         // The decoded cache is bounded (SPEC-9.3.1): with a full cache a new
         // decode is refused and nothing is held for it.
         let one = png(1, 1, |_, _| [1, 2, 3, 4]);
-        let mut cache = ImageCache::new(vec![one.clone(), one]);
+        let mut cache = ImageCache::from_bytes(vec![one.clone(), one]);
         cache.decoded_bytes = MAX_IMAGE_CACHE_BYTES - 4;
         cache.decode(1).unwrap();
         assert_eq!(cache.decode(2), Err(ImageError::CacheFull));
@@ -476,7 +477,7 @@ mod tests {
         let white = [255, 255, 255, 255];
         // 2 x 1: red | blue
         let two = png(2, 1, |x, _| if x == 0 { red } else { blue });
-        let mut cache = ImageCache::new(vec![two]);
+        let mut cache = ImageCache::from_bytes(vec![two]);
         cache.decode(1).unwrap();
         let mut t = TextEngine::new();
         let mut dl = DisplayList::new();
@@ -528,7 +529,7 @@ mod tests {
 
         // An unknown fit value on the wire draws nothing; a resource that was
         // refused draws the placeholder, like one never decoded.
-        let mut cache = ImageCache::new(vec![b"not a png".to_vec()]);
+        let mut cache = ImageCache::from_bytes(vec![b"not a png".to_vec()]);
         assert!(cache.decode(1).is_err());
         let mut dl = DisplayList::new();
         dl.begin().unwrap();
@@ -540,7 +541,7 @@ mod tests {
         let fit_at = bytes.len() - 2;
         assert_eq!(bytes[fit_at], 0);
         bytes[fit_at] = 3;
-        let mut good = ImageCache::new(vec![png(1, 1, |_, _| red)]);
+        let mut good = ImageCache::from_bytes(vec![png(1, 1, |_, _| red)]);
         good.decode(1).unwrap();
         let img = raster::render(&bytes, 4, 2, 1.0, &mut t, &good).unwrap();
         assert_eq!(img.pixel(0, 0).unwrap(), white);

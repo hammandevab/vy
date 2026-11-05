@@ -14,6 +14,7 @@ pub mod host;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
 pub use host::{Capabilities, Link, LogEntry, LogSource, SemNode};
+pub use vy_render::Resource;
 
 use host::Host;
 use sha2::{Digest, Sha256};
@@ -70,8 +71,9 @@ pub enum Error {
         actual: [u8; 32],
     },
     /// The module breaks the ABI contract (SPEC-4.2.*, SPEC-5.1.*, SPEC-5.2.*).
-    Abi(AbiReport),
-    /// `memory_max` is above the limit (SPEC-8.1.3) or zero.
+    Abi(Box<AbiReport>),
+    /// `memory_max` is above the limit, zero, or below the module's initial
+    /// memory plus one page (SPEC-8.1.3).
     MemoryMax(u32),
     /// wasmtime could not compile or instantiate the module.
     Instantiate(String),
@@ -145,9 +147,10 @@ pub struct Options {
     pub capabilities: Capabilities,
     /// Package resources by index: `resources[i]` is resource id `i + 1`;
     /// id 0 is the module itself (SPEC-4.5.1). Images among them are decoded
-    /// at their first `dl_image` (SPEC-6.5.1). Until the manifest parser
-    /// (M3) the caller supplies them directly.
-    pub resources: Vec<Vec<u8>>,
+    /// at their first `dl_image` (SPEC-6.5.1) and checked against the size
+    /// the manifest declares for them when the caller passes it
+    /// (SPEC-8.1.2). Until the package loader (M3) the caller supplies them.
+    pub resources: Vec<Resource>,
 }
 
 impl Default for Options {
@@ -240,11 +243,18 @@ impl Runtime {
         }
         let report = check_abi_bytes(wasm)?;
         if !report.ok() {
-            return Err(Error::Abi(report));
+            return Err(Error::Abi(Box::new(report)));
         }
         let pages = options.memory_max_pages;
         if pages == 0 || pages > limits::MAX_MEMORY_PAGES {
             return Err(Error::MemoryMax(pages));
+        }
+        // The module must be able to grow at all, or its first allocation
+        // traps the page in its first frame (SPEC-8.1.3).
+        if let Some((initial, _)) = report.memory {
+            if u64::from(pages) < initial + 1 {
+                return Err(Error::MemoryMax(pages));
+            }
         }
 
         let engine = engine();

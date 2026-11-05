@@ -5,7 +5,7 @@
   "lang": "sv",
   "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 64,
-  "capabilities": [],
+  "capabilities": {},
   "fallback": "# Om sidor som ritar sig själva\n\nEn lång artikel i fyllnadssvenska.",
   "published": "2026-11-04",
   "source_url": "https://github.com/hammandevab/vy/tree/main/modules/text",

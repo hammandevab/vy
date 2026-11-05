@@ -21,6 +21,10 @@ fn features() -> wasmparser::WasmFeatures {
 pub struct AbiReport {
     /// Human-readable problems; empty means the module conforms.
     pub problems: Vec<String>,
+    /// Things that conform but will bite: a module whose initial memory is
+    /// 4095 pages or more leaves at most one page under the 4096-page cap
+    /// for `memory_max >= initial + 1` (SPEC-8.1.3).
+    pub warnings: Vec<String>,
     /// Imports found, by name.
     pub imports: Vec<String>,
     /// Function exports found, by name.
@@ -44,6 +48,9 @@ impl std::fmt::Display for AbiReport {
             Some((min, Some(max))) => writeln!(f, "memory: {min}..{max} pages")?,
             Some((min, None)) => writeln!(f, "memory: {min}.. pages (no max)")?,
             None => writeln!(f, "memory: none")?,
+        }
+        for w in &self.warnings {
+            writeln!(f, "warning: {w}")?;
         }
         if self.problems.is_empty() {
             writeln!(f, "ABI 1.0: OK")
@@ -161,6 +168,13 @@ pub fn check_abi_bytes(bytes: &[u8]) -> Result<AbiReport, Error> {
                 for m in reader {
                     let m = m.map_err(invalid)?;
                     report.memory = Some((m.initial, m.maximum));
+                    if m.initial + 1 >= u64::from(vy_abi::limits::MAX_MEMORY_PAGES) {
+                        report.warnings.push(format!(
+                            "initial memory of {} pages leaves at most one page of growth: memory_max must be at least initial + 1 and at most {} (SPEC-8.1.3)",
+                            m.initial,
+                            vy_abi::limits::MAX_MEMORY_PAGES
+                        ));
+                    }
                     if m.shared {
                         report
                             .problems
@@ -380,7 +394,9 @@ mod tests {
         );
     }
 
-    /// SPEC-8.1.3: memory max above 4096 pages is reported.
+    /// SPEC-8.1.3: memory max above 4096 pages is reported; an initial
+    /// memory of 4095 pages or more is a warning, since no manifest can then
+    /// satisfy `memory_max >= initial + 1` within the cap.
     #[test]
     fn spec_8_1_3_memory_max_limit() {
         let wat = GOOD.replace(
@@ -389,6 +405,21 @@ mod tests {
         );
         let r = check_abi_bytes(&wasm(&wat)).unwrap();
         assert!(r.problems.iter().any(|p| p.contains("exceeds 4096")), "{r}");
+        assert!(r.warnings.is_empty());
+        for (initial, warn) in [(4094, false), (4095, true), (4096, true)] {
+            let wat = GOOD.replace(
+                "(memory (export \"memory\") 1 16)",
+                &format!("(memory (export \"memory\") {initial})"),
+            );
+            let r = check_abi_bytes(&wasm(&wat)).unwrap();
+            assert!(r.ok(), "{initial}: a warning is not a problem: {r}");
+            assert_eq!(
+                r.warnings.iter().any(|w| w.contains("SPEC-8.1.3")),
+                warn,
+                "{initial}: {r}"
+            );
+            assert_eq!(format!("{r}").contains("warning:"), warn);
+        }
     }
 
     /// SPEC-2.1.6: bytes that are not WebAssembly are rejected, never interpreted.

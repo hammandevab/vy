@@ -1,0 +1,23 @@
+{
+  "abi": "1.0",
+  "name": "Galleri",
+  "summary": "Referensmodul 4: åtta PNG-resurser i ett rutnät med cover, contain och stretch i tur och ordning, och en ljuslåda. Bildernas storlek (w, h) står i manifestet (SPEC-8.1.2). Inga capabilities.",
+  "lang": "sv",
+  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
+  "memory_max": 64,
+  "resources": [
+    { "path": "res/01-ringar.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 320, "h": 200 },
+    { "path": "res/02-rutor.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 240, "h": 240 },
+    { "path": "res/03-vagor.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 200, "h": 300 },
+    { "path": "res/04-diagonal.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 320, "h": 180 },
+    { "path": "res/05-prickar.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 256, "h": 256 },
+    { "path": "res/06-spiral.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 300, "h": 200 },
+    { "path": "res/07-rutnat.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 180, "h": 320 },
+    { "path": "res/08-solnedgang.png", "type": "image/png", "hash": "sha256:FYLLS-I-AV-vy-publish", "w": 320, "h": 200 }
+  ],
+  "capabilities": {},
+  "fallback": "# Galleri\n\nGalleriet kräver en Vy-klient.",
+  "published": "2026-11-05",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/gallery",
+  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+}

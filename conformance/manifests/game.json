@@ -1,0 +1,13 @@
+{
+  "abi": "1.0",
+  "name": "Studs",
+  "summary": "Referensmodul 5: paddel och boll; rörelse integrerad från dt_ms, en frame per frame via request_frame bara medan bollen är i spel, serve ur random. Inga capabilities.",
+  "lang": "sv",
+  "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
+  "memory_max": 64,
+  "capabilities": {},
+  "fallback": "# Studs\n\nSpelet kräver en Vy-klient.",
+  "published": "2026-11-05",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/game",
+  "sig": { "key_id": "dev", "bytes": "ed25519:OSIGNERAT-I-M2" }
+}

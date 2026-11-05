@@ -108,7 +108,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-6.4.1]** Textformning och typsnittsrendering sker i värden; modulen ser aldrig glyfer.
 - **[SPEC-6.4.2]** Värden tillhandahåller fem inbyggda typsnittsroller `sans`, `serif`, `mono`, `ui`, `emoji` som resurs-id −1 till −5.
 - **[SPEC-6.4.3]** `dl_text` och `text_measure` radbryter vid `w` när `w > 0` och radbryter inte alls när `w ≤ 0`; `dl_text` returnerar bredd och höjd så att modulen kan placera nästa element.
-- **[SPEC-6.5.1]** Bilder avkodas lat vid första `dl_image` och cachas per paket; högst 8192 × 8192 px; avkodningen är en engångskostnad bunden av manifestet och debiteras inte frame-budgeten (från M3 avkodas den utanför UI-tråden).
+- **[SPEC-6.5.1]** Bilder avkodas lat vid första `dl_image` och cachas per paket; högst 8192 × 8192 px, och en bild vars avkodade storlek avviker från manifestets `w`/`h` ger `E_RESOURCE`; avkodningen är en engångskostnad bunden av manifestet och debiteras inte frame-budgeten (från M3 avkodas den utanför UI-tråden).
 
 ## 7. Protokoll
 
@@ -128,9 +128,9 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 ## 8. Manifestet
 
 - **[SPEC-8.1.1]** Obligatoriska fält: `abi`, `name` (≤ 80 tecken), `summary` (≤ 2 KB), `lang` (BCP 47), `module` {hash, size}, `memory_max`, `published`, `sig`.
-- **[SPEC-8.1.2]** Valfria fält: `resources`, `capabilities`, `links`, `fallback` (≤ 16 KB Markdown), `min_size`, `icon`, `source_url`, `skeleton`, `chunks`, `embeds`.
-- **[SPEC-8.1.3]** `memory_max` anges i wasm-sidor (64 KB) och är högst 4096.
-- **[SPEC-8.2.1]** Capabilities i 1.0: `net` {origins ≤ 16}, `storage` {quota_kb ≤ 16384}, `clipboard`, `hires_time`, `ime`, `persist_frame`.
+- **[SPEC-8.1.2]** Valfria fält: `resources` (lista av {path, type, hash, size}, där en bild dessutom har obligatoriska `w` och `h` i pixlar – modulen får storlekarna vid byggtid och värden avvisar en bild vars avkodade storlek avviker), `capabilities`, `links`, `fallback` (≤ 16 KB Markdown), `min_size`, `icon`, `source_url`, `skeleton`, `chunks`, `embeds`; okända fält avvisas.
+- **[SPEC-8.1.3]** `memory_max` anges i wasm-sidor (64 KB), är högst 4096 och minst modulens initiala minne + 1 sida; `vy-manifest` validerar det och `check-abi` varnar för en modul vars initiala minne inte lämnar den sidan.
+- **[SPEC-8.2.1]** Capabilities i 1.0 är en map från namn till objekt: `net` {origins: lista med ≤ 16 origins}, `storage` {quota_kb ≤ 16384}, `clipboard` {}, `hires_time` {}, `ime` {}, `persist_frame` {}.
 - **[SPEC-8.2.2]** En capability som inte står i manifestet kan inte beviljas i efterhand.
 - **[SPEC-8.2.3]** Standardpolicy: `net` för egen origin, `storage` upp till 1 MB och `ime` beviljas automatiskt; `clipboard` och `persist_frame` efter fråga; `hires_time` nekas som standard.
 - **[SPEC-8.3.1]** `fallback` visas när modulen avvisas eller fönstret är mindre än `min_size`.
@@ -159,7 +159,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-10.3.2]** Fokuserbara noder är de med rollerna `link`, `button`, `textbox`, `checkbox`, `radio`, `menuitem`, `tab` och `slider`; finns ingen sådan nod konsumeras Tab utan verkan.
 - **[SPEC-10.3.3]** Fokusmarkeringen ritas av modulen utifrån `KIND_FOCUS`; värden ritar ingen fokusring.
 - **[SPEC-10.4.1]** En sida utan semantiskt träd får publiceras men markeras som *otillgänglig* i adressfältet.
-- **[SPEC-10.4.2]** En sida med inmatningsfält utan `ime`-capability avvisas av konformanssviten.
+- **[SPEC-10.4.2]** En sida med inmatningsfält (`textbox`-noder) vars manifest inte begär `ime` avvisas av konformanssviten.
 
 ## 11. Klientarkitektur
 

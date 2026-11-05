@@ -7,8 +7,10 @@
 # Formatet är en delmängd av TOML: [[case]]-tabeller med name, module, width, height,
 # scale (standard 1), frames (standard 1 + antal events; ett tak – vy_frame anropas bara så
 # länge modulen begär en ny frame, SPEC-6.2.1), semantic, capabilities (lista med namn ur
-# SPEC-8.2.1), resources (lista med filer relativt repots rot; resources[i] blir resurs-id
-# i + 1, SPEC-4.5.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
+# SPEC-8.2.1; bara vad modulens manifest i manifests/ begär, SPEC-8.2.2), resources (lista med
+# filer relativt repots rot som "sökväg" eller {path, w, h} med bildens storlek ur manifestet,
+# SPEC-8.1.2; resources[i] blir resurs-id i + 1, SPEC-4.5.1) och events (lista med
+# inline-tabeller: pointer_move/down/up med x, y;
 # pointer_leave utan argument; key_down/up med code (USB HID); text_input med text; scroll
 # med dx, dy, lines; focus med node, gained, keyboard). Värden äger fokus (SPEC-10.3.1):
 # key_down 43 (Tab, med modifiers = 1 för Skift) når aldrig modulen utan flyttar värdens fokus
@@ -94,7 +96,7 @@ height = 768
 scale = 1.5
 
 # form: textfält med fokus och IME, kryssruta och skicka-knapp (modules/form).
-# Sidan har textbox-noder och måste beviljas `ime` (SPEC-10.4.2).
+# Sidan har textbox-noder, så manifestet måste begära `ime` (SPEC-10.4.2); fallen beviljar det.
 
 [[case]]
 name = "form-800x600@1"
@@ -205,7 +207,8 @@ events = [
 ]
 
 # gallery: åtta PNG-resurser i rutnät med cover/contain/stretch och en ljuslåda
-# (modules/gallery). Resurserna ges i ordning: resources[i] är resurs-id i + 1.
+# (modules/gallery). Resurserna ges i ordning: resources[i] är resurs-id i + 1, med den
+# storlek manifestet anger (SPEC-8.1.2); värden avvisar en bild som inte stämmer.
 
 [[case]]
 name = "gallery-800x600@1"
@@ -215,10 +218,14 @@ height = 600
 scale = 1
 semantic = "gallery"
 resources = [
-  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
-  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
-  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
-  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+  {path = "modules/gallery/res/01-ringar.png", w = 320, h = 200},
+  {path = "modules/gallery/res/02-rutor.png", w = 240, h = 240},
+  {path = "modules/gallery/res/03-vagor.png", w = 200, h = 300},
+  {path = "modules/gallery/res/04-diagonal.png", w = 320, h = 180},
+  {path = "modules/gallery/res/05-prickar.png", w = 256, h = 256},
+  {path = "modules/gallery/res/06-spiral.png", w = 300, h = 200},
+  {path = "modules/gallery/res/07-rutnat.png", w = 180, h = 320},
+  {path = "modules/gallery/res/08-solnedgang.png", w = 320, h = 200},
 ]
 
 [[case]]
@@ -229,10 +236,14 @@ height = 600
 scale = 1
 semantic = "gallery-opened"
 resources = [
-  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
-  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
-  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
-  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+  {path = "modules/gallery/res/01-ringar.png", w = 320, h = 200},
+  {path = "modules/gallery/res/02-rutor.png", w = 240, h = 240},
+  {path = "modules/gallery/res/03-vagor.png", w = 200, h = 300},
+  {path = "modules/gallery/res/04-diagonal.png", w = 320, h = 180},
+  {path = "modules/gallery/res/05-prickar.png", w = 256, h = 256},
+  {path = "modules/gallery/res/06-spiral.png", w = 300, h = 200},
+  {path = "modules/gallery/res/07-rutnat.png", w = 180, h = 320},
+  {path = "modules/gallery/res/08-solnedgang.png", w = 320, h = 200},
 ]
 events = [
   {kind = "pointer_down", x = 400, y = 170},       # andra bilden (Rutor, contain)
@@ -247,10 +258,14 @@ width = 1024
 height = 768
 scale = 1.5
 resources = [
-  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
-  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
-  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
-  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+  {path = "modules/gallery/res/01-ringar.png", w = 320, h = 200},
+  {path = "modules/gallery/res/02-rutor.png", w = 240, h = 240},
+  {path = "modules/gallery/res/03-vagor.png", w = 200, h = 300},
+  {path = "modules/gallery/res/04-diagonal.png", w = 320, h = 180},
+  {path = "modules/gallery/res/05-prickar.png", w = 256, h = 256},
+  {path = "modules/gallery/res/06-spiral.png", w = 300, h = 200},
+  {path = "modules/gallery/res/07-rutnat.png", w = 180, h = 320},
+  {path = "modules/gallery/res/08-solnedgang.png", w = 320, h = 200},
 ]
 
 [[case]]
@@ -260,10 +275,14 @@ width = 400
 height = 700
 scale = 1
 resources = [
-  "modules/gallery/res/01-ringar.png", "modules/gallery/res/02-rutor.png",
-  "modules/gallery/res/03-vagor.png", "modules/gallery/res/04-diagonal.png",
-  "modules/gallery/res/05-prickar.png", "modules/gallery/res/06-spiral.png",
-  "modules/gallery/res/07-rutnat.png", "modules/gallery/res/08-solnedgang.png",
+  {path = "modules/gallery/res/01-ringar.png", w = 320, h = 200},
+  {path = "modules/gallery/res/02-rutor.png", w = 240, h = 240},
+  {path = "modules/gallery/res/03-vagor.png", w = 200, h = 300},
+  {path = "modules/gallery/res/04-diagonal.png", w = 320, h = 180},
+  {path = "modules/gallery/res/05-prickar.png", w = 256, h = 256},
+  {path = "modules/gallery/res/06-spiral.png", w = 300, h = 200},
+  {path = "modules/gallery/res/07-rutnat.png", w = 180, h = 320},
+  {path = "modules/gallery/res/08-solnedgang.png", w = 320, h = 200},
 ]
 events = [
   {kind = "scroll", dy = 500},                      # en kolumn: rullning i pixlar
@@ -410,10 +429,14 @@ height = 800
 scale = 1
 semantic = "shop"
 resources = [
-  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
-  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
-  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
-  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+  {path = "modules/shop/assets/01-mugg.png", w = 240, h = 240},
+  {path = "modules/shop/assets/02-bok.png", w = 240, h = 240},
+  {path = "modules/shop/assets/03-lampa.png", w = 240, h = 240},
+  {path = "modules/shop/assets/04-vaxt.png", w = 240, h = 240},
+  {path = "modules/shop/assets/05-horlurar.png", w = 240, h = 240},
+  {path = "modules/shop/assets/06-ryggsack.png", w = 240, h = 240},
+  {path = "modules/shop/assets/07-termos.png", w = 240, h = 240},
+  {path = "modules/shop/assets/08-plad.png", w = 240, h = 240},
 ]
 
 [[case]]
@@ -424,10 +447,14 @@ height = 800
 scale = 1
 semantic = "shop-cart"
 resources = [
-  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
-  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
-  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
-  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+  {path = "modules/shop/assets/01-mugg.png", w = 240, h = 240},
+  {path = "modules/shop/assets/02-bok.png", w = 240, h = 240},
+  {path = "modules/shop/assets/03-lampa.png", w = 240, h = 240},
+  {path = "modules/shop/assets/04-vaxt.png", w = 240, h = 240},
+  {path = "modules/shop/assets/05-horlurar.png", w = 240, h = 240},
+  {path = "modules/shop/assets/06-ryggsack.png", w = 240, h = 240},
+  {path = "modules/shop/assets/07-termos.png", w = 240, h = 240},
+  {path = "modules/shop/assets/08-plad.png", w = 240, h = 240},
 ]
 events = [
   {kind = "pointer_down", x = 130, y = 325},        # Mugg Lund: lägg i varukorg
@@ -444,10 +471,14 @@ width = 800
 height = 600
 scale = 1
 resources = [
-  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
-  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
-  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
-  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+  {path = "modules/shop/assets/01-mugg.png", w = 240, h = 240},
+  {path = "modules/shop/assets/02-bok.png", w = 240, h = 240},
+  {path = "modules/shop/assets/03-lampa.png", w = 240, h = 240},
+  {path = "modules/shop/assets/04-vaxt.png", w = 240, h = 240},
+  {path = "modules/shop/assets/05-horlurar.png", w = 240, h = 240},
+  {path = "modules/shop/assets/06-ryggsack.png", w = 240, h = 240},
+  {path = "modules/shop/assets/07-termos.png", w = 240, h = 240},
+  {path = "modules/shop/assets/08-plad.png", w = 240, h = 240},
 ]
 events = [
   {kind = "scroll", dy = 160},                      # ner en bit i rutnätet
@@ -461,10 +492,14 @@ width = 400
 height = 700
 scale = 2
 resources = [
-  "modules/shop/assets/01-mugg.png", "modules/shop/assets/02-bok.png",
-  "modules/shop/assets/03-lampa.png", "modules/shop/assets/04-vaxt.png",
-  "modules/shop/assets/05-horlurar.png", "modules/shop/assets/06-ryggsack.png",
-  "modules/shop/assets/07-termos.png", "modules/shop/assets/08-plad.png",
+  {path = "modules/shop/assets/01-mugg.png", w = 240, h = 240},
+  {path = "modules/shop/assets/02-bok.png", w = 240, h = 240},
+  {path = "modules/shop/assets/03-lampa.png", w = 240, h = 240},
+  {path = "modules/shop/assets/04-vaxt.png", w = 240, h = 240},
+  {path = "modules/shop/assets/05-horlurar.png", w = 240, h = 240},
+  {path = "modules/shop/assets/06-ryggsack.png", w = 240, h = 240},
+  {path = "modules/shop/assets/07-termos.png", w = 240, h = 240},
+  {path = "modules/shop/assets/08-plad.png", w = 240, h = 240},
 ]
 events = [{kind = "key_down", code = 77}]            # End: sista kortet
 

@@ -12,7 +12,7 @@ use vy_abi::event as kind;
 use vy_render::RgbaImage;
 use vy_runtime::{Capabilities, LogEntry, Options, Runtime, SemNode};
 
-pub use vy_runtime::{check_abi_bytes, AbiReport};
+pub use vy_runtime::{check_abi_bytes, AbiReport, Resource};
 
 /// An input event replayed before the final frame (SPEC-5.1.3, SPEC-A.2.1),
 /// in logical pixels. The minimal subset a conformance case needs to reach a
@@ -191,8 +191,10 @@ pub struct RenderRequest<'a> {
     pub memory_max_pages: u32,
     /// Capabilities the headless host grants (SPEC-8.2.1); none by default.
     pub capabilities: Capabilities,
-    /// Package resources, `resources[i]` being resource id `i + 1` (SPEC-4.5.1).
-    pub resources: &'a [Vec<u8>],
+    /// Package resources, `resources[i]` being resource id `i + 1`
+    /// (SPEC-4.5.1), each with the size the manifest declares when known
+    /// (SPEC-8.1.2).
+    pub resources: &'a [Resource],
     /// Events delivered after the first frame, in order; each one the module
     /// answers with a redraw gets a frame while `frames` allows (SPEC-6.2.1).
     pub events: &'a [ScriptedEvent],

@@ -136,6 +136,35 @@ impl RgbaImage {
     }
 }
 
+/// One package resource as the host holds it before decoding: the bytes and,
+/// for an image, the size the manifest declares for it (SPEC-8.1.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Resource {
+    /// The file's bytes.
+    pub bytes: Vec<u8>,
+    /// `(w, h)` from the manifest, checked against the decoded image
+    /// (SPEC-6.5.1); `None` when the caller did not state one.
+    pub pixels: Option<(u32, u32)>,
+}
+
+impl Resource {
+    /// A resource with no declared size.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            pixels: None,
+        }
+    }
+
+    /// A resource the manifest says is `w` × `h` pixels.
+    pub fn with_size(bytes: Vec<u8>, w: u32, h: u32) -> Self {
+        Self {
+            bytes,
+            pixels: Some((w, h)),
+        }
+    }
+}
+
 /// Why an image resource cannot be drawn. Every variant is `E_RESOURCE` on
 /// the ABI (SPEC-A.1.1: "unknown resource id or wrong type").
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +187,14 @@ pub enum ImageError {
     Decode(String),
     /// Decoding would push the package past [`MAX_IMAGE_CACHE_BYTES`].
     CacheFull,
+    /// The decoded size is not what the manifest declared (SPEC-8.1.2,
+    /// SPEC-6.5.1); nothing is kept.
+    SizeMismatch {
+        /// Decoded width and height.
+        actual: (u32, u32),
+        /// Declared width and height.
+        declared: (u32, u32),
+    },
 }
 
 impl fmt::Display for ImageError {
@@ -181,6 +218,11 @@ impl fmt::Display for ImageError {
                 "decoded images would exceed {} bytes",
                 MAX_IMAGE_CACHE_BYTES
             ),
+            Self::SizeMismatch { actual, declared } => write!(
+                f,
+                "{}x{} px but the manifest says {}x{} (SPEC-8.1.2)",
+                actual.0, actual.1, declared.0, declared.1
+            ),
         }
     }
 }
@@ -196,7 +238,7 @@ impl std::error::Error for ImageError {}
 
 enum Slot {
     /// Raw resource bytes, not yet touched by `dl_image`.
-    Raw(Vec<u8>),
+    Raw(Resource),
     /// Decoded on first use.
     Ready(RgbaImage),
     /// Refused on first use; the raw length is kept for accounting.
@@ -217,12 +259,17 @@ pub struct ImageCache {
 
 impl ImageCache {
     /// Cache over the package's resources, nothing decoded yet.
-    pub fn new(resources: Vec<Vec<u8>>) -> Self {
+    pub fn new(resources: Vec<Resource>) -> Self {
         Self {
             slots: resources.into_iter().map(Slot::Raw).collect(),
             decoded_bytes: 0,
             decodes: 0,
         }
+    }
+
+    /// Cache over resources with no declared sizes.
+    pub fn from_bytes(resources: Vec<Vec<u8>>) -> Self {
+        Self::new(resources.into_iter().map(Resource::new).collect())
     }
 
     /// Number of resources in the package (ids `1..=count`).
@@ -255,12 +302,19 @@ impl ImageCache {
             return 0;
         };
         self.decodes += 1;
-        let raw = std::mem::take(raw);
+        let Resource { bytes: raw, pixels } = std::mem::take(raw);
         let room = MAX_IMAGE_CACHE_BYTES.saturating_sub(self.decoded_bytes);
         let (outcome, cost) =
             match RgbaImage::decode_png_within(&raw, Some(limits::MAX_IMAGE_SIDE_PX)) {
                 Err(e @ ImageError::TooLarge { .. }) => (Slot::Failed(e), 0),
                 Err(e) => (Slot::Failed(e), raw.len()),
+                Ok(img) if pixels.is_some_and(|p| p != (img.width, img.height)) => (
+                    Slot::Failed(ImageError::SizeMismatch {
+                        actual: (img.width, img.height),
+                        declared: pixels.unwrap_or_default(),
+                    }),
+                    raw.len(),
+                ),
                 Ok(img) if img.data.len() > room => {
                     (Slot::Failed(ImageError::CacheFull), raw.len())
                 }

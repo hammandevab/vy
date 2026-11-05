@@ -5,7 +5,7 @@
   "lang": "sv",
   "module": { "hash": "sha256:FYLLS-I-AV-vy-publish", "size": 0 },
   "memory_max": 64,
-  "capabilities": [],
+  "capabilities": {},
   "links": [
     "vy://docs.example/personer/maja-ek",
     "vy://docs.example/lagesrapport",

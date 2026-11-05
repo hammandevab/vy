@@ -23,7 +23,7 @@
 use crate::FUEL_PER_HOST_BYTE;
 use vy_abi::{cap, err, fit, limits, ABI_VERSION};
 use vy_dl::DisplayList;
-use vy_render::{pack_x100, ImageCache, TextEngine};
+use vy_render::{pack_x100, ImageCache, Resource, TextEngine};
 use wasmtime::{Caller, Linker, Memory, StoreLimits, Trap};
 
 /// Milliseconds the headless clock advances per completed frame.
@@ -183,7 +183,7 @@ pub struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(limits: StoreLimits, caps: Capabilities, resources: Vec<Vec<u8>>) -> Self {
+    pub(crate) fn new(limits: StoreLimits, caps: Capabilities, resources: Vec<Resource>) -> Self {
         Self {
             memory: None,
             limits,
