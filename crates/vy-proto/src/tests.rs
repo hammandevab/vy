@@ -640,6 +640,98 @@ fn spec_7_3_2_revalidate_ignores_freshness() {
     assert_eq!(f.fetch(&at).unwrap().package.manifest.name, "Ny version");
 }
 
+/// SPEC-7.3.2, SPEC-7.4.4, SPEC-7.4.5, SPEC-7.6.2: live reload's
+/// conditional GET (`Fetcher::revalidate`) decides nothing about trust: it
+/// asks no DNS, fetches neither the key file nor the key log, and pins
+/// nothing, so the reload that follows a change goes through `fetch` and
+/// its trust decision like any visit. A first visit without a TXT record
+/// stays restricted and asks DNS again; a pinned origin whose server now
+/// signs with another key (and lists it) is `UnknownKey`, not re-pinned.
+#[test]
+fn spec_7_3_2_revalidate_keeps_the_trust_path() {
+    let publisher = key(0);
+    let stranger = key(4);
+    let site = Site::new(
+        package(&publisher, None),
+        Form::Package,
+        std::slice::from_ref(&publisher),
+    );
+    site.lock().unwrap().cache_control = None;
+    let server = serve(&site);
+    let a = Address::parse("vy://exempel.test/hello").unwrap();
+    let name = vy_manifest::dns_txt_name(a.host());
+    let mut log = vy_manifest::KeyLog::default();
+    log.append("exempel.test", publisher.public(), "2026-11-05");
+    site.lock().unwrap().other.insert(
+        WELL_KNOWN_LOG_PATH.into(),
+        ("text/plain".into(), log.text().into_bytes()),
+    );
+    let dns = FakeResolver::default();
+    let (mut f, dir) = remote_fetcher("revalidate-trust", &server, &dns);
+    let trust_requests = || {
+        (
+            server.count(WELL_KNOWN_KEY_PATH),
+            server.count(WELL_KNOWN_LOG_PATH),
+        )
+    };
+
+    // First visit, no TXT record: restricted, nothing pinned.
+    let first = f.fetch(&a).unwrap();
+    assert_eq!(
+        first.restriction(),
+        Some(&Restriction::DnsNoRecord { name: name.clone() })
+    );
+    assert_eq!(dns.lookups().len(), 1);
+    let before = trust_requests();
+    let v1 = f.revalidate(&a).unwrap();
+    assert_eq!(dns.lookups().len(), 1, "revalidate asks no DNS");
+    assert_eq!(trust_requests(), before, "nor the key file or the log");
+    assert!(!f.keys().has_pins(&a.origin()), "and pins nothing");
+    let again = f.fetch(&a).unwrap();
+    assert!(!again.trusted());
+    assert_eq!(dns.lookups().len(), 2, "the reload asks DNS again");
+
+    // With the record: trusted and pinned to the publisher alone.
+    dns.set(
+        &name,
+        Ok(vec![vy_manifest::dns_txt_record(&publisher.public())]),
+    );
+    assert!(f.fetch(&a).unwrap().trusted());
+    let pinned = |f: &Fetcher| {
+        f.keys()
+            .origin(&a.origin())
+            .unwrap()
+            .pinned
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pinned(&f), [publisher.public().key_id()]);
+    let lookups = dns.lookups().len();
+
+    // The server now signs with another key and lists it: revalidate sees
+    // the change and leaves the pins alone; the reload is restricted.
+    {
+        let mut s = site.lock().unwrap();
+        s.packages.insert("/hello".into(), package(&stranger, None));
+        s.keys = key_file(&[publisher.public(), stranger.public()]);
+    }
+    let before = trust_requests();
+    let v2 = f.revalidate(&a).unwrap();
+    assert_ne!(v1, v2, "the change is seen");
+    assert_eq!(trust_requests(), before);
+    assert_eq!(pinned(&f), [publisher.public().key_id()]);
+    let reloaded = f.fetch(&a).unwrap();
+    assert!(!reloaded.trusted());
+    assert!(matches!(
+        reloaded.restriction(),
+        Some(Restriction::UnknownKey { key_id }) if *key_id == stranger.public().key_id()
+    ));
+    assert_eq!(pinned(&f), [publisher.public().key_id()], "not re-pinned");
+    assert_eq!(dns.lookups().len(), lookups, "a pinned origin asks no DNS");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// SPEC-7.3.2: manifests use ordinary HTTP caching: `max-age` serves from
 /// disk without a request, `ETag` revalidates with 304, `no-store` never.
 #[test]
