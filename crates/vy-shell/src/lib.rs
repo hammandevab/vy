@@ -62,7 +62,8 @@ mod tests {
         todo!()
     }
 
-    /// SPEC-10.3.1: focus order from the tree; Tab/Shift+Tab/Enter/Escape as KIND_FOCUS.
+    /// SPEC-10.3.1: the shell feeds OS key and pointer events to the runtime, which owns
+    /// the focus order (Tab/Shift+Tab become KIND_FOCUS; Enter/Escape stay KEY_DOWN).
     #[test]
     #[ignore = "M4: accessibility"]
     fn spec_10_3_1_focus_order() {

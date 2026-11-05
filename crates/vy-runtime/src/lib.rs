@@ -19,7 +19,7 @@ use host::Host;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::OnceLock;
-use vy_abi::{event, limits, ABI_MINOR};
+use vy_abi::{event, key, limits, modifier, role, ABI_MINOR};
 use vy_render::{ImageCache, TextEngine};
 use wasmtime::{
     Config, Engine, Instance, Linker, Module, Store, StoreLimitsBuilder, Trap, TypedFunc,
@@ -218,6 +218,9 @@ pub struct Runtime {
     dt_reset: bool,
     /// False between `VISIBILITY` hidden and shown (SPEC-6.2.1).
     visible: bool,
+    /// The semantic node that holds keyboard focus, as the host sees it
+    /// (SPEC-10.3.1).
+    focus: Option<i32>,
 }
 
 impl Runtime {
@@ -288,6 +291,7 @@ impl Runtime {
             last_frame_at: 0,
             dt_reset: true,
             visible: true,
+            focus: None,
         })
     }
 
@@ -519,9 +523,21 @@ impl Runtime {
     /// The host keeps the state behind `key_down` from `KEY_DOWN` to
     /// `KEY_UP` and clears it when the tab is hidden (SPEC-5.2.6); a
     /// `VISIBILITY` shown makes the next `dt_ms` 0 (SPEC-5.1.2).
+    ///
+    /// The host also owns keyboard focus (SPEC-10.3.1): Tab and Shift+Tab
+    /// are consumed here and become `FOCUS` events through the focusable
+    /// nodes of the last frame's tree in document order (SPEC-10.3.2); a
+    /// `POINTER_DOWN` moves focus to the focusable node under it, or away
+    /// from everything, before the pointer event itself is delivered; Enter
+    /// and Escape are delivered as `KEY_DOWN`. A `FOCUS` event handed in by
+    /// the caller (a scripted one) updates the host's notion of focus too.
     pub fn event(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) -> Result<bool, Error> {
         self.gate()?;
         match kind {
+            event::KEY_DOWN if a == key::TAB => {
+                return self.focus_step(b & modifier::SHIFT != 0);
+            }
+            event::KEY_UP if a == key::TAB => return Ok(false),
             event::KEY_DOWN => {
                 let host = self.host_mut();
                 if !host.keys_down.contains(&a) {
@@ -529,6 +545,17 @@ impl Runtime {
                 }
             }
             event::KEY_UP => self.host_mut().keys_down.retain(|k| *k != a),
+            event::POINTER_DOWN => {
+                let moved = self.focus_at(a as f32 / 100.0, b as f32 / 100.0)?;
+                let redraw = self.deliver(kind, a, b, c, d)?;
+                return Ok(moved || redraw);
+            }
+            event::FOCUS if b == 1 => self.focus = Some(a),
+            event::FOCUS => {
+                if self.focus == Some(a) {
+                    self.focus = None;
+                }
+            }
             event::VISIBILITY if a == 1 => {
                 self.visible = true;
                 self.dt_reset = true;
@@ -539,12 +566,84 @@ impl Runtime {
             }
             _ => {}
         }
+        self.deliver(kind, a, b, c, d)
+    }
+
+    /// Call `vy_event` and note whether the module wants a frame.
+    fn deliver(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) -> Result<bool, Error> {
         let ev = self.exports.event.clone();
         let (r, _) = self.call(&ev, (kind, a, b, c, d)).map_err(|(e, _)| e)?;
         self.last_event = r;
         let redraw = r == 1;
         if redraw {
             self.host_mut().wants_frame = true;
+        }
+        Ok(redraw)
+    }
+
+    /// The semantic node the host holds keyboard focus on (SPEC-10.3.1).
+    pub fn focus(&self) -> Option<i32> {
+        self.focus
+    }
+
+    /// Tab or Shift+Tab: the next or previous focusable node of the last
+    /// frame's tree in document order, wrapping at the ends; with no
+    /// focusable node the key is consumed and nothing happens (SPEC-10.3.1,
+    /// SPEC-10.3.2).
+    fn focus_step(&mut self, backwards: bool) -> Result<bool, Error> {
+        let order: Vec<i32> = self
+            .host()
+            .sem
+            .iter()
+            .filter(|n| role::is_focusable(n.role))
+            .map(|n| n.id)
+            .collect();
+        if order.is_empty() {
+            return Ok(false);
+        }
+        let n = order.len();
+        let at = self
+            .focus
+            .and_then(|id| order.iter().position(|o| *o == id));
+        let next = match (at, backwards) {
+            (None, false) => 0,
+            (None, true) => n - 1,
+            (Some(i), false) => (i + 1) % n,
+            (Some(i), true) => (i + n - 1) % n,
+        };
+        self.move_focus(Some(order[next]), true)
+    }
+
+    /// A pointer press at `(x, y)` logical pixels focuses the last focusable
+    /// node in document order whose rectangle holds the point, or nothing
+    /// (SPEC-10.3.1).
+    fn focus_at(&mut self, x: f32, y: f32) -> Result<bool, Error> {
+        let hit = self
+            .host()
+            .sem
+            .iter()
+            .rev()
+            .find(|n| {
+                role::is_focusable(n.role) && x >= n.x && y >= n.y && x < n.x + n.w && y < n.y + n.h
+            })
+            .map(|n| n.id);
+        self.move_focus(hit, false)
+    }
+
+    /// Deliver `FOCUS` out for the old node and in for the new one
+    /// (`c` = 1 keyboard, 0 pointer); nothing when focus does not move.
+    fn move_focus(&mut self, target: Option<i32>, keyboard: bool) -> Result<bool, Error> {
+        if target == self.focus {
+            return Ok(false);
+        }
+        let how = i32::from(keyboard);
+        let mut redraw = false;
+        if let Some(old) = self.focus.take() {
+            redraw |= self.deliver(event::FOCUS, old, 0, how, 0)?;
+        }
+        if let Some(new) = target {
+            self.focus = Some(new);
+            redraw |= self.deliver(event::FOCUS, new, 1, how, 0)?;
         }
         Ok(redraw)
     }

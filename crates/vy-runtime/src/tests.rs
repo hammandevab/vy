@@ -3,7 +3,7 @@
 
 use super::*;
 use host::LogSource;
-use vy_abi::err;
+use vy_abi::{err, key, modifier};
 
 /// The exports a test module does not care about.
 const STUBS: &str = r#"
@@ -1400,6 +1400,192 @@ fn spec_5_2_7_fetch_and_storage_denied_headless() {
         assert!(new[0].starts_with(&format!("{name}: E_DENIED")), "{new:?}");
     }
     assert!(!rt.is_suspended());
+}
+
+/// A module with a fixed tree (main 1; button 2 at y 0, textbox 3 at y 20,
+/// text 4 at y 30, link 5 at y 40, all 50 wide and 10 tall) that records
+/// every event it receives as `kind * 1e6 + (a % 1000) * 1000 + (b % 10) *
+/// 10 + c % 10`. Kind 100 returns record `a`, 101 clears, 102 returns the
+/// count; those three are not recorded.
+fn focus_module() -> Vec<u8> {
+    wasm(&format!(
+        r#"(module
+            (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $n (mut i32) (i32.const 0))
+            {INIT_OK}
+            (func $node (param $id i32) (param $role i32) (param $y f32)
+                (drop (call $sem_node (local.get $id) (i32.const 1) (local.get $role) (f32.const 0) (local.get $y) (f32.const 50) (f32.const 10) (i32.const 0) (i32.const 0))))
+            (func (export "vy_frame") (param i32) (result i32)
+                (drop (call $sem_node (i32.const 1) (i32.const 0) (i32.const 15) (f32.const 0) (f32.const 0) (f32.const 100) (f32.const 100) (i32.const 0) (i32.const 0)))
+                (call $node (i32.const 2) (i32.const 4) (f32.const 0))
+                (call $node (i32.const 3) (i32.const 5) (f32.const 20))
+                (call $node (i32.const 4) (i32.const 1) (f32.const 30))
+                (call $node (i32.const 5) (i32.const 3) (f32.const 40))
+                i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 100)) (then
+                    (return (i32.load (i32.add (i32.const 1024) (i32.mul (local.get 1) (i32.const 4)))))))
+                (if (i32.eq (local.get 0) (i32.const 101)) (then
+                    (global.set $n (i32.const 0))
+                    (return (i32.const 0))))
+                (if (i32.eq (local.get 0) (i32.const 102)) (then
+                    (return (global.get $n))))
+                (i32.store (i32.add (i32.const 1024) (i32.mul (global.get $n) (i32.const 4)))
+                    (i32.add
+                        (i32.mul (local.get 0) (i32.const 1000000))
+                        (i32.add
+                            (i32.mul (i32.rem_u (local.get 1) (i32.const 1000)) (i32.const 1000))
+                            (i32.add
+                                (i32.mul (i32.rem_u (local.get 2) (i32.const 10)) (i32.const 10))
+                                (i32.rem_u (local.get 3) (i32.const 10))))))
+                (global.set $n (i32.add (global.get $n) (i32.const 1)))
+                i32.const 1)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ))
+}
+
+/// The events `focus_module` recorded since the last call, decoded as
+/// `(kind, a, b, c)` with `a` modulo 1000.
+fn recorded(rt: &mut Runtime) -> Vec<(i32, i32, i32, i32)> {
+    rt.event(102, 0, 0, 0, 0).unwrap();
+    let n = rt.last_event_result();
+    let mut out = Vec::new();
+    for i in 0..n {
+        rt.event(100, i, 0, 0, 0).unwrap();
+        let v = rt.last_event_result();
+        out.push((v / 1_000_000, v / 1000 % 1000, v / 10 % 10, v % 10));
+    }
+    rt.event(101, 0, 0, 0, 0).unwrap();
+    out
+}
+
+/// SPEC-10.3.1, SPEC-10.3.2, SPEC-10.1.1: the host owns focus. Tab and
+/// Shift+Tab never reach the module; they move focus through the focusable
+/// nodes of the whole tree in document order (button, textbox, link; the
+/// text node is skipped), wrapping, and arrive as `FOCUS` out then in with
+/// `c = 1`. Enter and Escape are ordinary `KEY_DOWN`s. A pointer press
+/// focuses the node under it (`c = 0`) before the press is delivered, and
+/// a press on nothing focusable clears focus. A scripted `FOCUS` moves the
+/// host's focus as well.
+#[test]
+fn spec_10_3_1_host_owns_focus() {
+    use vy_abi::event::{FOCUS, KEY_DOWN, POINTER_DOWN};
+    let mut rt = load(&focus_module());
+    rt.init(100, 100, 1.0).unwrap();
+    rt.frame().unwrap();
+    assert_eq!(rt.focus(), None);
+    recorded(&mut rt);
+
+    assert!(
+        rt.event(KEY_DOWN, key::TAB, 0, 0, 0).unwrap(),
+        "focus moved: redraw"
+    );
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 2, 1, 1)],
+        "first focusable, no KEY_DOWN 43"
+    );
+    assert_eq!(rt.focus(), Some(2));
+    assert!(!rt.event(vy_abi::event::KEY_UP, key::TAB, 0, 0, 0).unwrap());
+    assert!(
+        recorded(&mut rt).is_empty(),
+        "KEY_UP of Tab is swallowed too"
+    );
+    rt.event(KEY_DOWN, key::TAB, 0, 0, 0).unwrap();
+    assert_eq!(recorded(&mut rt), vec![(FOCUS, 2, 0, 1), (FOCUS, 3, 1, 1)]);
+    rt.event(KEY_DOWN, key::TAB, 0, 0, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 3, 0, 1), (FOCUS, 5, 1, 1)],
+        "text skipped"
+    );
+    rt.event(KEY_DOWN, key::TAB, 0, 0, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 5, 0, 1), (FOCUS, 2, 1, 1)],
+        "wraps"
+    );
+    rt.event(KEY_DOWN, key::TAB, modifier::SHIFT, 0, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 2, 0, 1), (FOCUS, 5, 1, 1)],
+        "Shift+Tab backwards"
+    );
+
+    rt.event(KEY_DOWN, key::ENTER, 0, 0, 0).unwrap();
+    rt.event(KEY_DOWN, key::ESCAPE, 0, 0, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(KEY_DOWN, key::ENTER, 0, 0), (KEY_DOWN, key::ESCAPE, 0, 0)],
+        "Enter and Escape are the module's"
+    );
+
+    // Pointer: press on the textbox (y 25), then on the text node (y 35).
+    rt.event(POINTER_DOWN, 1000, 2500, 1, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 5, 0, 0), (FOCUS, 3, 1, 0), (POINTER_DOWN, 0, 0, 1)],
+        "focus before the press, c = 0 for the pointer"
+    );
+    assert_eq!(rt.focus(), Some(3));
+    rt.event(POINTER_DOWN, 1000, 3500, 1, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 3, 0, 0), (POINTER_DOWN, 0, 0, 1)]
+    );
+    assert_eq!(rt.focus(), None, "nothing focusable under the pointer");
+    rt.event(POINTER_DOWN, 1000, 3500, 1, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(POINTER_DOWN, 0, 0, 1)],
+        "no change, no FOCUS"
+    );
+
+    // A scripted FOCUS (what cases.toml sends) is the host's focus too.
+    rt.event(FOCUS, 5, 1, 1, 0).unwrap();
+    assert_eq!(rt.focus(), Some(5));
+    rt.event(KEY_DOWN, key::TAB, 0, 0, 0).unwrap();
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 5, 1, 1), (FOCUS, 5, 0, 1), (FOCUS, 2, 1, 1)]
+    );
+
+    // Keys the host consumes are never "held" for `key_down`.
+    assert!(!rt.host().keys_down.contains(&key::TAB));
+}
+
+/// SPEC-10.3.1, SPEC-10.3.2: without a single focusable node Tab is consumed
+/// and nothing happens; the module never sees the key.
+#[test]
+fn spec_10_3_2_tab_with_nothing_focusable() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "key")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (drop (call $log (i32.const 0) (i32.const 0) (i32.const 3)))
+                i32.const 1)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+    ));
+    let mut rt = load(&bytes);
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame().unwrap();
+    assert!(!rt.event(event::KEY_DOWN, key::TAB, 0, 0, 0).unwrap());
+    assert!(!rt
+        .event(event::KEY_DOWN, key::TAB, modifier::SHIFT, 0, 0)
+        .unwrap());
+    assert!(module_logs(&rt).is_empty(), "the module saw no event");
+    assert!(!rt.wants_frame());
+    assert!(rt.event(event::KEY_DOWN, key::ENTER, 0, 0, 0).unwrap());
+    assert_eq!(module_logs(&rt), vec!["key"]);
 }
 
 /// A module whose frame draws one `IMAGE` with `resource_id = dt_ms / 10`

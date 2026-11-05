@@ -152,6 +152,18 @@ pub mod modifier {
     pub const META: i32 = 8;
 }
 
+/// USB HID usage codes of the keys the host itself acts on (SPEC-10.3.1):
+/// Tab moves focus and never reaches the module; Enter and Escape are
+/// delivered as `KEY_DOWN` for the module to act on.
+pub mod key {
+    /// Return / Enter.
+    pub const ENTER: i32 = 0x28;
+    /// Escape.
+    pub const ESCAPE: i32 = 0x29;
+    /// Tab (with Shift: backwards).
+    pub const TAB: i32 = 0x2B;
+}
+
 /// Semantic roles for `sem_node` (SPEC-A.3.1).
 pub mod role {
     /// Plain text run.
@@ -204,6 +216,17 @@ pub mod role {
     pub const SEPARATOR: i32 = 24;
     /// Highest valid role.
     pub const MAX: i32 = 24;
+
+    /// Roles the host moves keyboard focus through, in document order
+    /// (SPEC-10.3.2): the interactive widgets.
+    pub const FOCUSABLE: [i32; 8] = [
+        LINK, BUTTON, TEXTBOX, CHECKBOX, RADIO, MENUITEM, TAB, SLIDER,
+    ];
+
+    /// True when a node of this role takes focus (SPEC-10.3.2).
+    pub fn is_focusable(role: i32) -> bool {
+        FOCUSABLE.contains(&role)
+    }
 
     /// Canonical lower-case name of a role, or `None` outside 1..=24 (SPEC-10.1.2).
     pub fn name(role: i32) -> Option<&'static str> {
@@ -756,6 +779,29 @@ mod tests {
             assert_eq!(cap::name(i as i32 + 1), Some(*n));
         }
         assert_eq!(cap::id("file"), None, "1.1 capabilities are not in 1.0");
+    }
+
+    /// SPEC-10.3.1, SPEC-10.3.2: the host acts on Tab itself and leaves Enter
+    /// and Escape to the module; exactly the eight interactive roles take focus.
+    #[test]
+    fn spec_10_3_2_focusable_roles() {
+        assert_eq!((key::TAB, key::ENTER, key::ESCAPE), (0x2B, 0x28, 0x29));
+        for r in 1..=role::MAX {
+            let expect = matches!(
+                r,
+                role::LINK
+                    | role::BUTTON
+                    | role::TEXTBOX
+                    | role::CHECKBOX
+                    | role::RADIO
+                    | role::MENUITEM
+                    | role::TAB
+                    | role::SLIDER
+            );
+            assert_eq!(role::is_focusable(r), expect, "{}", role::name(r).unwrap());
+        }
+        assert!(!role::is_focusable(0) && !role::is_focusable(25));
+        assert_eq!(role::FOCUSABLE.len(), 8);
     }
 
     /// SPEC-A.3.1, SPEC-10.1.2: roles 1..24 are the only roles and each has one name.

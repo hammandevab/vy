@@ -10,8 +10,10 @@
 # SPEC-8.2.1), resources (lista med filer relativt repots rot; resources[i] blir resurs-id
 # i + 1, SPEC-4.5.1) och events (lista med inline-tabeller: pointer_move/down/up med x, y;
 # pointer_leave utan argument; key_down/up med code (USB HID); text_input med text; scroll
-# med dx, dy, lines; focus med node, gained, keyboard – det värden skulle skicka ur sin
-# fokusordning, SPEC-10.3.1).
+# med dx, dy, lines; focus med node, gained, keyboard). Värden äger fokus (SPEC-10.3.1):
+# key_down 43 (Tab, med modifiers = 1 för Skift) når aldrig modulen utan flyttar värdens fokus
+# genom trädets fokuserbara noder och blir FOCUS-händelser; ett pointer_down flyttar fokus till
+# noden under pekaren först; ett scriptat focus sätter värdens fokus direkt.
 
 [[case]]
 name = "hello-800x600@1"
@@ -468,8 +470,10 @@ events = [{kind = "key_down", code = 77}]            # End: sista kortet
 
 # document: rapport med byline, tvåspaltig brödtext som blir enspaltig under 640 px,
 # datatabell (sem.table/row/cell), noter och tangentbordsfokus över länkar
-# (modules/document). Hela trädet registreras varje frame så nod-id är stabila;
-# `focus`-fallet skickar KIND_FOCUS som värdens fokusordning skulle (SPEC-10.3.1).
+# (modules/document). Hela trädet registreras varje frame, även utanför fönstret
+# (SPEC-10.1.1), så nod-id är stabila och värdens Tab-ordning når länkarna nedanför;
+# fokusringen ritas av modulen (SPEC-10.3.3). `focus`-fallet sätter värdens fokus på en
+# nod och går sedan bakåt med Skift+Tab (SPEC-10.3.1).
 
 [[case]]
 name = "document-1280x800@1"

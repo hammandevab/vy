@@ -5,8 +5,10 @@
 //! parents, and refuses locally what the host would: the 65 537th node is
 //! `DlFull` and a text over 4 KB is `Arg` (SPEC-9.3.2). Ids are stable across
 //! frames as long as the draw order is, which is what `KIND_FOCUS` events
-//! rely on (SPEC-10.3.1). An id used twice in one frame is refused by the
-//! host as `Arg` (SPEC-5.2.13) and surfaces here as `Err`.
+//! rely on (SPEC-10.3.1); the host walks the focusable nodes in the order
+//! they were registered (SPEC-10.3.2), so register the whole tree every
+//! frame, on screen or not (SPEC-10.1.1). An id used twice in one frame is
+//! refused by the host as `Arg` (SPEC-5.2.13) and surfaces here as `Err`.
 
 use crate::error::{check, VyError};
 use crate::raw::{self, pl};

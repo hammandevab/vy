@@ -13,12 +13,12 @@
 //!   footnotes (SPEC-10.1.1, SPEC-A.3.1). The whole tree is registered every
 //!   frame, on-screen or not, so node ids are stable and a host can build its
 //!   focus order from it (SPEC-10.3.1); only visible blocks are drawn.
-//! - `KIND_FOCUS` (SPEC-10.3.1): the page draws the focus ring where the
-//!   host says focus is and scrolls a link into view when the change came
-//!   from the keyboard. Tab and Shift+Tab as `KEY_DOWN` do the same locally
-//!   for hosts without a focus order (headless); Enter follows the link,
-//!   which is a `navigate` (SPEC-5.2.10) for external links and a scroll for
-//!   the sections.
+//! - `KIND_FOCUS` (SPEC-10.3.1): the host owns the focus order and turns
+//!   Tab, Shift+Tab and pointer presses into focus events; the page draws
+//!   the focus ring where the host says focus is (SPEC-10.3.3) and scrolls a
+//!   link into view when the change came from the keyboard. Enter follows
+//!   the link, which is a `navigate` (SPEC-5.2.10) for external links and a
+//!   scroll for the sections.
 //! - `link_register` (SPEC-5.2.10) for every link each frame, since scrolling
 //!   moves them; `SCROLL`, Page Up/Down, Home/End in a clipped page
 //!   (SPEC-6.1.4). No capabilities.
@@ -60,7 +60,8 @@ const ARROW_PX: f32 = 48.0;
 /// Space kept around a link scrolled into view.
 const VIEW_PAD: f32 = 24.0;
 
-/// Links in Tab order: author, three sections, the CSV, three sources.
+/// Links in document order (the host's Tab order, SPEC-10.3.2): author,
+/// three sections, the CSV, three sources.
 const LINKS: usize = 1 + SECTIONS.len() + 1 + NOTES.len();
 
 struct LinkInfo {
@@ -324,16 +325,6 @@ impl DocumentPage {
             self.reveal(self.layout.links[i]);
         }
         changed
-    }
-
-    fn move_focus(&mut self, backwards: bool) -> bool {
-        let next = match (self.focus, backwards) {
-            (None, false) => 0,
-            (None, true) => LINKS - 1,
-            (Some(i), false) => (i + 1) % LINKS,
-            (Some(i), true) => (i + LINKS - 1) % LINKS,
-        };
-        self.set_focus(Some(next), true)
     }
 
     /// Enter on the focused link.
@@ -626,12 +617,9 @@ impl App for DocumentPage {
                 let px = if lines { dy * LINE_PX } else { dy };
                 self.scroll_by(px)
             }
-            Event::KeyDown {
-                code, modifiers, ..
-            } => {
+            Event::KeyDown { code, .. } => {
                 let page = (self.window.height - ARROW_PX).max(ARROW_PX);
                 match code {
-                    key::TAB => self.move_focus(modifiers.shift()),
                     key::ENTER => self.activate(),
                     key::ESCAPE => self.set_focus(None, false),
                     key::DOWN => self.scroll_by(ARROW_PX),

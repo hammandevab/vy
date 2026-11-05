@@ -150,12 +150,14 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 
 ## 10. Tillgänglighet och semantik
 
-- **[SPEC-10.1.1]** Modulen bygger ett semantiskt träd via `sem_node` parallellt med display listen, med samma determinism.
+- **[SPEC-10.1.1]** Modulen bygger hela sitt semantiska träd via `sem_node` parallellt med display listen, med samma determinism, även för noder utanför fönstret; värden klipper trädet mot fönstret när det exponeras.
 - **[SPEC-10.1.2]** Roller är den fasta listan i bilaga A; noder utan roll ignoreras av hjälpmedel.
 - **[SPEC-10.2.1]** Värden exponerar trädet till plattformens tillgänglighets-API via AccessKit.
 - **[SPEC-10.2.2]** Textmarkering kopierar den logiska strängen ur textnoder, aldrig pixlar.
 - **[SPEC-10.2.3]** `vy-cli --dump-semantic` skriver trädet som JSON.
-- **[SPEC-10.3.1]** Fokusordning hålls av värden ur trädet; Tab, Skift+Tab, Enter och Escape levereras som `KIND_FOCUS`-event.
+- **[SPEC-10.3.1]** Fokusordningen hålls av värden ur trädet: Tab och Skift+Tab konsumeras av värden, flyttar fokus till nästa respektive föregående fokuserbara nod i dokumentordning (med omlopp) och levereras som `KIND_FOCUS` (ut för den gamla noden, in för den nya, `c = 1`); ett `POINTER_DOWN` flyttar fokus till den fokuserbara noden under pekaren, eller bort från alla, innan pekarhändelsen levereras (`c = 0`); Enter och Escape levereras som `KEY_DOWN`.
+- **[SPEC-10.3.2]** Fokuserbara noder är de med rollerna `link`, `button`, `textbox`, `checkbox`, `radio`, `menuitem`, `tab` och `slider`; finns ingen sådan nod konsumeras Tab utan verkan.
+- **[SPEC-10.3.3]** Fokusmarkeringen ritas av modulen utifrån `KIND_FOCUS`; värden ritar ingen fokusring.
 - **[SPEC-10.4.1]** En sida utan semantiskt träd får publiceras men markeras som *otillgänglig* i adressfältet.
 - **[SPEC-10.4.2]** En sida med inmatningsfält utan `ime`-capability avvisas av konformanssviten.
 

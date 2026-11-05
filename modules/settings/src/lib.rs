@@ -13,9 +13,10 @@
 //! - `POINTER_DOWN`/`POINTER_MOVE`/`POINTER_UP` as a drag gesture on the
 //!   slider (SPEC-A.2.1), and hit-testing of every control from the same
 //!   arithmetic the frame draws with.
-//! - `KEY_DOWN` for Tab/Shift+Tab, Space, arrows, Home/End on the focused
-//!   control, and `KIND_FOCUS` when the host moves focus (SPEC-10.3.1); node
-//!   ids come from the draw order and are recorded per frame.
+//! - `KEY_DOWN` for Space, arrows, Home/End on the focused control, and
+//!   `KIND_FOCUS` when the host moves focus with Tab, Shift+Tab or a pointer
+//!   press (SPEC-10.3.1); the ring is the page's (SPEC-10.3.3); node ids
+//!   come from the draw order and are recorded per frame.
 //! - A semantic tree with `checkbox`, `radio`, `slider`, `button` and
 //!   `region` nodes whose text carries the current value (SPEC-10.1.1).
 //! - Visible state: the dark switch swaps the palette, the compact switch
@@ -120,7 +121,7 @@ enum Storage {
     Unavailable(VyError),
 }
 
-/// Keyboard focus stops in Tab order.
+/// Keyboard focus stops in document order (the host's Tab order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Control {
     Switch(usize),
@@ -462,16 +463,6 @@ impl SettingsPage {
         changed
     }
 
-    fn move_focus(&mut self, backwards: bool) -> bool {
-        let next = match (self.focus.map(Control::index), backwards) {
-            (None, false) => 0,
-            (None, true) => STOPS - 1,
-            (Some(i), false) => (i + 1) % STOPS,
-            (Some(i), true) => (i + STOPS - 1) % STOPS,
-        };
-        self.focus_by_keyboard(Control::nth(next))
-    }
-
     /// Space or Enter on the focused control.
     fn activate(&mut self) -> bool {
         match self.focus {
@@ -716,13 +707,15 @@ impl App for SettingsPage {
                                     self.draw_radio(f, Control::Size(i), *r, SIZES[i], selected)?;
                                 }
                                 let s = self.styles();
-                                let ph = f.text(
-                                    l.preview.x,
-                                    l.preview.y,
-                                    l.preview.w,
-                                    s.preview[self.values.size as usize],
-                                    PREVIEW,
-                                )?.h;
+                                let ph = f
+                                    .text(
+                                        l.preview.x,
+                                        l.preview.y,
+                                        l.preview.w,
+                                        s.preview[self.values.size as usize],
+                                        PREVIEW,
+                                    )?
+                                    .h;
                                 f.sem.text(
                                     Rect::new(l.preview.x, l.preview.y, l.preview.w, ph),
                                     PREVIEW,
@@ -821,10 +814,7 @@ impl App for SettingsPage {
                 self.save();
                 true
             }
-            Event::KeyDown {
-                code, modifiers, ..
-            } => match code {
-                key::TAB => self.move_focus(modifiers.shift()),
+            Event::KeyDown { code, .. } => match code {
                 key::SPACE | key::ENTER => self.activate(),
                 key::ESCAPE => self.set_focus(None),
                 key::RIGHT | key::UP if self.focus == Some(Control::Volume) => {

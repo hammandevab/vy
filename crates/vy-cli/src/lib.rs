@@ -568,6 +568,60 @@ mod tests {
         assert_eq!(render(&req).unwrap().frames_run, 1);
     }
 
+    /// SPEC-10.3.1, SPEC-10.3.3, SPEC-10.1.1: three Tabs reach the document
+    /// page as `FOCUS` events through the host's own order over the whole
+    /// tree, never as `KEY_DOWN` 43, and the focus ring the golden shows is
+    /// drawn by the module: it is a `RECT` in the display list, and the
+    /// pixels are nothing but that list rasterized.
+    #[test]
+    fn spec_10_3_3_focus_ring_comes_from_the_module() {
+        let wasm = fs::read(root().join("target/wasm/document.wasm")).unwrap();
+        let tab = ScriptedEvent::KeyDown {
+            code: vy_abi::key::TAB,
+            modifiers: 0,
+            repeat: false,
+        };
+        let events = [tab.clone(), tab.clone(), tab];
+        let mut req = RenderRequest::new(&wasm, 1280, 800);
+        req.events = &events;
+        req.frames = 4;
+        let out = render(&req).unwrap();
+        assert_eq!(
+            out.frames_run, 4,
+            "each Tab moved focus and asked for a frame"
+        );
+        // The third link (Metod) carries the ring: the page's RING colour.
+        const RING: u32 = 0x2F5B_D6FF;
+        let ops = vy_dl::decode(&out.display_list).unwrap();
+        let rings: Vec<_> = ops
+            .iter()
+            .filter(|op| matches!(op, vy_dl::Op::Rect { color, .. } if *color == RING))
+            .collect();
+        assert_eq!(
+            rings.len(),
+            1,
+            "exactly one focus ring, drawn by the module"
+        );
+        let link = out
+            .semantic
+            .iter()
+            .filter(|n| n.role == vy_abi::role::LINK)
+            .nth(2)
+            .expect("third link");
+        let vy_dl::Op::Rect { x, y, .. } = rings[0] else {
+            unreachable!()
+        };
+        assert!((x - (link.x - 4.0)).abs() < 0.01 && (y - (link.y - 4.0)).abs() < 0.01);
+        // No host overlay: the pixels are the display list and nothing else.
+        let (pw, ph) = physical(1280, 800, 1.0);
+        let golden = RgbaImage::decode_png(
+            &fs::read(root().join("conformance/golden/document-1280x800@1-tab3.png")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!((pw, ph), (golden.width, golden.height));
+        assert_eq!(out.image, golden, "the golden is the module's own drawing");
+    }
+
     /// SPEC-13.1.4: compiling a 300 KB module takes at most 60 ms, P95 over
     /// 100 runs on the reference machine (SPEC §13), and 0 ms on a
     /// compilation-cache hit. A release-mode measurement for `vy-cli bench`

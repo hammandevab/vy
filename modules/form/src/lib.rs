@@ -1,8 +1,9 @@
 //! Vy reference module 2 (`form`): two text fields with focus and IME, a
 //! checkbox and a submit button.
 //!
-//! Focus is moved by pointer and by Tab/Shift+Tab, or by the host through
-//! `KIND_FOCUS` (SPEC-10.3.1); a focused text field opens composition with
+//! Focus is the host's (SPEC-10.3.1): Tab, Shift+Tab and pointer presses
+//! arrive as `KIND_FOCUS` on the fixed node ids below, and the page draws
+//! the focus ring itself (SPEC-10.3.3); a focused text field opens composition with
 //! `ime_begin` over its rectangle (SPEC-5.2.6) and closes it with `ime_end`
 //! when focus leaves. Committed text arrives as `TEXT_INPUT` (SPEC-5.1.6).
 //! Interactive nodes keep fixed semantic ids so focus events can name them.
@@ -185,20 +186,6 @@ impl FormPage {
             let _ = ime_begin(if f == Focus::Name { l.name } else { l.email });
         }
         true
-    }
-
-    fn move_focus(&mut self, backwards: bool) -> bool {
-        let n = Focus::ORDER.len();
-        let i = self
-            .focus
-            .and_then(|f| Focus::ORDER.iter().position(|o| *o == f));
-        let next = match (i, backwards) {
-            (None, false) => 0,
-            (None, true) => n - 1,
-            (Some(i), false) => (i + 1) % n,
-            (Some(i), true) => (i + n - 1) % n,
-        };
-        self.set_focus(Some(Focus::ORDER[next]))
     }
 
     fn submit(&mut self) -> bool {
@@ -391,10 +378,7 @@ impl App for FormPage {
                 }
                 _ => false,
             },
-            Event::KeyDown {
-                code, modifiers, ..
-            } => match code {
-                key::TAB => self.move_focus(modifiers.shift()),
+            Event::KeyDown { code, .. } => match code {
                 key::ESCAPE => self.set_focus(None),
                 key::ENTER => self.submit(),
                 key::BACKSPACE => match self.focus.and_then(|f| self.value_mut(f)) {

@@ -105,7 +105,9 @@ pub enum Event<'a> {
     },
     /// The pointer left the page; hover state should be cleared.
     PointerLeave,
-    /// Keyboard focus moved to or from a semantic node (SPEC-10.3.1).
+    /// Keyboard focus moved to or from a semantic node: the host moved it
+    /// with Tab, Shift+Tab or a pointer press (SPEC-10.3.1); the page draws
+    /// the ring (SPEC-10.3.3).
     Focus {
         /// The node.
         node: NodeId,
@@ -241,16 +243,17 @@ impl<'a> Event<'a> {
 }
 
 /// USB HID usage codes of keys pages commonly handle (SPEC-A.2.1: `KEY_DOWN`
-/// carries USB HID keycodes).
+/// carries USB HID keycodes). Tab never reaches a page: the host turns it
+/// into `FOCUS` events (SPEC-10.3.1).
 pub mod key {
     /// Return / Enter.
-    pub const ENTER: i32 = 0x28;
+    pub const ENTER: i32 = vy_abi::key::ENTER;
     /// Escape.
-    pub const ESCAPE: i32 = 0x29;
+    pub const ESCAPE: i32 = vy_abi::key::ESCAPE;
     /// Backspace.
     pub const BACKSPACE: i32 = 0x2A;
-    /// Tab.
-    pub const TAB: i32 = 0x2B;
+    /// Tab; consumed by the host, listed so a page can name it.
+    pub const TAB: i32 = vy_abi::key::TAB;
     /// Space.
     pub const SPACE: i32 = 0x2C;
     /// Delete forward.
