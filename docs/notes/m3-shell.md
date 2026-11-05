@@ -62,6 +62,22 @@ vy-shell (huvudprocess)                          vy-shell --tab (en process per 
   stannade (trap, exit, budget, död process). Allt är en display list genom `vy-render` med
   DejaVu; inget toolkit. Sidans bild rasteriseras för sig och blittas i sidytan och ingenstans
   annars: en modul som målar −10 000…10 000 färgar bara sidytan (`spec_9_6_1`).
+- **Capability-frågan (granskning 0004, fynd 4).** Frågan är en egen display list
+  (`chrome::draw_dialog`) som komponeras över sidytans överkant *efter* sidan: sidytan och
+  chromens höjd är desamma med och utan fråga, så en sida kan inte flytta det som ligger under
+  pekaren genom att få skalet att fråga (omladdning på pekarrörelse). Pekaren över frågan är
+  skalets (`page_point` ger inget till sidan). Ett klick på "Tillåt" räknas först när frågan
+  varit uppe i 700 ms (`DIALOG_ARM_MS`, per flik och per fråga: nästa fråga i kön och en flik man
+  växlar till armas på nytt); "Neka" räknas alltid. Skalfallet `shell-chat-800x600@1-ask` visar
+  frågan över chat-sidan.
+- **Extern öppning (granskning 0004, fynd 3).** En sidas `navigate("https://…")` och en
+  registrerad https-länk öppnar systemets webbläsare bara på en användargest i *den* fliken –
+  ett pekarsläpp eller en tangentnedtryckning levererad till sidan – inom 1 000 ms
+  (`GESTURE_WINDOW_MS`, samma sekund som SPEC-5.2.12 ger `clipboard_read`), och gesten
+  förbrukas: en öppning per gest. Pekarrörelser och rullning är inga gester; en dold flik får
+  inga händelser och har ingen gest. Annars släpps begäran och loggas på info-nivå med adressen
+  (`[host info] not opened: …` i flikens logg). Adressfältet och felvyns knapp är användarens
+  egna och kräver ingen gest.
 - **Zoom (Ctrl+Plus/Minus/0)** ändrar `scale` som modulen ser (`vy_resize` med ny logisk storlek
   och skala × zoom); chromen ritas i fönstrets skala.
 - **Policy.** Förtroende avgörs i `vy-proto` (`Fetched::grants()`); lokala `.wasm`/`.vyp` körs i
@@ -85,10 +101,11 @@ Wayland/X11-protokoll), färre på Windows och macOS. Alla låsta i `Cargo.lock`
 | `getrandom` 0.2 (fanns via vy-publish och ring) | 32 byte OS-entropi per sidinstans till slumpnyckeln. | OS-anrop per plattform. | 0 extra |
 
 Skrivet själv i stället för beroende: datakatalogen ur tre miljövariabler (`paths.rs`, ingen
-`dirs`), extern öppning med `cmd /C start "" <url>` / `open` / `xdg-open` för enbart
-`https://` i utskrivbar ASCII (`external.rs`, ingen `open`), ChaCha20-strömmen (40 rader ARX i
-`vy-runtime`, verifierad mot RFC 8439-vektorn via OpenSSL), Markdown-delmängden för reserven,
-tangentkartan winit → USB HID.
+`dirs`), extern öppning med `ShellExecuteW` (windows-sys, samma crate softbuffer drar) / `open` /
+`xdg-open` för enbart `https://` i utskrivbar ASCII som ett enda argument utan kommandotolk
+emellan (`external.rs`, ingen `open`; granskning 0004 fynd 1 tog bort `cmd /C start`),
+ChaCha20-strömmen (40 rader ARX i `vy-runtime`, verifierad mot RFC 8439-vektorn via OpenSSL),
+Markdown-delmängden för reserven, tangentkartan winit → USB HID.
 
 ## Rör nu, delat minne sedan (SPEC-11.2.1)
 
@@ -117,6 +134,9 @@ rasteriseras på ~1 ms i release – se bench). Bilder går en gång per resurs.
 | nya | vy-proto | `Fetcher::request` mot testservern (GET/POST/status/limit/TLS-regel/ingen Referer) |
 | nya | vy-shell | ipc rundtur och felramar, flikloopens svar, adressfält, historik, grants, lagring, Markdown, chrome-layout, blit, tangentkarta; `tests/bin.rs` kör binären |
 | nya | vy-cli | `tests/bin.rs` (`abi-dump`, `--tab`); fyra `shell = true`-fall i sviten |
+| spec_2_1_7_page_opens_externally_once_per_gesture | vy-shell | efter granskning 0004: 1 000 `navigate(https://)` efter ett klick ger en öppning; utan gest, efter en sekund och från dold flik ingen |
+| spec_8_2_3_capability_question_overlays_and_arms_late | vy-shell | efter granskning 0004: frågan över sidytan utan att flytta den; "Tillåt" ignoreras i 700 ms, "Neka" tas direkt; ny fråga och flikbyte armar om |
+| skalfall `shell-chat-800x600@1-ask` | vy-cli | efter granskning 0004: `address` i ett skalfall – signerad, betrodd sida; frågan om `net` i guldbilden |
 
 Kvar ignorerade: spec_13_1_1 (kräver fönster; flikprocessens kallstart mäts i bench), M4-testerna
 (AccessKit, textmarkering, fokusordnings-UI, otillgänglig-markören – markören ritas redan),
@@ -131,6 +151,11 @@ Backloggen: 29 → 19 (`cargo test --workspace -- --ignored --list`).
 konformansfall à 0,000 % (50 som förr, oförändrade, plus fyra skalfall), 26 träd lika.
 `abi-dump` = `docs/ABI-1.0.md`. Modulerna 11/11 bygger, `test_modules` 11/11, `check-abi` 11/11.
 `cargo build --release -p vy-shell` går på Linux (26,2 MB); Windows och macOS verifieras av CI.
+
+Efter granskning 0004 (fynd 1–6 och uppföljningen av 3 och 4): 252 gröna / 19 ignorerade,
+55 konformansfall à 0,000 % (nytt skalfall `shell-chat-800x600@1-ask`), och release-profilen
+har `strip = true`: `vy-shell` är 21,8 MB på Linux (var 26,2 MB ostrippad), under
+SPEC-12.3.1:s 25 MB, så zippen från `release.yml` håller grinden utan egen strippning.
 
 ## Vad som kräver ett riktigt fönster – manuell kontroll på Windows
 
@@ -161,6 +186,56 @@ har öppnat fönstret. Steg, i ordning:
 8. Stäng fönstret: alla `--tab`-processer försvinner (Shutdown, annars kill efter 500 ms).
 
 På Linux (X11/Wayland) och macOS: samma steg; på GNOME/Wayland saknas titelrad (ingen CSD).
+
+## Testomgång 1 – manuella steg på Windows
+
+För en testare utan utvecklingsmiljö. Du behöver `vy-shell.exe` ur release-zippen
+(`vy-<version>-x86_64-pc-windows-msvc.zip` från GitHub Releases) och en vanlig webbläsare. Räkna
+med 20 minuter. **Besök bara adresserna nedan** (projektets egen sajt): flikprocessen har ännu
+ingen OS-sandbox (granskning 0004, fynd 8).
+
+1. **Starta.** Packa upp zippen och dubbelklicka `vy-shell.exe`. Om Windows SmartScreen varnar:
+   "Mer info" → "Kör ändå". Väntat: ett fönster "Vy" med en tom flik och markerat adressfält,
+   ingen svart konsolruta.
+2. **Första sidan.** Skriv `vy://vy-production-d83b.up.railway.app/hello` och tryck Enter. Väntat:
+   inom någon sekund en sida med text och en rektangel, fliken heter "Hej från Vy", och
+   adressfältet visar *ingen* röd markering "begränsat läge".
+3. **Alla elva sidor.** Ctrl+L markerar adressen; byt ut `hello` mot ett namn i taget och tryck
+   Enter: `chat`, `dashboard`, `document`, `form`, `gallery`, `game`, `list`, `settings`, `shop`,
+   `text`. Varje sida ska ritas och ge fliken ett namn (Teamkanalen, Översikt, Lägesrapport,
+   Anmälan, Galleri, Studs, Fakturor, Inställningar, Vy-butiken, Om sidor som ritar sig själva).
+   Särskilt:
+   - `chat`: en gul fråga "Sidan vill använda nätverket (net)." med knapparna Tillåt och Neka
+     ligger över sidans överkant. Vänta en sekund och klicka **Tillåt** (ett klick inom 0,7 s
+     ignoreras med flit). Väntat: frågan försvinner, pluppen `net` i adressfältet blir grön.
+     Skriv något i fältet längst ner och klicka Skicka: sidan visar "offline" (chat.example finns
+     inte) – det är väntat.
+   - `form`: klicka i ett fält, skriv svenska tecken (å ä ö), Tab till nästa fält, Backspace.
+   - `game`: mellanslag startar, pilarna styr, Escape pausar.
+   - `settings`: slå om ett val (t.ex. Mörkt tema), tryck Ctrl+T och skriv adressen till
+     `settings` igen i den nya fliken: valet ska vara kvar ("Sparade inställningar laddade.").
+     Ctrl+W stänger den nya fliken. (Sparas när fliken döljs eller fönstret stängs, se
+     "Stubbat och ogjort"; F5 i samma flik räcker inte ännu.)
+   - `shop`: rulla med hjulet, klicka ett kort: adressen byts till `vy://shop.example/produkt/…`
+     och en felsida "Sidan kunde inte hämtas" visas (shop.example finns inte) – väntat.
+     Alt+Vänsterpil går tillbaka.
+   - `text` och `document`: rulla med hjul, Page Down och End.
+4. **En https-länk.** På `document`: tryck End, för pekaren över länken "Byggnoteringar på GitHub"
+   (handpekare, adressen syns i en mörk ruta nere till vänster) och klicka. Väntat: din vanliga
+   webbläsare öppnar GitHub-sidan, Vy ligger kvar på sin sida, ingen konsolruta blinkar till.
+   Klicka länken en gång till: ännu en flik i webbläsaren (ett klick, en öppning).
+5. **Flikar.** Ctrl+T: ny tom flik med adressfältet markerat – skriv en sida och Enter. Ctrl+Tab
+   byter flik, Ctrl+W stänger fliken. Ctrl+W på sista fliken stänger fönstret.
+6. **Omstart och minne.** Stäng fönstret; i Aktivitetshanteraren ska inga `vy-shell.exe` finnas
+   kvar efter några sekunder. Starta om och gå till `chat` igen. Väntat: frågan ställs *inte*
+   igen – pluppen `net` visar ditt svar från steg 3. (Svaren ligger i `%APPDATA%\vy\grants.txt`;
+   radera filen för att bli frågad på nytt.)
+7. **Rapportera.** Skriv ett GitHub-ärende i `hammandevab/vy` med titeln
+   "Testomgång 1: steg N – <vad hände>" (eller mejla ägaren) med: vad du gjorde, vad du väntade
+   dig, vad som hände, en skärmdump (Win+Skift+S), Windows-version, skärmens skalning
+   (Inställningar → System → Bildskärm → Skala) och antal skärmar. Vid krasch: bifoga
+   `%APPDATA%\vy\grants.txt`. Allt som gick som väntat behöver bara en rad: "steg 1–7 som
+   väntat".
 
 ## Bench (release, byggmaskinen, 10 iterationer)
 
@@ -213,8 +288,9 @@ Läsning:
   ändrats (cache i `compose`). P95 på budgetgränsen på den här maskinen.
 - **Minne (SPEC-13.3.1):** skalet + 11 flikprocesser = 225 MB RSS i release på Linux
   (19–20 MB per flik), under 400 MB.
-- Binären `vy-shell` är 26,2 MB på Linux (release, thin LTO, ostrippad; strippad 21,8 MB).
-  SPEC-12.3.1 (≤ 25 MB) är M5-grinden; `strip = true` i release-profilen räcker.
+- Binären `vy-shell` var 26,2 MB på Linux (release, thin LTO, ostrippad; strippad 21,8 MB).
+  SPEC-12.3.1 (≤ 25 MB) är M5-grinden; sedan granskning 0004 har release-profilen `strip = true`
+  och binären är 21,8 MB (se "Grindar och tal").
 
 ## Stubbat och ogjort
 
@@ -228,7 +304,12 @@ Läsning:
 - **Wayland CSD** avstått (ovan). **DNS TXT** (SPEC-7.4.2) som förr.
 - **`links` i manifestet** verkställs inte (spec-fråga 48).
 - **Lagring sparas** vid suspend/dold/avslut, inte vid varje `state_put`; en krasch i
-  huvudprocessen mellan två suspend förlorar ändringar sedan senaste.
+  huvudprocessen mellan två suspend förlorar ändringar sedan senaste. **Observerat vid
+  checklistan (ej åtgärdat här):** vid navigering eller F5 i samma flik bär den gamla
+  processens `Storage`-svar en generation som inte längre gäller, och vid Ctrl+W på en synlig
+  flik finns fliken inte kvar – båda släpps i `Shell::handle`, så ändringar sedan senaste
+  dolda läge går förlorade. Flikbyte (dold flik) och fönsterstängning sparar. Att göra: ta
+  emot `Storage` oavsett generation och flik och spara per origin.
 - **`spec_13_3_1` i debug** rapporterar bara RSS (45 MB per flikprocess i debug på Linux);
   gränsen 400 MB hävdas i release, där skalet + 11 flikprocesser (spelet och tio textsidor)
   är 225 MB på Linux (19–20 MB per flik).

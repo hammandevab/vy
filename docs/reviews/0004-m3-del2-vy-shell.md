@@ -107,3 +107,24 @@ CI-körning på macOS och Windows där klienten byggs. Fynd 1, 2, 5 och 6 är re
 och ser att webbläsaren öppnas utan konsolfönster; (iii) fynd 3 och 4 stängs (annars kan en sida spamma
 webbläsaren och lura fram ett "Tillåt"); (iv) `strip = true` så att zippen håller 25 MB; (v) säg till
 testaren att bara besöka den egna vy-serve-sajten: flikprocessen har ingen OS-sandbox (fynd 8).
+
+## Uppföljning
+
+Byggagent, efter granskningen. Rekommendationens villkor fynd 3 och 4 samt testomgångens (iii) och
+(iv) är åtgärdade på `main`; varje fix har ett test som faller utan den. Guldbilder: de fyra
+skalfallen oförändrade (0,000 %), ett nytt skalfall med frågan. Grindar efter fixarna: modulbygge
+11/11, `test_modules` 11/11, fmt, clippy, `cargo test --workspace` 252 gröna / 19 ignorerade,
+spec_trace 132/132, konformans 55/55 à 0,000 %, `abi-dump` = `docs/ABI-1.0.md`, release-bygge av
+`vy-shell` på Linux 21,8 MB strippad (var 26,2 MB).
+
+| Fynd | Status | Commit |
+| --- | --- | --- |
+| 3. Extern öppning utan gest och utan tak | **Stängt.** En sidas `navigate("https://…")` och en registrerad https-länk öppnar webbläsaren bara på en användargest i den fliken (pekarsläpp eller tangentnedtryckning levererad till sidan) inom 1 000 ms av skalets klocka, och gesten förbrukas: en öppning per gest; annars släpps begäran och loggas på info-nivå med adressen. Dold flik får inga händelser, alltså ingen gest. Adressfältet kräver ingen gest. Test `spec_2_1_7_page_opens_externally_once_per_gesture`: 1 000 anrop efter ett klick → en öppning; utan gest, efter en sekund, från dold flik → ingen. | `bfdbf7b` |
+| 4. Klickkapning av capability-frågan | **Stängt.** Frågan är en egen display list som komponeras över sidytans överkant efter sidan: sidytan och chromens höjd är desamma med och utan fråga, pekaren över frågan är skalets. "Tillåt" räknas först när frågan varit uppe i 700 ms, per flik och per fråga (nästa fråga i kön och flikbyte armar om); "Neka" räknas alltid. Test `spec_8_2_3_capability_question_overlays_and_arms_late`; chromens layouttest. Sviten: skalfall kan ha `address` (signerad, betrodd sida) och `shell-chat-800x600@1-ask` visar frågan över chat-sidan. | `efa7975`, `5c3adca`, `4d929b4` |
+| Testomgång (iv): `strip = true` | **Stängt.** Release-profilen strippar; `vy-shell` 21,8 MB på Linux, under SPEC-12.3.1:s 25 MB. | `471cf62` |
+| Testomgång (v) och checklista | **Stängt.** `docs/notes/m3-shell.md`, "Testomgång 1 – manuella steg på Windows": sju steg för en icke-utvecklare, med varningen att bara besöka den egna sajten och vad som ska rapporteras hur. | (detta commit) |
+| 1, 2, 5, 6 | Stängda före granskningen (se ovan). | – |
+| 7–11 | Öppna. Vid checklistan observerat: en fliks `Storage`-svar vid navigering/F5 (gammal generation) och vid Ctrl+W (fliken borta) släpps i `Shell::handle`; lagring sparas säkert bara vid dold flik och fönsterstängning (noterat i notes/m3-shell, "Stubbat och ogjort"). | – |
+
+Kvar för testomgång 1: (i) en grön CI-körning på Windows som bygger klienten och (ii) en utvecklares
+klick på en https-länk på Windows.
