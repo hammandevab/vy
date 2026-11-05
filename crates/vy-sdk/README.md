@@ -21,8 +21,10 @@ egen kontroll.
   Automatiska id är positiva; ett id sidan väljer med `node_with_id` är negativt (SPEC-5.2.13).
   Registrera hela trädet varje frame: värden äger fokus och går Tab-ordningen ur trädets
   fokuserbara noder (SPEC-10.3.1); sidan får `Event::Focus` och ritar ringen själv.
-- `Column`/`Row` är en liten immediate-mode-layout: padding, gap, nästa rektangel, text som mäter
-  sig själv via värden. Ingen flexbox; layouten bor i modulen (SPEC-2.1.3).
+- Ingen layoutmotor: layouten bor i modulen (SPEC-2.1.3). Mönstret referenssidorna använder är en
+  `layout()`-funktion som räknar ut rektanglarna ur fönstret, så att `event` träfftestar och `frame`
+  ritar samma rektanglar – se nedan. `vy_sdk::math` har `floor`, `round`, `ceil` och `snap(v, scale)`
+  (närmaste fysiska pixelgräns) för 1 px-linjer; `core` saknar dem och SDK:t drar inte in `libm`.
 - `Event` avkodar `vy_event` enligt bilaga A (med `PointerLeave`); `event::key` har de vanligaste
   USB HID-koderna. Tab når aldrig en sida – värden gör `FOCUS` av den; Enter och Escape kommer
   som `KeyDown`. `dt_ms` i `App::frame` är tiden sedan föregående frame och 0 efter start och
@@ -34,34 +36,54 @@ egen kontroll.
 #![no_std]
 use vy_sdk::prelude::*;
 
+/// Rektanglarna räknas ut på ett ställe, ur fönstret: `event` träfftestar
+/// mot samma rektanglar som `frame` ritar (layout()-mönstret).
+struct Layout { card: Rect, button: Rect }
+
 struct Page { window: Window, title: StyleId, body: StyleId, clicks: u32 }
 
+impl Page {
+    fn layout(&self) -> Layout {
+        let card = Rect::new(24.0, 24.0, (self.window.width - 48.0).max(0.0), 160.0);
+        let button = Rect::new(card.x + 24.0, card.bottom() - 60.0, 120.0, 36.0);
+        Layout { card, button }
+    }
+}
+
 impl App for Page {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let title = text_style(Font::Sans, 28.0, 600, Color::rgb(0x1A, 0x1A, 0x2E)).unwrap_or(StyleId(0));
-        let body = text_style(Font::Sans, 16.0, 400, Color::rgb(0x5F, 0x5E, 0x5A)).unwrap_or(StyleId(0));
-        Self { window, title, body, clicks: 0 }
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        // Ett fel här blir vy_init:s returvärde (SPEC-5.1.1); värden avvisar sidan.
+        let title = text_style(Font::Sans, 28.0, 600, Color::rgb(0x1A, 0x1A, 0x2E))?;
+        let body = text_style(Font::Sans, 16.0, 400, Color::rgb(0x5F, 0x5E, 0x5A))?;
+        Ok(Self { window, title, body, clicks: 0 })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
+        let l = self.layout();
         let area = Rect::new(0.0, 0.0, self.window.width, self.window.height);
         f.rect(area, 0.0, Color::rgb(0xF5, 0xF5, 0xF0))?;
-        let mut col = Column::new(area).padding(24.0).gap(12.0);
-        f.group(Role::Main, area, "", |f| {
-            let r = col.text(f, self.title, "Hej från Vy")?;
-            f.sem.node(Role::Heading, r, "Hej från Vy")?;
-            let r = col.text(f, self.body, "Klicka var som helst.")?;
-            f.sem.node(Role::Text, r, "Klicka var som helst.")?;
-            let button = col.next(36.0);
-            f.rect(button, 6.0, Color::rgb(0x1A, 0x1A, 0x2E))?;
-            f.sem.node_with_id(-1, Role::Button, button, "Räkna")
+        f.rect(l.card, 12.0, Color::rgb(0xFF, 0xFF, 0xFF))?;
+        f.group(Role::Main, l.card, "", |f| {
+            let x = l.card.x + 24.0;
+            let w = l.card.w - 48.0;
+            // dl_text returnerar storleken, så nästa element följer efter (SPEC-5.2.4).
+            let h = f.text(x, l.card.y + 24.0, w, self.title, "Hej från Vy")?.h;
+            f.sem.node(Role::Heading, Rect::new(x, l.card.y + 24.0, w, h), "Hej från Vy")?;
+            let y = l.card.y + 24.0 + h + 8.0;
+            let h = f.text(x, y, w, self.body, "Klicka på knappen.")?.h;
+            f.sem.node(Role::Text, Rect::new(x, y, w, h), "Klicka på knappen.")?;
+            f.rect(l.button, 6.0, Color::rgb(0x1A, 0x1A, 0x2E))?;
+            // En 1 px-linje på en fysisk pixelgräns, även vid skala 1,5.
+            let rule_y = vy_sdk::math::snap(l.button.y - 12.0, self.window.scale);
+            f.rect(Rect::new(x, rule_y, w, vy_sdk::math::snap(1.0, self.window.scale)), 0.0, Color::rgb(0xC9, 0xC2, 0xB4))?;
+            f.sem.node_with_id(-1, Role::Button, l.button, "Räkna")
         })?;
         Ok(())
     }
 
     fn event(&mut self, event: Event<'_>) -> bool {
         match event {
-            Event::PointerDown { .. } => { self.clicks += 1; true }
+            Event::PointerDown { x, y, .. } if self.layout().button.contains(x, y) => { self.clicks += 1; true }
             Event::Focus { node, gained, .. } => node == NodeId(-1) && gained, // rita ringen
             _ => false,
         }

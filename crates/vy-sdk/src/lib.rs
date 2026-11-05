@@ -27,7 +27,6 @@ pub mod arena;
 pub mod error;
 pub mod event;
 pub mod frame;
-pub mod layout;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
 mod raw;
@@ -45,7 +44,6 @@ pub use app::{App, Window};
 pub use error::VyError;
 pub use event::{Capability, Event, Modifiers};
 pub use frame::{Fit, Frame, Path};
-pub use layout::{Column, Row};
 pub use sem::{NodeId, Role, Sem};
 
 /// Fixed-point helper: the ABI carries lengths as integers × 100.
@@ -189,7 +187,6 @@ pub mod prelude {
     pub use crate::error::VyError;
     pub use crate::event::{Capability, Event, Modifiers};
     pub use crate::frame::{Fit, Frame, Path};
-    pub use crate::layout::{Column, Row};
     pub use crate::sem::{NodeId, Role, Sem};
     pub use crate::{Color, Font, Rect, ResourceId, Size, StyleId};
 }

@@ -563,11 +563,11 @@ fn spec_5_1_6_arena() {
 
 /// SPEC-5.2.4, SPEC-5.2.5, SPEC-6.4.3: `Frame::text` returns the host's
 /// width and height in logical pixels, unpacked from the same `i64` layout
-/// as `text_measure`, which agrees; `max_w <= 0` wraps nothing;
-/// `Column::text` advances by that height and `Column`/`Row` do the
-/// arithmetic of padding and gap (SPEC-2.1.3: layout lives in the module).
+/// as `text_measure`, which agrees; `max_w <= 0` wraps nothing; a refused
+/// text is not counted; the page places the next element from the size it
+/// got back (SPEC-2.1.3: layout lives in the module).
 #[test]
-fn spec_5_2_4_text_size_and_layout() {
+fn spec_5_2_4_text_size() {
     mock::reset();
     let s = style();
     let m = text_measure(s, 100.0, "ett två tre fyra").unwrap();
@@ -584,29 +584,13 @@ fn spec_5_2_4_text_size_and_layout() {
     );
     assert_eq!(f.text(0.0, 0.0, 0.0, StyleId(42), "x"), Err(VyError::Style));
     assert_eq!(f.ops(), 3, "a refused text is not counted");
-
-    let mut col = Column::new(Rect::new(10.0, 20.0, 120.0, 400.0))
-        .padding(10.0)
-        .gap(4.0);
-    assert_eq!((col.x(), col.width(), col.cursor()), (20.0, 100.0, 30.0));
-    let r = col.text(&mut f, s, "ett två tre fyra").unwrap();
-    assert_eq!(r, Rect::new(20.0, 30.0, 100.0, 40.0));
-    assert_eq!(col.cursor(), 74.0, "height plus gap");
-    let r2 = col.next(10.0);
-    assert_eq!(r2, Rect::new(20.0, 74.0, 100.0, 10.0));
-    assert_eq!(col.height(), 10.0 + 40.0 + 4.0 + 10.0 + 10.0);
-    assert_eq!(col.remaining(), 400.0 - 10.0 - (84.0 + 4.0 - 20.0));
-    col.space(6.0);
-    let mut row = col.row(20.0);
-    assert_eq!(row.area(), Rect::new(20.0, 94.0, 100.0, 20.0));
-    assert_eq!(row.next(30.0), Rect::new(20.0, 94.0, 30.0, 20.0));
-    assert_eq!(row.remaining(), 100.0 - 30.0 - 4.0);
-    assert_eq!(row.fill(), Rect::new(54.0, 94.0, 66.0, 20.0));
-    assert_eq!(row.remaining(), 0.0);
-    assert_eq!(f.end(), Ok(4), "three bare texts and the column's text");
+    // The next element follows from the returned height.
+    let below = f.text(20.0, 30.0 + m.h, 100.0, s, "fem").unwrap();
+    assert_eq!(below.h, 20.0);
+    assert_eq!(f.end(), Ok(4));
     mock::with(|h| {
         assert!(
-            matches!(&h.frame_ops()[3], Op::Text { x, y, max_w, .. } if (*x, *y, *max_w) == (20.0, 30.0, 100.0))
+            matches!(&h.frame_ops()[3], Op::Text { x, y, max_w, .. } if (*x, *y, *max_w) == (20.0, 70.0, 100.0))
         );
     });
     assert_eq!(api::text_caret(s, "ab\ncd", 4).unwrap(), (9.6, 20.0));
