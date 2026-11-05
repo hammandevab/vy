@@ -78,9 +78,9 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-5.2.4]** `dl_text` returnerar layoutens bredd × 100 i de höga 32 bitarna och höjd × 100 i de låga, i logiska pixlar och packat som `text_measure`; ett fel är en negativ `i64`.
 - **[SPEC-5.2.5]** Text: `text_style(font_resource_id: i32, size_px: f32, weight: i32, color: i32) -> i32`, `text_measure(style_id: i32, max_w: f32, ptr: i32, len: i32) -> i64` (bredd × 100 i de höga 32 bitarna, höjd × 100 i de låga), `text_caret(style_id: i32, ptr: i32, len: i32, byte_offset: i32) -> i64` (x × 100 i de höga, y × 100 i de låga); varje halva i ett packat `i64` är högst 2³¹ − 1, så värdet är aldrig negativt, och ett fel returneras som statuskoden teckenutvidgad till `i64`, alltså negativt.
 - **[SPEC-5.2.6]** Input: `key_down(code: i32) -> i32` är 1 från `KEY_DOWN` till `KEY_UP` för koden och nollställs av värden vid `VISIBILITY` dold och vid fokusförlust; `ime_begin(x: f32, y: f32, w: f32, h: f32) -> i32` och `ime_end() -> i32` (kräver capability `ime`); `pointer_get` har utgått: pekarens läge, knappar och modifierare levereras enbart via events.
-- **[SPEC-5.2.7]** Nätverk (capability `net`): `fetch_begin(method: i32, url_ptr: i32, url_len: i32, body_ptr: i32, body_len: i32) -> i32`, `fetch_poll(req_id: i32) -> i32`, `fetch_read(req_id: i32, dst_ptr: i32, max: i32) -> i32`, `fetch_cancel(req_id: i32) -> i32`.
+- **[SPEC-5.2.7]** Nätverk (capability `net`): `fetch_begin(method: i32, url_ptr: i32, url_len: i32, body_ptr: i32, body_len: i32) -> i32` returnerar ett `req_id` eller `E_RATE` när 64 anrop redan är öppna, `fetch_poll(req_id: i32) -> i32`, `fetch_read(req_id: i32, dst_ptr: i32, max: i32) -> i32`, `fetch_cancel(req_id: i32) -> i32`; `FETCH_DONE` bär HTTP-statusen i `b` eller en negativ kod ur bilaga A, och värden håller svarskroppen tills `fetch_read` returnerat 0 (slutet) eller `fetch_cancel` anropats, som båda frigör den och stänger anropet.
 - **[SPEC-5.2.8]** `fetch_begin` mot en origin som inte står i manifestets `net`-lista returnerar `E_ORIGIN` utan nätverksanrop.
-- **[SPEC-5.2.9]** Lagring (capability `storage`): `state_put(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32`, `state_get(key_ptr: i32, key_len: i32, dst_ptr: i32, max: i32) -> i32`, `state_delete(key_ptr: i32, key_len: i32) -> i32`; nyckelrymd per origin, högst 16 MB.
+- **[SPEC-5.2.9]** Lagring (capability `storage`): `state_put(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32`, `state_get(key_ptr: i32, key_len: i32, dst_ptr: i32, max: i32) -> i32` returnerar värdets hela längd (även över `max`) och `E_RESOURCE` för en nyckel som saknas, `state_delete(key_ptr: i32, key_len: i32) -> i32`; nyckelrymd per origin, högst 16 MB.
 - **[SPEC-5.2.10]** Navigering: `navigate(url_ptr: i32, url_len: i32, replace: i32) -> i32` accepterar endast `vy://` och `https://` (annars `E_ARG`) och returnerar `E_DENIED` i en värd utan navigering (headless); `link_register(id: i32, x: f32, y: f32, w: f32, h: f32, url_ptr: i32, url_len: i32) -> i32` registrerar en länk för den pågående framen: länklistan nollställs vid `dl_begin`, och samma `id` i samma frame ersätter den tidigare registreringen.
 - **[SPEC-5.2.11]** Tid och slump: `now_ms() -> i64` är monoton med 1 ms upplösning utan capability `hires_time` och 10 µs med; `random(dst_ptr: i32, len: i32) -> i32` fylls av värdens CSPRNG i klienten och av en seedad deterministisk PRNG i headless- och konformansläge.
 - **[SPEC-5.2.12]** Urklipp (capability `clipboard`): `clipboard_read(dst_ptr: i32, max: i32) -> i32` kräver användargest inom 1 s; `clipboard_write(ptr: i32, len: i32) -> i32`.
@@ -107,7 +107,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-6.3.1]** Alla koordinater är logiska pixlar; `scale` anger förhållandet till fysiska pixlar.
 - **[SPEC-6.4.1]** Textformning och typsnittsrendering sker i värden; modulen ser aldrig glyfer.
 - **[SPEC-6.4.2]** Värden tillhandahåller fem inbyggda typsnittsroller `sans`, `serif`, `mono`, `ui`, `emoji` som resurs-id −1 till −5.
-- **[SPEC-6.4.3]** `dl_text` radbryter vid `w` och returnerar höjden så att modulen kan placera nästa element.
+- **[SPEC-6.4.3]** `dl_text` och `text_measure` radbryter vid `w` när `w > 0` och radbryter inte alls när `w ≤ 0`; `dl_text` returnerar bredd och höjd så att modulen kan placera nästa element.
 - **[SPEC-6.5.1]** Bilder avkodas lat vid första `dl_image` och cachas per paket; högst 8192 × 8192 px.
 
 ## 7. Protokoll
@@ -261,7 +261,7 @@ registret sist.
 | 8 | `IME_COMPOSE` | ptr | len | markör | – |
 | 9 | `POINTER_LEAVE` | – | – | – | – |
 | 10 | `FOCUS` | nod-id | 1 in / 0 ut | 0 mus / 1 tangentbord | – |
-| 20 | `FETCH_DONE` | req_id | status | bytes | – |
+| 20 | `FETCH_DONE` | req_id | HTTP-status eller negativ felkod | bytes | – |
 | 30 | `VISIBILITY` | 1 synlig / 0 gömd | – | – | – |
 | 31 | `BUDGET` | ms använt | ms tillåtet | 1 = sista varningen | – |
 | 32 | `CAPABILITY` | capability-id | 1 beviljad / 0 återkallad | – | – |

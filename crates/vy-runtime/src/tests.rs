@@ -1345,6 +1345,63 @@ fn spec_5_1_6_alloc_failure_drops_the_event() {
     assert!(!rt.is_suspended());
 }
 
+/// SPEC-5.2.7, SPEC-5.2.9, SPEC-5.3.1: the headless host has no transport
+/// and no storage, so every `fetch_*` and `state_*` call is `E_DENIED` even
+/// with `net` and `storage` granted, logged as such; the page runs on. The
+/// transport semantics of SPEC-5.2.7 (64 open requests, `E_RATE`, the body
+/// held until `fetch_read` returns 0 or `fetch_cancel`) and the missing-key
+/// `E_RESOURCE` of SPEC-5.2.9 are the shell's (M3); the SDK mock proves the
+/// latter for pages today.
+#[test]
+fn spec_5_2_7_fetch_and_storage_denied_headless() {
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "fetch_begin" (func $fetch_begin (param i32 i32 i32 i32 i32) (result i32)))
+            (import "vy" "fetch_poll" (func $fetch_poll (param i32) (result i32)))
+            (import "vy" "fetch_read" (func $fetch_read (param i32 i32 i32) (result i32)))
+            (import "vy" "fetch_cancel" (func $fetch_cancel (param i32) (result i32)))
+            (import "vy" "state_get" (func $state_get (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "https://chat.example/api")
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (local $r i32)
+                (if (i32.eq (local.get 0) (i32.const 1)) (then
+                    (local.set $r (call $fetch_begin (i32.const 1) (i32.const 0) (i32.const 24) (i32.const 0) (i32.const 0)))))
+                (if (i32.eq (local.get 0) (i32.const 2)) (then
+                    (local.set $r (call $fetch_poll (i32.const 1)))))
+                (if (i32.eq (local.get 0) (i32.const 3)) (then
+                    (local.set $r (call $fetch_read (i32.const 1) (i32.const 1024) (i32.const 64)))))
+                (if (i32.eq (local.get 0) (i32.const 4)) (then
+                    (local.set $r (call $fetch_cancel (i32.const 1)))))
+                (if (i32.eq (local.get 0) (i32.const 5)) (then
+                    (local.set $r (call $state_get (i32.const 0) (i32.const 5) (i32.const 1024) (i32.const 64)))))
+                local.get $r)
+            {STUBS})"#
+    ));
+    let opts = Options {
+        capabilities: Capabilities::from_names(["net", "storage"]).unwrap(),
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    for (case, name) in [
+        (1, "fetch_begin"),
+        (2, "fetch_poll"),
+        (3, "fetch_read"),
+        (4, "fetch_cancel"),
+        (5, "state_get"),
+    ] {
+        let before = rt.logs().len();
+        rt.frame_with_dt(case).unwrap();
+        assert_eq!(rt.last_frame().ops_reported, err::E_DENIED, "{name}");
+        let new = host_logs(&rt)[before..].to_vec();
+        assert_eq!(new.len(), 1, "{name}: {new:?}");
+        assert!(new[0].starts_with(&format!("{name}: E_DENIED")), "{new:?}");
+    }
+    assert!(!rt.is_suspended());
+}
+
 /// A module whose frame draws one `IMAGE` with `resource_id = dt_ms / 10`
 /// and `fit = dt_ms % 10`.
 fn image_module() -> Vec<u8> {

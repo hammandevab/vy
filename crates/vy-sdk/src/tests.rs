@@ -740,6 +740,33 @@ fn spec_5_2_6_bindings_pass_through() {
     });
 }
 
+/// SPEC-5.2.9: `state_get` reports the value's full length even when `dst`
+/// is shorter, and a key with no value is `Resource`, not an empty value;
+/// `state_delete` makes the key missing again.
+#[test]
+fn spec_5_2_9_state_get_missing_key_is_resource() {
+    mock::reset();
+    mock::with(|h| h.caps.storage = true);
+    let mut buf = [0u8; 2];
+    assert_eq!(api::state_get("saknas", &mut buf), Err(VyError::Resource));
+    api::state_put("k", b"abcd").unwrap();
+    assert_eq!(
+        api::state_get("k", &mut buf),
+        Ok(4),
+        "full length, two copied"
+    );
+    assert_eq!(&buf, b"ab");
+    api::state_put("tom", b"").unwrap();
+    assert_eq!(
+        api::state_get("tom", &mut buf),
+        Ok(0),
+        "an empty value exists"
+    );
+    api::state_delete("k").unwrap();
+    assert_eq!(api::state_get("k", &mut buf), Err(VyError::Resource));
+    mock::with(|h| assert!(h.refusals.is_empty(), "{:?}", h.refusals));
+}
+
 /// SPEC-5.2.13, SPEC-5.2.10: a node id used twice in one frame is refused
 /// as `Arg` and not counted, like the host does; links are forgotten at
 /// `dl_begin` and the same id replaces the earlier rectangle.
