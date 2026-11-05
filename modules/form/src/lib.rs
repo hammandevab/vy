@@ -2,12 +2,14 @@
 //! checkbox and a submit button.
 //!
 //! Focus is the host's (SPEC-10.3.1): Tab, Shift+Tab and pointer presses
-//! arrive as `KIND_FOCUS` on the fixed node ids below, and the page draws
-//! the focus ring itself (SPEC-10.3.3); a focused text field opens composition with
-//! `ime_begin` over its rectangle (SPEC-5.2.6) and closes it with `ime_end`
-//! when focus leaves. Committed text arrives as `TEXT_INPUT` (SPEC-5.1.6).
-//! Interactive nodes keep fixed semantic ids so focus events can name them.
-//! Requires capability `ime` (SPEC-10.4.2).
+//! arrive as `KIND_FOCUS` on the fixed node ids below, the page keeps no
+//! focus of its own (a failed submit shows the error and leaves focus where
+//! the host has it), and it draws the focus ring itself (SPEC-10.3.3); a
+//! focused text field opens composition with `ime_begin` over its
+//! rectangle (SPEC-5.2.6) and closes it with `ime_end` when focus leaves.
+//! Committed text arrives as `TEXT_INPUT` (SPEC-5.1.6). Interactive nodes
+//! keep fixed semantic ids so focus events can name them. Requires
+//! capability `ime` (SPEC-10.4.2).
 #![no_std]
 
 extern crate alloc;
@@ -189,19 +191,18 @@ impl FormPage {
         true
     }
 
+    /// Validate and submit. Focus stays where the host has it (SPEC-10.3.1):
+    /// the error text says which field needs attention.
     fn submit(&mut self) -> bool {
         if self.name.trim().is_empty() {
             self.error_text = Some("Fyll i ditt namn.");
             self.submitted = false;
-            self.set_focus(Some(Focus::Name));
         } else if !self.email.contains('@') {
             self.error_text = Some("E-postadressen behöver ett @.");
             self.submitted = false;
-            self.set_focus(Some(Focus::Email));
         } else {
             self.error_text = None;
             self.submitted = true;
-            self.set_focus(None);
         }
         true
     }
@@ -355,23 +356,17 @@ impl App for FormPage {
 
     fn event(&mut self, event: Event<'_>) -> bool {
         match event {
+            // The host has already moved focus to the control under the
+            // pointer (SPEC-10.3.1); only the press itself is handled here.
             Event::PointerDown { x, y, .. } => {
                 let l = self.layout();
-                if l.name.contains(x, y) {
-                    self.set_focus(Some(Focus::Name));
-                    true
-                } else if l.email.contains(x, y) {
-                    self.set_focus(Some(Focus::Email));
-                    true
-                } else if l.news.contains(x, y) {
+                if l.news.contains(x, y) {
                     self.news = !self.news;
-                    self.set_focus(Some(Focus::News));
                     true
                 } else if l.submit.contains(x, y) {
-                    self.set_focus(Some(Focus::Submit));
                     self.submit()
                 } else {
-                    self.set_focus(None)
+                    false
                 }
             }
             Event::TextInput { text } => match self.focus.and_then(|f| self.value_mut(f)) {
@@ -382,7 +377,6 @@ impl App for FormPage {
                 _ => false,
             },
             Event::KeyDown { code, .. } => match code {
-                key::ESCAPE => self.set_focus(None),
                 key::ENTER => self.submit(),
                 key::BACKSPACE => match self.focus.and_then(|f| self.value_mut(f)) {
                     Some(v) => v.pop().is_some(),

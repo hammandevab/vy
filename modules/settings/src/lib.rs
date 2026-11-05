@@ -15,8 +15,11 @@
 //!   arithmetic the frame draws with.
 //! - `KEY_DOWN` for Space, arrows, Home/End on the focused control, and
 //!   `KIND_FOCUS` when the host moves focus with Tab, Shift+Tab or a pointer
-//!   press (SPEC-10.3.1); the ring is the page's (SPEC-10.3.3); node ids
-//!   come from the draw order and are recorded per frame.
+//!   press (SPEC-10.3.1); the page keeps no focus of its own and hit-tests
+//!   presses against the same rectangles it registers as nodes, so the
+//!   control the host focuses is the one that activates; the ring is the
+//!   page's (SPEC-10.3.3); node ids come from the draw order and are
+//!   recorded per frame.
 //! - A semantic tree with `checkbox`, `radio`, `slider`, `button` and
 //!   `region` nodes whose text carries the current value (SPEC-10.1.1).
 //! - Visible state: the dark switch swaps the palette, the compact switch
@@ -430,6 +433,19 @@ impl SettingsPage {
         changed
     }
 
+    /// The whole row of switch `i`: its semantic node and its hit area are
+    /// the same rectangle, so the host's pointer focus and the page's
+    /// activation agree (SPEC-10.3.1).
+    fn switch_row(&self, l: &Layout, i: usize) -> Rect {
+        let row_h = self.row_h();
+        Rect::new(
+            l.card[0].x + PAD,
+            l.switches[i].y - (row_h - SWITCH_H) / 2.0,
+            l.card[0].w - 2.0 * PAD,
+            row_h,
+        )
+    }
+
     /// The hit rectangle of a control in window coordinates.
     fn control_rect(&self, c: Control) -> Rect {
         let l = self.layout();
@@ -465,16 +481,21 @@ impl SettingsPage {
 
     /// Space or Enter on the focused control.
     fn activate(&mut self) -> bool {
-        match self.focus {
-            Some(Control::Switch(i)) => self.change(|v| match i {
+        self.focus.is_some_and(|c| self.activate_control(c))
+    }
+
+    /// Toggle, select or reset `c`; the slider is dragged, not activated.
+    fn activate_control(&mut self, c: Control) -> bool {
+        match c {
+            Control::Switch(i) => self.change(|v| match i {
                 0 => v.dark = !v.dark,
                 1 => v.compact = !v.compact,
                 _ => v.animations = !v.animations,
             }),
-            Some(Control::Size(i)) => self.change(|v| v.size = i as u8),
-            Some(Control::Home(i)) => self.change(|v| v.home = i as u8),
-            Some(Control::Reset) => self.reset(),
-            _ => false,
+            Control::Size(i) => self.change(|v| v.size = i as u8),
+            Control::Home(i) => self.change(|v| v.home = i as u8),
+            Control::Reset => self.reset(),
+            Control::Volume => false,
         }
     }
 
@@ -533,6 +554,7 @@ impl SettingsPage {
             card.w - 2.0 * PAD,
             row_h,
         );
+        debug_assert_eq!(row, self.switch_row(&self.layout(), i));
         let text = format!("{}: {}", SWITCHES[i], if on { "på" } else { "av" });
         let id = f.sem.node(Role::Checkbox, row, &text)?;
         self.node_ids[Control::Switch(i).index()] = id.0;
@@ -765,39 +787,35 @@ impl App for SettingsPage {
 
     fn event(&mut self, event: Event<'_>) -> bool {
         match event {
+            // The host has already focused the control under the pointer
+            // through `FOCUS` (SPEC-10.3.1); the press activates it.
             Event::PointerDown { x, y, .. } => {
                 let l = self.layout();
-                for (i, r) in l.switches.iter().enumerate() {
-                    let row = Rect::new(l.card[0].x, r.y - 10.0, l.card[0].w, SWITCH_H + 20.0);
-                    if row.contains(x, y) {
-                        self.set_focus(Some(Control::Switch(i)));
-                        return self.activate() || true;
+                for i in 0..SWITCHES.len() {
+                    if self.switch_row(&l, i).contains(x, y) {
+                        self.activate_control(Control::Switch(i));
+                        return true;
                     }
                 }
                 for (i, r) in l.sizes.iter().enumerate() {
                     if r.contains(x, y) {
-                        self.set_focus(Some(Control::Size(i)));
-                        return self.activate() || true;
+                        self.activate_control(Control::Size(i));
+                        return true;
                     }
                 }
                 for (i, r) in l.homes.iter().enumerate() {
                     if r.contains(x, y) {
-                        self.set_focus(Some(Control::Home(i)));
-                        return self.activate() || true;
+                        self.activate_control(Control::Home(i));
+                        return true;
                     }
                 }
                 if Self::slider_hit(l.track).contains(x, y) {
-                    self.set_focus(Some(Control::Volume));
                     self.dragging = true;
                     let v = Self::value_at(l.track, x);
                     self.change(|val| val.volume = v);
                     return true;
                 }
-                if l.reset.contains(x, y) {
-                    self.set_focus(Some(Control::Reset));
-                    return self.reset();
-                }
-                self.set_focus(None)
+                l.reset.contains(x, y) && self.reset()
             }
             Event::PointerMove { x, .. } if self.dragging => {
                 let track = self.layout().track;
@@ -819,7 +837,6 @@ impl App for SettingsPage {
             }
             Event::KeyDown { code, .. } => match code {
                 key::SPACE | key::ENTER => self.activate(),
-                key::ESCAPE => self.set_focus(None),
                 key::RIGHT | key::UP if self.focus == Some(Control::Volume) => {
                     self.nudge_volume(i32::from(SLIDER_STEP))
                 }

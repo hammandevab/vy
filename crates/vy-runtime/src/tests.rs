@@ -1415,19 +1415,22 @@ fn spec_5_2_7_fetch_and_storage_denied_headless() {
 /// text 4 at y 30, link 5 at y 40, all 50 wide and 10 tall) that records
 /// every event it receives as `kind * 1e6 + (a % 1000) * 1000 + (b % 10) *
 /// 10 + c % 10`. Kind 100 returns record `a`, 101 clears, 102 returns the
-/// count; those three are not recorded.
+/// count, 103 toggles whether the button (node 2) is registered at all;
+/// those four are not recorded.
 fn focus_module() -> Vec<u8> {
     wasm(&format!(
         r#"(module
             (import "vy" "sem_node" (func $sem_node (param i32 i32 i32 f32 f32 f32 f32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (global $n (mut i32) (i32.const 0))
+            (global $hide (mut i32) (i32.const 0))
             {INIT_OK}
             (func $node (param $id i32) (param $role i32) (param $y f32)
                 (drop (call $sem_node (local.get $id) (i32.const 1) (local.get $role) (f32.const 0) (local.get $y) (f32.const 50) (f32.const 10) (i32.const 0) (i32.const 0))))
             (func (export "vy_frame") (param i32) (result i32)
                 (drop (call $sem_node (i32.const 1) (i32.const 0) (i32.const 15) (f32.const 0) (f32.const 0) (f32.const 100) (f32.const 100) (i32.const 0) (i32.const 0)))
-                (call $node (i32.const 2) (i32.const 4) (f32.const 0))
+                (if (i32.eqz (global.get $hide)) (then
+                    (call $node (i32.const 2) (i32.const 4) (f32.const 0))))
                 (call $node (i32.const 3) (i32.const 5) (f32.const 20))
                 (call $node (i32.const 4) (i32.const 1) (f32.const 30))
                 (call $node (i32.const 5) (i32.const 3) (f32.const 40))
@@ -1440,6 +1443,9 @@ fn focus_module() -> Vec<u8> {
                     (return (i32.const 0))))
                 (if (i32.eq (local.get 0) (i32.const 102)) (then
                     (return (global.get $n))))
+                (if (i32.eq (local.get 0) (i32.const 103)) (then
+                    (global.set $hide (i32.sub (i32.const 1) (global.get $hide)))
+                    (return (i32.const 0))))
                 (i32.store (i32.add (i32.const 1024) (i32.mul (global.get $n) (i32.const 4)))
                     (i32.add
                         (i32.mul (local.get 0) (i32.const 1000000))
@@ -1564,6 +1570,54 @@ fn spec_10_3_1_host_owns_focus() {
 
     // Keys the host consumes are never "held" for `key_down`.
     assert!(!rt.host().keys_down.contains(&key::TAB));
+}
+
+/// SPEC-10.3.2, SPEC-10.3.1: focus follows node ids across frames. When the
+/// focused node is left out of a frame's tree the host delivers `FOCUS`
+/// out for it (`b = 0`, `c = 0`) after that frame and nothing has focus;
+/// the next Tab starts from the beginning of document order, which is how
+/// a page moves focus without an import: by what it registers, and in what
+/// order. A node that comes back does not regain focus by itself.
+#[test]
+fn spec_10_3_2_focus_lost_when_node_disappears() {
+    use vy_abi::event::{FOCUS, KEY_DOWN};
+    let mut rt = load(&focus_module());
+    rt.init(100, 100, 1.0).unwrap();
+    rt.frame().unwrap();
+    rt.event(KEY_DOWN, key::TAB, 0, 0, 0).unwrap();
+    assert_eq!(rt.focus(), Some(2));
+    recorded(&mut rt);
+
+    // The page stops registering the button; the next frame drops focus.
+    rt.event(103, 0, 0, 0, 0).unwrap();
+    rt.frame().unwrap();
+    assert_eq!(rt.focus(), None, "the node is gone, so is focus");
+    assert_eq!(
+        recorded(&mut rt),
+        vec![(FOCUS, 2, 0, 0)],
+        "FOCUS out after the frame, neither keyboard nor pointer"
+    );
+    assert!(
+        rt.wants_frame(),
+        "the module answered 1 to the FOCUS out: it redraws without the ring"
+    );
+    rt.frame().unwrap();
+    assert!(
+        recorded(&mut rt).is_empty(),
+        "reported once; nothing has focus so nothing more is lost"
+    );
+
+    // From nothing, Tab goes to the first focusable node now registered.
+    rt.event(KEY_DOWN, key::TAB, 0, 0, 0).unwrap();
+    assert_eq!(recorded(&mut rt), vec![(FOCUS, 3, 1, 1)]);
+
+    // The button comes back: focus stays where it is, Shift+Tab reaches it.
+    rt.event(103, 0, 0, 0, 0).unwrap();
+    rt.frame().unwrap();
+    assert_eq!(rt.focus(), Some(3));
+    assert!(recorded(&mut rt).is_empty());
+    rt.event(KEY_DOWN, key::TAB, modifier::SHIFT, 0, 0).unwrap();
+    assert_eq!(recorded(&mut rt), vec![(FOCUS, 3, 0, 1), (FOCUS, 2, 1, 1)]);
 }
 
 /// SPEC-10.3.1, SPEC-10.3.2: without a single focusable node Tab is consumed

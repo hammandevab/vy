@@ -7,8 +7,10 @@
 //! What the page exercises in the ABI:
 //! - `now_ms` (SPEC-5.2.11) stamps every message; the page never has a clock
 //!   of its own, so the same events give the same stamps (SPEC-2.1.5).
-//! - `ime_begin`/`ime_end` (SPEC-5.2.6) follow focus on the composer, which
-//!   also re-issues `ime_begin` after `vy_resize` (SPEC-5.1.4) because the
+//! - `ime_begin`/`ime_end` (SPEC-5.2.6) follow the host's focus on the
+//!   composer (SPEC-10.3.1: the page cannot focus it by itself, so the
+//!   thread opens with nothing focused until a Tab or a press), and
+//!   `ime_begin` is re-issued after `vy_resize` (SPEC-5.1.4) because the
 //!   field moved; committed text arrives as `TEXT_INPUT` through `vy_alloc`
 //!   (SPEC-5.1.6).
 //! - Enter appends the message locally and calls `fetch_begin` (SPEC-5.2.7)
@@ -499,7 +501,6 @@ impl App for ChatPage {
             pending: None,
         };
         page.relayout();
-        page.set_focus(true);
         Ok(page)
     }
 
@@ -576,15 +577,9 @@ impl App for ChatPage {
 
     fn event(&mut self, event: Event<'_>) -> bool {
         match event {
-            Event::PointerDown { x, y, .. } => {
-                if self.field_rect().contains(x, y) {
-                    self.set_focus(true)
-                } else if self.send_rect().contains(x, y) {
-                    self.send()
-                } else {
-                    self.set_focus(false)
-                }
-            }
+            // Focus on the composer comes from the host's `FOCUS` before
+            // the press (SPEC-10.3.1); the press itself only sends.
+            Event::PointerDown { x, y, .. } => self.send_rect().contains(x, y) && self.send(),
             Event::TextInput { text } => {
                 if self.focused && self.input.len() + text.len() <= MAX_INPUT {
                     self.input.push_str(text);
@@ -595,7 +590,6 @@ impl App for ChatPage {
             }
             Event::KeyDown { code, .. } => match code {
                 key::ENTER => self.send(),
-                key::ESCAPE => self.set_focus(false),
                 key::BACKSPACE if self.focused => self.input.pop().is_some(),
                 key::PAGE_DOWN => self.scroll_by(self.thread().h),
                 key::PAGE_UP => self.scroll_by(-self.thread().h),

@@ -511,21 +511,39 @@ impl Runtime {
         match result {
             Err(e) => Err(e),
             Ok(_) => {
-                let host = self.host_mut();
-                if host.dl.is_open() {
-                    host.log(
-                        LogSource::Host,
-                        2,
-                        "vy_frame returned without dl_end; list closed by host".into(),
-                    );
-                    let _ = host.dl.end();
+                {
+                    let host = self.host_mut();
+                    if host.dl.is_open() {
+                        host.log(
+                            LogSource::Host,
+                            2,
+                            "vy_frame returned without dl_end; list closed by host".into(),
+                        );
+                        let _ = host.dl.end();
+                    }
+                    if let Some(code) = host.exited {
+                        return Err(Error::Exited(code));
+                    }
                 }
-                if let Some(code) = host.exited {
-                    return Err(Error::Exited(code));
-                }
-                Ok(host.dl.bytes())
+                self.drop_focus_if_gone()?;
+                Ok(self.host().dl.bytes())
             }
         }
+    }
+
+    /// A focused node that the frame did not register has lost focus:
+    /// `FOCUS` out (`b = 0`, `c = 0`) is delivered after the frame and
+    /// nothing has focus until the next Tab or press (SPEC-10.3.2). Nothing
+    /// is delivered to a module the frame just suspended.
+    fn drop_focus_if_gone(&mut self) -> Result<(), Error> {
+        let Some(id) = self.focus else {
+            return Ok(());
+        };
+        if self.suspended || self.host().sem.iter().any(|n| n.id == id) {
+            return Ok(());
+        }
+        self.focus = None;
+        self.deliver(event::FOCUS, id, 0, 0, 0).map(|_| ())
     }
 
     /// `vy_event(kind, a, b, c, d)` (SPEC-5.1.3). Returns true when the module
@@ -535,13 +553,16 @@ impl Runtime {
     /// `KEY_UP` and clears it when the tab is hidden (SPEC-5.2.6); a
     /// `VISIBILITY` shown makes the next `dt_ms` 0 (SPEC-5.1.2).
     ///
-    /// The host also owns keyboard focus (SPEC-10.3.1): Tab and Shift+Tab
-    /// are consumed here and become `FOCUS` events through the focusable
-    /// nodes of the last frame's tree in document order (SPEC-10.3.2); a
-    /// `POINTER_DOWN` moves focus to the focusable node under it, or away
-    /// from everything, before the pointer event itself is delivered; Enter
-    /// and Escape are delivered as `KEY_DOWN`. A `FOCUS` event handed in by
-    /// the caller (a scripted one) updates the host's notion of focus too.
+    /// The host also owns focus (SPEC-10.3.1): Tab and Shift+Tab are
+    /// consumed here and become `FOCUS` events through the focusable nodes
+    /// of the last frame's tree in document order (SPEC-10.3.2), from
+    /// nothing to the first (or last); a `POINTER_DOWN` moves focus to the
+    /// focusable node under it, or away from everything, before the pointer
+    /// event itself is delivered; Enter and Escape are delivered as
+    /// `KEY_DOWN`. A `FOCUS` event handed in by the caller (a scripted one)
+    /// updates the host's notion of focus too. There is no import to ask
+    /// for focus: a module changes the tree instead, and a focused node
+    /// that a frame leaves out loses focus (see [`Runtime::frame`]).
     pub fn event(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) -> Result<bool, Error> {
         self.gate()?;
         match kind {

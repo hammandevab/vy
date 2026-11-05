@@ -13,12 +13,12 @@
 //!   footnotes (SPEC-10.1.1, SPEC-A.3.1). The whole tree is registered every
 //!   frame, on-screen or not, so node ids are stable and a host can build its
 //!   focus order from it (SPEC-10.3.1); only visible blocks are drawn.
-//! - `KIND_FOCUS` (SPEC-10.3.1): the host owns the focus order and turns
-//!   Tab, Shift+Tab and pointer presses into focus events; the page draws
-//!   the focus ring where the host says focus is (SPEC-10.3.3) and scrolls a
-//!   link into view when the change came from the keyboard. Enter follows
-//!   the link, which is a `navigate` (SPEC-5.2.10) for external links and a
-//!   scroll for the sections.
+//! - `KIND_FOCUS` (SPEC-10.3.1): the host owns focus and turns Tab,
+//!   Shift+Tab and pointer presses into focus events; the page keeps no
+//!   focus of its own, draws the ring where the host says focus is
+//!   (SPEC-10.3.3) and scrolls a link into view when the change came from
+//!   the keyboard. Enter follows the link, which is a `navigate`
+//!   (SPEC-5.2.10) for external links and a scroll for the sections.
 //! - `link_register` (SPEC-5.2.10) for every link each frame, since scrolling
 //!   moves them; `SCROLL`, Page Up/Down, Home/End in a clipped page
 //!   (SPEC-6.1.4). No capabilities.
@@ -353,15 +353,6 @@ impl DocumentPage {
         }
     }
 
-    /// The link under `(x, y)` in window coordinates.
-    fn link_at(&self, x: f32, y: f32) -> Option<usize> {
-        (0..LINKS).find(|&i| {
-            self.layout.links[i]
-                .offset(0.0, -self.scroll)
-                .contains(x, y)
-        })
-    }
-
     /// A 1 px rule's top and height, snapped to device pixels (SPEC-6.3.1).
     fn hairline(&self, y: f32) -> (f32, f32) {
         let scale = self.window.scale;
@@ -632,7 +623,6 @@ impl App for DocumentPage {
                 let page = (self.window.height - ARROW_PX).max(ARROW_PX);
                 match code {
                     key::ENTER => self.activate(),
-                    key::ESCAPE => self.set_focus(None, false),
                     key::DOWN => self.scroll_by(ARROW_PX),
                     key::UP => self.scroll_by(-ARROW_PX),
                     key::PAGE_DOWN | key::SPACE => self.scroll_by(page),
@@ -642,10 +632,8 @@ impl App for DocumentPage {
                     _ => false,
                 }
             }
-            Event::PointerDown { x, y, .. } => {
-                let hit = self.link_at(x, y);
-                self.set_focus(hit, false)
-            }
+            // A press focuses the link under it through the host's `FOCUS`
+            // (SPEC-10.3.1); the page keeps no pointer focus of its own.
             Event::Focus {
                 node,
                 gained,
