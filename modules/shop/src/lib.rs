@@ -518,25 +518,24 @@ impl ShopPage {
 }
 
 impl App for ShopPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "shop: init");
-        Self {
+        Ok(Self {
             window,
-            title: style(Font::Sans, 22.0, 700, INK),
-            subtitle: style(Font::Sans, 13.0, 400, MUTED),
-            name: style(Font::Sans, 15.0, 600, INK),
-            price: style(Font::Sans, 14.0, 400, MUTED),
-            button: style(Font::Sans, 14.0, 600, WHITE),
-            body: style(Font::Sans, 15.0, 400, INK),
-            muted: style(Font::Sans, 14.0, 400, MUTED),
-            heading: style(Font::Sans, 18.0, 700, INK),
-            total: style(Font::Sans, 15.0, 700, INK),
-            badge: style(Font::Sans, 12.0, 600, WHITE),
+            title: style(Font::Sans, 22.0, 700, INK)?,
+            subtitle: style(Font::Sans, 13.0, 400, MUTED)?,
+            name: style(Font::Sans, 15.0, 600, INK)?,
+            price: style(Font::Sans, 14.0, 400, MUTED)?,
+            button: style(Font::Sans, 14.0, 600, WHITE)?,
+            body: style(Font::Sans, 15.0, 400, INK)?,
+            muted: style(Font::Sans, 14.0, 400, MUTED)?,
+            heading: style(Font::Sans, 18.0, 700, INK)?,
+            total: style(Font::Sans, 15.0, 700, INK)?,
+            badge: style(Font::Sans, 12.0, 600, WHITE)?,
             cart: [0; PRODUCTS.len()],
             scroll: 0.0,
-        }
+        })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {

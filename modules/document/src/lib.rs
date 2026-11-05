@@ -470,32 +470,31 @@ impl DocumentPage {
 }
 
 impl App for DocumentPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "document: init");
         let mut page = Self {
             window,
-            title: style(Font::Sans, 30.0, 700, INK),
-            byline: style(Font::Sans, 13.0, 400, MUTED),
-            link13: style(Font::Sans, 13.0, 600, ACCENT),
-            link14: style(Font::Sans, 14.0, 600, ACCENT),
-            lead: style(Font::Serif, 18.0, 400, INK),
-            h2: style(Font::Sans, 19.0, 700, INK),
-            body: style(Font::Serif, 15.0, 400, INK),
-            caption: style(Font::Sans, 13.0, 600, MUTED),
-            cell: style(Font::Sans, 13.0, 400, INK),
-            cell_small: style(Font::Sans, 12.0, 400, INK),
-            head: style(Font::Sans, 13.0, 700, INK),
-            head_small: style(Font::Sans, 12.0, 700, INK),
-            note: style(Font::Sans, 13.0, 400, MUTED),
+            title: style(Font::Sans, 30.0, 700, INK)?,
+            byline: style(Font::Sans, 13.0, 400, MUTED)?,
+            link13: style(Font::Sans, 13.0, 600, ACCENT)?,
+            link14: style(Font::Sans, 14.0, 600, ACCENT)?,
+            lead: style(Font::Serif, 18.0, 400, INK)?,
+            h2: style(Font::Sans, 19.0, 700, INK)?,
+            body: style(Font::Serif, 15.0, 400, INK)?,
+            caption: style(Font::Sans, 13.0, 600, MUTED)?,
+            cell: style(Font::Sans, 13.0, 400, INK)?,
+            cell_small: style(Font::Sans, 12.0, 400, INK)?,
+            head: style(Font::Sans, 13.0, 700, INK)?,
+            head_small: style(Font::Sans, 12.0, 700, INK)?,
+            note: style(Font::Sans, 13.0, 400, MUTED)?,
             layout: Layout::default(),
             scroll: 0.0,
             focus: None,
             link_ids: [0; LINKS],
         };
         page.relayout();
-        page
+        Ok(page)
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {

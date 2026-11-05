@@ -2,7 +2,8 @@
 //! produce the six exports of SPEC-5.1.
 //!
 //! The glue owns the lifecycle the spec prescribes: `vy_init` constructs the
-//! app (SPEC-5.1.1); `vy_frame` opens a [`Frame`], lets the app draw, closes
+//! app and returns 0, or the status code of the error that stopped it, in
+//! which case the host rejects the page (SPEC-5.1.1); `vy_frame` opens a [`Frame`], lets the app draw, closes
 //! it and returns the opcode count (SPEC-5.1.2); `vy_event` decodes the
 //! arguments and returns 1 when the app wants a redraw (SPEC-5.1.3);
 //! `vy_resize` and `vy_suspend` forward (SPEC-5.1.4, SPEC-5.1.5);
@@ -30,8 +31,11 @@ pub struct Window {
 /// A Vy page. Implement it and hand the type to `vy_sdk::export!`.
 pub trait App: Sized + 'static {
     /// `vy_init`: build the page for a window; `abi_minor` is the host's
-    /// ABI minor version (SPEC-5.1.1, SPEC-4.3.2).
-    fn init(window: Window, abi_minor: i32) -> Self;
+    /// ABI minor version (SPEC-5.1.1, SPEC-4.3.2). An `Err` (a style the
+    /// host refused, say) becomes `vy_init`'s return value, its status
+    /// code, and the host does not run the page; there is no page without
+    /// what `init` asked for, so no `unwrap_or` is needed.
+    fn init(window: Window, abi_minor: i32) -> Result<Self, VyError>;
 
     /// `vy_frame`: describe the whole page into `f` (SPEC-6.1.2); the glue
     /// opened it and will close it. An `Err` is logged at `Level::Error` and
@@ -79,17 +83,26 @@ impl<A> Default for Slot<A> {
     }
 }
 
-/// `vy_init` (SPEC-5.1.1).
+/// `vy_init` (SPEC-5.1.1): 0, or the status code of the error `App::init`
+/// returned, logged at `Level::Error`; the slot stays empty then and every
+/// later export is ignored.
 pub fn init<A: App>(slot: &Slot<A>, abi_minor: i32, width: i32, height: i32, scale: f32) -> i32 {
     let window = Window {
         width: width as f32,
         height: height as f32,
         scale,
     };
-    let app = A::init(window, abi_minor);
-    // SAFETY: see `Slot`; no reference into the slot is live here.
-    unsafe { *slot.0.get() = Some(app) };
-    0
+    match A::init(window, abi_minor) {
+        Ok(app) => {
+            // SAFETY: see `Slot`; no reference into the slot is live here.
+            unsafe { *slot.0.get() = Some(app) };
+            0
+        }
+        Err(e) => {
+            let _ = log(Level::Error, e.name());
+            e.code()
+        }
+    }
 }
 
 /// `vy_frame` (SPEC-5.1.2): returns the opcodes written.
@@ -147,7 +160,7 @@ pub fn alloc(size: i32) -> i32 {
 /// use vy_sdk::prelude::*;
 /// struct Page;
 /// impl App for Page {
-///     fn init(_: Window, _: i32) -> Self { Page }
+///     fn init(_: Window, _: i32) -> Result<Self, VyError> { Ok(Page) }
 ///     fn frame(&mut self, _: &mut Frame, _: i32) -> Result<(), VyError> { Ok(()) }
 ///     fn event(&mut self, _: Event<'_>) -> bool { false }
 ///     fn resize(&mut self, _: Window) {}

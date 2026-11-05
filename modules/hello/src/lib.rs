@@ -26,16 +26,16 @@ struct Hello {
 }
 
 impl App for Hello {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let title = text_style(Font::Sans, 28.0, 600, INK).unwrap_or(StyleId(0));
-        let body = text_style(Font::Sans, 16.0, 400, MUTED).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let title = text_style(Font::Sans, 28.0, 600, INK)?;
+        let body = text_style(Font::Sans, 16.0, 400, MUTED)?;
         let _ = log(Level::Debug, "hello: init");
         let _ = vy_sdk::abi_version();
-        Self {
+        Ok(Self {
             window,
             title,
             body,
-        }
+        })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {

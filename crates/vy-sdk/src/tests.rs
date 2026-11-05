@@ -112,14 +112,14 @@ struct TestApp {
 }
 
 impl App for TestApp {
-    fn init(window: Window, abi_minor: i32) -> Self {
-        log(Level::Info, "test: init").unwrap();
-        Self {
+    fn init(window: Window, abi_minor: i32) -> Result<Self, VyError> {
+        log(Level::Info, "test: init")?;
+        Ok(Self {
             window,
             abi_minor,
             events: Vec::new(),
             suspended: 0,
-        }
+        })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
@@ -216,6 +216,45 @@ fn spec_5_1_exports_lifecycle() {
     assert_ne!(p, 0);
     assert_eq!(arena::bytes(p, 16).unwrap().len(), 16);
     assert_eq!(vy_alloc(-1), 0, "bad size is 0");
+}
+
+/// A page whose `init` asks for a style the host refuses and gives up.
+struct FailingApp;
+
+impl App for FailingApp {
+    fn init(_: Window, _: i32) -> Result<Self, VyError> {
+        text_style(Font::Sans, 0.0, 400, Color(0))?;
+        unreachable!("the mock refuses a 0 px style");
+    }
+    fn frame(&mut self, _: &mut Frame, _: i32) -> Result<(), VyError> {
+        Ok(())
+    }
+    fn event(&mut self, _: Event<'_>) -> bool {
+        false
+    }
+    fn resize(&mut self, _: Window) {}
+}
+
+/// SPEC-5.1.1, SPEC-5.3.1: an error in `App::init` is `vy_init`'s return
+/// value, the host's status code, logged at error level; the page is never
+/// stored, so the other exports stay inert.
+#[test]
+fn spec_5_1_1_init_error_is_the_return_value() {
+    mock::reset();
+    let slot: crate::app::Slot<FailingApp> = crate::app::Slot::new();
+    assert_eq!(
+        crate::app::init(&slot, 0, 100, 100, 1.0),
+        err::E_ARG,
+        "the refused style's code"
+    );
+    assert_eq!(crate::app::frame(&slot, 16), 0);
+    assert_eq!(crate::app::event(&slot, kind::POINTER_DOWN, 0, 0, 1, 0), 0);
+    assert_eq!(crate::app::suspend(&slot), 0);
+    mock::with(|h| {
+        assert_eq!(h.refusals, ["text_style: E_ARG"]);
+        assert_eq!(h.logs, [(Level::Error as i32, "E_ARG".into())]);
+        assert!(h.ops.is_empty(), "no frame ran");
+    });
 }
 
 /// SPEC-6.1.4: the SDK refuses the 33rd clip push and a pop without push

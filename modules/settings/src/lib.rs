@@ -621,31 +621,30 @@ impl SettingsPage {
     }
 }
 
-fn styles_for(p: &Palette) -> Styles {
-    let style =
-        |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
-    Styles {
-        title: style(Font::Sans, 26.0, 700, p.ink),
-        status: style(Font::Sans, 13.0, 400, p.muted),
-        heading: style(Font::Sans, 15.0, 700, p.muted),
-        label: style(Font::Sans, 16.0, 400, p.ink),
-        value: style(Font::Sans, 16.0, 600, p.ink),
-        button: style(Font::Sans, 15.0, 600, p.accent),
+fn styles_for(p: &Palette) -> Result<Styles, VyError> {
+    let style = |font, size, weight, color| text_style(font, size, weight, color);
+    Ok(Styles {
+        title: style(Font::Sans, 26.0, 700, p.ink)?,
+        status: style(Font::Sans, 13.0, 400, p.muted)?,
+        heading: style(Font::Sans, 15.0, 700, p.muted)?,
+        label: style(Font::Sans, 16.0, 400, p.ink)?,
+        value: style(Font::Sans, 16.0, 600, p.ink)?,
+        button: style(Font::Sans, 15.0, 600, p.accent)?,
         preview: [
-            style(Font::Serif, 14.0, 400, p.muted),
-            style(Font::Serif, 16.0, 400, p.muted),
-            style(Font::Serif, 18.0, 400, p.muted),
+            style(Font::Serif, 14.0, 400, p.muted)?,
+            style(Font::Serif, 16.0, 400, p.muted)?,
+            style(Font::Serif, 18.0, 400, p.muted)?,
         ],
-    }
+    })
 }
 
 impl App for SettingsPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
         let _ = log(Level::Debug, "settings: init");
         let mut page = Self {
             window,
-            light: styles_for(&LIGHT),
-            dark: styles_for(&DARK),
+            light: styles_for(&LIGHT)?,
+            dark: styles_for(&DARK)?,
             values: Values::DEFAULT,
             storage: Storage::Empty,
             last_save: None,
@@ -655,7 +654,7 @@ impl App for SettingsPage {
             node_ids: [0; STOPS],
         };
         page.load();
-        page
+        Ok(page)
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
@@ -892,7 +891,7 @@ mod tests {
     fn spec_5_2_9_values_persist_across_instances() {
         mock::reset();
         mock::with(|h| h.caps.storage = true);
-        let mut page = SettingsPage::init(window(), 0);
+        let mut page = SettingsPage::init(window(), 0).unwrap();
         assert_eq!(page.storage, Storage::Empty);
         assert_eq!(page.values, Values::DEFAULT);
 
@@ -925,7 +924,7 @@ mod tests {
         let saved = mock::with(|h| h.state.get(KEY.as_bytes()).cloned()).unwrap();
         assert_eq!(saved, [FORMAT, 0b101, 2, 0, 100]);
 
-        let again = SettingsPage::init(window(), 0);
+        let again = SettingsPage::init(window(), 0).unwrap();
         assert_eq!(again.storage, Storage::Loaded);
         assert_eq!(
             again.values,
@@ -940,7 +939,7 @@ mod tests {
         // Reset deletes the key: the next instance starts from the defaults.
         let mut again = again;
         assert!(again.reset());
-        let third = SettingsPage::init(window(), 0);
+        let third = SettingsPage::init(window(), 0).unwrap();
         assert_eq!(third.storage, Storage::Empty);
         assert_eq!(third.values, Values::DEFAULT);
     }
@@ -950,7 +949,7 @@ mod tests {
     #[test]
     fn spec_5_3_1_denied_storage_is_visible_not_fatal() {
         mock::reset();
-        let mut page = SettingsPage::init(window(), 0);
+        let mut page = SettingsPage::init(window(), 0).unwrap();
         assert_eq!(page.storage, Storage::Unavailable(VyError::Denied));
         page.set_focus(Some(Control::Switch(1)));
         assert!(page.activate());

@@ -334,25 +334,24 @@ impl ListPage {
 }
 
 impl App for ListPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "list: init");
-        Self {
+        Ok(Self {
             window,
-            header: style(Font::Sans, 22.0, 700, INK),
-            count: style(Font::Sans, 13.0, 400, MUTED),
-            title: style(Font::Sans, 15.0, 600, INK),
-            subtitle: style(Font::Sans, 13.0, 400, MUTED),
-            value: style(Font::Mono, 15.0, 400, INK),
-            dialog_title: style(Font::Sans, 20.0, 700, INK),
-            label: style(Font::Sans, 13.0, 600, MUTED),
-            body: style(Font::Sans, 15.0, 400, INK),
-            button: style(Font::Sans, 15.0, 600, WHITE),
+            header: style(Font::Sans, 22.0, 700, INK)?,
+            count: style(Font::Sans, 13.0, 400, MUTED)?,
+            title: style(Font::Sans, 15.0, 600, INK)?,
+            subtitle: style(Font::Sans, 13.0, 400, MUTED)?,
+            value: style(Font::Mono, 15.0, 400, INK)?,
+            dialog_title: style(Font::Sans, 20.0, 700, INK)?,
+            label: style(Font::Sans, 13.0, 600, MUTED)?,
+            body: style(Font::Sans, 15.0, 400, INK)?,
+            button: style(Font::Sans, 15.0, 600, WHITE)?,
             scroll: 0.0,
             selected: 0,
             open: false,
-        }
+        })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
@@ -476,6 +475,7 @@ mod tests {
             },
             0,
         )
+        .unwrap()
     }
 
     fn down(page: &mut ListPage, code: i32) -> bool {

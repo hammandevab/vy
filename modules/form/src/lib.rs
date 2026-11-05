@@ -241,27 +241,26 @@ const NEWS: &str = "Jag vill ha nyhetsbrevet";
 const SUBMIT: &str = "Skicka";
 
 impl App for FormPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "form: init");
-        Self {
+        Ok(Self {
             window,
-            title: style(Font::Sans, 26.0, 700, INK),
-            help: style(Font::Sans, 14.0, 400, MUTED),
-            label: style(Font::Sans, 13.0, 600, MUTED),
-            field: style(Font::Sans, 16.0, 400, INK),
-            placeholder: style(Font::Sans, 16.0, 400, BORDER),
-            button: style(Font::Sans, 16.0, 600, WHITE),
-            error: style(Font::Sans, 14.0, 400, ERROR),
-            ok: style(Font::Sans, 15.0, 400, OK_INK),
+            title: style(Font::Sans, 26.0, 700, INK)?,
+            help: style(Font::Sans, 14.0, 400, MUTED)?,
+            label: style(Font::Sans, 13.0, 600, MUTED)?,
+            field: style(Font::Sans, 16.0, 400, INK)?,
+            placeholder: style(Font::Sans, 16.0, 400, BORDER)?,
+            button: style(Font::Sans, 16.0, 600, WHITE)?,
+            error: style(Font::Sans, 14.0, 400, ERROR)?,
+            ok: style(Font::Sans, 15.0, 400, OK_INK)?,
             name: String::new(),
             email: String::new(),
             news: false,
             focus: None,
             submitted: false,
             error_text: None,
-        }
+        })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {

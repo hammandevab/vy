@@ -259,16 +259,15 @@ impl Game {
 }
 
 impl App for Game {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "game: init");
         let mut game = Self {
             window,
-            title: style(Font::Sans, 18.0, 700, HUD),
-            hud: style(Font::Mono, 15.0, 400, HUD),
-            hint: style(Font::Sans, 14.0, 400, HUD_MUTED),
-            big: style(Font::Sans, 32.0, 700, HUD),
+            title: style(Font::Sans, 18.0, 700, HUD)?,
+            hud: style(Font::Mono, 15.0, 400, HUD)?,
+            hint: style(Font::Sans, 14.0, 400, HUD_MUTED)?,
+            big: style(Font::Sans, 32.0, 700, HUD)?,
             phase: Phase::Waiting,
             paddle_x: window.width / 2.0,
             ball: (0.0, 0.0),
@@ -282,7 +281,7 @@ impl App for Game {
         };
         game.clamp_paddle();
         game.rest_ball();
-        game
+        Ok(game)
     }
 
     fn frame(&mut self, f: &mut Frame, dt_ms: i32) -> Result<(), VyError> {
@@ -446,6 +445,7 @@ mod tests {
             },
             0,
         )
+        .unwrap()
     }
 
     fn press(g: &mut Game, code: i32) -> bool {

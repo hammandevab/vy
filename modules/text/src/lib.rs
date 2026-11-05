@@ -125,24 +125,23 @@ impl TextPage {
 }
 
 impl App for TextPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         // Only DejaVu Sans has a bold face in the host (SPEC-6.4.2); a bold
         // serif would be matched to it anyway, so ask for sans outright.
         let mut page = Self {
             window,
-            title: style(Font::Sans, 34.0, 700, INK),
-            heading: style(Font::Sans, 22.0, 700, INK),
-            body: style(Font::Serif, 17.0, 400, INK),
-            quote: style(Font::Serif, 17.0, 400, MUTED),
+            title: style(Font::Sans, 34.0, 700, INK)?,
+            heading: style(Font::Sans, 22.0, 700, INK)?,
+            body: style(Font::Serif, 17.0, 400, INK)?,
+            quote: style(Font::Serif, 17.0, 400, MUTED)?,
             scroll: 0.0,
             heights: [0.0; BLOCKS],
             content_h: 0.0,
         };
         page.relayout();
         let _ = log(Level::Debug, "text: init");
-        page
+        Ok(page)
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {

@@ -514,25 +514,24 @@ const SUBTITLE: &str =
     "Januari till december 2026 · fast datatabell · för pekaren över en stapel eller en månad";
 
 impl App for Dashboard {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "dashboard: init");
-        Self {
+        Ok(Self {
             window,
-            title: style(Font::Sans, 24.0, 700, INK),
-            subtitle: style(Font::Sans, 13.0, 400, INK_2),
-            tile_label: style(Font::Sans, 13.0, 400, INK_2),
-            tile_value: style(Font::Sans, 28.0, 700, INK),
-            delta_up: style(Font::Sans, 13.0, 600, GOOD),
-            delta_down: style(Font::Sans, 13.0, 600, CRITICAL),
-            card_title: style(Font::Sans, 15.0, 600, INK),
-            tick: style(Font::Sans, 12.0, 400, INK_3),
-            legend: style(Font::Sans, 13.0, 400, INK_2),
-            tooltip_title: style(Font::Sans, 13.0, 600, TOOLTIP_INK),
-            tooltip_body: style(Font::Sans, 13.0, 400, TOOLTIP_INK),
+            title: style(Font::Sans, 24.0, 700, INK)?,
+            subtitle: style(Font::Sans, 13.0, 400, INK_2)?,
+            tile_label: style(Font::Sans, 13.0, 400, INK_2)?,
+            tile_value: style(Font::Sans, 28.0, 700, INK)?,
+            delta_up: style(Font::Sans, 13.0, 600, GOOD)?,
+            delta_down: style(Font::Sans, 13.0, 600, CRITICAL)?,
+            card_title: style(Font::Sans, 15.0, 600, INK)?,
+            tick: style(Font::Sans, 12.0, 400, INK_3)?,
+            legend: style(Font::Sans, 13.0, 400, INK_2)?,
+            tooltip_title: style(Font::Sans, 13.0, 600, TOOLTIP_INK)?,
+            tooltip_body: style(Font::Sans, 13.0, 400, TOOLTIP_INK)?,
             hover: Hover::None,
-        }
+        })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
@@ -605,6 +604,7 @@ mod tests {
             },
             0,
         )
+        .unwrap()
     }
 
     #[test]

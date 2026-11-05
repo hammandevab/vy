@@ -442,9 +442,8 @@ impl ChatPage {
 }
 
 impl App for ChatPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "chat: init");
         let now = now_ms();
         let seed = |from: Sender, text: &str, minutes_ago: i64| Message {
@@ -461,16 +460,16 @@ impl App for ChatPage {
         };
         let mut page = Self {
             window,
-            title: style(Font::Sans, 18.0, 700, INK),
-            subtitle: style(Font::Sans, 13.0, 400, MUTED),
-            name: style(Font::Sans, 12.0, 600, MUTED),
-            mine: style(Font::Sans, 15.0, 400, WHITE),
-            theirs: style(Font::Sans, 15.0, 400, INK),
-            stamp: style(Font::Sans, 11.0, 400, MUTED),
-            field: style(Font::Sans, 15.0, 400, INK),
-            placeholder: style(Font::Sans, 15.0, 400, MUTED),
-            button: style(Font::Sans, 15.0, 600, WHITE),
-            banner: style(Font::Sans, 13.0, 400, AMBER_INK),
+            title: style(Font::Sans, 18.0, 700, INK)?,
+            subtitle: style(Font::Sans, 13.0, 400, MUTED)?,
+            name: style(Font::Sans, 12.0, 600, MUTED)?,
+            mine: style(Font::Sans, 15.0, 400, WHITE)?,
+            theirs: style(Font::Sans, 15.0, 400, INK)?,
+            stamp: style(Font::Sans, 11.0, 400, MUTED)?,
+            field: style(Font::Sans, 15.0, 400, INK)?,
+            placeholder: style(Font::Sans, 15.0, 400, MUTED)?,
+            button: style(Font::Sans, 15.0, 600, WHITE)?,
+            banner: style(Font::Sans, 13.0, 400, AMBER_INK)?,
             messages: alloc::vec![
                 seed(Sender::Maja, "Hej! Har ni hunnit läsa utkastet till specen?", 26),
                 seed(
@@ -501,7 +500,7 @@ impl App for ChatPage {
         };
         page.relayout();
         page.set_focus(true);
-        page
+        Ok(page)
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {

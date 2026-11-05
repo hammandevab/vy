@@ -320,22 +320,21 @@ impl GalleryPage {
 const TITLE: &str = "Galleri";
 
 impl App for GalleryPage {
-    fn init(window: Window, _abi_minor: i32) -> Self {
-        let style =
-            |font, size, weight, color| text_style(font, size, weight, color).unwrap_or(StyleId(0));
+    fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "gallery: init");
-        Self {
+        Ok(Self {
             window,
-            header: style(Font::Sans, 22.0, 700, INK),
-            sub: style(Font::Sans, 13.0, 400, MUTED),
-            caption: style(Font::Sans, 14.0, 600, INK),
-            detail: style(Font::Mono, 12.0, 400, MUTED),
-            light_title: style(Font::Sans, 16.0, 600, ON_DARK),
-            light_sub: style(Font::Sans, 13.0, 400, ON_DARK_MUTED),
-            button: style(Font::Sans, 14.0, 600, ON_DARK),
+            header: style(Font::Sans, 22.0, 700, INK)?,
+            sub: style(Font::Sans, 13.0, 400, MUTED)?,
+            caption: style(Font::Sans, 14.0, 600, INK)?,
+            detail: style(Font::Mono, 12.0, 400, MUTED)?,
+            light_title: style(Font::Sans, 16.0, 600, ON_DARK)?,
+            light_sub: style(Font::Sans, 13.0, 400, ON_DARK_MUTED)?,
+            button: style(Font::Sans, 14.0, 600, ON_DARK)?,
             scroll: 0.0,
             open: None,
-        }
+        })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
@@ -455,6 +454,7 @@ mod tests {
             },
             0,
         )
+        .unwrap()
     }
 
     #[test]
