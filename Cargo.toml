@@ -74,3 +74,6 @@ softbuffer = { version = "0.4", default-features = false, features = ["x11", "x1
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Symbols and debug info are not shipped: the client binary is capped at
+# 25 MB (SPEC-12.3.1) and release.yml zips what this profile produces.
+strip = true
