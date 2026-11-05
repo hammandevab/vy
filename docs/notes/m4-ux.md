@@ -13,7 +13,7 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 | 3 | Textmarkering (SPEC-10.2.2), värdens egen (`selection.rs`): dra från en textnod markerar (sidan får pekarhändelserna ändå), Skift+klick utökar, Ctrl+A tar alla textnoder, Escape och ett tryck utanför text tömmer. Markeringen är noderna i dokumentordning mellan ändarna, med teckengranularitet i ändnoderna; Ctrl+C (och Ctrl+X) kopierar de logiska strängarna med `\n` mellan noder. Ritas av huvudprocessen som en genomskinlig överlagring i sidytan (`compose::fill_blend`, chromens accentfärg); sidans display list rörs inte. Flikprocessen rapporterar fokus (`ToShell::Focus`) så att Ctrl+A i ett fokuserat textfält går till sidan. | `spec_10_2_2_text_selection` (un-ignorerad, document- och form-sidan), `spec_10_2_2_selected_text_is_logical`, `spec_10_2_2_glyph_granularity_in_wrapped_runs` |
 | 4 | Sök på sidan (Ctrl+F, `find.rs`): en sökruta över sidytans övre högra hörn (egen display list, komponerad efter sidan som frågan; under den är ytan skalets), söker i det semantiska trädets text skiftlägesokänsligt med enkel Unicode-vikning (`char::to_lowercase`), visar "3 av 7"/"Inga träffar", Enter/Skift+Enter bläddrar med omlopp, Escape stänger, knapparna ‹ › × fungerar med pekaren. Träffarna markeras genom överlagringen (aktuell starkare). En träff utanför vyn hämtas in med syntetiska `SCROLL`. | `spec_10_1_1_find_on_page`, `spec_10_1_1_find_in_the_tree` |
 | 5 | AccessKit (SPEC-10.2.1, `a11y.rs`): skalets ögonblicksbild (fönster, adressfält, sidans träd och fokus) blir en hel `TreeUpdate` – fönstret som rot, adressfältet (`TextInput`), sidan (`Document`, klipper sina barn till sidytan) och modulens noder med plattformsroll, text som namn eller värde och rektangel i fysiska fönsterpixlar; fokus är värdens. Fönstret skapar `accesskit_winit::Adapter` medan fönstret är osynligt och skickar en uppdatering bara när ett hjälpmedel lyssnar och sammandraget ändrats. Åtgärder: Focus flyttar värdens fokus som Tab, Click trycker och släpper i nodens mitt (och följer en registrerad länk där), SetValue stöds inte. En sida utan träd märks "otillgänglig" även i trädet; felet att markören aldrig visades (fliken skickar bara ändrade träd, så en sida utan noder skickade inget) är rättat: en första frame utan träd betyder inget träd. | `spec_10_2_1_accesskit`, `spec_10_3_1_focus_order`, `spec_10_4_1_inaccessible_marker` (alla tre un-ignorerade), `spec_10_2_1_roles_and_ids`, `spec_10_2_1_any_tree_is_well_formed` |
-| 6 | Devtools (F12, SPEC-11.4.1, `devtools.rs`): en panel till höger om sidytan (sidan får den smalare ytan och lägger om sig; panelen är chrome) med flikarna "Display list" (framens opkoder med antal och byte per opkod; ett klick på en op ramar in dess rektangel över sidan), "Semantik" (trädet med nästling, roll, id, text och fokusmarkering), "Logg" (sidans loggrader med nivå och framenummer), "Inspelning" (spela in fliken från en ny laddning med `--record` till `<data>/recordings/vy-<tid>-<flik>.vyrec`, stoppa, lista, spela upp i en ny flik med `--replay`) och "Studio" ("Live-omladdning (localhost)": var 500:e ms en villkorlig GET mot varje localhost-sidas server och omladdning vid ändring; "Öppna Studio" öppnar `vy://localhost:8081/` i en ny flik). Dessutom rättat: efter en storleksändring fick sidan ingen frame förrän nästa inmatning (SPEC-6.2.1). | `spec_11_4_1_devtools_panel`, `spec_11_4_1_devtools_record_and_replay`, `spec_7_3_2_live_reload_localhost`, `spec_11_4_1_display_list_pane`, `spec_11_4_1_tree_log_recording_studio_panes`, i vy-proto `spec_7_3_2_revalidate_ignores_freshness` |
+| 6 | Devtools (F12, SPEC-11.4.1, `devtools.rs`): en panel till höger om sidytan (sidan får den smalare ytan och lägger om sig; panelen är chrome) med flikarna "Display list" (framens opkoder med antal och byte per opkod; ett klick på en op ramar in dess rektangel över sidan), "Semantik" (trädet med nästling, roll, id, text och fokusmarkering), "Logg" (sidans loggrader med nivå och framenummer), "Inspelning" (spela in fliken från en ny laddning med `--record` till `<data>/recordings/vy-<tid>-<flik>.vyrec`, stoppa, lista, spela upp i en ny flik med `--replay`) och "Studio" ("Live-omladdning (localhost)": var 500:e ms en villkorlig GET mot varje localhost-sidas server och omladdning vid ändring; "Öppna Studio" öppnar `vy://localhost:8081/` i en ny flik). En plain-http-förfrågan släpps bara till sidans egen loopback-origin. Dessutom rättat: efter en storleksändring fick sidan ingen frame förrän nästa inmatning (SPEC-6.2.1). | `spec_11_4_1_devtools_panel`, `spec_11_4_1_devtools_record_and_replay`, `spec_7_3_2_live_reload_localhost`, `spec_11_4_1_display_list_pane`, `spec_11_4_1_tree_log_recording_studio_panes`, i vy-proto `spec_7_3_2_revalidate_ignores_freshness`; plain-http-regeln `spec_5_2_8_plain_http_only_to_own_loopback_origin` |
 
 ## Beslut
 
@@ -152,7 +152,6 @@ På macOS gäller Cmd i stället för Ctrl.
 | Crate | Varför | Varför inte 200 rader själv | Drar in (nytt i låsfilen) |
 | --- | --- | --- | --- |
 | `arboard` 3.7, `default-features = false` (ingen `image-data`, ingen `wayland-data-control`) | Systemets urklipp för text på Windows, macOS och X11. | Tre plattformars urklipp: Win32 `OpenClipboard`/`CF_UNICODETEXT` vore ~80 rader, men X11 kräver en egen tråd som äger markeringen och svarar på `SelectionRequest` (INCR för stora texter, överlämning till urklippshanteraren vid avslut), och macOS kräver `NSPasteboard` via objc2. | Linux: `parking_lot`, `parking_lot_core`, `lock_api`, `scopeguard` (x11rb och resten fanns via winit). Windows: `clipboard-win`, `error-code`. macOS: `objc2-app-kit` (objc2 fanns). |
-
 | `accesskit` 0.25 | Schemat för tillgänglighetsträdet (`Node`, `Role`, `TreeUpdate`); `a11y.rs` bygger trädet med det, även utan fönster. | Det är kontraktet plattformsadaptrarna läser; att skriva det själv vore att skriva adaptrarna. | `uuid` (utan standardfunktioner). |
 | `accesskit_winit` 0.34 (`rwh_06`; ingen `accesskit_unix` som standard) | Plattformens tillgänglighets-API (SPEC-10.2.1): UI Automation på Windows, NSAccessibility på macOS, kopplat till winit-fönstret. | UIA kräver COM-servrar för provider-gränssnitten (tusentals rader i `accesskit_windows`), NSAccessibility en Objective-C-klass per nodtyp; ingen av dem går på 200 rader. | Windows: `accesskit_windows`, `accesskit_consumer`, `windows` 0.6x m.fl. (+20 crates, 218 → 238). macOS: `accesskit_macos`, `accesskit_consumer`, objc2-delar (+8, 239 → 247). Linux: +5 (265 → 270), adaptern gör inget. |
 | (frivilligt) funktionen `a11y-linux` | AT-SPI över D-Bus på Linux/BSD: `accesskit_unix` med `async-io`. | – | +80 crates (270 → 350): `zbus`, `atspi`, `async-io`, `async-executor`, `blocking`, `event-listener`, `serde_repr`, `enumflags2`, `phf` m.fl. |
@@ -176,17 +175,22 @@ Urklipp på Wayland utan XWayland: `arboard::Clipboard::new()` misslyckas, skale
 `vy-shell: no system clipboard (…); using an in-memory one` och använder minnesurklippet – aldrig panik.
 Samma sak i CI utan display.
 
-Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
-
 ## Grindar och tal
 
-- Delad byggkatalog med fyra arbetsträd på 2 CPU:er: `vy-render`:s två väggklocktester
-  (`spec_5_3_3_bench_32_rounded_clips_2000_rects`, `spec_5_3_3_bench_65000_fullscreen_rects`, gräns 1 s i
-  debug) föll ibland vid belastning 4–7 (1,02–1,5 s). `vy-render` är orörd på den här grenen; de gick
-  igenom vid lägre belastning. Övriga grindar gröna vid varje commit: fmt, clippy, `cargo test --workspace`,
-  spec_trace, konformans 55/55 à 0,000 %, typkontroll av `vy-shell` för Windows och macOS (`check-cross`,
-  C-beroenden ersatta av tomma objekt).
-- Binärstorlek: se *Nya beroenden*.
+- Slutläget (0dff18d), i grenens egen byggkatalog: `cargo test --workspace` **274 gröna, 15 ignorerade**
+  (main: 19 ignorerade; un-ignorerade här: `spec_10_2_1_accesskit`, `spec_10_2_2_text_selection`,
+  `spec_10_3_1_focus_order`, `spec_10_4_1_inaccessible_marker`), spec_trace 133/133, konformans 55/55 à
+  0,000 % (inga guldbilder ändrade), fmt, clippy utan varningar, typkontroll av `vy-shell` för Windows och
+  macOS (`check-cross`, C-beroenden ersatta av tomma objekt), `cargo check -p vy-shell --features
+  a11y-linux`. Modulgrinden behövdes inte: inget i `modules/`, `crates/vy-sdk` eller `crates/vy-abi` ändrat.
+- `vy-render`:s två väggklocktester (`spec_5_3_3_bench_32_rounded_clips_2000_rects`,
+  `spec_5_3_3_bench_65000_fullscreen_rects`, gräns 1 s i debug) föll ibland vid belastning 4–7 på 2 CPU:er
+  (1,02–1,5 s). `vy-render` är orörd på den här grenen; de gick igenom vid omkörning.
+- Byggmiljön: fram till 22:16 delade fyra arbetsträd `target/`. Två följder sågs och rättades innan något
+  committades: ett annat arbetsträds `vy-runtime` länkades in (cargo-hashen bortser från arbetsträdets
+  sökväg) och ett annat arbetsträds `vy-cli`/`vy-shell` startades som flikprocess (skalfallen föll med
+  15–87 %, `--tab` sade "unknown message tag 14"). Inga guldbilder gjordes ur de körningarna; slutläget ovan
+  är kört i egen byggkatalog.
 
 ## Hotbild
 
@@ -215,6 +219,9 @@ Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
   begärt det, i datakatalogen (`recordings/`), och spelas bara upp på begäran. En uppspelad session kör
   samma modul i en flikprocess som vilken sida som helst; den får inget nätverk (huvudprocessen svarar inte
   på dess förfrågningar annorlunda än för en vanlig flik utan grants: fliken har inga capabilities alls).
+- **Plain http** (loopback, SPEC-7.1.3) går bara till sidans egen origin: en fjärrsida med en
+  `http://localhost:…`-origin i sin `net`-lista når den ändå inte, och en localhost-sida når inte en annan
+  lokal port (t.ex. en annan utvecklingsserver). Testat i `spec_5_2_8_plain_http_only_to_own_loopback_origin`.
 - **Live-omladdning** frågar bara servrar på localhost (adressens värd är `localhost`, `127.0.0.1` eller
   `[::1]`), bara medan användaren slagit på den, och gör inget annat än en villkorlig GET av sidans adress;
   en ändrad sida laddas om genom den vanliga vägen (signatur, nyckel, grants som förut).
@@ -235,7 +242,8 @@ Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
   Om ett annat spår (m4/security fuzzar ramningen) också lagt till varianter med samma taggar måste en av
   dem numreras om vid sammanslagning; testet `ipc::tests` räknar varianterna (14 respektive 14 här).
 - `SPEC.md`: ny mening SPEC-8.2.4 (eget `spec:`-commit, §8 är inte fryst).
-- `Cargo.toml`, `Cargo.lock`: `arboard` i `[workspace.dependencies]`.
+- `Cargo.toml`, `Cargo.lock`: `arboard`, `accesskit` och `accesskit_winit` i `[workspace.dependencies]`
+  (låsfilen får också `accesskit_unix` och zbus-stacken, som bara byggs med `a11y-linux`).
 - `crates/vy-shell/src/process.rs` (m4/security) är **inte** ändrad; steg 2 bygger på att
   `TabConnection::shutdown` väntar in processen och läsartråden. Ändras det (t.ex. till asynkron
   nedstängning) måste `Shell::retired_message` fortfarande få svaret före laddarens nästa svar.
