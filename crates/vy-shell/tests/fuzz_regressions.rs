@@ -290,6 +290,10 @@ fn write_seeds() {
             .encode(),
         ),
         ("shutdown.bin", ToTab::Shutdown.encode()),
+        // m4/ux: the copy gesture (SPEC-8.2.4), devtools recording, focus.
+        ("copy-gesture.bin", ToTab::CopyGesture.encode()),
+        ("stop-recording.bin", ToTab::StopRecording.encode()),
+        ("focus.bin", ToShell::Focus(Some(-10)).encode()),
     ];
     for (name, bytes) in messages {
         write("ipc", name, &bytes);
