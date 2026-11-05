@@ -717,7 +717,10 @@ events = [
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i
-# begränsat läge (SPEC-7.4.3), så markören "begränsat läge" syns. Inga events, inget träd.
+# begränsat läge (SPEC-7.4.3), så markören "begränsat läge" syns. Inga events, inget träd, inga
+# `capabilities`. Med `address = "vy://…"` tas sidan i stället som hämtad därifrån, signerad med
+# svitens nyckel och verifierad (SPEC-7.4.2): standardpolicyn avgör grants (SPEC-8.2.3), pluppar
+# visas, och en capability som policyn frågar om ger frågan med Tillåt/Neka över sidytans överkant.
 
 [[case]]
 name = "shell-hello-800x600@1"
@@ -750,3 +753,12 @@ width = 300
 height = 200
 scale = 1
 shell = true
+
+[[case]]
+name = "shell-chat-800x600@1-ask"              # signerad sida på en annan origin än manifestets net-origin:
+module = "chat"                                # frågan om `net` ligger över sidytan utan att flytta den (SPEC-8.2.3)
+width = 800
+height = 600
+scale = 1
+shell = true
+address = "vy://conformance.example/chat"
