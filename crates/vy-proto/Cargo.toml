@@ -11,6 +11,14 @@ vy-abi.workspace = true
 vy-manifest.workspace = true
 ureq.workspace = true
 minicbor.workspace = true
+# Message ids of the DNS stub resolver (SPEC-7.4.5); the same crate and
+# version ring already pulls in through ureq.
+getrandom.workspace = true
+
+# The system resolver on Windows (`DnsQuery_UTF8`, SPEC-7.4.5): the same
+# crate and version vy-shell already uses there, two more feature gates.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns"] }
 
 [dev-dependencies]
 wat.workspace = true
