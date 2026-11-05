@@ -70,6 +70,11 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11
 # Presents a CPU-rasterized frame to the window without a GPU context
 # (the wgpu path is M4/M5). No KMS/DRM backend.
 softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+# M4 (vy-shell); motiveringar i docs/notes/m4-ux.md.
+# The system clipboard for Ctrl+C/V/X: text only (no `image-data`, which
+# pulls in `image`); X11 on Linux (no `wayland-data-control`: XWayland
+# bridges the selection), clipboard-win on Windows, NSPasteboard on macOS.
+arboard = { version = "3.7", default-features = false }
 
 [profile.release]
 lto = "thin"

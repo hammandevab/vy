@@ -176,6 +176,7 @@ impl ApplicationHandler<Wake> for App {
             data_dir,
             headless: false,
             opener: Box::new(SystemOpener),
+            clipboard: crate::clipboard::system_or_memory(),
             waker,
         };
         let mut shell = match Shell::new(config, w, h, scale as f32) {
@@ -286,10 +287,7 @@ impl ApplicationHandler<Wake> for App {
                     shell.key(code, down, mods, event.repeat);
                 }
                 // Committed text, when the key is not a shortcut chord.
-                let plain = mods
-                    & (vy_abi::modifier::CTRL | vy_abi::modifier::ALT | vy_abi::modifier::META)
-                    == 0;
-                if down && plain {
+                if down && crate::keymap::produces_text(mods) {
                     if let Some(text) = event.text.as_deref() {
                         if !text.is_empty() && !text.chars().any(char::is_control) {
                             shell.text_input(text);

@@ -141,9 +141,43 @@ pub fn modifier_bits(state: ModifiersState) -> i32 {
     bits
 }
 
+/// True when a key pressed with `modifiers` (SPEC-A.5.1 bits) may commit
+/// the text winit reports for it: no modifier, Shift, AltGr (which
+/// Windows and X11 report as Ctrl+Alt: `@ { [ ] } \ $ |` on a Swedish
+/// keyboard), and Option on macOS (`@` is Option+2 there). Ctrl alone and
+/// Meta (Cmd, Win) are shortcut chords and commit nothing.
+pub fn produces_text(modifiers: i32) -> bool {
+    let ctrl = modifiers & modifier::CTRL != 0;
+    let alt = modifiers & modifier::ALT != 0;
+    if modifiers & modifier::META != 0 {
+        return false;
+    }
+    match (ctrl, alt) {
+        (false, false) | (true, true) => true,
+        (false, true) => cfg!(target_os = "macos"),
+        (true, false) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPEC-A.5.1: AltGr (Ctrl+Alt) and plain keys commit text; Ctrl and
+    /// Meta chords do not; Alt alone only on macOS (Option).
+    #[test]
+    fn spec_a_5_1_altgr_commits_text() {
+        assert!(produces_text(0));
+        assert!(produces_text(modifier::SHIFT));
+        assert!(produces_text(modifier::CTRL | modifier::ALT));
+        assert!(produces_text(
+            modifier::CTRL | modifier::ALT | modifier::SHIFT
+        ));
+        assert!(!produces_text(modifier::CTRL));
+        assert!(!produces_text(modifier::META));
+        assert!(!produces_text(modifier::META | modifier::ALT));
+        assert_eq!(produces_text(modifier::ALT), cfg!(target_os = "macos"));
+    }
 
     /// SPEC-10.3.1, SPEC-A.5.1: the codes the spec names and the shell's
     /// shortcuts use are the HID codes of their physical keys; the

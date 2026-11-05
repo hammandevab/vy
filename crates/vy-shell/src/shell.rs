@@ -11,6 +11,7 @@
 
 use crate::address::{AddressField, Edit};
 use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
+use crate::clipboard::{self, ClipboardBackend};
 use crate::compose::{blend, blit, physical};
 use crate::external::{is_external, Opener};
 use crate::grants::{GrantStore, Resolved};
@@ -92,6 +93,9 @@ pub struct Config {
     pub headless: bool,
     /// Opens `https://` addresses (SPEC-2.1.7).
     pub opener: Box<dyn Opener>,
+    /// The clipboard behind Ctrl+C/V/X and the pages' `clipboard_*`
+    /// (SPEC-5.2.12): the system's in a window, memory headless.
+    pub clipboard: Box<dyn ClipboardBackend>,
     /// Wakes the UI thread.
     pub waker: Waker,
 }
@@ -168,6 +172,12 @@ struct Tab {
     /// Clock reading at which the capability question now shown for this
     /// tab appeared, for arming "Tillåt" (`DIALOG_ARM_MS`).
     ask_since: Option<i64>,
+    /// Clock reading of the last copy gesture (Ctrl+C or Ctrl+X) delivered
+    /// to the page that no `clipboard_write` has used yet (SPEC-8.2.4).
+    copy_gesture_ms: Option<i64>,
+    /// The clipboard as the tab's runtime holds it, for `clipboard_read`:
+    /// what it last wrote or was last sent; `None` before the load.
+    clipboard_sent: Option<Vec<u8>>,
 }
 
 impl Tab {
@@ -211,6 +221,8 @@ impl Tab {
             under_min: false,
             gesture_ms: None,
             ask_since: None,
+            copy_gesture_ms: None,
+            clipboard_sent: None,
         }
     }
 
@@ -218,6 +230,14 @@ impl Tab {
     /// true at most once per gesture.
     fn take_gesture(&mut self, now: i64) -> bool {
         self.gesture_ms
+            .take()
+            .is_some_and(|at| now - at <= GESTURE_WINDOW_MS)
+    }
+
+    /// Take the tab's recent copy gesture (SPEC-8.2.4), if there is one at
+    /// `now`: one `clipboard_write` without the capability per gesture.
+    fn take_copy_gesture(&mut self, now: i64) -> bool {
+        self.copy_gesture_ms
             .take()
             .is_some_and(|at| now - at <= GESTURE_WINDOW_MS)
     }
@@ -308,7 +328,6 @@ pub struct Shell {
     buttons: i32,
     modifiers: i32,
     hover: Option<String>,
-    clipboard: Vec<u8>,
     clock_headless: i64,
     started: Instant,
     quit: bool,
@@ -360,7 +379,6 @@ impl Shell {
             buttons: 0,
             modifiers: 0,
             hover: None,
-            clipboard: Vec::new(),
             clock_headless: 0,
             started: Instant::now(),
             quit: false,
@@ -421,10 +439,15 @@ impl Shell {
         &self.external_opens
     }
 
-    /// The shell's clipboard (SPEC-5.2.12), as the last page or address
-    /// bar left it.
-    pub fn clipboard(&self) -> &[u8] {
-        &self.clipboard
+    /// The clipboard's text (SPEC-5.2.12), as the last page, copy or
+    /// address bar left it; `None` when empty.
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        self.config.clipboard.read()
+    }
+
+    /// Replace the clipboard's text, as another program would.
+    pub fn set_clipboard_text(&mut self, text: &str) {
+        self.config.clipboard.write(text);
     }
 
     /// The active tab's id.
@@ -806,6 +829,8 @@ impl Shell {
             tab.pressed_link = None;
             tab.gesture_ms = None;
             tab.ask_since = None;
+            tab.copy_gesture_ms = None;
+            tab.clipboard_sent = None;
         }
         if Some(id) == self.active_tab() {
             let display = self.tab(id).map(|t| t.display.clone()).unwrap_or_default();
@@ -1013,7 +1038,6 @@ impl Shell {
                 RandomSource::ChaCha20(keybytes),
             )
         };
-        let clipboard = self.clipboard.clone();
         let (net_origins, storage_quota_bytes, memory_max_pages) = match &page.manifest {
             Some(m) => (
                 m.capabilities
@@ -1071,6 +1095,10 @@ impl Shell {
         tab.display = page.display;
         let want_size = page_size(page_rect, tab.zoom, scale);
         tab.sent_size = want_size;
+        // The page's runtime starts with an empty clipboard and is handed
+        // the real one before each gesture, when `clipboard` is granted
+        // (see `send_page_event`).
+        tab.clipboard_sent = Some(Vec::new());
         match conn {
             Ok(conn) => {
                 let request = LoadRequest {
@@ -1087,7 +1115,7 @@ impl Shell {
                     height: want_size.1,
                     scale: want_size.2,
                     clock_ms,
-                    clipboard: Some(clipboard),
+                    clipboard: Some(Vec::new()),
                 };
                 conn.send(&ToTab::Load(Box::new(request)));
                 tab.conn = Some(conn);
@@ -1248,23 +1276,24 @@ impl Shell {
             }
             ToShell::Clipboard(bytes) => {
                 // The clipboard is written through `clipboard_write`, which
-                // needs the capability (SPEC-5.2.12, SPEC-5.3.1): a tab
-                // without it has nothing to say to the other tabs.
-                let Some(tab) = self.tab_mut(id) else {
+                // needs the capability (SPEC-5.2.12, SPEC-5.3.1) or the
+                // user's own copy gesture in that tab, once per gesture
+                // (SPEC-8.2.4); the tab process runs page code, so the
+                // main process decides again.
+                let now = self.now_ms();
+                let Some(tab) = find_tab(&mut self.tabs, id) else {
                     return;
                 };
-                if !tab.capabilities().has(cap::CLIPBOARD) {
-                    tab.log("[host] clipboard ignored: `clipboard` is not granted".into());
+                if !tab.capabilities().has(cap::CLIPBOARD) && !tab.take_copy_gesture(now) {
+                    tab.log(
+                        "[host] clipboard ignored: `clipboard` is not granted and no copy gesture is pending"
+                            .into(),
+                    );
                     return;
                 }
-                self.clipboard = bytes.clone();
-                for tab in &self.tabs {
-                    if tab.id != id && tab.running() {
-                        tab.send(&ToTab::Clipboard {
-                            bytes: bytes.clone(),
-                        });
-                    }
-                }
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                tab.clipboard_sent = Some(bytes);
+                self.config.clipboard.write(&text);
             }
             ToShell::Ime(rect) => {
                 if let Some(tab) = self.tab_mut(id) {
@@ -1682,6 +1711,31 @@ impl Shell {
 
     fn send_page_event(&mut self, kind: i32, a: i32, b: i32, c: i32, d: i32) {
         let now = self.now_ms();
+        // A gesture lets the page read the clipboard for a second
+        // (SPEC-5.2.12): a page granted `clipboard` is handed the current
+        // one first, when it changed since the last time.
+        let fresh_press = kind == event::POINTER_DOWN || (kind == event::KEY_DOWN && c == 0);
+        if fresh_press
+            && self
+                .tabs
+                .get(self.active)
+                .is_some_and(|t| t.running() && t.capabilities().has(cap::CLIPBOARD))
+        {
+            let bytes = self
+                .config
+                .clipboard
+                .read()
+                .map(String::into_bytes)
+                .unwrap_or_default();
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                if tab.clipboard_sent.as_ref() != Some(&bytes) {
+                    tab.send(&ToTab::Clipboard {
+                        bytes: bytes.clone(),
+                    });
+                    tab.clipboard_sent = Some(bytes);
+                }
+            }
+        }
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.running() {
                 tab.send(&ToTab::Event {
@@ -1957,9 +2011,12 @@ impl Shell {
     /// consumed it; otherwise it went to the page.
     pub fn key(&mut self, code: i32, down: bool, modifiers: i32, repeat: bool) -> bool {
         self.modifiers = modifiers;
-        let ctrl = modifiers & modifier::CTRL != 0 || modifiers & modifier::META != 0;
-        let shift = modifiers & modifier::SHIFT != 0;
         let alt = modifiers & modifier::ALT != 0;
+        // Ctrl with Alt is AltGr on Windows and X11 (a character, not a
+        // shortcut: AltGr+0 is `}` and AltGr+`+` is `\` on a Swedish
+        // keyboard); Meta is Cmd on macOS.
+        let ctrl = modifiers & modifier::CTRL != 0 && !alt || modifiers & modifier::META != 0;
+        let shift = modifiers & modifier::SHIFT != 0;
         if down {
             match (code, ctrl, alt) {
                 (hid::L, true, _) => {
@@ -2016,9 +2073,63 @@ impl Shell {
             }
             return true;
         }
+        if down && ctrl && !alt {
+            match code {
+                // Paste: the clipboard reaches the page as typed text.
+                hid::V => {
+                    self.paste_into_page();
+                    return true;
+                }
+                // Copy or cut: a copy gesture for the page (SPEC-8.2.4).
+                hid::C | hid::X => {
+                    self.copy_gesture(code, modifiers, repeat);
+                    return false;
+                }
+                _ => {}
+            }
+        }
         let kind = if down { event::KEY_DOWN } else { event::KEY_UP };
         self.send_page_event(kind, code, modifiers, i32::from(repeat && down), 0);
         false
+    }
+
+    /// Ctrl+V with keyboard focus in the page: the clipboard's text goes
+    /// to the page as `TEXT_INPUT`, exactly as if typed (SPEC-5.1.6), in
+    /// chunks of `clipboard::PASTE_CHUNK_BYTES` with `\n` line endings;
+    /// the page routes it to its focused field. No capability is
+    /// involved: it is the user's input.
+    fn paste_into_page(&mut self) {
+        let Some(text) = self.config.clipboard.read() else {
+            return;
+        };
+        let now = self.now_ms();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if !tab.running() {
+            return;
+        }
+        for chunk in clipboard::paste_chunks(&text) {
+            tab.send(&ToTab::TextInput {
+                text: chunk,
+                clock_ms: now,
+            });
+        }
+        tab.tick_due = true;
+    }
+
+    /// Ctrl+C or Ctrl+X with keyboard focus in the page: the key goes to
+    /// the page as `KEY_DOWN`, and a `clipboard_write` while the page
+    /// handles it succeeds without the capability (SPEC-8.2.4), once.
+    fn copy_gesture(&mut self, code: i32, modifiers: i32, repeat: bool) {
+        let now = self.now_ms();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if tab.running() {
+                tab.copy_gesture_ms = Some(now);
+                tab.send(&ToTab::CopyGesture);
+            }
+        }
+        self.send_page_event(event::KEY_DOWN, code, modifiers, i32::from(repeat), 0);
     }
 
     fn address_key(&mut self, code: i32, ctrl: bool, shift: bool) {
@@ -2042,14 +2153,26 @@ impl Shell {
             hid::BACKSPACE => self.address.edit(Edit::Backspace { word: ctrl }),
             hid::DELETE => self.address.edit(Edit::Delete { word: ctrl }),
             hid::A if ctrl => self.address.edit(Edit::SelectAll),
-            hid::C if ctrl => self.clipboard = self.address.selected_text().as_bytes().to_vec(),
+            hid::C if ctrl => {
+                let selected = self.address.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                }
+            }
             hid::X if ctrl => {
-                self.clipboard = self.address.selected_text().as_bytes().to_vec();
-                self.address.insert("");
+                let selected = self.address.selected_text().to_string();
+                if !selected.is_empty() {
+                    self.config.clipboard.write(&selected);
+                    self.address.insert("");
+                }
             }
             hid::V if ctrl => {
-                let paste = String::from_utf8_lossy(&self.clipboard).into_owned();
-                self.address.insert(&paste);
+                if let Some(paste) = self.config.clipboard.read() {
+                    self.address.insert(clipboard::truncate(
+                        &paste,
+                        clipboard::MAX_ADDRESS_PASTE_BYTES,
+                    ));
+                }
             }
             _ => return,
         }

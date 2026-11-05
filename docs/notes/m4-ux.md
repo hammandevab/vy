@@ -1,0 +1,95 @@
+# M4 ux – urklipp, lagring, markering, sök, tillgänglighet, devtools
+
+Byggagentens noteringar för grenen `m4/ux` (från `main` 3bc0bcb). Granskningssidan skrivs av en annan
+agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy-sdk`, `vy-cli`:s
+`--dump-semantic`. Det som rör andra spår står under *Berör andra spår*.
+
+## Vad som landat
+
+| Steg | Vad | Test |
+| --- | --- | --- |
+| 1 | Systemets urklipp bakom Ctrl+C/V/X (`clipboard.rs`, `ClipboardBackend`): `arboard` i fönstret, minne huvudlöst och när systemets inte kan öppnas. Ctrl+V i sidan levererar urklippet som `TEXT_INPUT` (som om det skrivits), i bitar om 4 KB, `\r\n`/`\r` → `\n`, högst 1 MB. Ctrl+C/V/X i adressfältet går mot samma urklipp (inklistring högst 8 KB). Ctrl+C/Ctrl+X i sidan är en kopieringsgest (SPEC-8.2.4): sidans `clipboard_write` under just det `KEY_DOWN` lyckas utan capability. AltGr (Ctrl+Alt) skriver tecken i stället för att trigga genvägar. | `spec_8_2_4_copy_gesture_grants_clipboard_write`, `spec_5_2_12_clipboard_copy_paste_through_the_shell`, `spec_5_2_12_memory_clipboard_and_paste_chunks`, `spec_a_5_1_altgr_is_not_a_shortcut`, `spec_a_5_1_altgr_commits_text` |
+
+## Beslut
+
+- **Urklippet är systemets, och sidan ser det bara med capability.** Huvudprocessen äger urklippet
+  (`Config::clipboard`). En flikprocess startar med tomt urklipp och får systemets innehåll (`ToTab::Clipboard`)
+  först vid en färsk gest – pekartryck eller tangentnedtryckning utan upprepning – och bara när
+  `clipboard` är beviljad, och bara när innehållet ändrats sedan senast. Förr skickades skalets eget
+  urklipp till alla flikar vid varje skrivning; nu når ingenting en flik som inte fått capabilityn.
+- **Ctrl+V i sidan är inmatning, inte `clipboard_read`.** Texten levereras som `TEXT_INPUT` och sidan
+  lägger den i sitt fokuserade fält, precis som skriven text; ingen capability behövs. Ctrl+V:s
+  `KEY_DOWN` konsumeras av skalet (annars skulle en sida som själv klistrar in på Ctrl+V få texten
+  två gånger). `KEY_UP` för V går fram som förut.
+- **Kopieringsgesten (SPEC-8.2.4)** är en engångsram `ToTab::CopyGesture` som armar exakt nästa
+  `ToTab::Event`; flikloopen levererar den med `Runtime::event_as_copy_gesture`, och `clipboard_write`
+  släpps igenom under just det anropet. Huvudprocessen avgör igen när `ToShell::Clipboard` kommer:
+  utan beviljad `clipboard` tas en skrivning bara emot inom 1 s efter en kopieringsgest i den fliken,
+  och bara en per gest (flikprocessen kör sidans kod och litas inte på).
+- **Varje skrivning rapporteras** (`Runtime::take_clipboard_write`), inte bara ändrade värden: systemets
+  urklipp kan ha ändrats av ett annat program mellan två likadana kopieringar.
+- **AltGr.** Windows och X11 rapporterar AltGr som Ctrl+Alt. Skalets Ctrl-genvägar kräver nu Ctrl utan
+  Alt (eller Meta/Cmd), och fönstret skickar text för Ctrl+Alt (och för Option på macOS). Förr gick
+  `@ { [ ] } \ $ |` inte att skriva på ett svenskt tangentbord, och AltGr+0 (`}`) nollställde zoomen.
+
+## Tangentbordstabell
+
+Det testguiden skrivs från. "Sidan" betyder att tangenten går till modulen som `KEY_DOWN`/`KEY_UP`.
+
+| Tangent | Var | Verkan |
+| --- | --- | --- |
+| Ctrl+V | sidan | urklippets text till sidan som inskriven text (`TEXT_INPUT`); hamnar i fokuserat fält |
+| Ctrl+C, Ctrl+X | sidan | går till sidan; sidan får skriva urklippet under tangenten utan capability (SPEC-8.2.4) |
+| Ctrl+V | adressfältet | klistra in (radbrytningar tas bort, högst 8 KB) |
+| Ctrl+C, Ctrl+X | adressfältet | kopiera/klipp ut markeringen till systemets urklipp |
+| AltGr+tangent | överallt | tecknet (t.ex. `@`, `{`, `\`), aldrig en genväg |
+| Ctrl+L, Ctrl+T, Ctrl+W, Ctrl+Tab, F5, Alt+Vänster/Höger, Ctrl+Plus/Minus/0 | överallt | som i M3 (notes/m3-shell) |
+
+På macOS gäller Cmd i stället för Ctrl.
+
+## Nya beroenden
+
+| Crate | Varför | Varför inte 200 rader själv | Drar in (nytt i låsfilen) |
+| --- | --- | --- | --- |
+| `arboard` 3.7, `default-features = false` (ingen `image-data`, ingen `wayland-data-control`) | Systemets urklipp för text på Windows, macOS och X11. | Tre plattformars urklipp: Win32 `OpenClipboard`/`CF_UNICODETEXT` vore ~80 rader, men X11 kräver en egen tråd som äger markeringen och svarar på `SelectionRequest` (INCR för stora texter, överlämning till urklippshanteraren vid avslut), och macOS kräver `NSPasteboard` via objc2. | Linux: `parking_lot`, `parking_lot_core`, `lock_api`, `scopeguard` (x11rb och resten fanns via winit). Windows: `clipboard-win`, `error-code`. macOS: `objc2-app-kit` (objc2 fanns). |
+
+Urklipp på Wayland utan XWayland: `arboard::Clipboard::new()` misslyckas, skalet loggar
+`vy-shell: no system clipboard (…); using an in-memory one` och använder minnesurklippet – aldrig panik.
+Samma sak i CI utan display.
+
+Binärstorlek (release, Linux, strippad): se tabellen under *Grindar och tal*.
+
+## Hotbild
+
+- **Urklippsläsning** kräver fortfarande capability `clipboard` och en gest inom 1 s (SPEC-5.2.12). Det nya
+  är att flikprocessen bara får systemets urklipp när capabilityn är beviljad och användaren just gjort
+  en gest i fliken; en sida utan capability ser aldrig urklippet, inte ens i sitt eget minne.
+- **Urklippsskrivning utan capability** (SPEC-8.2.4) är begränsad till det `KEY_DOWN` för Ctrl+C/Ctrl+X som
+  användaren tryckt i sidan: en sida kan ersätta urklippet bara när användaren bett om en kopiering,
+  med vad sidan vill – samma sak som på webben (`copy`-händelsen). Den kan inte läsa det. Huvudprocessen
+  kräver gesten igen (inom 1 s, en skrivning per gest), så en komprometterad flikprocess kan inte skriva
+  urklippet i bakgrunden. Test: `spec_8_2_4_copy_gesture_grants_clipboard_write` (flikloopen),
+  `spec_5_2_12_clipboard_copy_paste_through_the_shell` (skalet, med en förfalskad `Clipboard`-ram).
+- **Inklistring** är användarens egen inmatning: texten går som `TEXT_INPUT` till sidan som har fokus.
+  Begränsad till 1 MB (samma som en sidas `clipboard_write`), i bitar om 4 KB så att en liten `vy_alloc`-arena
+  räcker. Adressfältet tar högst 8 KB och inga styrtecken.
+
+## Berör andra spår
+
+- `crates/vy-runtime/src/host.rs`, `src/lib.rs` (m4/perf): additivt – fälten `Host::copy_gesture` och
+  `Host::clipboard_written`, `Runtime::event_as_copy_gesture`, `Runtime::take_clipboard_write`; grinden i
+  `clipboard_write` släpper igenom under kopieringsgesten. Inget befintligt API ändrat. (Commit 26e77b6.)
+- `crates/vy-shell/src/ipc.rs`: ny ram `ToTab::CopyGesture` med tagg 13. Om ett annat spår också lagt
+  till en `ToTab`-variant med tagg 13 måste en av dem numreras om vid sammanslagning.
+- `SPEC.md`: ny mening SPEC-8.2.4 (eget `spec:`-commit, §8 är inte fryst).
+- `Cargo.toml`, `Cargo.lock`: `arboard` i `[workspace.dependencies]`.
+
+## Spec-frågor
+
+Numreringen fortsätter efter notes/m3-shell (45–52).
+
+53. **SPEC-8.2.4 mot SPEC-5.2.12/5.3.1.** Den nya meningen säger att en skrivning under kopieringsgesten
+    lyckas utan capability; 5.2.12 rubricerar urklippet "(capability `clipboard`)" och 5.3.1 säger att
+    ett anrop utan beviljad capability ger `E_DENIED`. Läsningen här är att 8.2.4 är en policyregel om
+    *när* capabilityn anses beviljad (implicit, under gesten), så §5 är orört. Bör 5.3.1 få en hänvisning
+    i 1.1, eller räcker det att 8.2.4 står i §8?

@@ -11,6 +11,7 @@
 
 pub mod address;
 pub mod chrome;
+pub mod clipboard;
 pub mod compose;
 pub mod external;
 pub mod grants;
@@ -762,7 +763,7 @@ mod tests {
             plain,
             ToShell::Clipboard(b"not granted".to_vec()),
         );
-        assert_eq!(shell.clipboard(), b"");
+        assert_eq!(shell.clipboard_text(), None);
         inject(
             &mut shell,
             plain,
@@ -777,7 +778,179 @@ mod tests {
         shell.answer_ask(true);
         assert_eq!(shell.tab_badges(clip)[1], ("clipboard", true));
         inject(&mut shell, clip, ToShell::Clipboard(b"granted".to_vec()));
-        assert_eq!(shell.clipboard(), b"granted");
+        assert_eq!(shell.clipboard_text().as_deref(), Some("granted"));
+        shell.shutdown();
+    }
+
+    /// SPEC-5.2.12, SPEC-8.2.4, SPEC-5.1.6: the clipboard is the system's
+    /// (memory here). Ctrl+V with focus in the page delivers its text to
+    /// the page as `TEXT_INPUT`, as if typed, with `\n` line endings, and
+    /// the form page's focused field takes it; Ctrl+V, Ctrl+C and Ctrl+X in
+    /// the address bar paste, copy and cut through the same clipboard.
+    /// Ctrl+C or Ctrl+X in the page is a copy gesture: the page's
+    /// `clipboard_write` while handling that key succeeds without the
+    /// capability and lands on the clipboard, once per gesture; a write on
+    /// any other key is refused by the tab's runtime, and a second write
+    /// the tab claims for the same gesture is refused by the shell.
+    #[test]
+    fn spec_5_2_12_clipboard_copy_paste_through_the_shell() {
+        use crate::shell::hid;
+        use vy_abi::modifier::CTRL;
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let form = shell.open_tab(Some(local("form")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(form), "running");
+        // Tab to the name field, paste: the field holds the text, line
+        // endings normalised and nothing stripped.
+        shell.key(key::TAB, true, 0, false);
+        shell.key(key::TAB, false, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.set_clipboard_text("Anna\r\nLind ");
+        assert!(
+            shell.key(hid::V, true, CTRL, false),
+            "consumed by the shell"
+        );
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        let name_field = |shell: &crate::shell::Shell| {
+            shell
+                .tab_semantic(form)
+                .into_iter()
+                .find(|n| n.id == -10)
+                .map(|n| n.text)
+        };
+        assert_eq!(name_field(&shell).as_deref(), Some("Anna\nLind "));
+        // An empty clipboard pastes nothing.
+        shell.set_clipboard_text("");
+        shell.key(hid::V, true, CTRL, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(name_field(&shell).as_deref(), Some("Anna\nLind "));
+        // The address bar: paste replaces the selection, copy and cut
+        // write the clipboard.
+        shell.set_clipboard_text("vy://docs.example/rapport");
+        shell.key(hid::L, true, CTRL, false);
+        shell.key(hid::V, true, CTRL, false);
+        assert_eq!(shell.address().text(), "vy://docs.example/rapport");
+        shell.key(hid::A, true, CTRL, false);
+        shell.key(hid::C, true, CTRL, false);
+        assert_eq!(
+            shell.clipboard_text().as_deref(),
+            Some("vy://docs.example/rapport")
+        );
+        shell.set_clipboard_text("other");
+        shell.key(hid::X, true, CTRL, false);
+        assert_eq!(shell.address().text(), "", "cut");
+        assert_eq!(
+            shell.clipboard_text().as_deref(),
+            Some("vy://docs.example/rapport")
+        );
+        // A whole document pasted into the address bar is cut short.
+        shell.set_clipboard_text(&"x".repeat(100_000));
+        shell.key(hid::V, true, CTRL, false);
+        assert_eq!(
+            shell.address().text().len(),
+            crate::clipboard::MAX_ADDRESS_PASTE_BYTES
+        );
+        shell.key(key::ESCAPE, true, 0, false);
+        assert!(!shell.address().focused());
+
+        // A page that writes the clipboard on every key it gets.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "clipboard_write" (func $cw (param i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "kopia")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then (drop (call $cw (i32.const 16) (i32.const 5)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("vy-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("copier.wasm");
+        std::fs::write(&path, &wasm).unwrap();
+        let copier = shell.open_tab(Some(Source::File { path, draft: None }));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(copier), "running");
+        assert_eq!(shell.tab_badges(copier), vec![], "no capabilities at all");
+        // A plain key: the write is refused in the tab, the clipboard stays.
+        shell.set_clipboard_text("before");
+        shell.key(0x05, true, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        assert_eq!(shell.clipboard_text().as_deref(), Some("before"));
+        assert!(shell
+            .tab_logs(copier)
+            .iter()
+            .any(|l| l.contains("clipboard_write: E_DENIED")));
+        // Ctrl+C: a copy gesture; the page's write reaches the clipboard.
+        assert!(
+            !shell.key(hid::C, true, CTRL, false),
+            "the key went to the page"
+        );
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        assert_eq!(shell.clipboard_text().as_deref(), Some("kopia"));
+        // The same again with Ctrl+X, after the clipboard changed elsewhere.
+        shell.set_clipboard_text("elsewhere");
+        shell.key(hid::X, true, CTRL, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        assert_eq!(shell.clipboard_text().as_deref(), Some("kopia"));
+        // One write per gesture: a second `Clipboard` the tab claims for
+        // the same gesture is refused by the shell and logged.
+        shell.set_clipboard_text("elsewhere");
+        let generation = shell.tab_generation(copier);
+        shell.handle(Incoming::Tab(
+            copier,
+            generation,
+            Inbound::Message(ToShell::Clipboard(b"forged".to_vec())),
+        ));
+        assert_eq!(shell.clipboard_text().as_deref(), Some("elsewhere"));
+        assert!(shell
+            .tab_logs(copier)
+            .iter()
+            .any(|l| l.starts_with("[host] clipboard ignored")));
+        // And a gesture is not a grant for long: after a second, nothing.
+        shell.key(hid::C, true, CTRL, false);
+        shell.advance_clock(crate::shell::GESTURE_WINDOW_MS + 1);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        assert_eq!(shell.clipboard_text().as_deref(), Some("elsewhere"));
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-A.5.1: Ctrl with Alt is AltGr, a character and not a shortcut:
+    /// AltGr+0 (`}`) and AltGr+`+` (`\`) on a Swedish keyboard leave the
+    /// zoom alone and reach the address bar as typed text, while Ctrl+0
+    /// and Cmd+0 still reset it.
+    #[test]
+    fn spec_a_5_1_altgr_is_not_a_shortcut() {
+        use crate::shell::hid;
+        use vy_abi::modifier::{ALT, CTRL, META};
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        shell.open_tab(None);
+        shell.zoom_step(1);
+        assert_eq!(shell.zoom(), 1.1);
+        shell.key(hid::DIGIT0, true, CTRL | ALT, false);
+        shell.key(hid::MINUS, true, CTRL | ALT, false);
+        assert_eq!(shell.zoom(), 1.1, "AltGr is no zoom shortcut");
+        shell.key(hid::L, true, CTRL, false);
+        shell.key(hid::DIGIT0, true, CTRL | ALT, false);
+        shell.text_input("}");
+        assert!(shell.address().text().ends_with('}'));
+        shell.key(key::ESCAPE, true, 0, false);
+        shell.key(hid::DIGIT0, true, META, false);
+        assert_eq!(shell.zoom(), 1.0, "Cmd+0");
+        shell.zoom_step(1);
+        shell.key(hid::DIGIT0, true, CTRL, false);
+        assert_eq!(shell.zoom(), 1.0, "Ctrl+0");
         shell.shutdown();
     }
 

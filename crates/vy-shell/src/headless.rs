@@ -8,6 +8,7 @@
 //! nothing is persisted, and the drive stops at the first frame of a
 //! static page or after a fixed number of ticks of an animating one.
 
+use crate::clipboard::MemoryClipboard;
 use crate::external::RecordingOpener;
 use crate::page::{LoadedPage, Source};
 use crate::paths::scratch_dir;
@@ -46,8 +47,8 @@ impl Default for Options {
     }
 }
 
-/// A shell set up for headless use: in-memory grants, a scratch data
-/// directory, a recording opener and no waker.
+/// A shell set up for headless use: in-memory grants and clipboard, a
+/// scratch data directory, a recording opener and no waker.
 pub fn headless_shell(
     exe: Option<PathBuf>,
     width: f32,
@@ -60,6 +61,7 @@ pub fn headless_shell(
             data_dir: scratch_dir("headless"),
             headless: true,
             opener: Box::new(RecordingOpener::default()),
+            clipboard: Box::new(MemoryClipboard::new()),
             waker: Waker::none(),
         },
         width,
