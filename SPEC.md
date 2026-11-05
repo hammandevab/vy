@@ -123,6 +123,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-7.4.2]** Utgivarens publika nyckel publiceras i DNS TXT `_vy.<värd>` och på `https://<värd>/.well-known/vy-key`; båda måste stämma vid första besök.
 - **[SPEC-7.4.3]** En sida utan giltig signatur körs i begränsat läge där inga capabilities beviljas.
 - **[SPEC-7.4.4]** Nyckelrotation sker genom att ett manifest signerat med den gamla nyckeln anger det nya nyckel-id:t i `next_key_id`; den nya nyckeln hämtas då från `/.well-known/vy-key` och godtas för origin, och ingen annan väg ger en okänd nyckel förtroende.
+- **[SPEC-7.4.5]** TXT-posten vid `_vy.<värd>` har formen `v=vy1; k=<nyckel>`, där `<nyckel>` är den publika nyckeln som 64 gemena hextecken som i `/.well-known/vy-key`, en post per nyckel; vid första besök litar klienten bara på nycklar som står både i `/.well-known/vy-key` och i TXT-posterna, och saknad post, avvikelse eller ett uppslag som misslyckas ger begränsat läge (SPEC-7.4.3) utan pinnad nyckel och med orsaken angiven så att klienten kan visa den. `localhost` (även `127.0.0.1` och `[::1]`) har inget DNS och är undantaget, som i SPEC-7.1.3; en origin med pinnad nyckel frågar aldrig DNS igen – rotation enligt SPEC-7.4.4 är enda vägen till en ny nyckel.
 - **[SPEC-7.5.1]** Klienten skickar aldrig `Referer` och accepterar högst 3 omdirigeringar.
 
 ## 8. Manifestet

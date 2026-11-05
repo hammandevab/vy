@@ -128,6 +128,40 @@ pub fn parse_key_file(text: &str) -> Result<Vec<PublicKey>, Error> {
         .collect()
 }
 
+/// Label of the DNS name that carries the publisher's keys: `_vy.<host>`
+/// (SPEC-7.4.2).
+pub const DNS_TXT_LABEL: &str = "_vy";
+
+/// Start of the TXT record form (SPEC-7.4.5): `v=vy1; k=<64 hex digits>`,
+/// one record per key. The version tag lets a later format share the name.
+pub const DNS_TXT_PREFIX: &str = "v=vy1; k=";
+
+/// The DNS name whose TXT records publish the keys of `host`: `_vy.<host>`.
+pub fn dns_txt_name(host: &str) -> String {
+    format!("{DNS_TXT_LABEL}.{host}")
+}
+
+/// The TXT record for `key` (SPEC-7.4.5): the one canonical form, so a
+/// publisher cannot write it two ways (SPEC-2.1.1).
+pub fn dns_txt_record(key: &PublicKey) -> String {
+    format!("{DNS_TXT_PREFIX}{key}")
+}
+
+/// The key a TXT record names, or `None` for a record of another form
+/// (other TXT records at the same name are simply not Vy's). Surrounding
+/// whitespace is ignored; the hex must be lower case and exactly 64 digits.
+pub fn parse_dns_txt(text: &str) -> Option<PublicKey> {
+    let hex = text.trim().strip_prefix(DNS_TXT_PREFIX)?;
+    let bytes = from_hex::<32>(hex)?;
+    PublicKey::from_bytes(&bytes).ok()
+}
+
+/// The zone-file line an operator publishes for `key` at `host`
+/// (SPEC-7.4.5), as `vy-serve` prints it and `vy-publish keygen` suggests it.
+pub fn dns_txt_zone_line(host: &str, key: &PublicKey) -> String {
+    format!("{}. IN TXT \"{}\"", dns_txt_name(host), dns_txt_record(key))
+}
+
 impl Manifest {
     /// Sign the canonical encoding without `sig` (SPEC-7.4.1) and store
     /// the result in `sig` with the key's id.
