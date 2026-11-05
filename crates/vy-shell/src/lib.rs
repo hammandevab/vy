@@ -17,6 +17,8 @@ pub mod grants;
 pub mod headless;
 pub mod history;
 pub mod ipc;
+#[cfg(feature = "window")]
+pub mod keymap;
 pub mod markdown;
 pub mod page;
 pub mod paths;
@@ -24,6 +26,8 @@ pub mod process;
 pub mod shell;
 pub mod storage;
 pub mod tab;
+#[cfg(feature = "window")]
+pub mod window;
 
 #[cfg(test)]
 mod tests {

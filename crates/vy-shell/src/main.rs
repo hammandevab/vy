@@ -50,7 +50,36 @@ fn main() -> ExitCode {
             }
         };
     }
-    usage()
+    if args.iter().any(|a| a.starts_with("--")) {
+        return usage();
+    }
+    let mut sources = Vec::new();
+    for a in &args {
+        match vy_shell::page::Source::parse(a) {
+            Ok(s) => sources.push(s),
+            Err(e) => {
+                eprintln!("vy-shell: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    match window(sources) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("vy-shell: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(feature = "window")]
+fn window(sources: Vec<vy_shell::page::Source>) -> Result<(), String> {
+    vy_shell::window::run(sources)
+}
+
+#[cfg(not(feature = "window"))]
+fn window(_sources: Vec<vy_shell::page::Source>) -> Result<(), String> {
+    Err("built without the window feature; use --screenshot".into())
 }
 
 /// `--screenshot <png> --size WxH [--scale S] [--ticks N] [--manifest <draft>] <source>`.
