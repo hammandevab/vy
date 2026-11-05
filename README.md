@@ -28,9 +28,14 @@ cargo run -p vy-cli -- check-abi target/wasm/form.wasm
 cargo run -p vy-cli -- render target/wasm/form.wasm --out form.png --size 800x600 --grant ime \
     --dump-semantic form.json
 cargo run -p vy-cli -- conformance     # pixeldiff <= 0,1 % mot guldbilderna
+cargo run -p vy-publish -- keygen --out dev.key
+cargo run -p vy-publish -- build --manifest conformance/manifests/hello.json \
+    --module target/wasm/hello.wasm --key dev.key --out hello.vyp   # signerat paket (M3)
+cargo run -p vy-serve -- --dir . --public-key dev.key.pub           # vy://localhost:8080/hello
 ```
 
-Byggnoteringar (beroenden, approximationer, spec-frågor): `docs/BUILD-NOTES.md`.
+Byggnoteringar (beroenden, approximationer, spec-frågor): `docs/BUILD-NOTES.md`;
+M3:s första del (manifest, publish, proto, serve): `docs/notes/m3-proto-serve.md`.
 SDK-dokumentation med exempel: `crates/vy-sdk/README.md`.
 
 Licens: MIT.

@@ -57,8 +57,8 @@ HTML-escape och Markdown-delmängden (rubriker och stycken), LRU-index för cach
   och 64 KB-gränsen före tolkning.
 - **JSON-formen** är härledd: `"hash": "sha256:<hex>"`, `"bytes": "ed25519:<hex>"`, fältordning som i
   structen. `Draft` är utkastet utgivaren skriver (`resources[].path`, inga hash, ingen `sig`);
-  `conformance/manifests/*.json` är utkast i gammal form (`capabilities: []`, `type`, platshållare) och
-  behöver skrivas om efter merge till formen i `crates/vy-manifest/tests/fixtures/hello.json`.
+  `conformance/manifests/*.json` är utkasten för de elva referensmodulerna (omskrivna vid merge, se
+  nedan) och `hello.json` där är det utkast grenens tester, Dockerfile och end-to-end-testet läser.
 - **Nyckel-id** = de 16 första hextecknen av SHA-256(publik nyckel). Härlett, så en nyckel har exakt ett
   id; `.well-known/vy-key` behöver bara lista nycklar.
 - **Signatur och identitet.** `sig` krävs i kodningen (SPEC-8.1.1); `Manifest::encode` på en osignerad
@@ -86,43 +86,43 @@ HTML-escape och Markdown-delmängden (rubriker och stycken), LRU-index för cach
 
 ## Spec-frågor
 
-Numrerade 17–28 efter BUILD-NOTES 16 på den här grenens bas; main har sedan dess fått egna 17–21 (M2.6), så numren får skrivas om vid merge.
+Numrerade 27–38 efter BUILD-NOTES 26 (M2.6); på grenen hette de 17–28, omnumrerade vid merge.
 
-17. **SPEC-8.1.1 mot SPEC-7.4.3 – saknad signatur.** `sig` är obligatoriskt, så ett manifest utan
+27. **SPEC-8.1.1 mot SPEC-7.4.3 – saknad signatur.** `sig` är obligatoriskt, så ett manifest utan
     `sig` avvisas vid avkodning; "utan giltig signatur" tolkas som *närvarande men ogiltig eller med
     okänd nyckel* → begränsat läge. Om specen vill att osignerade sidor ska köras begränsat bör `sig`
     flyttas till de valfria fälten.
-18. **SPEC-7.4.4 saknar fält.** Rotation kräver ett signerat fält som namnger nästa nyckel-id, men
+28. **SPEC-7.4.4 saknar fält.** Rotation kräver ett signerat fält som namnger nästa nyckel-id, men
     SPEC-8.1.2 listar inget sådant (och `sig` ligger utanför signaturen). Infört som valfritt
     toppnivåfält `next_key_id`; bör in i 8.1.2.
-19. **SPEC-7.2.1 – "adresser till modul och resurser".** `url` är valfritt på `module`, `resources[]`
+29. **SPEC-7.2.1 – "adresser till modul och resurser".** `url` är valfritt på `module`, `resources[]`
     och `chunks[]`; saknas det hämtas `/_vy/<hex sha256>` relativt manifestets URL. vy-serve serverar
     den vägen. Konventionen bör stå i specen.
-20. **SPEC-7.1.3 – localhost.** Även `127.0.0.1` och `[::1]` är undantagna; de är samma maskin.
-21. **SPEC-8.2.3 – luckor i policyn.** `net` mot främmande origin och `storage` över 1 MB nämns inte;
+30. **SPEC-7.1.3 – localhost.** Även `127.0.0.1` och `[::1]` är undantagna; de är samma maskin.
+31. **SPEC-8.2.3 – luckor i policyn.** `net` mot främmande origin och `storage` över 1 MB nämns inte;
     båda ger *fråga*. `origin_is_own` betyder att alla listade origins är sidans egen.
-22. **Fälttyper som inte är specificerade.** `published` är text `YYYY-MM-DD`; `icon` och `skeleton`
+32. **Fälttyper som inte är specificerade.** `published` är text `YYYY-MM-DD`; `icon` och `skeleton`
     är resursindex (≥ 1); `chunks` är en lista `{hash, size, url?}`; `links`/`embeds` är textlistor
     (`vy://`/`https://` respektive `vy://`); `min_size` är `{w, h}`; `lang` kontrolleras som BCP 47-syntax.
     Hash är `bstr(32)` i CBOR och `sha256:<hex>` i JSON.
-23. **SPEC-4.1.3 – tomma listor.** Kanonisk form förbjuder `resources: []`, `capabilities: {}` osv.;
+33. **SPEC-4.1.3 – tomma listor.** Kanonisk form förbjuder `resources: []`, `capabilities: {}` osv.;
     fältet utelämnas. Bör stå i specen så andra klienter gör lika.
-24. **SPEC-7.4.2 – DNS TXT.** Inte implementerat (ingen resolver i trädet); bara well-known
+34. **SPEC-7.4.2 – DNS TXT.** Inte implementerat (ingen resolver i trädet); bara well-known
     konsulteras, så "båda måste stämma" kan inte verkställas i M3. Ignorerat test med motivering.
-25. **Nyckel-id.** Specen definierar inte "nyckel-id" (7.4.4). Härlett ur nyckeln enligt ovan.
-26. **SPEC-4.1.5 – WebP/AVIF.** `w`/`h` krävs för alla bilder men verifieras bara mot PNG-huvudet;
+35. **Nyckel-id.** Specen definierar inte "nyckel-id" (7.4.4). Härlett ur nyckeln enligt ovan.
+36. **SPEC-4.1.5 – WebP/AVIF.** `w`/`h` krävs för alla bilder men verifieras bara mot PNG-huvudet;
     WebP/AVIF kräver avkodare som inte finns (BUILD-NOTES M2). Utkastet får ange `w`/`h` för dem.
-27. **SPEC-7.3.2 – ETag över signaturen.** Se beslutet ovan: identiteten (SPEC-4.1.2) utesluter `sig`
+37. **SPEC-7.3.2 – ETag över signaturen.** Se beslutet ovan: identiteten (SPEC-4.1.2) utesluter `sig`
     och duger inte som ETag.
-28. **SPEC-9.5.1 – egen origin för localhost.** `vy://localhost:8080` räknas som samma origin som
+38. **SPEC-9.5.1 – egen origin för localhost.** `vy://localhost:8080` räknas som samma origin som
     `http://localhost:8080` i `net`-listan, eftersom hämtningen går över http där.
 
 ## Stubbat och ogjort
 
 - DNS TXT-uppslag (M4), HTTP/3 (ureq talar HTTP/1.1; HTTP/2 och /3 är öppna), proxyer (av).
 - WebP/AVIF-huvuden läses inte.
-- `vy-cli` läser fortfarande inte manifest (gräns i den här PR:en); SPEC-10.4.2/beslut 22 väntar.
-- `conformance/manifests/*.json` måste skrivas om till utkastformen (gräns).
+- `vy-cli` läste inte manifest på grenen och `conformance/manifests/*.json` var i gammal form;
+  båda är lösta vid merge (se *Vid merge mot main* nedan).
 - `docker build` är inte körd: sandlådan saknar Docker-daemon. Musl-bygget
   (`CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked --target
   x86_64-unknown-linux-musl -p vy-serve -p vy-publish`) och paketsteget är körda lokalt med samma
@@ -151,7 +151,43 @@ vy-publish, vy-serve och end-to-end-testet kompilerar:
 | `Problem` (Display), `Error` (Display; varianterna `NonCanonical`, `UnknownField`, `MissingField`, `Unsigned`, `Json` används i tester) | publish, proto |
 | `png_dimensions`, `module_initial_pages` | validering; fria funktioner som main:s version kan ersätta om semantiken är samma |
 
-Testerna i `crates/vy-manifest/src/lib.rs` pinnar dessutom den kanoniska kodningen av fixturen
+Testerna i `crates/vy-manifest/src/lib.rs` pinnar dessutom den kanoniska kodningen av hello-utkastet
 (`spec_4_1_2_identity_is_hash_of_canonical_cbor`): nyckelordningen och typerna ovan är det som gör två
 klienter kompatibla, så den som vinner merge-konflikten bör behålla just de byten eller ändra testet
 medvetet.
+
+## Vid merge mot main (e50f628 och följdcommits)
+
+Main hade under tiden (5b26760) fått en egen typad `Manifest` i en enda `lib.rs` med en handskriven
+JSON-läsare, och `vy-cli conformance` läste `conformance/manifests/*.json` genom den. Grenens modulära
+`vy-manifest` är basen efter merge (den är supermängden: CBOR, signatur, paket, policy); main:s
+`json.rs` utgick eftersom serde redan är den enda JSON-vägen (princip 1). Det main hade som grenen
+saknade är fört över som tillägg:
+
+- **`vy-cli` läser utkasten** (`Draft::from_json`), fyller i modul och fallets resurser
+  (`Draft::finish`) och kör `Manifest::validate`: `memory_max` mot modulens initiala sidor
+  (SPEC-8.1.3, via `module_initial_pages`), bildhuvuden mot `w`/`h` (SPEC-8.1.2), hash, storlek och
+  gränserna i §4/§8. Fallets `resources` måste namnge utkastets filer i samma ordning (SPEC-4.5.1)
+  och en storlek fallet anger måste vara manifestets; värden får `pixels` ur manifestet. Som förr:
+  fallet får bara bevilja vad manifestet begär (SPEC-8.2.2), `textbox` kräver `ime` (SPEC-10.4.2),
+  `net.origins`, `storage.quota_kb` och `memory_max` tillämpas på körningen. `cases.toml`:s
+  `resources = [{path, w, h}]` är därmed en andra källa som kontrolleras mot utkastet; att läsa
+  sökvägarna ur utkastet och stryka listan ur fallen är en möjlig förenkling.
+- **Utkastets `w`/`h` är utgivarens påstående**: `Draft::finish` behåller det (förr vann
+  PNG-huvudet tyst) och `validate` ger `ImageSizeMismatch` om huvudet säger annat – main:s
+  `check_resource_sizes` i grenens form. `w`/`h` på en resurs som inte är en bild är ett fel
+  (`SizeOnNonImage`). `Draft::load_resources(base)` läser utkastets resurser relativt utkastfilen;
+  vy-publish och testerna använder den.
+- **Elva utkast** i `conformance/manifests/`: inga platshållare (`module`, `sig`), capabilities som
+  map, `mime` i stället för `type`, `min_size` som `{w, h}`, resursvägar relativt utkastet
+  (`../../modules/gallery/res/…`) så att `vy-publish build --manifest conformance/manifests/gallery.json`
+  läser samma fil som sviten (provat: åtta resurser, hashar ok, signatur giltig). Fixturen
+  `crates/vy-manifest/tests/fixtures/hello.json` var en kopia av `conformance/manifests/hello.json`
+  och är borttagen. Inga pixlar ändrade: 50/50 fall vid 0,000 %.
+- **Main:s tester** är förda över (JSON-formen av capabilities, obligatoriska och valfria fält,
+  bildstorlekar mot gallery- och shop-filerna, resursindex ur shop-utkastet, gränser, memory_max vid
+  4096, `conformance_manifests_validate` för alla elva utkast mot byggda moduler); varje SPEC-id
+  main:s `vy-manifest` refererade refereras fortfarande där. `json_reader` följde med `json.rs`.
+- End-to-end-testet följer main:s `vy_runtime::Options` (resurser med manifestets `w`/`h`,
+  `net_origins`, `storage_quota_bytes`).
+- Känd mjukhet: serde läser `{w, h}` även ur `[w, h]` (sekvens → struct); CBOR-formen är strikt.

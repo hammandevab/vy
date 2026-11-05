@@ -1,8 +1,27 @@
 # Byggnoteringar
 
 Skrivna av byggagenten. Granskningssidorna skrivs av en annan agent (`docs/reviews/`).
-M2.6-delen står först, sedan M2.5, M2 och M1; äldre delar är oförändrade utom där senare
-milstolpar ändrat läget (markerat).
+M3:s första del står först, sedan M2.6, M2.5, M2 och M1; äldre delar är oförändrade utom där
+senare milstolpar ändrat läget (markerat).
+
+# M3 del 1 – manifest, publish, proto, serve
+
+Grenen `m3/proto-serve` (byggd parallellt med M2.6, egna noteringar i
+[`docs/notes/m3-proto-serve.md`](notes/m3-proto-serve.md)) är inmergad: `vy-manifest` omskriven
+som moduler med kanonisk CBOR (SPEC-4.1.3), identitet (SPEC-4.1.2), Ed25519-signatur (SPEC-7.4.1),
+paketformat (SPEC-4.4.1), validering och policy (SPEC-8.2.3); nya crates `vy-publish` (keygen,
+build, inspect), `vy-proto` (adresser, hämtning, cache, nyckelförtroende) och `vy-serve` (statisk
+server) med ett end-to-end-test publish → serve → fetch → runtime över localhost (SPEC-7.2.1);
+`Dockerfile` och `railway.toml`. Konflikten i `vy-manifest` löstes med grenens version som bas och
+main:s tillägg (M2.5/M2.6: typad `Manifest`, `vy-cli` som läser manifest, bildstorlekar, capabilities
+som map, `memory_max ≥ initialt + 1`) förda över som tillägg; main:s egen JSON-läsare utgick till
+förmån för serde. De elva manifesten i `conformance/manifests/` är nu utkast (`Draft`) som
+`vy-publish build` läser oförändrade. Beroenden, spec-frågor 27–38 och vad som stubbats står i
+notesfilen, liksom avsnittet *Vid merge mot main* med allt som ändrades vid sammanslagningen.
+Grindar och tal: 50 konformansfall vid 0,000 %, 184 gröna tester i workspace (var 146), 28
+ignorerade (var 41), spec-id 131/131. Crates i `cargo tree --workspace`: 213 unika (var 169);
+`vy-cli` 182 (var 164) eftersom den nu drar in grenens `vy-manifest` (serde_json, minicbor,
+ed25519-dalek, zstd, wasmparser).
 
 # M2.6 – SDK, spec-frågor 17–21, verktyg och frysförberedelse
 

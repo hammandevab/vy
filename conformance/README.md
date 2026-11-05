@@ -8,12 +8,17 @@
 - `golden/<modul>-<WxH>@<scale>[-<tillstånd>].png` – guldbilder, en per referensmodul, storlek,
   DPI och scriptat tillstånd (från M1).
 - `semantic/<modul>.json` – förväntat semantiskt träd (från M1).
-- `manifests/<modul>.json` – manifest i JSON-form (kanonisk CBOR på tråden), ett per modul;
-  sviten läser det: `memory_max` mot modulens initiala minne (SPEC-8.1.3) och som minnestak
-  för körningen (SPEC-4.2.4), fallet får bara bevilja vad manifestet begär (SPEC-8.2.2), en
-  sida med `textbox`-noder måste begära `ime` (SPEC-10.4.2), bildresursers `w`/`h` stämmer mot
-  filerna (`vy-manifest`, SPEC-8.1.2), `net.origins` avgör vilka adresser `fetch_begin` får
-  nå (SPEC-5.2.8) och `storage.quota_kb` är lagringens kvot (SPEC-9.3.1).
+- `manifests/<modul>.json` – manifestutkast (`vy_manifest::Draft`, samma fil som
+  `vy-publish build --manifest` läser; kanonisk CBOR på tråden), ett per modul: inga hashar,
+  storlekar eller signatur, resurser som sökvägar relativt utkastet med `mime` och bildens
+  `w`/`h`. Sviten fyller i modulen och fallets resurser och kör `Manifest::validate`:
+  `memory_max` mot modulens initiala minne (SPEC-8.1.3) och som minnestak för körningen
+  (SPEC-4.2.4), bildresursers `w`/`h` mot filerna (SPEC-8.1.2), gränserna i §4 och §8. Fallets
+  `resources` måste namnge utkastets filer i samma ordning (SPEC-4.5.1) och en storlek fallet
+  anger måste vara manifestets; värden får storleken ur manifestet. Fallet får bara bevilja
+  vad manifestet begär (SPEC-8.2.2), en sida med `textbox`-noder måste begära `ime`
+  (SPEC-10.4.2), `net.origins` avgör vilka adresser `fetch_begin` får nå (SPEC-5.2.8) och
+  `storage.quota_kb` är lagringens kvot (SPEC-9.3.1).
 
 Pixeldiff-gränsen är 0,1 % (SPEC-12.2.2); en pixel räknas som avvikande om någon kanal skiljer sig.
 Ett fall vars semantiska träd har `textbox`-noder måste höra till ett manifest som begär `ime`
