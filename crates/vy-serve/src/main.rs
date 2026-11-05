@@ -5,7 +5,9 @@
 //! default `0.0.0.0`), `--host-name` (`VY_HOST_NAME`, then Railway's
 //! `RAILWAY_PUBLIC_DOMAIN`, the host in `vy://` links, default
 //! `localhost:<port>`), `--public-key` (`VY_PUBLIC_KEY`, a `vy-key` file
-//! served at `/.well-known/vy-key`).
+//! served at `/.well-known/vy-key`). At startup it prints the DNS TXT
+//! records a client's first visit needs (SPEC-7.4.5), which are also
+//! served at `/.well-known/vy-dns`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -67,10 +69,56 @@ fn main() -> ExitCode {
         handle.port(),
         config
             .host_name
+            .clone()
             .unwrap_or_else(|| format!("localhost:{}", handle.port()))
     );
     for p in packages {
         eprintln!("  /{p}");
+    }
+    // The DNS half of the trust chain (SPEC-7.4.2, SPEC-7.4.5) is the
+    // operator's to publish; without it every first visit is restricted.
+    let host = config
+        .host_name
+        .clone()
+        .unwrap_or_else(|| format!("localhost:{}", handle.port()));
+    let lines = handle.site().dns_zone_lines(&host);
+    if lines.is_empty() {
+        eprintln!("no --public-key: every page runs in restricted mode (SPEC-7.4.3)");
+    } else if vy_serve::is_loopback_host(&host) {
+        eprintln!("DNS: none needed for {host}, loopback has no DNS (SPEC-7.4.5)");
+    } else {
+        eprintln!(
+            "DNS TXT record(s) to publish at the DNS provider for {host} (SPEC-7.4.5; also at /.well-known/vy-dns);"
+        );
+        eprintln!("without them a client's first visit runs every page in restricted mode:");
+        for l in lines {
+            eprintln!("  {l}");
+        }
+        if host.ends_with(".up.railway.app") {
+            eprintln!(
+                "note: {host} is a platform subdomain whose DNS you cannot change; serve the site \
+                 under a domain you control (VY_HOST_NAME) and publish the record there"
+            );
+        }
+    }
+    // The key log (SPEC-7.6.1) is optional in 1.0 (SPEC-7.6.3); a broken
+    // one is served as is, and clients will refuse it (SPEC-7.6.2).
+    match handle.site().key_log() {
+        None => eprintln!(
+            "no {} in the site directory: no key log is served (SPEC-7.6.1)",
+            vy_serve::LOG_FILE_NAME
+        ),
+        Some(Ok(log)) => eprintln!(
+            "key log: {} entr{} at {}, head {}",
+            log.entries.len(),
+            if log.entries.len() == 1 { "y" } else { "ies" },
+            vy_serve::WELL_KNOWN_LOG_PATH,
+            vy_manifest::hex(&log.head())
+        ),
+        Some(Err(e)) => eprintln!(
+            "warning: {}: {e}; clients will refuse it",
+            vy_serve::LOG_FILE_NAME
+        ),
     }
     // The workers run until the process is stopped.
     loop {

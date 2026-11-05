@@ -46,8 +46,73 @@ pub trait Sink: Fn(TabId, Inbound) -> bool + Send + 'static {}
 impl<F: Fn(TabId, Inbound) -> bool + Send + 'static> Sink for F {}
 
 enum Kind {
-    Process(Child),
+    Process(Proc),
     Thread(Option<JoinHandle<()>>),
+}
+
+/// The job a tab process runs in on Windows (SPEC-9.1.3); nothing elsewhere.
+#[cfg(windows)]
+type Job = crate::sandbox::TabJob;
+#[cfg(not(windows))]
+type Job = ();
+
+/// A tab process: started by std, or on Windows with `VY_SANDBOX=strict`
+/// in an AppContainer ([`crate::sandbox::spawn_strict`]).
+enum Proc {
+    Std(
+        Child,
+        #[cfg_attr(not(windows), allow(dead_code))] Option<Job>,
+    ),
+    #[cfg(windows)]
+    Strict(crate::sandbox::StrictChild),
+}
+
+impl Proc {
+    fn id(&self) -> u32 {
+        match self {
+            Proc::Std(c, _) => c.id(),
+            #[cfg(windows)]
+            Proc::Strict(c) => c.id(),
+        }
+    }
+
+    fn kill(&mut self) {
+        match self {
+            Proc::Std(c, _) => {
+                let _ = c.kill();
+            }
+            #[cfg(windows)]
+            Proc::Strict(c) => {
+                let _ = c.kill();
+            }
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<String>> {
+        match self {
+            Proc::Std(c, _) => Ok(c.try_wait()?.map(|s| s.to_string())),
+            #[cfg(windows)]
+            Proc::Strict(c) => c.try_wait(),
+        }
+    }
+
+    fn wait(&mut self) {
+        match self {
+            Proc::Std(c, _) => {
+                let _ = c.wait();
+            }
+            #[cfg(windows)]
+            Proc::Strict(c) => c.wait(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn job(&self) -> Option<&Job> {
+        match self {
+            Proc::Std(_, j) => j.as_ref(),
+            Proc::Strict(c) => Some(&c.job),
+        }
+    }
 }
 
 /// The main process's end of one tab.
@@ -59,14 +124,40 @@ pub struct TabConnection {
     reader: Option<JoinHandle<()>>,
 }
 
-/// Where `--tab` children are started from: this executable.
+/// Where `--tab` children are started from: this executable ([`self_exe`]).
 pub fn tab_executable() -> io::Result<PathBuf> {
+    self_exe()
+}
+
+/// A path that starts the image this process is running, even after the
+/// file it was started from has been replaced on disk (an update while
+/// the client runs): tab processes must speak the same IPC as their shell.
+///
+/// On Linux that is `/proc/self/exe`: the child execs it before it has its
+/// own image, so it names the parent's inode, whatever the path now holds.
+/// Windows does not let a running executable be replaced (it can only be
+/// renamed, and the rename keeps the image), so `current_exe` is the same
+/// file. On macOS `current_exe` is the path, and a replaced file there
+/// would start the new binary: a residual risk until tabs are started
+/// another way.
+pub fn self_exe() -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let proc_exe = Path::new("/proc/self/exe");
+        if proc_exe.exists() {
+            return Ok(proc_exe.to_path_buf());
+        }
+    }
     std::env::current_exe()
 }
 
 /// Start a tab process from `exe` (`exe --tab`), delivering its messages
 /// to `sink` as `(id, ..)`. `record` and `replay` are passed on as the
-/// child's `--record`/`--replay` files (SPEC-11.4.1).
+/// child's `--record`/`--replay` files (SPEC-11.4.1). The child locks
+/// itself down before it reads anything (SPEC-9.1.3, [`crate::sandbox`]);
+/// on Windows the shell also puts it in a job object, or with
+/// `VY_SANDBOX=strict` starts it in an AppContainer, falling back to the
+/// default with a message when that cannot be done.
 pub fn spawn_process(
     exe: &Path,
     id: TabId,
@@ -74,14 +165,56 @@ pub fn spawn_process(
     record: Option<&Path>,
     replay: Option<&Path>,
 ) -> io::Result<TabConnection> {
-    let mut cmd = Command::new(exe);
-    cmd.arg("--tab");
+    let mut args = vec![std::ffi::OsString::from("--tab")];
     if let Some(r) = record {
-        cmd.arg("--record").arg(r);
+        args.push("--record".into());
+        args.push(r.into());
     }
     if let Some(r) = replay {
-        cmd.arg("--replay").arg(r);
+        args.push("--replay".into());
+        args.push(r.into());
     }
+    let (process, stdin, stdout) = start(exe, &args, record.is_none() && replay.is_none())?;
+    connect(id, sink, process, stdin, stdout)
+}
+
+/// Start `exe --tab --sandbox-probe` exactly as a tab is started (job
+/// object, strict mode) and return what the probe reports (SPEC-9.1.3).
+pub fn probe_process(exe: &Path) -> io::Result<String> {
+    use std::io::Read;
+    let args = ["--tab".into(), "--sandbox-probe".into()];
+    let (mut process, stdin, mut stdout) = start(exe, &args, true)?;
+    drop(stdin);
+    let mut text = String::new();
+    stdout.read_to_string(&mut text)?;
+    process.wait();
+    Ok(text)
+}
+
+type Pipes = (Proc, Box<dyn Write + Send>, Box<dyn io::Read + Send>);
+
+/// Start a tab child with `args`: on Windows with `VY_SANDBOX=strict`
+/// (when `strict_ok`) in an AppContainer, falling back with a message;
+/// otherwise through std and, on Windows, into a job object.
+fn start(exe: &Path, args: &[std::ffi::OsString], strict_ok: bool) -> io::Result<Pipes> {
+    #[cfg(windows)]
+    if strict_ok && crate::sandbox::Mode::from_env() == crate::sandbox::Mode::Strict {
+        let tail: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        match crate::sandbox::spawn_strict(exe, &tail.join(" ")) {
+            Ok((child, stdin, stdout)) => {
+                return Ok((Proc::Strict(child), Box::new(stdin), Box::new(stdout)))
+            }
+            Err(e) => eprintln!(
+                "vy-shell: VY_SANDBOX=strict: {e}; this tab starts with the default sandbox"
+            ),
+        }
+    }
+    let _ = strict_ok;
+    let mut cmd = Command::new(exe);
+    cmd.args(args);
     // The child's stderr (panics) goes where the shell's goes; a Windows
     // release build is a GUI program without one, so nowhere.
     let stderr = if cfg!(all(windows, not(debug_assertions))) {
@@ -96,6 +229,27 @@ pub fn spawn_process(
         .spawn()?;
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
+    #[cfg(windows)]
+    let job = match crate::sandbox::contain(&child) {
+        Ok(job) => Some(job),
+        Err(e) => {
+            eprintln!("vy-shell: a tab runs without a job object: {e}");
+            None
+        }
+    };
+    #[cfg(not(windows))]
+    let job = None;
+    Ok((Proc::Std(child, job), Box::new(stdin), Box::new(stdout)))
+}
+
+/// The writer and reader threads of a process-backed tab.
+fn connect(
+    id: TabId,
+    sink: impl Sink,
+    process: Proc,
+    stdin: impl Write + Send + 'static,
+    stdout: impl io::Read + Send + 'static,
+) -> io::Result<TabConnection> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let writer = thread::Builder::new()
         .name(format!("tab-{id}-writer"))
@@ -131,7 +285,7 @@ pub fn spawn_process(
     Ok(TabConnection {
         id,
         tx: Some(tx),
-        kind: Kind::Process(child),
+        kind: Kind::Process(process),
         writer: Some(writer),
         reader: Some(reader),
     })
@@ -193,6 +347,21 @@ impl TabConnection {
             .is_some_and(|tx| tx.send(msg.encode()).is_ok())
     }
 
+    /// Bound the tab process's memory to `memory_max_pages` of linear
+    /// memory plus headroom once the page is known (SPEC-9.3.1): the job's
+    /// commit limit on Windows; elsewhere wasmtime's own limit is the
+    /// bound and this does nothing.
+    pub fn limit_memory(&self, memory_max_pages: u32) -> io::Result<()> {
+        #[cfg(windows)]
+        if let Kind::Process(p) = &self.kind {
+            if let Some(job) = p.job() {
+                return job.limit_memory(memory_max_pages);
+            }
+        }
+        let _ = memory_max_pages;
+        Ok(())
+    }
+
     /// The tab's process id, for a process-backed tab.
     pub fn pid(&self) -> Option<u32> {
         match &self.kind {
@@ -210,7 +379,7 @@ impl TabConnection {
     /// does not answer a shutdown).
     pub fn kill(&mut self) {
         if let Kind::Process(c) = &mut self.kind {
-            let _ = c.kill();
+            c.kill();
         }
     }
 
@@ -224,7 +393,7 @@ impl TabConnection {
         let start = Instant::now();
         loop {
             match c.try_wait() {
-                Ok(Some(status)) => return Some(status.to_string()),
+                Ok(Some(status)) => return Some(status),
                 Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(5)),
                 Ok(None) => return None,
                 Err(e) => return Some(e.to_string()),
@@ -245,8 +414,8 @@ impl TabConnection {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                let _ = c.kill();
-                let _ = c.wait();
+                c.kill();
+                c.wait();
             }
             Kind::Thread(h) => {
                 if let Some(h) = h.take() {
@@ -266,8 +435,8 @@ impl TabConnection {
 impl Drop for TabConnection {
     fn drop(&mut self) {
         if let Kind::Process(c) = &mut self.kind {
-            let _ = c.kill();
-            let _ = c.wait();
+            c.kill();
+            c.wait();
         }
     }
 }
@@ -296,5 +465,88 @@ pub fn wait_for(
             Ok(other) => others.push(other),
             Err(_) => return None,
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    const STAGE: &str = "VY_SELF_EXE_STAGE";
+    const MARK: &str = "self-exe: original image";
+
+    /// The child half of `spec_9_1_1_tabs_start_the_running_image`: a
+    /// no-op in the normal run. As stage 1 it waits for the parent's
+    /// signal (its own file has been replaced by then) and starts
+    /// [`self_exe`] as stage 2, which prints the mark only the original
+    /// test binary knows.
+    #[test]
+    fn self_exe_child_stage() {
+        match std::env::var(STAGE).as_deref() {
+            Ok("1") => {
+                let go = PathBuf::from(std::env::var("VY_SELF_EXE_GO").unwrap());
+                let start = Instant::now();
+                while !go.exists() && start.elapsed() < Duration::from_secs(20) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let out = Command::new(self_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "process::tests::self_exe_child_stage",
+                        "--nocapture",
+                    ])
+                    .env(STAGE, "2")
+                    .output()
+                    .unwrap();
+                print!("{}", String::from_utf8_lossy(&out.stdout));
+            }
+            Ok("2") => println!("{MARK}"),
+            _ => {}
+        }
+    }
+
+    /// SPEC-9.1.1, SPEC-11.2.2: a tab process is the shell's own image.
+    /// A copy of this test binary is started from a temporary path, the
+    /// file at that path is replaced by a script while it runs, and the
+    /// child it then starts through [`self_exe`] is still the original
+    /// image, not the script.
+    #[test]
+    fn spec_9_1_1_tabs_start_the_running_image() {
+        assert_eq!(self_exe().unwrap(), Path::new("/proc/self/exe"));
+        let dir = std::env::temp_dir().join(format!("vy-self-exe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("shell");
+        std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        let go = dir.join("go");
+        let child = Command::new(&copy)
+            .args([
+                "--exact",
+                "process::tests::self_exe_child_stage",
+                "--nocapture",
+            ])
+            .env(STAGE, "1")
+            .env("VY_SELF_EXE_GO", &go)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The update: a different file takes the path while the copy runs.
+        let script = dir.join("next");
+        std::fs::write(&script, "#!/bin/sh\necho replaced\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&script, &copy).unwrap();
+        std::fs::write(&go, b"").unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains(MARK), "{text}");
+        assert!(!text.contains("replaced"), "{text}");
+        let direct = Command::new(&copy).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&direct.stdout),
+            "replaced\n",
+            "the path did change"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

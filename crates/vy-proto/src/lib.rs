@@ -10,6 +10,7 @@
 
 mod address;
 mod cache;
+pub mod dns;
 mod fetch;
 mod keys;
 mod url;
@@ -23,10 +24,12 @@ pub use address::{to_https, Address, AddressError, DEFAULT_PORT};
 pub use cache::{
     BlobCache, HttpCache, HttpRecord, DEFAULT_CACHE_CAP_BYTES, DEFAULT_HTTP_CACHE_CAP_BYTES,
 };
+pub use dns::{DnsError, SystemResolver, TxtResolver};
 pub use fetch::{
-    transport_allowed, Error, Fetched, Fetcher, Form, Options, ACCEPT, BLOB_PATH_PREFIX,
-    MAX_BLOB_BYTES, MAX_KEY_FILE_BYTES, MAX_REDIRECTS, WELL_KNOWN_KEY_PATH,
+    transport_allowed, Error, Fetched, Fetcher, Form, Options, Restriction, ACCEPT,
+    BLOB_PATH_PREFIX, MAX_BLOB_BYTES, MAX_KEY_FILE_BYTES, MAX_REDIRECTS, WELL_KNOWN_KEY_PATH,
+    WELL_KNOWN_LOG_PATH,
 };
-pub use keys::{KeyStore, OriginKeys};
+pub use keys::{KeyStore, LogHead, OriginKeys};
 pub use url::{accepts, cache_control, media_type, resolve, CacheControl, HttpUrl};
 pub use vy_manifest::{MEDIA_MANIFEST, MEDIA_PACKAGE};

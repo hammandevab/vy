@@ -1,0 +1,76 @@
+# Fuzz targets (cargo-fuzz, nightly). Not a member of the main workspace:
+# the table below makes this directory its own workspace, so stable
+# `cargo test --workspace` never builds libFuzzer. The same entry points
+# are replayed on stable by crates/vy-shell/tests/fuzz_regressions.rs.
+[package]
+name = "vy-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vy-dl = { path = "../crates/vy-dl" }
+vy-manifest = { path = "../crates/vy-manifest" }
+vy-proto = { path = "../crates/vy-proto" }
+vy-render = { path = "../crates/vy-render" }
+vy-shell = { path = "../crates/vy-shell", default-features = false }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "display_list"
+path = "fuzz_targets/display_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc"
+path = "fuzz_targets/ipc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "address"
+path = "fuzz_targets/address.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png"
+path = "fuzz_targets/png.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markdown"
+path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
+test = false
+doc = false
+bench = false

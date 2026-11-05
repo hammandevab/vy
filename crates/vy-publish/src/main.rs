@@ -1,4 +1,6 @@
-//! `vy-publish`: keygen, build and inspect packages.
+//! `vy-publish`: keygen, build and inspect packages, and keep the key log.
+
+mod log_append;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,7 +15,8 @@ fn usage() -> ExitCode {
          vy-publish keygen --out <dev.key>\n  \
          vy-publish pubkey --key <dev.key> [--out <dev.key.pub>]\n  \
          vy-publish build --manifest <draft.json> --module <module.wasm> --key <dev.key> --out <page.vyp> [--resource <file>]...\n  \
-         vy-publish inspect <page.vyp> [--public-key <dev.key.pub>]"
+         vy-publish inspect <page.vyp> [--public-key <dev.key.pub>]\n  \
+         vy-publish log-append --log <site>/vy-log --host <host[:port]> --public-key <dev.key.pub> [--published YYYY-MM-DD]"
     );
     ExitCode::from(2)
 }
@@ -25,6 +28,7 @@ fn main() -> ExitCode {
         Some("pubkey") => cmd_pubkey(&args[1..]),
         Some("build") => cmd_build(&args[1..]),
         Some("inspect") => cmd_inspect(&args[1..]),
+        Some("log-append") => log_append::cmd(&args[1..]),
         _ => return usage(),
     };
     match result {
@@ -89,6 +93,11 @@ fn cmd_keygen(args: &[String]) -> Result<ExitCode, String> {
     println!("public: {}", key.public());
     println!("seed:   {out} (keep private, never commit)");
     println!("pub:    {}", pub_path.display());
+    println!(
+        "dns:    {} (TXT record at _vy.<host>, SPEC-7.4.5)",
+        vy_manifest::dns_txt_record(&key.public())
+    );
+    println!("log:    vy-publish log-append --log <site>/vy-log --host <host> --public-key {} (SPEC-7.6.1)", pub_path.display());
     Ok(ExitCode::SUCCESS)
 }
 

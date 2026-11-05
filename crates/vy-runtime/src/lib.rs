@@ -16,7 +16,7 @@ mod rng;
 pub use abi_check::{check_abi_bytes, AbiReport};
 pub use host::{
     origin_of, plain_http_allowed, CannedResponse, Capabilities, FetchRequest, Link, LogEntry,
-    LogSource, Navigation, SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES,
+    LogSource, Navigation, SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES, NET_BYTES_PER_MINUTE,
 };
 pub use rng::RandomSource;
 pub use vy_render::{RasterReport, Resource};
@@ -1035,21 +1035,33 @@ impl Runtime {
     /// also closes the request (SPEC-5.2.7).
     fn deliver_fetch(&mut self, id: i32) -> Result<bool, Error> {
         let host = self.host_mut();
-        let f = host
+        let (body_len, answered_status) = host
             .fetches
-            .iter_mut()
+            .iter()
             .find(|f| f.id == id)
+            .map(|f| (f.body.len(), f.status))
             .expect("an answered request");
-        let (status, len) = if f.body.len() > limits::MAX_FETCH_RESPONSE_BYTES as usize {
+        let (status, len) = if body_len > limits::MAX_FETCH_RESPONSE_BYTES as usize {
             host.fetches.retain(|f| f.id != id);
             host.host_log(format!(
                 "fetch {id}: E_TOO_LARGE (response over {} bytes dropped)",
                 limits::MAX_FETCH_RESPONSE_BYTES
             ));
             (err::E_TOO_LARGE, 0)
+        } else if !host.net_admit(body_len as u64) {
+            // Over this minute's budget (SPEC-9.3.1): the body is dropped
+            // and the request closed, as for one over 64 MB.
+            host.fetches.retain(|f| f.id != id);
+            host.host_log(format!(
+                "fetch {id}: E_RATE (response of {body_len} bytes over {} network bytes this minute dropped)",
+                host::NET_BYTES_PER_MINUTE
+            ));
+            (err::E_RATE, 0)
         } else {
-            f.delivered = true;
-            (f.status, f.body.len() as i32)
+            if let Some(f) = host.fetches.iter_mut().find(|f| f.id == id) {
+                f.delivered = true;
+            }
+            (answered_status, body_len as i32)
         };
         self.deliver(event::FETCH_DONE, id, status, len, 0)
     }

@@ -5,6 +5,7 @@
 //! vy-shell [<vy-address | file.vyp | file.wasm>]          open a window
 //! vy-shell --screenshot <png> --size WxH [--scale S] [--manifest <draft.json>] <address or file>
 //! vy-shell --tab [--record <file>] [--replay <file>]      a tab process (started by the shell)
+//! vy-shell --tab --sandbox-probe                          lock down, try file/socket/process, report
 //! ```
 //!
 //! A release build on Windows is a GUI program (no console window on a
@@ -19,7 +20,7 @@ fn usage() -> ExitCode {
         "usage:\n  \
          vy-shell [<vy://address | page.vyp | module.wasm>]\n  \
          vy-shell --screenshot <out.png> --size WxH [--scale S] [--manifest <draft.json>] <address or file>\n  \
-         vy-shell --tab [--record <file>] [--replay <file>]   (started by the shell itself)"
+         vy-shell --tab [--record <file>] [--replay <file>] [--sandbox-probe]   (started by the shell itself)"
     );
     ExitCode::from(2)
 }
@@ -29,13 +30,39 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--tab") {
         let mut record = None;
         let mut replay = None;
+        let mut probe = false;
         let mut it = args[1..].iter();
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--record" => record = it.next().map(PathBuf::from),
                 "--replay" => replay = it.next().map(PathBuf::from),
+                "--sandbox-probe" => probe = true,
                 _ => return usage(),
             }
+        }
+        // The OS sandbox (SPEC-9.1.3) before anything from the shell is
+        // read. A recording or replay opens its file inside the loop, so
+        // those developer runs are not locked down.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let report = if record.is_none() && replay.is_none() {
+            vy_shell::sandbox::lockdown(vy_shell::sandbox::Mode::from_env())
+        } else {
+            vy_shell::sandbox::Report {
+                warnings: vec!["--record/--replay".into()],
+                ..Default::default()
+            }
+        };
+        if probe {
+            let attempts = vy_shell::sandbox::probe(&exe);
+            print!("{}", vy_shell::sandbox::probe_text(&report, &attempts));
+            return if attempts.iter().all(|a| a.outcome.is_err()) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        for w in &report.warnings {
+            eprintln!("vy-shell --tab: sandbox not applied: {w}");
         }
         return match vy_shell::tab::main(record.as_deref(), replay.as_deref()) {
             Ok(()) => ExitCode::SUCCESS,
@@ -142,7 +169,7 @@ fn screenshot(args: &[String]) -> Result<(), String> {
         height: h as f32,
         scale,
         max_ticks: ticks.max(1),
-        exe: Some(std::env::current_exe().map_err(|e| e.to_string())?),
+        exe: Some(vy_shell::process::self_exe().map_err(|e| e.to_string())?),
         timeout: std::time::Duration::from_secs(60),
     };
     let image = vy_shell::headless::screenshot(source, &options)?;

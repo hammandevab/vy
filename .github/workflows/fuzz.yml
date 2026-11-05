@@ -1,0 +1,51 @@
+# Fuzzing (M4): every night and on demand, each cargo-fuzz target in fuzz/
+# runs for about five minutes on nightly Rust, seeded from fuzz/corpus.
+# A crash is uploaded as an artifact; commit it under
+# fuzz/artifacts/<target>/ with the fix, and the stable replay test
+# (crates/vy-shell/tests/fuzz_regressions.rs) keeps it a gate.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [manifest, display_list, ipc, address, png, markdown, dns]
+    env:
+      # rust-toolchain.toml pins stable; fuzzing needs nightly.
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nightly toolchain and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          mkdir -p fuzz/artifacts/${{ matrix.target }}
+          cargo fuzz run --fuzz-dir fuzz ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+            -max_total_time=${{ github.event.inputs.seconds || '300' }} \
+            -rss_limit_mb=2048 -timeout=10
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-crashes
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

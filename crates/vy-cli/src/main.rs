@@ -25,6 +25,11 @@ fn main() -> ExitCode {
     // As a tab process of the headless shell (conformance's shell cases
     // and bench start this executable with `--tab`).
     if args.first().map(String::as_str) == Some("--tab") {
+        // The same OS sandbox as vy-shell's tab processes (SPEC-9.1.3).
+        let report = vy_shell::sandbox::lockdown(vy_shell::sandbox::Mode::from_env());
+        for w in &report.warnings {
+            eprintln!("vy-cli --tab: sandbox not applied: {w}");
+        }
         return match vy_shell::tab::main(None, None) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

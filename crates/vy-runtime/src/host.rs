@@ -36,6 +36,10 @@ pub type Storage = BTreeMap<Vec<u8>, Vec<u8>>;
 /// Storage quota the headless host applies when the caller names none:
 /// 1 MB, the policy default of SPEC-8.2.3.
 pub const DEFAULT_STORAGE_QUOTA_BYTES: u64 = 1 << 20;
+/// Network bytes a page may move per minute of its clock, request bodies
+/// and URLs plus response bodies (SPEC-9.3.1). The main process holds
+/// the same budget for the tab, which it does not trust to keep this one.
+pub const NET_BYTES_PER_MINUTE: u64 = 256 << 20;
 
 /// A response the headless host serves for `fetch_begin` to one URL
 /// (SPEC-5.2.7): what a conformance case declares as
@@ -321,6 +325,9 @@ pub struct Host {
     pub(crate) links: Vec<Link>,
     pub(crate) log: Vec<LogEntry>,
     pub(crate) clock_ms: i64,
+    /// Start of the current network minute and the bytes counted in it
+    /// (SPEC-9.3.1).
+    pub(crate) net_minute: (i64, u64),
     /// Where the clock comes from: advanced per frame headless, set by
     /// the host process otherwise (SPEC-5.2.11).
     pub(crate) clock: ClockSource,
@@ -408,6 +415,7 @@ impl Host {
             links: Vec::new(),
             log: Vec::new(),
             clock_ms: 0,
+            net_minute: (0, 0),
             clock,
             rng: Rng::new(random),
             wants_frame: false,
@@ -515,6 +523,21 @@ impl Host {
     }
 
     /// Owe fuel for `bytes` of host work (see [`crate::FUEL_PER_HOST_BYTE`]).
+    /// Count `bytes` against this minute's network budget (SPEC-9.3.1);
+    /// false, and nothing counted, when they do not fit.
+    pub(crate) fn net_admit(&mut self, bytes: u64) -> bool {
+        if self.clock_ms.saturating_sub(self.net_minute.0) >= 60_000 {
+            self.net_minute = (self.clock_ms, 0);
+        }
+        match self.net_minute.1.checked_add(bytes) {
+            Some(total) if total <= NET_BYTES_PER_MINUTE => {
+                self.net_minute.1 = total;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn charge(&mut self, bytes: usize) {
         let fuel = (bytes as u64).saturating_mul(FUEL_PER_HOST_BYTE);
         self.pending_fuel = self.pending_fuel.saturating_add(fuel);
@@ -1087,6 +1110,12 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 }
                 if host.fetches.len() >= limits::MAX_OPEN_FETCHES as usize {
                     return host.refuse("fetch_begin", &err::E_RATE.into());
+                }
+                if !host.net_admit((url.len() + body_len) as u64) {
+                    host.host_log(format!(
+                        "fetch_begin: E_RATE (over {NET_BYTES_PER_MINUTE} network bytes this minute; no request made)"
+                    ));
+                    return err::E_RATE;
                 }
                 match host.transport {
                     Transport::Canned => {

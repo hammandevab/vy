@@ -1,0 +1,2 @@
+https://exempel.se/a/b
+../c?d

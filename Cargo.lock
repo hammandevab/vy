@@ -3229,11 +3229,13 @@ dependencies = [
 name = "vy-proto"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "minicbor",
  "ureq",
  "vy-abi",
  "vy-manifest",
  "wat",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3297,6 +3299,7 @@ dependencies = [
  "accesskit_winit",
  "arboard",
  "getrandom 0.2.17",
+ "libc",
  "softbuffer",
  "vy-abi",
  "vy-dl",

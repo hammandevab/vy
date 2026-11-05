@@ -117,8 +117,9 @@ fn spec_7_2_1_end_to_end_localhost() {
     assert!(first.trusted(), "signature verifies with the published key");
     assert_eq!(first.identity, package.identity());
     assert_eq!(first.package, package);
-    // Manifest, module and key file.
-    assert_eq!(first.requests, 3);
+    // Manifest, module, key file and key log (a 404: the site serves
+    // none, which 1.0 allows, SPEC-7.6.3).
+    assert_eq!(first.requests, 4);
 
     let second = fetcher.fetch(&address).unwrap();
     assert_eq!(

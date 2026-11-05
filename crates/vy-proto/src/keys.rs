@@ -3,14 +3,19 @@
 //! On the first visit to an origin the keys published at
 //! `/.well-known/vy-key` are pinned; later manifests must be signed by a
 //! pinned key, or by a key the previous manifest announced as its
-//! successor in `next_key_id`, which is then fetched and pinned in turn.
-//! The DNS TXT half of SPEC-7.4.2 is not consulted yet (M4).
+//! successor in `next_key_id`, which is then fetched and pinned in turn,
+//! retiring the keys before it (SPEC-7.4.6). Which keys a first visit pins is decided
+//! in `fetch.rs` (the key file and DNS must agree, SPEC-7.4.5); this is
+//! the store.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use vy_manifest::{is_key_id, PublicKey};
+use vy_manifest::{from_hex, hex, is_key_id, PublicKey};
+
+/// A key log as last checked: its length and head (SPEC-7.6.2).
+pub type LogHead = (u64, [u8; 32]);
 
 /// Pins and announced successors of one origin.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -19,6 +24,9 @@ pub struct OriginKeys {
     pub pinned: BTreeMap<String, PublicKey>,
     /// Key ids a trusted manifest named in `next_key_id` (SPEC-7.4.4).
     pub successors: BTreeSet<String>,
+    /// Length and head of the origin's key log when it was last checked
+    /// (SPEC-7.6.2); `None` while the origin has served no log.
+    pub log: Option<LogHead>,
 }
 
 /// The key store: a text file `keys` with one line per pin or successor.
@@ -49,6 +57,11 @@ impl KeyStore {
                     ["successor", origin, key_id] if is_key_id(key_id) => {
                         store.entry(origin).successors.insert((*key_id).to_string());
                     }
+                    ["log", origin, count, head] => {
+                        if let (Ok(n), Some(h)) = (count.parse::<u64>(), from_hex::<32>(head)) {
+                            store.entry(origin).log = Some((n, h));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -68,6 +81,9 @@ impl KeyStore {
             }
             for id in &keys.successors {
                 text.push_str(&format!("successor {origin} {id}\n"));
+            }
+            if let Some((count, head)) = &keys.log {
+                text.push_str(&format!("log {origin} {count} {}\n", hex(head)));
             }
         }
         let tmp = self.path.with_extension("tmp");
@@ -130,11 +146,28 @@ impl KeyStore {
             .unwrap_or(false)
     }
 
-    /// Pin an announced successor once its key is known; the announcement
-    /// is consumed.
+    /// Length and head of the origin's key log as last checked (SPEC-7.6.2).
+    pub fn log_head(&self, origin: &str) -> Option<LogHead> {
+        self.origins.get(origin).and_then(|o| o.log)
+    }
+
+    /// Remember the origin's key log at `count` entries with `head`.
+    pub fn set_log_head(&mut self, origin: &str, count: u64, head: [u8; 32]) -> io::Result<()> {
+        self.entry(origin).log = Some((count, head));
+        self.save()
+    }
+
+    /// Pin an announced successor once its key is known and a manifest
+    /// signed by it has verified; the announcement is consumed and every
+    /// key pinned before is retired (SPEC-7.4.6). Rotation exists to take
+    /// a key out of service: a client that kept honouring the old key
+    /// would give a stolen one an unlimited life, so after a rotation the
+    /// origin has exactly the key it rotated to, and a page still signed
+    /// by the old key is restricted until the publisher re-signs it.
     pub fn promote(&mut self, origin: &str, key: PublicKey) -> io::Result<()> {
         let o = self.entry(origin);
         o.successors.remove(&key.key_id());
+        o.pinned.clear();
         o.pinned.insert(key.key_id(), key);
         self.save()
     }
@@ -166,7 +199,17 @@ mod tests {
         s.promote("vy://x", b).unwrap();
         assert!(!s.is_successor("vy://x", &b.key_id()));
         assert_eq!(s.pinned("vy://x", &b.key_id()), Some(b));
+        assert_eq!(
+            s.pinned("vy://x", &a.key_id()),
+            None,
+            "the key rotated away from is retired (SPEC-7.4.6)"
+        );
         assert!(!s.has_pins("vy://y"));
+        // The log head persists beside the pins (SPEC-7.6.2).
+        s.set_log_head("vy://x", 3, [7; 32]).unwrap();
+        let s = KeyStore::open(&dir).unwrap();
+        assert_eq!(s.log_head("vy://x"), Some((3, [7; 32])));
+        assert_eq!(s.log_head("vy://y"), None);
         let _ = fs::remove_dir_all(&dir);
     }
 

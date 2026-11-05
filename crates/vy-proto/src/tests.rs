@@ -180,6 +180,130 @@ fn addr(server: &TestServer, path: &str) -> Address {
     Address::parse(&format!("vy://localhost:{}{path}", server.port())).unwrap()
 }
 
+/// A TXT resolver the tests script: an answer per name, and a count of
+/// lookups so a test can assert that none was made.
+#[derive(Clone, Debug, Default)]
+struct FakeResolver(Arc<Mutex<FakeDns>>);
+
+#[derive(Debug, Default)]
+struct FakeDns {
+    answers: HashMap<String, Result<Vec<String>, DnsError>>,
+    lookups: Vec<String>,
+}
+
+impl FakeResolver {
+    fn set(&self, name: &str, answer: Result<Vec<String>, DnsError>) {
+        self.0
+            .lock()
+            .unwrap()
+            .answers
+            .insert(name.to_string(), answer);
+    }
+
+    fn lookups(&self) -> Vec<String> {
+        self.0.lock().unwrap().lookups.clone()
+    }
+}
+
+impl TxtResolver for FakeResolver {
+    fn txt(&self, name: &str) -> Result<Vec<String>, DnsError> {
+        let mut dns = self.0.lock().unwrap();
+        dns.lookups.push(name.to_string());
+        dns.answers
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Ok(Vec::new()))
+    }
+}
+
+/// Plumbing that lets a test address a loopback server by a remote name:
+/// every host resolves to the server's port on 127.0.0.1, and the plain
+/// TCP connection reports itself as TLS so an `https://` request goes
+/// through. Only tests build agents this way; the product's agent uses
+/// ureq's resolver and rustls.
+mod remote {
+    use std::net::SocketAddr;
+    use ureq::config::Config;
+    use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
+    use ureq::unversioned::transport::{
+        Buffers, ConnectionDetails, Connector, NextTimeout, TcpConnector, Transport,
+    };
+    use ureq::{http, Agent, Error};
+
+    #[derive(Debug)]
+    struct Loopback(u16);
+
+    impl Resolver for Loopback {
+        fn resolve(
+            &self,
+            _uri: &http::Uri,
+            _config: &Config,
+            _timeout: NextTimeout,
+        ) -> Result<ResolvedSocketAddrs, Error> {
+            let mut addrs = self.empty();
+            addrs.push(SocketAddr::from(([127, 0, 0, 1], self.0)));
+            Ok(addrs)
+        }
+    }
+
+    #[derive(Debug)]
+    struct PlainAsTls<T: Transport>(T);
+
+    impl<T: Transport> Transport for PlainAsTls<T> {
+        fn buffers(&mut self) -> &mut dyn Buffers {
+            self.0.buffers()
+        }
+        fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
+            self.0.transmit_output(amount, timeout)
+        }
+        fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
+            self.0.await_input(timeout)
+        }
+        fn is_open(&mut self) -> bool {
+            self.0.is_open()
+        }
+        fn is_tls(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Debug)]
+    struct PretendTls;
+
+    impl<In: Transport> Connector<In> for PretendTls {
+        type Out = PlainAsTls<In>;
+        fn connect(
+            &self,
+            _details: &ConnectionDetails,
+            chained: Option<In>,
+        ) -> Result<Option<Self::Out>, Error> {
+            Ok(chained.map(PlainAsTls))
+        }
+    }
+
+    /// An agent with `config` whose every connection goes to `port` on
+    /// loopback, in plain HTTP, whatever the URL says.
+    pub fn agent(config: Config, port: u16) -> Agent {
+        Agent::with_parts(
+            config,
+            TcpConnector::default().chain(PretendTls),
+            Loopback(port),
+        )
+    }
+}
+
+/// A fetcher that reaches `server` under any host name, with `resolver`
+/// answering its TXT lookups.
+fn remote_fetcher(name: &str, server: &TestServer, resolver: &FakeResolver) -> (Fetcher, PathBuf) {
+    let dir = temp_dir(name);
+    let options = Options::new(&dir);
+    let agent = remote::agent(Fetcher::test_config(&options), server.port());
+    (
+        Fetcher::with_parts(options, Box::new(resolver.clone()), agent).unwrap(),
+        dir,
+    )
+}
+
 /// SPEC-7.1.1: vy://host/path?q becomes https://host/path?q with the Accept header.
 #[test]
 fn spec_7_1_1_translation() {
@@ -261,16 +385,16 @@ fn spec_7_2_1_media_types() {
     assert_eq!(whole.package, p);
     assert_eq!(whole.identity, p.identity());
     assert!(whole.trusted());
-    // Page plus key discovery.
-    assert_eq!(whole.requests, 2);
+    // Page, key discovery and the key log (SPEC-7.6.2).
+    assert_eq!(whole.requests, 3);
 
     site.lock().unwrap().form = Form::Manifest;
     let (mut g, dir2) = fetcher("forms2");
     let bare = g.fetch(&addr(&server, "/hello")).unwrap();
     assert_eq!(bare.form, Form::Manifest);
     assert_eq!(bare.package, p);
-    // Manifest, module, resource, keys.
-    assert_eq!(bare.requests, 4);
+    // Manifest, module, resource, keys, key log.
+    assert_eq!(bare.requests, 5);
     let paths: Vec<String> = server.requests().iter().map(|r| r.path.clone()).collect();
     assert!(p.manifest.module.url.is_none() && p.manifest.resources[0].url.is_none());
     assert!(paths.contains(&format!("/_vy/{}", p.manifest.module.hash.hex())));
@@ -525,7 +649,8 @@ fn spec_7_3_2_manifest_http_cache() {
     let server = serve(&site);
     let (mut f, dir) = fetcher("http");
     let first = f.fetch(&addr(&server, "/hello")).unwrap();
-    assert_eq!(first.requests, 4);
+    // Manifest, key file, key log (SPEC-7.6.2), module, resource.
+    assert_eq!(first.requests, 5);
     // Fresh for 60 s: no request at all.
     let second = f.fetch(&addr(&server, "/hello")).unwrap();
     assert_eq!(second.requests, 0);
@@ -597,7 +722,7 @@ fn spec_7_4_1_signature_scope() {
 
 /// SPEC-7.4.2: the publisher key is read from `/.well-known/vy-key` on the
 /// first visit and pinned; later visits use the pin and never ask again.
-/// (The DNS TXT half is not implemented, see the ignored test below.)
+/// (The DNS TXT half is `spec_7_4_2_dns_txt_must_agree` below.)
 #[test]
 fn spec_7_4_2_key_discovery() {
     let p = package(&key(0), None);
@@ -644,12 +769,171 @@ fn spec_7_4_2_key_discovery() {
     let _ = std::fs::remove_dir_all(dir3);
 }
 
-/// SPEC-7.4.2: DNS TXT `_vy.<host>` must agree with `.well-known/vy-key`
-/// on the first visit.
+/// SPEC-7.4.2, SPEC-7.4.5: on the first visit of a remote origin the key
+/// file and the TXT records at `_vy.<host>` must agree: only keys in both
+/// are pinned and only one of them makes the page trusted. A record that
+/// names another key, no `v=vy1` record at all, or a lookup that fails is
+/// restricted mode with the reason, nothing pinned, and the next visit asks
+/// again. A pinned origin never asks DNS again, and loopback never asks at
+/// all (SPEC-7.1.3).
 #[test]
-#[ignore = "M4: DNS TXT lookup needs a resolver; only .well-known is consulted in M3"]
 fn spec_7_4_2_dns_txt_must_agree() {
-    todo!()
+    let publisher = key(0);
+    let backup = key(9);
+    let stranger = key(4);
+    let site = Site::new(
+        package(&publisher, None),
+        Form::Package,
+        &[publisher.clone(), backup.clone()],
+    );
+    site.lock().unwrap().cache_control = None;
+    let server = serve(&site);
+    let a = Address::parse("vy://exempel.test/hello").unwrap();
+    assert!(!a.is_localhost());
+    let name = "_vy.exempel.test";
+    assert_eq!(vy_manifest::dns_txt_name(a.host()), name);
+
+    // Agree: the record names the publisher; the backup key is only in the
+    // key file and is not pinned.
+    let dns = FakeResolver::default();
+    dns.set(
+        name,
+        Ok(vec![
+            "v=spf1 -all".into(),
+            vy_manifest::dns_txt_record(&publisher.public()),
+        ]),
+    );
+    let (mut f, dir) = remote_fetcher("dns-agree", &server, &dns);
+    let first = f.fetch(&a).unwrap();
+    assert!(first.trusted(), "{:?}", first.restriction());
+    assert_eq!(first.restriction(), None);
+    assert_eq!(dns.lookups(), [name]);
+    let pins = f.keys().origin(&a.origin()).unwrap();
+    assert_eq!(
+        pins.pinned.keys().collect::<Vec<_>>(),
+        [&publisher.public().key_id()],
+        "only the key both sources publish is pinned"
+    );
+    // Pinned: no lookup on the next visit, and a page signed by the
+    // backup key is not trusted even though the key file lists it.
+    assert!(f.fetch(&a).unwrap().trusted());
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&backup, None));
+    let by_backup = f.fetch(&a).unwrap();
+    assert!(!by_backup.trusted());
+    assert!(matches!(
+        by_backup.restriction(),
+        Some(Restriction::UnknownKey { key_id }) if *key_id == backup.public().key_id()
+    ));
+    assert_eq!(dns.lookups().len(), 1, "a pinned origin never asks DNS");
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&publisher, None));
+
+    // Mismatch: the record names a key the key file does not have.
+    let dns = FakeResolver::default();
+    dns.set(
+        name,
+        Ok(vec![vy_manifest::dns_txt_record(&stranger.public())]),
+    );
+    let (mut g, dir2) = remote_fetcher("dns-mismatch", &server, &dns);
+    let mismatch = g.fetch(&a).unwrap();
+    assert!(!mismatch.trusted());
+    assert_eq!(
+        mismatch.restriction(),
+        Some(&Restriction::DnsMismatch { name: name.into() })
+    );
+    assert!(!g.keys().has_pins(&a.origin()), "nothing is pinned");
+    assert!(mismatch
+        .restriction()
+        .unwrap()
+        .to_string()
+        .contains("SPEC-7.4.5"));
+    assert!(mismatch.grants().iter().all(|(_, g)| *g == Grant::Denied));
+
+    // Missing: no record, or only records of other forms.
+    for records in [vec![], vec!["v=spf1 -all".to_string()]] {
+        let dns = FakeResolver::default();
+        dns.set(name, Ok(records));
+        let (mut h, dir3) = remote_fetcher("dns-missing", &server, &dns);
+        let missing = h.fetch(&a).unwrap();
+        assert!(!missing.trusted());
+        assert_eq!(
+            missing.restriction(),
+            Some(&Restriction::DnsNoRecord { name: name.into() })
+        );
+        assert!(!h.keys().has_pins(&a.origin()));
+        let _ = std::fs::remove_dir_all(dir3);
+    }
+
+    // The lookup fails: restricted, fail closed, and asked again next time.
+    let dns = FakeResolver::default();
+    dns.set(name, Err(DnsError::Timeout));
+    let (mut t, dir4) = remote_fetcher("dns-timeout", &server, &dns);
+    let timed_out = t.fetch(&a).unwrap();
+    assert!(!timed_out.trusted());
+    assert_eq!(
+        timed_out.restriction(),
+        Some(&Restriction::DnsFailed {
+            name: name.into(),
+            error: DnsError::Timeout
+        })
+    );
+    assert!(!t.keys().has_pins(&a.origin()));
+    dns.set(
+        name,
+        Ok(vec![vy_manifest::dns_txt_record(&publisher.public())]),
+    );
+    assert!(t.fetch(&a).unwrap().trusted(), "the next visit asks again");
+    assert_eq!(dns.lookups().len(), 2);
+
+    // The signing key is in DNS but not in the key file: not pinned.
+    let dns = FakeResolver::default();
+    dns.set(
+        name,
+        Ok(vec![
+            vy_manifest::dns_txt_record(&publisher.public()),
+            vy_manifest::dns_txt_record(&stranger.public()),
+        ]),
+    );
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&stranger, None));
+    let (mut s, dir5) = remote_fetcher("dns-half", &server, &dns);
+    let half = s.fetch(&a).unwrap();
+    assert!(!half.trusted());
+    assert!(matches!(
+        half.restriction(),
+        Some(Restriction::KeyNotPublished { key_id }) if *key_id == stranger.public().key_id()
+    ));
+    assert_eq!(
+        s.keys()
+            .origin(&a.origin())
+            .unwrap()
+            .pinned
+            .keys()
+            .collect::<Vec<_>>(),
+        [&publisher.public().key_id()]
+    );
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&publisher, None));
+
+    // Loopback has no DNS: the key file alone, no lookup (SPEC-7.1.3).
+    let dns = FakeResolver::default();
+    let dir6 = temp_dir("dns-local");
+    let mut l = Fetcher::with_resolver(Options::new(&dir6), Box::new(dns.clone())).unwrap();
+    let local = l.fetch(&addr(&server, "/hello")).unwrap();
+    assert!(local.trusted());
+    assert!(dns.lookups().is_empty());
+    for d in [dir, dir2, dir4, dir5, dir6] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
 
 /// SPEC-7.4.3: a page without a valid signature runs in restricted mode:
@@ -704,15 +988,26 @@ fn spec_7_4_3_restricted_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// SPEC-7.4.4: key rotation: a manifest signed with the old key names the
-/// new key id; the new key is then accepted from `.well-known/vy-key`.
+/// SPEC-7.4.4, SPEC-7.4.6: key rotation end to end: a manifest signed with the old
+/// key names the new key id; the new key is then fetched from
+/// `.well-known/vy-key` and accepted for the origin, and the old key is
+/// retired at that moment (the decision: rotation takes a key out of
+/// service, so a client never honours a rotated-away key again). A key the
+/// site publishes without a chain from a trusted manifest is refused
+/// ("ingen annan väg ger en okänd nyckel förtroende"), an announced key
+/// that the key file lacks waits, and a manifest that merely names the
+/// successor without being signed by it neither promotes nor retires.
 #[test]
 fn spec_7_4_4_key_rotation() {
     let old = key(0);
     let new = key(3);
     let stranger = key(4);
     let announcing = package(&old, Some(&new.public().key_id()));
-    let site = Site::new(announcing, Form::Package, std::slice::from_ref(&old));
+    let site = Site::new(
+        announcing.clone(),
+        Form::Package,
+        std::slice::from_ref(&old),
+    );
     site.lock().unwrap().cache_control = None;
     let server = serve(&site);
     let (mut f, dir) = fetcher("rotation");
@@ -720,8 +1015,47 @@ fn spec_7_4_4_key_rotation() {
     assert!(f.fetch(&a).unwrap().trusted());
     assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
 
-    // The publisher rotates: new key signs, both keys published.
+    // Announced but not yet in the key file: restricted, the announcement
+    // kept, and a page still signed by the old key is still trusted.
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&new, None));
+    let early = f.fetch(&a).unwrap();
+    assert!(!early.trusted());
+    assert!(matches!(
+        early.restriction(),
+        Some(Restriction::SuccessorNotPublished { key_id }) if *key_id == new.public().key_id()
+    ));
+    assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
+    assert!(f
+        .keys()
+        .pinned(&a.origin(), &old.public().key_id())
+        .is_some());
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), announcing.clone());
+    assert!(f.fetch(&a).unwrap().trusted());
+
+    // A manifest that names the successor's id but is signed by someone
+    // else: a bad signature, and nothing changes in the store.
+    let mut forged = package(&stranger, None);
+    forged.manifest.sig.as_mut().unwrap().key_id = new.public().key_id();
     site.lock().unwrap().keys = key_file(&[old.public(), new.public(), stranger.public()]);
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), forged);
+    let bad = f.fetch(&a).unwrap();
+    assert_eq!(bad.restriction(), Some(&Restriction::BadSignature));
+    assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
+    assert!(f
+        .keys()
+        .pinned(&a.origin(), &old.public().key_id())
+        .is_some());
+
+    // The publisher rotates: the new key signs, both keys published.
     site.lock()
         .unwrap()
         .packages
@@ -734,13 +1068,49 @@ fn spec_7_4_4_key_rotation() {
         .pinned(&a.origin(), &new.public().key_id())
         .is_some());
     assert!(!f.keys().is_successor(&a.origin(), &new.public().key_id()));
+    assert_eq!(
+        f.keys().pinned(&a.origin(), &old.public().key_id()),
+        None,
+        "the old key is retired by the rotation"
+    );
+    let text = std::fs::read_to_string(dir.join("keys")).unwrap();
+    assert_eq!(text, format!("pin {} {}\n", a.origin(), new.public()));
 
-    // A key that was published but never announced is still refused.
+    // A page still signed by the old key is restricted from now on, even
+    // though the key file still lists the key.
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&old, None));
+    let stale = f.fetch(&a).unwrap();
+    assert!(!stale.trusted());
+    assert!(matches!(
+        stale.restriction(),
+        Some(Restriction::UnknownKey { key_id }) if *key_id == old.public().key_id()
+    ));
+
+    // A key that was published but never announced is refused: no chain
+    // from a trusted manifest, no trust.
     site.lock()
         .unwrap()
         .packages
         .insert("/hello".into(), package(&stranger, None));
-    assert!(!f.fetch(&a).unwrap().trusted());
+    let unknown = f.fetch(&a).unwrap();
+    assert!(!unknown.trusted());
+    assert!(matches!(
+        unknown.restriction(),
+        Some(Restriction::UnknownKey { key_id }) if *key_id == stranger.public().key_id()
+    ));
+    assert_eq!(
+        server.count(WELL_KNOWN_KEY_PATH),
+        4,
+        "the key file is fetched only for a first visit or an announced successor"
+    );
+    assert!(unknown
+        .restriction()
+        .unwrap()
+        .to_string()
+        .contains("SPEC-7.4.4"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -885,4 +1255,146 @@ fn spec_5_2_7_page_requests_through_the_main_process() {
     }
     assert_eq!(server.requests().len(), 5);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.6.2, SPEC-7.6.3: the key log is consulted at the two key
+/// decisions, the first visit and a rotation. A served log must list the
+/// key for the origin's host (an entry for another host does not count),
+/// its chain must hold, and once a head is recorded beside the pin a later
+/// log must still start with those entries and must not disappear; each
+/// failure is restricted mode with the pins unchanged. Without a log, ever,
+/// the origin is judged by §7.4 alone.
+#[test]
+fn spec_7_6_2_7_6_3_key_log_checked_at_key_decisions() {
+    let old = key(0);
+    let new = key(3);
+    let stranger = key(4);
+    let site = Site::new(
+        package(&old, Some(&new.public().key_id())),
+        Form::Package,
+        &[old.clone(), new.clone()],
+    );
+    site.lock().unwrap().cache_control = None;
+    let server = serve(&site);
+    let a = addr(&server, "/hello");
+    let host = a.origin().strip_prefix("vy://").unwrap().to_string();
+    let set_log = |body: Option<Vec<u8>>| {
+        let mut s = site.lock().unwrap();
+        match body {
+            Some(b) => {
+                s.other
+                    .insert(WELL_KNOWN_LOG_PATH.into(), ("text/plain".into(), b));
+            }
+            None => {
+                s.other.remove(WELL_KNOWN_LOG_PATH);
+            }
+        }
+    };
+    let mut log = vy_manifest::KeyLog::default();
+    log.append(&host, stranger.public(), "2026-11-05");
+
+    // A served log without the key: restricted, nothing pinned.
+    set_log(Some(log.text().into_bytes()));
+    let (mut f, dir) = fetcher("log-decisions");
+    let missing = f.fetch(&a).unwrap();
+    assert_eq!(
+        missing.restriction(),
+        Some(&Restriction::NotInLog {
+            key_id: old.public().key_id()
+        })
+    );
+    assert!(missing
+        .restriction()
+        .unwrap()
+        .to_string()
+        .contains("SPEC-7.6.2"));
+    assert!(!f.keys().has_pins(&a.origin()));
+    // A log whose chain does not hold.
+    set_log(Some(b"zz\n".to_vec()));
+    assert!(matches!(
+        f.fetch(&a).unwrap().restriction(),
+        Some(Restriction::LogInvalid(_))
+    ));
+    // An entry for another host does not count.
+    let mut elsewhere = vy_manifest::KeyLog::default();
+    elsewhere.append("exempel.se", old.public(), "2026-11-05");
+    set_log(Some(elsewhere.text().into_bytes()));
+    assert!(matches!(
+        f.fetch(&a).unwrap().restriction(),
+        Some(Restriction::NotInLog { .. })
+    ));
+    assert!(!f.keys().has_pins(&a.origin()));
+
+    // Listed: trusted, only the listed key pinned, the head recorded.
+    log.append(&host, old.public(), "2026-11-05");
+    set_log(Some(log.text().into_bytes()));
+    let first = f.fetch(&a).unwrap();
+    assert!(first.trusted(), "{:?}", first.restriction());
+    let o = f.keys().origin(&a.origin()).unwrap();
+    assert_eq!(
+        o.pinned.keys().collect::<Vec<_>>(),
+        [&old.public().key_id()],
+        "the new key is in vy-key but not in the log"
+    );
+    assert_eq!(o.log, Some((2, log.head())));
+    assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
+
+    // Rotation to a key the log does not list yet: restricted, old kept.
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&new, None));
+    assert_eq!(
+        f.fetch(&a).unwrap().restriction(),
+        Some(&Restriction::NotInLog {
+            key_id: new.public().key_id()
+        })
+    );
+    assert!(f
+        .keys()
+        .pinned(&a.origin(), &old.public().key_id())
+        .is_some());
+    // The same keys with another history: rewritten.
+    let mut rewritten = vy_manifest::KeyLog::default();
+    rewritten.append(&host, old.public(), "2026-11-04");
+    rewritten.append(&host, new.public(), "2026-11-04");
+    set_log(Some(rewritten.text().into_bytes()));
+    assert_eq!(
+        f.fetch(&a).unwrap().restriction(),
+        Some(&Restriction::LogRewritten)
+    );
+    // Withdrawn after a head was recorded (SPEC-7.6.3).
+    set_log(None);
+    assert_eq!(
+        f.fetch(&a).unwrap().restriction(),
+        Some(&Restriction::LogWithdrawn)
+    );
+    assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
+    assert_eq!(f.keys().log_head(&a.origin()), Some((2, log.head())));
+
+    // The log grows with the new key: the rotation goes through and the
+    // recorded head moves with it.
+    log.append(&host, new.public(), "2026-12-01");
+    set_log(Some(log.text().into_bytes()));
+    let rotated = f.fetch(&a).unwrap();
+    assert!(rotated.trusted(), "{:?}", rotated.restriction());
+    assert_eq!(f.keys().log_head(&a.origin()), Some((3, log.head())));
+    assert!(f
+        .keys()
+        .pinned(&a.origin(), &old.public().key_id())
+        .is_none());
+
+    // No log, ever: a first visit is judged by §7.4 alone, no head kept.
+    set_log(None);
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&old, None));
+    let (mut g, dir2) = fetcher("log-absent");
+    let plain = g.fetch(&a).unwrap();
+    assert!(plain.trusted(), "{:?}", plain.restriction());
+    assert_eq!(g.keys().log_head(&a.origin()), None);
+    for d in [dir, dir2] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }

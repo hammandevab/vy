@@ -7,6 +7,7 @@
 
 mod cbor;
 mod draft;
+mod log;
 mod manifest;
 mod package;
 mod policy;
@@ -14,6 +15,7 @@ mod sign;
 mod validate;
 
 pub use draft::{mime_for_path, Draft, DraftResource, ResourceInput};
+pub use log::{KeyLog, LogEntry, LOG_GENESIS, MAX_LOG_BYTES, MAX_LOG_HOST_BYTES};
 pub use manifest::{
     from_hex, hex, AbiVersion, Blob, CapabilityRequests, Empty, Entry, Hash, Manifest, MinSize,
     NetRequest, Resource, SigBytes, Signature, StorageRequest, MAX_FALLBACK_BYTES,
@@ -25,7 +27,10 @@ pub use package::{
     ENTRY_RESOURCE_PREFIX, MAX_PACKAGE_BYTES, MEDIA_MANIFEST, MEDIA_PACKAGE, ZSTD_LEVEL,
 };
 pub use policy::{Grant, Requested, Trust};
-pub use sign::{key_file, key_id, parse_key_file, PublicKey, SigningKey, KEY_ID_HEX_LEN};
+pub use sign::{
+    dns_txt_name, dns_txt_record, dns_txt_zone_line, key_file, key_id, parse_dns_txt,
+    parse_key_file, PublicKey, SigningKey, DNS_TXT_LABEL, DNS_TXT_PREFIX, KEY_ID_HEX_LEN,
+};
 pub use validate::{
     is_bcp47, is_date, is_key_id, is_origin, module_initial_pages, png_dimensions, Problem,
     AUTO_STORAGE_QUOTA_KB, MAX_MODULE_BYTES, MAX_RESOURCES_BYTES, RESOURCE_MIMES,
@@ -1223,6 +1228,42 @@ mod tests {
         );
         assert!(parse_key_file("# only a comment\n").unwrap().is_empty());
         assert!(parse_key_file("not hex\n").is_err());
+    }
+
+    /// SPEC-7.4.2, SPEC-7.4.5: the DNS TXT record at `_vy.<host>` has one
+    /// form, `v=vy1; k=<64 lower-case hex digits>`, which round-trips; a
+    /// record of any other form at that name is not a key (not an error:
+    /// the name may carry other TXT records), and the zone line is what
+    /// the operator publishes.
+    #[test]
+    fn spec_7_4_5_dns_txt_record_form() {
+        let key = test_key().public();
+        assert_eq!(dns_txt_name("exempel.se"), "_vy.exempel.se");
+        assert_eq!(DNS_TXT_LABEL, "_vy");
+        let record = dns_txt_record(&key);
+        assert_eq!(record, format!("v=vy1; k={TEST_PUBLIC_HEX}"));
+        assert_eq!(parse_dns_txt(&record), Some(key));
+        assert_eq!(parse_dns_txt(&format!("  {record}\n")), Some(key));
+        assert_eq!(
+            dns_txt_zone_line("exempel.se", &key),
+            format!("_vy.exempel.se. IN TXT \"v=vy1; k={TEST_PUBLIC_HEX}\"")
+        );
+        for other in [
+            "",
+            "v=spf1 -all",
+            "v=vy1",
+            "v=vy1; k=",
+            &format!("v=vy2; k={TEST_PUBLIC_HEX}"),
+            &format!("v=vy1;k={TEST_PUBLIC_HEX}"),
+            &format!("v=vy1; k={}", TEST_PUBLIC_HEX.to_ascii_uppercase()),
+            &format!("v=vy1; k={}", &TEST_PUBLIC_HEX[..62]),
+            &format!("v=vy1; k={TEST_PUBLIC_HEX}00"),
+            &format!("v=vy1; k={TEST_PUBLIC_HEX} extra"),
+            // 32 bytes that are not a curve point (y = 2 has no x).
+            &format!("v=vy1; k=02{}", "00".repeat(31)),
+        ] {
+            assert_eq!(parse_dns_txt(other), None, "{other:?}");
+        }
     }
 
     /// SPEC-7.4.4, SPEC-7.4.2, SPEC-8.1.1: `next_key_id` names a key and

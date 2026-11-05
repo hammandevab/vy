@@ -123,7 +123,17 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-7.4.2]** Utgivarens publika nyckel publiceras i DNS TXT `_vy.<värd>` och på `https://<värd>/.well-known/vy-key`; båda måste stämma vid första besök.
 - **[SPEC-7.4.3]** En sida utan giltig signatur körs i begränsat läge där inga capabilities beviljas.
 - **[SPEC-7.4.4]** Nyckelrotation sker genom att ett manifest signerat med den gamla nyckeln anger det nya nyckel-id:t i `next_key_id`; den nya nyckeln hämtas då från `/.well-known/vy-key` och godtas för origin, och ingen annan väg ger en okänd nyckel förtroende.
+- **[SPEC-7.4.5]** TXT-posten vid `_vy.<värd>` har formen `v=vy1; k=<nyckel>`, där `<nyckel>` är den publika nyckeln som 64 gemena hextecken som i `/.well-known/vy-key`, en post per nyckel; vid första besök litar klienten bara på nycklar som står både i `/.well-known/vy-key` och i TXT-posterna, och saknad post, avvikelse eller ett uppslag som misslyckas ger begränsat läge (SPEC-7.4.3) utan pinnad nyckel och med orsaken angiven så att klienten kan visa den. `localhost` (även `127.0.0.1` och `[::1]`) har inget DNS och är undantaget, som i SPEC-7.1.3; en origin med pinnad nyckel frågar aldrig DNS igen – rotation enligt SPEC-7.4.4 är enda vägen till en ny nyckel.
+- **[SPEC-7.4.6]** När ett manifest signerat med en nyckel som godtagits genom rotation (SPEC-7.4.4) har verifierats upphör alla nycklar som var pinnade för origin före rotationen att gälla; en sida som fortfarande är signerad med en sådan nyckel körs i begränsat läge.
 - **[SPEC-7.5.1]** Klienten skickar aldrig `Referer` och accepterar högst 3 omdirigeringar.
+
+### 7.6 Transparenslogg
+
+Loggen gör varje nyckel en utgivare tagit i bruk synlig i efterhand; den är en vanlig fil som vem som helst kan spegla och kontrollera utan att lita på servern (§17).
+
+- **[SPEC-7.6.1]** Utgivarens nyckellogg ligger på `https://<värd>/.well-known/vy-log`, är högst 1 MB och ändras bara genom att poster läggs till: en post per rad (tomma rader och rader som börjar med `#` är kommentarer), varje rad den kanoniska CBOR-kodningen (SPEC-4.1.3) som gemena hextecken av en map {host, key_id, key, published, prev_hash}, där `host` är originens värd med `:port` när porten inte är 443, `key` den publika nyckeln (32 byte), `key_id` dess nyckel-id (SPEC-8.1.1), `published` ett datum `ÅÅÅÅ-MM-DD` och `prev_hash` SHA-256 av föregående posts kodning, 32 nollbyte för den första; loggens huvud är SHA-256 av sista postens kodning.
+- **[SPEC-7.6.2]** Vid första besök och vid rotation hämtar klienten loggen; serverar origin en logg godtar klienten bara en nyckel som loggen listar för originens `host` och sparar loggens längd och huvud bredvid pinnen. En logg som inte kan hämtas eller vars kedja inte håller, en nyckel som saknas i loggen och en logg som inte längre börjar med de poster klienten sett (omskriven historik) ger begränsat läge (SPEC-7.4.3) utan att pinnarna ändras.
+- **[SPEC-7.6.3]** En origin utan logg (svar 404) är tillåten i 1.0 och bedöms enbart enligt SPEC-7.4.2–7.4.6; har klienten en gång sparat ett huvud för origin ger en saknad logg begränsat läge.
 
 ## 8. Manifestet
 
@@ -140,6 +150,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 
 - **[SPEC-9.1.1]** Varje flik körs i en egen OS-process med en egen wasmtime-instans.
 - **[SPEC-9.1.2]** Rasterisering och GPU-kontext finns endast i huvudprocessen; sandboxad kod delar aldrig GPU-kontext.
+- **[SPEC-9.1.3]** Flikprocessen körs utan filsystems- och nätverksåtkomst efter uppstart; värden kan verifiera det med en sond.
 - **[SPEC-9.2.1]** Beviljade capabilities visas i adressfältet och kan återkallas var för sig av användaren.
 - **[SPEC-9.3.1]** Resursgränser per flik verkställs av värden: minne enligt `memory_max`, 8 ms CPU per frame, 0 CPU i bakgrund utan `persist_frame`, 64 samtidiga nätverksanrop, 256 MB/min nätverk, `quota_kb` lagring.
 - **[SPEC-9.3.2]** Värden kopierar högst dessa byte ur modulminnet per anrop: `log` 4 KB; `dl_text`, `text_measure`, `text_caret` 65 535; `dl_path` 65 535 × 9; `sem_node` 4 KB; `navigate`, `link_register` och `fetch_begin`-URL 2 KB; `fetch_begin`-kropp 1 MB; `state_*`-nyckel 256 byte; `state_put`-värde 1 MB; `clipboard_write` 1 MB. Ett `len` över taket ger `E_ARG` utan kopia. Per frame håller värden högst 65 536 semantiska noder, högst 4 096 länkar och högst 16 MB text i semantiskt träd och display list tillsammans; överskott ger `E_DL_FULL`.
