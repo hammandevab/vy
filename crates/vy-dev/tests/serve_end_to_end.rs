@@ -44,9 +44,30 @@ impl Response {
     }
 }
 
+/// This run's dev API token, set once the daemon is up.
+static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// [`http_raw`] with the token added to a `/_dev/` path, as Studio sends it.
+fn http(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+    let path = match (path.starts_with("/_dev/"), TOKEN.get()) {
+        (true, Some(t)) => format!(
+            "{path}{}token={t}",
+            if path.contains('?') { '&' } else { '?' }
+        ),
+        _ => path.to_string(),
+    };
+    http_raw(port, method, &path, headers, body)
+}
+
 /// One HTTP/1.1 request with `Connection: close`; `Host` is
 /// `localhost:<port>` unless `headers` names one.
-fn http(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+fn http_raw(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Response {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
     let mut req = format!("{method} {path} HTTP/1.1\r\n");
@@ -116,6 +137,7 @@ fn serve_builds_and_serves_two_origins() {
     assert!(handle.key_created, "the key is made on first run");
     let (a, b) = (handle.port, handle.studio_port);
     assert_ne!(a, b);
+    TOKEN.set(handle.dev.access().token.clone()).unwrap();
     assert_eq!(handle.address(), format!("vy://localhost:{a}/e2e-sida"));
     let dev = &handle.dev;
     let settled = |builds: u32| {
@@ -161,18 +183,39 @@ fn serve_builds_and_serves_two_origins() {
     assert_eq!(http(a, "GET", "/_dev/state", &[], b"").status, 404);
     assert_eq!(http(a, "POST", "/_dev/build", &[], b"").status, 405);
 
-    // The guard: a browser's request, or one addressed to another name.
+    // The guard: a browser's request, one addressed to another name or
+    // port, one without this run's token.
+    let other_port = format!("localhost:{a}");
+    let localhost = format!("localhost:{b}");
     for headers in [
         &[("Origin", "https://evil.example")][..],
         &[("Sec-Fetch-Site", "cross-site")][..],
         &[("Referer", "https://evil.example/")][..],
         &[("Host", "evil.example")][..],
-        &[("Host", "evil.example"), ("X-Forwarded-Host", "localhost")][..],
+        &[("Host", other_port.as_str())][..],
+        &[
+            ("Host", "evil.example"),
+            ("X-Forwarded-Host", localhost.as_str()),
+        ][..],
     ] {
         let r = http(b, "POST", "/_dev/build", headers, b"");
         assert_eq!(r.status, 403, "{headers:?}");
         assert_eq!(r.header("Access-Control-Allow-Origin"), None);
     }
+    for path in [
+        "/_dev/state",
+        "/_dev/state?token=",
+        "/_dev/state?token=0000",
+    ] {
+        let r = http_raw(b, "GET", path, &[], b"");
+        assert_eq!(r.status, 403, "{path}");
+        assert!(r.json()["error"].as_str().unwrap().contains("token"));
+    }
+    let with_127 = format!("127.0.0.1:{b}");
+    assert_eq!(
+        http(b, "GET", "/_dev/state", &[("Host", with_127.as_str())], b"").status,
+        200
+    );
     assert_eq!(http(b, "GET", "/_dev/build", &[], b"").status, 405);
     assert_eq!(http(b, "GET", "/_dev/nothing", &[], b"").status, 404);
 

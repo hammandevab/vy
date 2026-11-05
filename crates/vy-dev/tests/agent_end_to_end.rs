@@ -37,8 +37,19 @@ fn fake_agent() -> String {
     }
 }
 
-/// One HTTP/1.1 request to `localhost:<port>`; status and body.
+/// This run's dev API token, set once the daemon is up.
+static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// One HTTP/1.1 request to `localhost:<port>`, the token added to a
+/// `/_dev/` path as Studio sends it; status and body.
 fn http(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+    let path = match (path.starts_with("/_dev/"), TOKEN.get()) {
+        (true, Some(t)) => format!(
+            "{path}{}token={t}",
+            if path.contains('?') { '&' } else { '?' }
+        ),
+        _ => path.to_string(),
+    };
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
     let head = format!(
@@ -117,6 +128,7 @@ fn agent_runs_streams_stops_and_triggers_a_build() {
     .unwrap();
     let (a, b) = (handle.port, handle.studio_port);
     let dev = &handle.dev;
+    TOKEN.set(dev.access().token.clone()).unwrap();
     let settled = |builds: u32| {
         assert!(
             dev.wait_until(BUILD_TIMEOUT, |s| s.builds >= builds

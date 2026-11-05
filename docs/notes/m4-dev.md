@@ -15,7 +15,7 @@ spåret `crates/vy-runtime/src/{host,lib,tests}.rs` (se *Berör andra spår*).
 | 1 `vy-dev new` | `vy-dev new <dir> [--name <n>] [--sdk <vy-checkout>]` skriver ett sidprojekt: `Cargo.toml` på `vy-sdk` (sökväg till checkoutens `crates/vy-sdk` med `--sdk`, annars git-beroendet `https://github.com/hammandevab/vy`), `src/lib.rs` (text, räknare och en knapp med fokusring, `layout()`-mönstret, ett nativt test), `manifest.json` (utkast i formen av `conformance/manifests/*.json`, `published` = dagens datum), release-profilen från `modules/hello` (inget `.cargo/config.toml` finns där), `.gitignore` och en `CLAUDE.md` för en sidskrivande agent: loopen, reglerna, *Klart när*, ett API-sammandrag och SDK:ts README inbäddad (`include_str!`), så agenten inte behöver nätet. | `scaffold_builds_to_wasm_and_passes_check_abi` (bygger till wasm32 här utan varningar, `check_abi_bytes` OK, utkastet validerar mot modulen, första framen har fem semantiska noder, mallen är rustfmt-ren, projektets eget `cargo test` grönt), `api_summary_covers_the_sdk` (varje import, event och roll i SDK:t nämns i sammandraget), `writes_a_project`, `names`, `civil_dates` |
 | 2a `vy-dev build` | Byggkedjan som ett steg: `cargo build --release --target wasm32-unknown-unknown --message-format=json-render-diagnostics` (diagnostiken renderad på stderr = loggen, JSON på stdout namnger modulen var målkatalogen än ligger), ABI-kontrollen (`vy_runtime::check_abi_bytes`, samma kod som `vy-cli check-abi`), utkastet mot modulen och resurserna (`vy_publish::load_resources` + `vy_publish::build`: `memory_max`, bildstorlekar, signatur) och paketet skrivet atomärt (temporär fil + `rename`). Loggen strömmas rad för rad till den som anropar och hålls till de sista 64 KB. `vy-dev build [<dir>] [--key] [--out]` kör den från kommandoraden. Nyckeln: `--key`, annars `VY_DEV_KEY`, annars `<datakatalog>/dev.key` (samma katalog som `vy-shell`: `%APPDATA%\vy`, `~/Library/Application Support/vy`, `~/.config/vy`), skapad med `vy_publish::keygen`/`write_key` första gången. | `build_pipeline_signs_a_valid_package_and_reports_failures` (giltigt signerat paket; trasig källa och för litet `memory_max` ger fel med orsak i loggen och inget paket), `finds_the_module_among_cargo_messages`, `writes_atomically`, `log_keeps_the_tail`, `keys_are_made_once`, `opens_a_scaffold_and_fingerprints_it` |
 | 2 `vy-dev serve` | `vy-dev serve [<dir>] [--port 8080] [--studio-port 8081] [--key <dev.key>] [--agent-cmd <cmd>] [--quiet]`. Två `tiny_http`-servrar, båda på `127.0.0.1`: origin A `vy://localhost:8080/<namn>` är en `vy_serve::Site` över `target/vy-dev/site/` som öppnas på nytt efter varje lyckat bygge (blobbar från gamla byggen släpps), origin B `vy://localhost:8081/` är Studio (steg 5) och dev-API:t under `/_dev/`. Nyckeln och dess `.pub` (`/.well-known/vy-key` på båda) som i 2a; skapad nyckel skrivs ut. En byggtråd med kondvariabel kör kedjan vid start och på begäran; en bevakare läser källornas mtime och längd var 500 ms (`src/`, `res/`, `Cargo.toml`, `manifest.json`, utkastets resurser; inte `Cargo.lock`, som cargo själv skriver) och begär ett bygge när filerna stått still ett intervall och skiljer sig från vad förra bygget utgick från. Byggfel hamnar i byggloggen och statusen, sidan från senaste lyckade bygge serveras vidare. Manifest och paket får `Cache-Control: no-cache`. | `serve_builds_and_serves_two_origins` (start → bygge → signerat paket på A, nyckeln på båda, sidan finns inte på B och API:t inte på A, vakten nekar `Origin`, `Sec-Fetch-Site`, `Referer`, fel `Host` och `X-Forwarded-Host`-förfalskning, `POST /_dev/build` ger samma paket, en trasig källa ger `error` i tillståndet medan sidan finns kvar, en rättad källa byggs av bevakaren, `vy-dev build` från kommandoraden ger samma paket), `fresh_rewrites_cache_control_for_pages_only`, `loopback_hosts`, `guard_refuses_browsers_and_foreign_hosts` |
-| 3 dev-API och agent | På origin B: `GET /_dev/state` → `{name, address, build: {status, log, builds}, agent: {running, last_exit}, seq}`; `POST /_dev/build` → 202; `POST /_dev/agent` (kroppen = uppdraget, UTF-8, högst 64 KB) → 202, 409 när en agent redan kör, 400/413 för tomt, ogiltigt eller för långt, 500 med orsak när programmet inte startar; `POST /_dev/agent/stop` → `{stopped}`; `GET /_dev/agent/events?after=<seq>&wait=<ms>&raw=0&limit=<n>` → `{next, entries: [{seq, kind, text, status?}]}`, long-poll upp till 20 s. Agenten startas som `<cmd> -p --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cargo *),Bash(vy-cli *),Bash(vy-dev build*),Bash(ls *)"` i projektkatalogen med uppdraget på stdin, `vy-dev`s egen katalog först på `PATH` (där `vy-cli` ligger i en release) och `VY_DEV_KEY` satt. Kommandot: `--agent-cmd`, annars `VY_AGENT_CMD`, annars `claude`; på Windows slås ett namn utan filändelse upp med `PATHEXT` (på `PATH`, eller bredvid sig själv för en sökväg), så `claude.cmd` hittas. Utdata läses rad för rad in i en ringlogg (4 000 poster, 8 KB per post): varje rå rad (`raw`), assistentens text (`assistant`), verktygets namn och vad det rörde (`tool`, t.ex. `Edit src/lib.rs`), slutresultatet (`result`), start/stopp/exit (`agent`) och byggen (`build` med `status`). En agent i taget; när den avslutas begärs ett bygge; under tiden begär bevakaren inget. Stopp: `taskkill /T /F` på Windows, annars processträdet ur `ps` med `SIGTERM` och efter 1,5 s `SIGKILL`. | `agent_runs_streams_stops_and_triggers_a_build` med `tools/fake_agent.sh` (uppdraget kommer fram på stdin med exakt de fasta flaggorna, händelserna kommer som text och verktygsnamn utan råa rader, 409 under en körning, stopp avslutar agenten och dess barnprocess, exit bygger och agentens ändring syns i modulen på A, råa rader med `raw=1`, tom long-poll efter `wait`, `limit` ger de nyaste, exitkod 3 rapporteras), `an_agent_that_does_not_start_is_reported`, `commands_parse`, `finds_scripts_with_pathext`, `process_trees`, `stream_json_lines_become_entries`, `select_filters_raw_and_keeps_the_newest`, `sequence_and_cap` |
+| 3 dev-API och agent | På origin B, varje väg med `token=<körningens nyckel>`: `GET /_dev/state` → `{name, address, build: {status, log, builds}, agent: {running, last_exit}, seq}`; `POST /_dev/build` → 202; `POST /_dev/agent` (kroppen = uppdraget, UTF-8, högst 64 KB) → 202, 409 när en agent redan kör, 400/413 för tomt, ogiltigt eller för långt, 500 med orsak när programmet inte startar; `POST /_dev/agent/stop` → `{stopped}`; `GET /_dev/agent/events?after=<seq>&wait=<ms>&raw=0&limit=<n>` → `{next, entries: [{seq, kind, text, status?}]}`, long-poll upp till 20 s. Agenten startas som `<cmd> -p --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cargo *),Bash(vy-cli *),Bash(vy-dev build*),Bash(ls *)"` i projektkatalogen med uppdraget på stdin, `vy-dev`s egen katalog först på `PATH` (där `vy-cli` ligger i en release) och `VY_DEV_KEY` satt. Kommandot: `--agent-cmd`, annars `VY_AGENT_CMD`, annars `claude`; på Windows slås ett namn utan filändelse upp med `PATHEXT` (på `PATH`, eller bredvid sig själv för en sökväg), så `claude.cmd` hittas. Utdata läses rad för rad in i en ringlogg (4 000 poster, 8 KB per post): varje rå rad (`raw`), assistentens text (`assistant`), verktygets namn och vad det rörde (`tool`, t.ex. `Edit src/lib.rs`), slutresultatet (`result`), start/stopp/exit (`agent`) och byggen (`build` med `status`). En agent i taget; när den avslutas begärs ett bygge; under tiden begär bevakaren inget. Stopp: `taskkill /T /F` på Windows, annars processträdet ur `ps` med `SIGTERM` och efter 1,5 s `SIGKILL`. | `agent_runs_streams_stops_and_triggers_a_build` med `tools/fake_agent.sh` (uppdraget kommer fram på stdin med exakt de fasta flaggorna, händelserna kommer som text och verktygsnamn utan råa rader, 409 under en körning, stopp avslutar agenten och dess barnprocess, exit bygger och agentens ändring syns i modulen på A, råa rader med `raw=1`, tom long-poll efter `wait`, `limit` ger de nyaste, exitkod 3 rapporteras), `an_agent_that_does_not_start_is_reported`, `commands_parse`, `finds_scripts_with_pathext`, `process_trees`, `stream_json_lines_become_entries`, `select_filters_raw_and_keeps_the_newest`, `sequence_and_cap` |
 
 ## Beslut
 
@@ -69,16 +69,17 @@ därför som ett skal, inte som en webbsida.
 API:t på origin B (`localhost:8081`). Origin är schema + värd + port (SPEC-9.5.1), och
 standardpolicyn beviljar `net` automatiskt bara mot sidans egen origin (SPEC-8.2.3). En sida på A som
 begär `net` mot B får alltså en *fråga* i adressfältet, aldrig ett tyst ja: säg nej till den. Agenten
-skriver sidans manifest, så en lurad agent kan begära det – frågan är skyddet. API:t finns inte på A
+skriver sidans manifest, så en lurad agent kan begära det; frågan är första skyddet och nyckeln per
+körning (punkt 6) det andra. API:t finns inte på A
 (404) och sidan inte på B, vilket `serve_builds_and_serves_two_origins` visar.
 
 **Vad mer skyddar API:t.**
 
 1. *Bara loopback.* Båda servrarna binder `127.0.0.1`; inget på nätverket når dem.
-2. *Host-kontroll mot DNS-rebinding.* `/_dev/` svarar bara när `Host` är `localhost`, `127.0.0.1`
-   eller `[::1]` (med valfri port). En webbsida som fått sitt namn att peka på 127.0.0.1 skickar sitt
-   eget namn i `Host` och får 403. `X-Forwarded-Host` läses inte för API:t (vem som helst kan sätta
-   det), bara den rå `Host`.
+2. *Host-kontroll mot DNS-rebinding.* `/_dev/` svarar bara när `Host` är `localhost:<studio-port>`
+   eller `127.0.0.1:<studio-port>` (punkt 7). En webbsida som fått sitt namn att peka på 127.0.0.1
+   skickar sitt eget namn i `Host` och får 403. `X-Forwarded-Host` läses inte för API:t (vem som
+   helst kan sätta det), bara den rå `Host`.
 3. *Inga webbläsare.* En begäran med `Origin`, `Referer` eller något `Sec-Fetch-*`-huvud nekas (403).
    Webbläsare sätter `Origin` på varje POST mellan origins och `Sec-Fetch-*` på allt, och en sida kan
    inte ta bort dem; Vy-klientens `vy-proto` skickar inget av dem (SPEC-7.5.1). Det stänger CSRF mot
@@ -88,17 +89,29 @@ skriver sidans manifest, så en lurad agent kan begära det – frågan är skyd
 4. *Fjärrsidor i Vy* kan inte nå `http://localhost` alls: `vy_proto::transport_allowed` släpper bara
    igenom `http://` till loopback för en sida som själv ligger på loopback.
 5. *En agent i taget*, och uppdraget är högst 64 KB.
+6. *En nyckel per körning.* `vy-dev serve` drar 16 byte ur OS:ets entropi (`getrandom`) till en
+   nyckel på 32 hextecken. Varje anrop till `/_dev/` måste ha `token=<nyckel>` i frågan, annars 403;
+   jämförelsen tar lika lång tid var nycklarna än skiljer sig. Nyckeln skrivs in i Studio-modulen
+   som `vy-dev` signerar och serverar (steg 5) och skrivs ut i terminalen (`api:`-raden), ingen
+   annanstans. En Vy-sida kan inte läsa den ur Studio: `fetch_begin` kan inte sätta `Accept`, så
+   servern svarar HTML (som inte bär nyckeln) på `/` och `/index`, och modulen som blob kräver en hash
+   sidan aldrig ser (den beror på nyckeln). Den okodade Studio-modulen i repot har platshållaren
+   `000…` (konformansfallet), som aldrig är en körnings nyckel.
+7. *`Host` måste vara API:ets egen port*: `localhost:<studio-port>` eller `127.0.0.1:<studio-port>`
+   (porten får utelämnas bara om den är 80). En annan port eller ett annat namn ger 403.
 
-**Ingen nyckel per körning.** Övervägd och avstådd: klienten kan inte sätta huvuden i `fetch_begin`,
-så en nyckel måste ligga i Studios adress eller modul. Studio serveras utan inloggning på samma origin
-som API:t, så den som kan nå API:t (en annan lokal användare, en sida på A som fått `net` mot B) kan
-också läsa nyckeln ur Studio-paketet; och m4/ux öppnar Studio på den fasta adressen
-`vy://localhost:8081/`. Nyckeln hade alltså inte stängt något som inte redan är stängt.
+`origin_boundary::pages_cannot_drive_the_dev_api` prövar gränsen genom klientens egen kod mot en
+körande `vy-dev serve`: sidan på A som begär `net` mot B får `Ask` av `Fetched::grants`; tillåten ändå
+får den 403 utan nyckel och med platshållaren; det sidan kan hämta från B innehåller inte nyckeln; en
+fjärrsida får `Error::TlsRequired` från `Fetcher::request` även med rätt nyckel; agenten startar
+aldrig; Studios egen origin med nyckeln får 200.
 
 **Kvarstående risk.**
 
-- *Andra användare på samma maskin* når `127.0.0.1:8081` och kan starta agenten. Kör inte
-  `vy-dev serve` på en delad fleranvändarmaskin. En riktig lösning kräver att klienten säger vilken
+- *Andra processer på samma maskin* som talar Vy-protokollet (sätter `Accept` och hämtar
+  Studio-paketet) kan läsa nyckeln ur modulen och starta agenten. För användarens egna processer är
+  det ingen ny förmåga; för andra användare på en delad maskin är det en. Kör inte `vy-dev serve` på
+  en delad fleranvändarmaskin. En riktig lösning kräver att klienten säger vilken
   origin en begäran kommer ifrån (ett huvud som huvudprocessen sätter och en sida inte kan förfalska)
   – förslag till m4/security, se *Öppna frågor*.
 - *Agenten själv* kan genom cargo göra allt användaren kan. Uppdraget är användarens eget och skrivs i
@@ -135,7 +148,12 @@ loopback för andra sidor, lager för lager:
 
 Inga nya crates i trädet (`Cargo.lock` får bara posten för `vy-dev`). `vy-dev` beror på crates som
 redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` (för
-`check_abi_bytes`), `tiny_http`, `serde_json` och `anyhow`.
+`check_abi_bytes` och `plain_http_allowed`), `tiny_http`, `serde_json` och `anyhow`, samt:
+
+| Crate | Vad | Varför inte själv | Drar in |
+| --- | --- | --- | --- |
+| `getrandom` 0.2 (fanns via `ring` och `vy-publish`) | 16 byte OS-entropi till dev-API:ts nyckel per körning | OS-anrop per plattform; `std` har ingen säker slump | 0 nya (samma version som redan är låst) |
+| `vy-proto` (bara `dev-dependencies`) | klientens egen begäranväg i `origin_boundary` | testet ska pröva klientens kod, inte en kopia | 0 nya (ureq, rustls fanns) |
 
 ## Öppna frågor
 

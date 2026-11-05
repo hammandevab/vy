@@ -6,13 +6,15 @@
 //! sockets; `serve` wraps it in `tiny_http`.
 //!
 //! Who may call the API matters (see `docs/notes/m4-dev.md`, *Hotbild*):
-//! `serve` binds loopback only, and [`guard`] refuses a request that looks
-//! like a browser's (an `Origin`, `Referer` or `Sec-Fetch-*` header, which
-//! a web page's request carries and a Vy client's never does) or whose
-//! `Host` is not a loopback name (DNS rebinding). The page under
-//! development never reaches the API at all: it is served on another
-//! origin, and `net` is granted to a page's own origin only (SPEC-8.2.3,
-//! SPEC-9.5.1).
+//! `serve` binds loopback only, and [`Access::guard`] refuses a request
+//! that looks like a browser's (an `Origin`, `Referer` or `Sec-Fetch-*`
+//! header, which a web page's request carries and a Vy client's never
+//! does), one whose `Host` is not `localhost:<port>` or `127.0.0.1:<port>`
+//! of the API (DNS rebinding), and one without this run's random token,
+//! which `serve` writes into the Studio module it serves and nowhere a page
+//! can read it. The page under development is served on another origin,
+//! and `net` is granted automatically to a page's own origin only
+//! (SPEC-8.2.3, SPEC-9.5.1).
 
 use crate::agent::{self, AgentCommand, Launch};
 use crate::build::{build_project, BuildOutcome};
@@ -100,8 +102,72 @@ pub struct Dev {
     key: SigningKey,
     package_path: PathBuf,
     agent: AgentConfig,
+    access: Access,
     inner: Mutex<Inner>,
     changed: Condvar,
+}
+
+/// Who may call the API: requests addressed to `localhost:<port>` or
+/// `127.0.0.1:<port>` that carry `token=<token>` in their query.
+#[derive(Clone, Debug)]
+pub struct Access {
+    /// The API's port, the only one a `Host` may name.
+    pub port: u16,
+    /// This run's token: 32 hex characters from OS entropy.
+    pub token: String,
+}
+
+impl Access {
+    /// A fresh token for the API on `port`.
+    pub fn new(port: u16) -> anyhow::Result<Self> {
+        let mut bytes = [0u8; 16];
+        getrandom::getrandom(&mut bytes).map_err(|e| anyhow::anyhow!("no entropy: {e}"))?;
+        Ok(Self {
+            port,
+            token: bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        })
+    }
+
+    /// `path` with this run's token added to its query.
+    pub fn with_token(&self, path: &str) -> String {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        format!("{path}{sep}token={}", self.token)
+    }
+
+    /// A request as the Vy client makes it: to `localhost:<port>`, with
+    /// the token.
+    pub fn request(&self, method: &str, path: &str, body: &[u8]) -> ApiRequest {
+        ApiRequest {
+            method: method.into(),
+            path: self.with_token(path),
+            body: body.to_vec(),
+            host: Some(format!("localhost:{}", self.port)),
+            browser_like: false,
+        }
+    }
+
+    /// The refusal for a request that must not reach the API, or `None`.
+    pub fn guard(&self, req: &ApiRequest) -> Option<ApiReply> {
+        let refuse = |why: &str| Some(ApiReply::json(403, json!({ "error": why })));
+        if req.browser_like {
+            return refuse("the dev API answers the Vy client, not web pages");
+        }
+        if !host_matches(req.host.as_deref(), self.port) {
+            return refuse("the dev API answers to localhost:<port> and 127.0.0.1:<port> only");
+        }
+        let query = req.path.split_once('?').map_or("", |(_, q)| q);
+        let token = query_value(query, "token").unwrap_or("");
+        if !same_bytes(token.as_bytes(), self.token.as_bytes()) {
+            return refuse("missing or wrong token: open Studio from vy-dev serve");
+        }
+        None
+    }
+}
+
+/// Equal length and bytes, in time that does not depend on where they
+/// differ.
+fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// How the agent is started.
@@ -130,13 +196,14 @@ pub enum AgentError {
 impl Dev {
     /// The state for `project`: packages are signed with `key` and written
     /// to `package_path`; the page is announced at `address`; the agent is
-    /// started as `agent` says.
+    /// started as `agent` says; the API answers what `access` lets in.
     pub fn new(
         project: Project,
         key: SigningKey,
         package_path: PathBuf,
         address: String,
         agent: AgentConfig,
+        access: Access,
     ) -> Self {
         Self {
             project,
@@ -144,6 +211,7 @@ impl Dev {
             key,
             package_path,
             agent,
+            access,
             inner: Mutex::new(Inner {
                 build: BuildStatus::Idle,
                 build_log: String::new(),
@@ -164,6 +232,11 @@ impl Dev {
     /// The agent's command.
     pub fn agent_command(&self) -> &AgentCommand {
         &self.agent.cmd
+    }
+
+    /// Who may call the API.
+    pub fn access(&self) -> &Access {
+        &self.access
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -419,7 +492,8 @@ impl Dev {
         })
     }
 
-    /// Route one dev API request.
+    /// Route one dev API request. Every route needs `token=<token>` in the
+    /// query besides its own parameters ([`Access::guard`]).
     ///
     /// - `GET /_dev/state`: [`Dev::state_json`].
     /// - `POST /_dev/build`: request a build; 202.
@@ -432,7 +506,7 @@ impl Dev {
     ///   [`MAX_WAIT_MS`]) for one; `raw=0` leaves out the raw stream lines;
     ///   `next` is what to pass as `after` the next time.
     pub fn api(self: &Arc<Self>, req: &ApiRequest) -> ApiReply {
-        if let Some(refused) = guard(req) {
+        if let Some(refused) = self.access.guard(req) {
             return refused;
         }
         let (path, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
@@ -505,57 +579,34 @@ fn summarize(text: &str) -> String {
     s
 }
 
-/// The value of `key` in a query string, as a number.
-fn query_u64(query: &str, key: &str) -> Option<u64> {
+/// The value of `key` in a query string.
+fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .find(|(k, _)| *k == key)
-        .and_then(|(_, v)| v.parse().ok())
+        .map(|(_, v)| v)
 }
 
-/// The refusal for a request that must not reach the API, or `None`.
-pub fn guard(req: &ApiRequest) -> Option<ApiReply> {
-    if req.browser_like {
-        return Some(ApiReply::json(
-            403,
-            json!({"error": "the dev API answers the Vy client, not web pages"}),
-        ));
-    }
-    if !host_is_loopback(req.host.as_deref()) {
-        return Some(ApiReply::json(
-            403,
-            json!({"error": "the dev API answers on localhost only"}),
-        ));
-    }
-    None
+/// The value of `key` in a query string, as a number.
+fn query_u64(query: &str, key: &str) -> Option<u64> {
+    query_value(query, key).and_then(|v| v.parse().ok())
 }
 
-/// True for a `Host` of `localhost`, `127.0.0.1` or `[::1]`, with or
-/// without a port. A request that reached the loopback socket under any
-/// other name came through DNS rebinding and is refused.
-pub fn host_is_loopback(host: Option<&str>) -> bool {
+/// True for a `Host` of `localhost:<port>` or `127.0.0.1:<port>` (without
+/// the port too when it is 80, as HTTP leaves it out then). A request that
+/// reached the socket under any other name came through DNS rebinding, and
+/// one naming another port was not meant for this API.
+pub fn host_matches(host: Option<&str>, port: u16) -> bool {
     let Some(host) = host else {
         return false;
     };
     let host = host.trim().to_ascii_lowercase();
-    let (name, port) = if host.starts_with('[') {
-        match host.split_once(']') {
-            Some((inner, "")) => (format!("{inner}]"), None),
-            Some((inner, tail)) => match tail.strip_prefix(':') {
-                Some(port) => (format!("{inner}]"), Some(port)),
-                None => return false,
-            },
-            None => return false,
-        }
-    } else {
-        match host.split_once(':') {
-            Some((n, p)) => (n.to_string(), Some(p)),
-            None => (host.clone(), None),
-        }
+    let (name, given) = match host.split_once(':') {
+        Some((n, p)) => (n, p.parse::<u16>().ok().filter(|_| !p.starts_with('+'))),
+        None => (host.as_str(), (port == 80).then_some(80)),
     };
-    let port_ok = port.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-    port_ok && matches!(name.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+    given == Some(port) && matches!(name, "localhost" | "127.0.0.1")
 }
 
 /// Whether a header name marks a browser's request: `Origin`, `Referer`
@@ -588,13 +639,14 @@ pub struct ApiRequest {
 }
 
 impl ApiRequest {
-    /// A request as the Vy client makes it, to `localhost`.
+    /// A request with no `Host` (refused by [`Access::guard`]);
+    /// [`Access::request`] makes one that is let in.
     pub fn new(method: &str, path: &str, body: &[u8]) -> Self {
         Self {
             method: method.into(),
             path: path.into(),
             body: body.to_vec(),
-            host: Some("localhost".into()),
+            host: None,
             browser_like: false,
         }
     }
@@ -629,30 +681,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loopback_hosts() {
+    fn hosts_must_name_the_api() {
         for ok in [
-            "localhost",
+            "localhost:8081",
             "LOCALHOST:8081",
-            "127.0.0.1:1",
-            "[::1]",
-            "[::1]:8081",
+            "127.0.0.1:8081",
+            " localhost:8081 ",
         ] {
-            assert!(host_is_loopback(Some(ok)), "{ok}");
+            assert!(host_matches(Some(ok), 8081), "{ok}");
         }
         for bad in [
-            "evil.example",
-            "localhost.evil.example",
-            "127.0.0.1.evil",
-            "[::2]",
-            "",
+            "evil.example:8081",
+            "localhost.evil.example:8081",
+            "127.0.0.1.evil:8081",
+            "localhost",
+            "localhost:8080",
             "localhost:",
             "localhost:80x",
+            "localhost:+8081",
             "localhost:8081@evil.example",
-            "[::1]x",
+            "[::1]:8081",
+            "",
         ] {
-            assert!(!host_is_loopback(Some(bad)), "{bad}");
+            assert!(!host_matches(Some(bad), 8081), "{bad}");
         }
-        assert!(!host_is_loopback(None));
+        assert!(!host_matches(None, 8081));
+        assert!(
+            host_matches(Some("localhost"), 80),
+            "port 80 may be left out"
+        );
         assert!(is_browser_header("Origin"));
         assert!(is_browser_header("sec-fetch-site"));
         assert!(is_browser_header("Referer"));
@@ -662,28 +719,86 @@ mod tests {
         assert_eq!(query_u64("after=12&wait=5", "wait"), Some(5));
         assert_eq!(query_u64("after=12", "wait"), None);
         assert_eq!(query_u64("after=x", "after"), None);
+        assert_eq!(query_value("a=1&token=t", "token"), Some("t"));
         assert_eq!(summarize("  gör en sida\nmed två rader"), "gör en sida…");
         assert_eq!(summarize(&"x".repeat(81)).chars().count(), 81);
     }
 
-    /// The guard comes before the routes: a browser's request and one
-    /// addressed to another host name are refused whatever they ask for.
+    /// The guard comes before the routes: a browser's request, one
+    /// addressed to another name or port, and one without this run's
+    /// token are refused whatever they ask for.
     #[test]
-    fn guard_refuses_browsers_and_foreign_hosts() {
-        let ok = ApiRequest::new("GET", "/_dev/state", b"");
-        assert!(guard(&ok).is_none());
-        let browser = ApiRequest {
-            browser_like: true,
-            ..ok.clone()
-        };
-        assert_eq!(guard(&browser).unwrap().status, 403);
-        let rebound = ApiRequest {
-            host: Some("attacker.example:8081".into()),
-            ..ok.clone()
-        };
-        assert_eq!(guard(&rebound).unwrap().status, 403);
-        let none = ApiRequest { host: None, ..ok };
-        assert_eq!(guard(&none).unwrap().status, 403);
+    fn guard_refuses_browsers_foreign_hosts_and_missing_tokens() {
+        let access = Access::new(8081).unwrap();
+        assert_eq!(access.token.len(), 32);
+        assert!(access.token.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(access.token, Access::new(8081).unwrap().token);
+        let ok = access.request("GET", "/_dev/state", b"");
+        assert_eq!(ok.path, format!("/_dev/state?token={}", access.token));
+        assert!(access.guard(&ok).is_none());
+        let with_query = access.request("GET", "/_dev/agent/events?after=3", b"");
+        assert!(with_query
+            .path
+            .ends_with(&format!("after=3&token={}", access.token)));
+        assert!(access.guard(&with_query).is_none());
+        let refused = |r: ApiRequest| access.guard(&r).map(|a| a.status);
+        assert_eq!(
+            refused(ApiRequest {
+                browser_like: true,
+                ..ok.clone()
+            }),
+            Some(403)
+        );
+        assert_eq!(
+            refused(ApiRequest {
+                host: Some("attacker.example:8081".into()),
+                ..ok.clone()
+            }),
+            Some(403)
+        );
+        assert_eq!(
+            refused(ApiRequest {
+                host: Some("localhost:8080".into()),
+                ..ok.clone()
+            }),
+            Some(403)
+        );
+        assert_eq!(
+            refused(ApiRequest {
+                host: None,
+                ..ok.clone()
+            }),
+            Some(403)
+        );
+        assert_eq!(
+            refused(ApiRequest {
+                path: "/_dev/state".into(),
+                ..ok.clone()
+            }),
+            Some(403),
+            "no token"
+        );
+        let mut wrong = access.token.clone();
+        wrong.replace_range(..1, if wrong.starts_with('0') { "1" } else { "0" });
+        assert_eq!(
+            refused(ApiRequest {
+                path: format!("/_dev/state?token={wrong}"),
+                ..ok.clone()
+            }),
+            Some(403),
+            "wrong token"
+        );
+        assert_eq!(
+            refused(ApiRequest {
+                path: format!("/_dev/state?token={}x", access.token),
+                ..ok
+            }),
+            Some(403),
+            "longer token"
+        );
+        assert!(
+            same_bytes(b"ab", b"ab") && !same_bytes(b"ab", b"abc") && !same_bytes(b"ab", b"ac")
+        );
     }
 
     /// An agent command that does not start is a 500 with the reason, in
@@ -709,12 +824,12 @@ mod tests {
                 prepend_path: None,
                 env: Vec::new(),
             },
+            Access::new(1).unwrap(),
         ));
-        let r = dev.api(&ApiRequest::new(
-            "POST",
-            "/_dev/agent",
-            "gör något".as_bytes(),
-        ));
+        let r = dev.api(
+            &dev.access()
+                .request("POST", "/_dev/agent", "gör något".as_bytes()),
+        );
         assert_eq!(r.status, 500);
         assert!(r.value()["error"]
             .as_str()

@@ -19,3 +19,11 @@ vy-runtime.workspace = true
 tiny_http.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# 16 bytes of OS entropy for the dev API's per-run token (the version ring and
+# vy-publish already use).
+getrandom.workspace = true
+
+[dev-dependencies]
+# The client's own request path (`Fetcher::request`, `transport_allowed`) in the
+# origin-boundary tests.
+vy-proto.workspace = true

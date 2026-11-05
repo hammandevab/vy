@@ -172,6 +172,7 @@ fn cmd_serve(args: &[String]) -> Result<ExitCode> {
     eprintln!("vy-dev: {} in {}", project.name, project.dir.display());
     eprintln!("  page:   {}", handle.address());
     eprintln!("  studio: {}", handle.studio_address());
+    eprintln!("  api:    {}", handle.api_url("/_dev/state"));
     eprintln!(
         "  key:    {} ({})",
         handle.key_id,

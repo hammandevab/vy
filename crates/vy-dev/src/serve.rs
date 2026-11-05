@@ -17,7 +17,7 @@
 //! visit (SPEC-7.4.2).
 
 use crate::agent::AgentCommand;
-use crate::dev::{self, AgentConfig, ApiRequest, Dev};
+use crate::dev::{self, Access, AgentConfig, ApiRequest, Dev};
 use crate::paths;
 use crate::project::Project;
 use anyhow::{anyhow, Context, Result};
@@ -102,6 +102,16 @@ impl Handle {
     /// The address of Studio.
     pub fn studio_address(&self) -> String {
         format!("vy://localhost:{}/", self.studio_port)
+    }
+
+    /// The dev API's URL for `path` (`/_dev/state`), with this run's token:
+    /// what Studio fetches, for `curl` and the devtools.
+    pub fn api_url(&self, path: &str) -> String {
+        format!(
+            "http://localhost:{}{}",
+            self.studio_port,
+            self.dev.access().with_token(path)
+        )
     }
 
     /// Stop everything: the builder after its current build, the watcher,
@@ -225,7 +235,8 @@ pub fn start(config: ServeConfig) -> Result<Handle> {
             .and_then(|p| p.parent().map(Path::to_path_buf)),
         env,
     };
-    let dev = Arc::new(Dev::new(project, key, package_path, address, agent));
+    let access = Access::new(studio_port)?;
+    let dev = Arc::new(Dev::new(project, key, package_path, address, agent, access));
     dev.request_build();
 
     let mut threads = Vec::new();
