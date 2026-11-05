@@ -118,6 +118,7 @@ impl std::error::Error for Error {}
 mod tests {
     use super::*;
     use crate::cbor::{encode_key, Enc};
+    use sha2::Digest;
     use std::path::{Path, PathBuf};
 
     /// The repository root.
@@ -700,11 +701,43 @@ mod tests {
         assert!(m.entry(9).is_none());
     }
 
-    /// SPEC-8.1.1: required fields are enforced, each one.
+    /// SPEC-8.1.1: required fields are enforced, each one; `published` is
+    /// an ISO 8601 date as text; a hash is 32 bytes in CBOR and
+    /// `sha256:<64 hex>` in JSON; `sig` is {key_id, bytes} with the key id
+    /// derived from the public key; `module.url` is optional.
     #[test]
     fn spec_8_1_1_required_fields() {
         let (m, wasm) = hello();
         let canonical = m.encode().unwrap();
+        // The encodings of the sentence.
+        assert_eq!(m.published, "2026-11-04");
+        assert!(is_date(&m.published));
+        let mut undated = m.clone();
+        undated.published = "4 november 2026".into();
+        assert!(undated
+            .validate(&wasm, &Vec::<Vec<u8>>::new())
+            .contains(&Problem::PublishedInvalid("4 november 2026".into())));
+        let json = m.to_json();
+        assert!(json.contains(&format!("\"hash\": \"sha256:{}\"", m.module.hash.hex())));
+        assert!(json.contains("\"key_id\": \""));
+        assert!(json.contains("\"bytes\": \"ed25519:"));
+        let e = entries(&canonical);
+        let module_cbor = &e.iter().find(|(k, _)| k == "module").unwrap().1;
+        assert!(
+            module_cbor.windows(2).any(|w| w == [0x58, 0x20]),
+            "bstr(32) hash"
+        );
+        assert!(m.module.url.is_none(), "url is optional");
+        let sig = m.sig.as_ref().unwrap();
+        assert_eq!(sig.key_id, key_id(&test_key().public().to_bytes()));
+        assert_eq!(sig.key_id.len(), KEY_ID_HEX_LEN);
+        let mut with_url = m.clone();
+        with_url.module.url = Some("/m.wasm".into());
+        with_url.sign(&test_key());
+        assert_eq!(
+            Manifest::decode(&with_url.encode().unwrap()).unwrap(),
+            with_url
+        );
         for required in [
             "abi",
             "name",
@@ -784,10 +817,29 @@ mod tests {
     }
 
     /// SPEC-8.1.2: optional fields are accepted and unknown fields rejected,
-    /// in both forms.
+    /// in both forms; resources are {hash, size, mime, url?, w?, h?}, `icon`
+    /// and `skeleton` are resource indices, `next_key_id` is a key id, and
+    /// an empty list or map is omitted from the canonical encoding.
     #[test]
     fn spec_8_1_2_optional_fields() {
         let (mut m, wasm, res) = with_image();
+        // The resource shape of the sentence, and nothing of the old
+        // {path, type} form.
+        let r = &m.resources[0];
+        assert_eq!(r.mime, "image/png");
+        assert!(r.url.is_none() && r.w == Some(320) && r.h == Some(200));
+        let json = m.to_json();
+        assert!(json.contains("\"mime\": \"image/png\""));
+        assert!(!json.contains("\"path\"") && !json.contains("\"type\""));
+        // Empty optional containers are not encoded at all.
+        let (bare, _) = hello();
+        let keys: Vec<String> = entries(&bare.encode().unwrap())
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        for absent in ["resources", "capabilities", "links", "chunks", "embeds"] {
+            assert!(!keys.contains(&absent.to_string()), "{absent}");
+        }
         m.links = vec!["vy://a.example/b".into(), "https://c.example/".into()];
         m.fallback = Some("# Hej\n\nText.".into());
         m.min_size = Some(MinSize { w: 320, h: 200 });
@@ -1108,15 +1160,34 @@ mod tests {
         assert!(parse_key_file("not hex\n").is_err());
     }
 
-    /// SPEC-7.4.4, SPEC-7.4.2: `next_key_id` names a key and nothing else:
-    /// exactly the 16 hex digits of a key id. The client copies the value
-    /// into its key store, so text with a newline or a space in it would
-    /// otherwise become a pin for another origin (review 0003).
+    /// SPEC-7.4.4, SPEC-7.4.2, SPEC-8.1.1: `next_key_id` names a key and
+    /// nothing else: exactly the 16 hex digits of a key id, which is the
+    /// first 16 hex digits of SHA-256 over the public key. The client copies
+    /// the value into its key store, so text with a newline or a space in
+    /// it would otherwise become a pin for another origin (review 0003).
     #[test]
     fn spec_7_4_4_next_key_id_is_a_key_id() {
         let (m, wasm) = hello();
         let good = test_key().public().key_id();
         assert!(is_key_id(&good));
+        let digest = sha2::Sha256::digest(test_key().public().to_bytes());
+        assert_eq!(
+            good,
+            hex(&digest[..8]),
+            "the first 16 hex digits of SHA-256"
+        );
+        // The field survives the canonical encoding and the JSON form.
+        let mut announcing = Manifest {
+            next_key_id: Some(good.clone()),
+            ..m.clone()
+        };
+        announcing.sign(&test_key());
+        let decoded = Manifest::decode(&announcing.encode().unwrap()).unwrap();
+        assert_eq!(decoded.next_key_id.as_deref(), Some(good.as_str()));
+        assert_eq!(
+            Manifest::from_json(&announcing.to_json()).unwrap(),
+            announcing
+        );
         let with = |id: &str| Manifest {
             next_key_id: Some(id.to_string()),
             ..m.clone()

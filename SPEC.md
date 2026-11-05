@@ -122,13 +122,13 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 - **[SPEC-7.4.1]** Manifestet bär en Ed25519-signatur över sin kanoniska CBOR-kodning utan `sig`-fältet.
 - **[SPEC-7.4.2]** Utgivarens publika nyckel publiceras i DNS TXT `_vy.<värd>` och på `https://<värd>/.well-known/vy-key`; båda måste stämma vid första besök.
 - **[SPEC-7.4.3]** En sida utan giltig signatur körs i begränsat läge där inga capabilities beviljas.
-- **[SPEC-7.4.4]** Nyckelrotation sker genom att ett manifest signerat med den gamla nyckeln anger det nya nyckel-id:t.
+- **[SPEC-7.4.4]** Nyckelrotation sker genom att ett manifest signerat med den gamla nyckeln anger det nya nyckel-id:t i `next_key_id`; den nya nyckeln hämtas då från `/.well-known/vy-key` och godtas för origin, och ingen annan väg ger en okänd nyckel förtroende.
 - **[SPEC-7.5.1]** Klienten skickar aldrig `Referer` och accepterar högst 3 omdirigeringar.
 
 ## 8. Manifestet
 
-- **[SPEC-8.1.1]** Obligatoriska fält: `abi`, `name` (≤ 80 tecken), `summary` (≤ 2 KB), `lang` (BCP 47), `module` {hash, size}, `memory_max`, `published`, `sig`.
-- **[SPEC-8.1.2]** Valfria fält: `resources` (lista av {path, type, hash, size}, där en bild dessutom har obligatoriska `w` och `h` i pixlar – modulen får storlekarna vid byggtid och värden avvisar en bild vars avkodade storlek avviker), `capabilities`, `links`, `fallback` (≤ 16 KB Markdown), `min_size`, `icon`, `source_url`, `skeleton`, `chunks`, `embeds`; okända fält avvisas.
+- **[SPEC-8.1.1]** Obligatoriska fält: `abi` (`"MAJOR.MINOR"`), `name` (≤ 80 tecken), `summary` (≤ 2 KB), `lang` (BCP 47), `module` {hash, size, url?}, `memory_max`, `published` (datum som text `ÅÅÅÅ-MM-DD`, ISO 8601), `sig` {key_id, bytes}; en hash är SHA-256, kodad som 32 byte i CBOR och som `sha256:<64 hex>` i JSON-formen, och ett nyckel-id är de 16 första hextecknen av SHA-256 över den publika nyckeln.
+- **[SPEC-8.1.2]** Valfria fält: `resources` (lista av {hash, size, mime, url?}, där en bild (`image/*`) dessutom har obligatoriska `w` och `h` i pixlar – modulen får storlekarna vid byggtid och värden avvisar en bild vars avkodade storlek avviker), `capabilities` (map enligt SPEC-8.2.1), `links` (lista av `vy://`- och `https://`-adresser), `fallback` (≤ 16 KB Markdown), `min_size` {w, h}, `icon` (resursindex till en bild), `source_url`, `skeleton` (resursindex), `chunks` (lista av {hash, size, url?}), `embeds` (lista av `vy://`-adresser), `next_key_id` (16 hextecken, SPEC-7.4.4); ett `url` är blobbens adress i manifestformen (SPEC-7.2.1) och utelämnat betyder `/_vy/<64 hex>` relativt manifestet; okända fält avvisas, och en tom lista eller map utelämnas i den kanoniska kodningen.
 - **[SPEC-8.1.3]** `memory_max` anges i wasm-sidor (64 KB), är högst 4096 och minst modulens initiala minne + 1 sida; `vy-manifest` validerar det och `check-abi` varnar för en modul vars initiala minne inte lämnar den sidan.
 - **[SPEC-8.2.1]** Capabilities i 1.0 är en map från namn till objekt: `net` {origins: lista med ≤ 16 origins}, `storage` {quota_kb ≤ 16384}, `clipboard` {}, `hires_time` {}, `ime` {}, `persist_frame` {}.
 - **[SPEC-8.2.2]** En capability som inte står i manifestet kan inte beviljas i efterhand.

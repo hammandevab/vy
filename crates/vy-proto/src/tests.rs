@@ -244,8 +244,10 @@ fn spec_7_1_2_no_fragments() {
     );
 }
 
-/// SPEC-7.2.1: a response is the whole package or the bare manifest with
-/// addresses to module and resources; both give the same page.
+/// SPEC-7.2.1, SPEC-8.1.2: a response is the whole package or the bare
+/// manifest with addresses to module and resources; both give the same
+/// page, and an entry without `url` is fetched from `/_vy/<64 hex>`
+/// relative to the manifest.
 #[test]
 fn spec_7_2_1_media_types() {
     assert_eq!(MEDIA_PACKAGE, "application/vy-package+zstd");
@@ -270,8 +272,11 @@ fn spec_7_2_1_media_types() {
     // Manifest, module, resource, keys.
     assert_eq!(bare.requests, 4);
     let paths: Vec<String> = server.requests().iter().map(|r| r.path.clone()).collect();
+    assert!(p.manifest.module.url.is_none() && p.manifest.resources[0].url.is_none());
     assert!(paths.contains(&format!("/_vy/{}", p.manifest.module.hash.hex())));
     assert!(paths.contains(&format!("/_vy/{}", p.manifest.resources[0].hash.hex())));
+    assert_eq!(BLOB_PATH_PREFIX, "/_vy/");
+    assert_eq!(p.manifest.module.hash.hex().len(), 64);
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);
 }
