@@ -7,6 +7,11 @@
   var och en med valfritt `after_frames = N` som begränsar hur många frames som körs före den.
 - `golden/<modul>-<WxH>@<scale>[-<tillstånd>].png` – guldbilder, en per referensmodul, storlek,
   DPI och scriptat tillstånd (från M1).
+- `golden/shell-<modul>-<WxH>@<scale>.png` – skalfall (`shell = true`, från M3): modulen körs med
+  sitt utkast i en flikprocess under det huvudlösa skalet (`vy-cli --tab`), och bilden är hela
+  fönstret `width × height` med chromen – flikrad, adressfält, markörer, pluppar – över sidytan
+  (SPEC-9.6.1, SPEC-11.3.2). Lokala filer körs i begränsat läge (SPEC-7.4.3). Inga events, inget
+  träd. Samma bild tas med `vy-shell --screenshot <png> --size WxH --manifest <utkast> <modul>`.
 - `semantic/<modul>.json` – förväntat semantiskt träd (från M1).
 - `manifests/<modul>.json` – manifestutkast (`vy_manifest::Draft`, samma fil som
   `vy-publish build --manifest` läser; kanonisk CBOR på tråden), ett per modul: inga hashar,
