@@ -8,7 +8,7 @@ use crate::cache::{
     DEFAULT_HTTP_CACHE_CAP_BYTES,
 };
 use crate::dns::{DnsError, SystemResolver, TxtResolver};
-use crate::keys::KeyStore;
+use crate::keys::{KeyStore, LogHead};
 use crate::url::{cache_control, media_type, resolve, CacheControl, HttpUrl};
 use std::fmt;
 use std::path::PathBuf;
@@ -16,8 +16,9 @@ use std::time::Duration;
 use ureq::config::Config;
 use ureq::Agent;
 use vy_manifest::{
-    dns_txt_name, parse_dns_txt, parse_key_file, Grant, Hash, Manifest, Package, PackageError,
-    Problem, PublicKey, Trust, MAX_MANIFEST_BYTES, MEDIA_MANIFEST, MEDIA_PACKAGE,
+    dns_txt_name, parse_dns_txt, parse_key_file, Grant, Hash, KeyLog, Manifest, Package,
+    PackageError, Problem, PublicKey, Trust, MAX_LOG_BYTES, MAX_MANIFEST_BYTES, MEDIA_MANIFEST,
+    MEDIA_PACKAGE,
 };
 
 /// The `Accept` header of every page request (SPEC-7.1.1).
@@ -35,6 +36,8 @@ pub const MAX_KEY_FILE_BYTES: u64 = 16 * 1024;
 pub const MAX_BLOB_BYTES: u64 = vy_manifest::MAX_RESOURCES_BYTES;
 /// Where `/.well-known/vy-key` lives (SPEC-7.4.2).
 pub const WELL_KNOWN_KEY_PATH: &str = "/.well-known/vy-key";
+/// Where an origin serves its key transparency log (SPEC-7.6.1).
+pub const WELL_KNOWN_LOG_PATH: &str = "/.well-known/vy-log";
 /// Prefix of the default blob URL when a manifest entry has no `url`:
 /// `/_vy/<hex sha256>` relative to the manifest.
 pub const BLOB_PATH_PREFIX: &str = "/_vy/";
@@ -220,6 +223,19 @@ pub enum Restriction {
         /// The key id announced.
         key_id: String,
     },
+    /// The origin's key log could not be fetched or its chain does not
+    /// hold (SPEC-7.6.2).
+    LogInvalid(String),
+    /// The origin serves a key log that does not list the key (SPEC-7.6.2).
+    NotInLog {
+        /// The key id the manifest names.
+        key_id: String,
+    },
+    /// The key log no longer starts with the entries seen before: its
+    /// history was rewritten (SPEC-7.6.2).
+    LogRewritten,
+    /// The origin served a key log once and now serves none (SPEC-7.6.3).
+    LogWithdrawn,
 }
 
 impl fmt::Display for Restriction {
@@ -250,6 +266,18 @@ impl fmt::Display for Restriction {
                     "announced key {key_id} is not in {WELL_KNOWN_KEY_PATH} (SPEC-7.4.4)"
                 )
             }
+            Self::LogInvalid(e) => write!(f, "{WELL_KNOWN_LOG_PATH}: {e} (SPEC-7.6.2)"),
+            Self::NotInLog { key_id } => {
+                write!(f, "key {key_id} is not in the origin's key log {WELL_KNOWN_LOG_PATH} (SPEC-7.6.2)")
+            }
+            Self::LogRewritten => write!(
+                f,
+                "{WELL_KNOWN_LOG_PATH} no longer starts with the entries seen before (SPEC-7.6.2)"
+            ),
+            Self::LogWithdrawn => write!(
+                f,
+                "the origin served a key log before and now serves none (SPEC-7.6.3)"
+            ),
         }
     }
 }
@@ -819,17 +847,24 @@ impl Fetcher {
         let key = match self.keys.pinned(&origin, &sig.key_id) {
             Some(k) => k,
             None if !self.keys.has_pins(&origin) => {
-                // First visit: pin what both sources publish (SPEC-7.4.5).
+                // First visit: pin what both sources publish (SPEC-7.4.5)
+                // and, when the origin serves a log, the log lists
+                // (SPEC-7.6.2).
                 let agreed = self.first_visit_keys(address, requests)?;
-                for k in &agreed {
+                let published = agreed.iter().any(|k| k.key_id() == sig.key_id);
+                let (logged, head) = self.logged_keys(address, agreed, requests)?;
+                for k in &logged {
                     let _ = self.keys.pin(&origin, *k);
                 }
-                agreed
-                    .into_iter()
-                    .find(|k| k.key_id() == sig.key_id)
-                    .ok_or_else(|| Restriction::KeyNotPublished {
-                        key_id: sig.key_id.clone(),
-                    })?
+                if let (Some((count, head)), false) = (head, logged.is_empty()) {
+                    let _ = self.keys.set_log_head(&origin, count, head);
+                }
+                let key_id = sig.key_id.clone();
+                match logged.into_iter().find(|k| k.key_id() == sig.key_id) {
+                    Some(k) => k,
+                    None if published => return Err(Restriction::NotInLog { key_id }),
+                    None => return Err(Restriction::KeyNotPublished { key_id }),
+                }
             }
             None if self.keys.is_successor(&origin, &sig.key_id) => {
                 // Rotation (SPEC-7.4.4): the announced key comes from the
@@ -843,6 +878,13 @@ impl Fetcher {
                     .ok_or_else(|| Restriction::SuccessorNotPublished {
                         key_id: sig.key_id.clone(),
                     })?;
+                // A served log must list the new key (SPEC-7.6.2).
+                let (logged, head) = self.logged_keys(address, vec![key], requests)?;
+                if logged.is_empty() {
+                    return Err(Restriction::NotInLog {
+                        key_id: sig.key_id.clone(),
+                    });
+                }
                 // The signature decides before the store changes: a
                 // manifest that names the successor but is not signed by
                 // it must not retire the old key.
@@ -850,6 +892,9 @@ impl Fetcher {
                     return Err(Restriction::BadSignature);
                 }
                 let _ = self.keys.promote(&origin, key);
+                if let Some((count, head)) = head {
+                    let _ = self.keys.set_log_head(&origin, count, head);
+                }
                 key
             }
             None => {
@@ -901,6 +946,63 @@ impl Fetcher {
             return Err(Restriction::DnsMismatch { name });
         }
         Ok(agreed)
+    }
+
+    /// Of `candidates`, the keys the origin's key log lists for its host,
+    /// with the log's length and head (SPEC-7.6.2); all of them and no
+    /// head when the origin serves no log and never did (SPEC-7.6.3). A
+    /// log that cannot be fetched, does not hold, or no longer starts with
+    /// the entries seen before is a restriction.
+    fn logged_keys(
+        &mut self,
+        address: &Address,
+        candidates: Vec<PublicKey>,
+        requests: &mut u32,
+    ) -> Result<(Vec<PublicKey>, Option<LogHead>), Restriction> {
+        let origin = address.origin();
+        let seen = self.keys.log_head(&origin);
+        let log = match self.fetch_log(address, requests) {
+            Err(e) => return Err(Restriction::LogInvalid(e)),
+            Ok(None) if seen.is_some() => return Err(Restriction::LogWithdrawn),
+            Ok(None) => return Ok((candidates, None)),
+            Ok(Some(log)) => log,
+        };
+        if let Some((count, head)) = seen {
+            let fits = usize::try_from(count).is_ok_and(|n| log.extends(n, &head));
+            if !fits {
+                return Err(Restriction::LogRewritten);
+            }
+        }
+        let host = origin.strip_prefix("vy://").unwrap_or(&origin);
+        let listed = candidates
+            .into_iter()
+            .filter(|k| log.lists(host, k))
+            .collect();
+        Ok((listed, Some((log.entries.len() as u64, log.head()))))
+    }
+
+    /// `GET /.well-known/vy-log` (SPEC-7.6.1): `None` for a 404, the
+    /// chain-checked log for a 200, the reason otherwise.
+    fn fetch_log(&self, address: &Address, requests: &mut u32) -> Result<Option<KeyLog>, String> {
+        let base = address.fetch_url();
+        let url = resolve(&base, WELL_KNOWN_LOG_PATH).ok_or_else(|| format!("bad base {base}"))?;
+        let resp = self
+            .get(
+                &url,
+                "text/plain",
+                &|_| MAX_LOG_BYTES as u64,
+                None,
+                address.is_localhost(),
+                requests,
+            )
+            .map_err(|e| e.to_string())?;
+        match resp.status {
+            404 => Ok(None),
+            200 => KeyLog::parse(&String::from_utf8_lossy(&resp.body))
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            status => Err(format!("status {status}")),
+        }
     }
 
     /// `GET /.well-known/vy-key` (SPEC-7.4.2).

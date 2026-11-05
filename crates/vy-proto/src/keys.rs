@@ -12,7 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use vy_manifest::{is_key_id, PublicKey};
+use vy_manifest::{from_hex, hex, is_key_id, PublicKey};
+
+/// A key log as last checked: its length and head (SPEC-7.6.2).
+pub type LogHead = (u64, [u8; 32]);
 
 /// Pins and announced successors of one origin.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -21,6 +24,9 @@ pub struct OriginKeys {
     pub pinned: BTreeMap<String, PublicKey>,
     /// Key ids a trusted manifest named in `next_key_id` (SPEC-7.4.4).
     pub successors: BTreeSet<String>,
+    /// Length and head of the origin's key log when it was last checked
+    /// (SPEC-7.6.2); `None` while the origin has served no log.
+    pub log: Option<LogHead>,
 }
 
 /// The key store: a text file `keys` with one line per pin or successor.
@@ -51,6 +57,11 @@ impl KeyStore {
                     ["successor", origin, key_id] if is_key_id(key_id) => {
                         store.entry(origin).successors.insert((*key_id).to_string());
                     }
+                    ["log", origin, count, head] => {
+                        if let (Ok(n), Some(h)) = (count.parse::<u64>(), from_hex::<32>(head)) {
+                            store.entry(origin).log = Some((n, h));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -70,6 +81,9 @@ impl KeyStore {
             }
             for id in &keys.successors {
                 text.push_str(&format!("successor {origin} {id}\n"));
+            }
+            if let Some((count, head)) = &keys.log {
+                text.push_str(&format!("log {origin} {count} {}\n", hex(head)));
             }
         }
         let tmp = self.path.with_extension("tmp");
@@ -132,6 +146,17 @@ impl KeyStore {
             .unwrap_or(false)
     }
 
+    /// Length and head of the origin's key log as last checked (SPEC-7.6.2).
+    pub fn log_head(&self, origin: &str) -> Option<LogHead> {
+        self.origins.get(origin).and_then(|o| o.log)
+    }
+
+    /// Remember the origin's key log at `count` entries with `head`.
+    pub fn set_log_head(&mut self, origin: &str, count: u64, head: [u8; 32]) -> io::Result<()> {
+        self.entry(origin).log = Some((count, head));
+        self.save()
+    }
+
     /// Pin an announced successor once its key is known and a manifest
     /// signed by it has verified; the announcement is consumed and every
     /// key pinned before is retired (SPEC-7.4.6). Rotation exists to take
@@ -180,6 +205,11 @@ mod tests {
             "the key rotated away from is retired (SPEC-7.4.6)"
         );
         assert!(!s.has_pins("vy://y"));
+        // The log head persists beside the pins (SPEC-7.6.2).
+        s.set_log_head("vy://x", 3, [7; 32]).unwrap();
+        let s = KeyStore::open(&dir).unwrap();
+        assert_eq!(s.log_head("vy://x"), Some((3, [7; 32])));
+        assert_eq!(s.log_head("vy://y"), None);
         let _ = fs::remove_dir_all(&dir);
     }
 

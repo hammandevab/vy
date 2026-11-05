@@ -101,8 +101,8 @@ fn main() -> ExitCode {
             );
         }
     }
-    // The key log (SPEC-7.6.1) is optional in 1.0; a broken
-    // one is served as is, and clients will refuse it.
+    // The key log (SPEC-7.6.1) is optional in 1.0 (SPEC-7.6.3); a broken
+    // one is served as is, and clients will refuse it (SPEC-7.6.2).
     match handle.site().key_log() {
         None => eprintln!(
             "no {} in the site directory: no key log is served (SPEC-7.6.1)",
