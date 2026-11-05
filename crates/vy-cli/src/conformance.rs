@@ -50,6 +50,12 @@ pub struct Case {
     /// manifest draft; a size the case states must be the one the manifest
     /// declares (SPEC-8.1.2).
     pub resources: Vec<CaseResource>,
+    /// True for a case of the whole client (SPEC-9.6.1, SPEC-11.3.2): the
+    /// module runs in a tab process of the headless shell, with its
+    /// manifest draft, and the golden is the composited frame, chrome
+    /// included; `width` × `height` is the window. Such a case has no
+    /// events and no semantic tree.
+    pub shell: bool,
 }
 
 /// One entry of a case's `resources`: a bare path, or a table with the
@@ -419,11 +425,15 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         events: Vec<Step>,
         resources: Vec<CaseResource>,
         fetch: Vec<CannedResponse>,
+        shell: bool,
     }
     fn finish(d: Draft, line: usize) -> Result<Case> {
         let name = d
             .name
             .ok_or_else(|| anyhow!("case before line {line}: missing name"))?;
+        if d.shell && (!d.events.is_empty() || d.semantic.is_some() || !d.fetch.is_empty()) {
+            bail!("case {name}: a shell case has no events, fetch or semantic tree");
+        }
         Ok(Case {
             module: d
                 .module
@@ -442,6 +452,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             events: d.events,
             resources: d.resources,
             fetch: d.fetch,
+            shell: d.shell,
             name,
         })
     }
@@ -497,6 +508,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                 }
             }
             "scale" => d.scale = Some(Scalar::parse(value, line)?.num(key, line)? as f32),
+            "shell" => d.shell = Scalar::parse(value, line)?.bool(key, line)?,
             "capabilities" => {
                 let mut caps = Capabilities::default();
                 for e in parse_array(value, line)? {
@@ -726,7 +738,54 @@ fn run_case(root: &Path, case: &Case, update: bool) -> CaseResult {
     result
 }
 
+/// The executable started as a tab process for shell cases: this one
+/// (`vy-cli --tab`); from a test binary under `deps/`, the `vy-cli` next
+/// to it, which cargo builds for the integration tests.
+pub fn tab_executable() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if let Some(deps) = exe.parent().filter(|p| p.ends_with("deps")) {
+        if let Some(profile) = deps.parent() {
+            let candidate = profile.join(format!("vy-cli{}", std::env::consts::EXE_SUFFIX));
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Ok(exe)
+}
+
+/// A shell case: the module and its draft through the headless shell,
+/// this executable serving as the tab process (`vy-cli --tab`).
+fn run_shell_case(root: &Path, case: &Case) -> Result<RgbaImage> {
+    let module_path = root
+        .join("target/wasm")
+        .join(format!("{}.wasm", case.module));
+    if !module_path.is_file() {
+        bail!(
+            "reading {} (run tools/build_modules.sh)",
+            module_path.display()
+        );
+    }
+    let source = vy_shell::page::Source::File {
+        path: module_path,
+        draft: Some(case.manifest_path(root)),
+    };
+    let options = vy_shell::headless::Options {
+        width: case.width as f32,
+        height: case.height as f32,
+        scale: case.scale,
+        max_ticks: case.frames.max(1),
+        exe: Some(tab_executable()?),
+        timeout: std::time::Duration::from_secs(120),
+    };
+    vy_shell::headless::screenshot(source, &options).map_err(|e| anyhow!("shell: {e}"))
+}
+
 fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResult) -> Result<()> {
+    if case.shell {
+        let image = run_shell_case(root, case)?;
+        return compare_golden(root, case, update, result, &image, None);
+    }
     let CasePackage {
         wasm,
         manifest,
@@ -766,17 +825,36 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
     if let Some(problem) = ime_requirement(&out.semantic, &manifest.capabilities) {
         bail!("{problem}");
     }
+    compare_golden(
+        root,
+        case,
+        update,
+        result,
+        &out.image,
+        Some(&out.semantic_json),
+    )
+}
+
+/// Compare (or, with `update`, write) the golden image and, when the case
+/// has one, the semantic tree.
+fn compare_golden(
+    root: &Path,
+    case: &Case,
+    update: bool,
+    result: &mut CaseResult,
+    image: &RgbaImage,
+    semantic_json: Option<&str>,
+) -> Result<()> {
     let golden_path = case.golden(root);
 
     if update {
         fs::create_dir_all(golden_path.parent().unwrap())?;
-        fs::write(&golden_path, out.image.encode_png()?)
+        fs::write(&golden_path, image.encode_png()?)
             .with_context(|| format!("writing {}", golden_path.display()))?;
         result.diff = Some(0.0);
-        if let Some(path) = case.semantic_path(root) {
+        if let (Some(path), Some(json)) = (case.semantic_path(root), semantic_json) {
             fs::create_dir_all(path.parent().unwrap())?;
-            fs::write(&path, &out.semantic_json)
-                .with_context(|| format!("writing {}", path.display()))?;
+            fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
             result.semantic_ok = Some(true);
         }
         return Ok(());
@@ -789,12 +867,12 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         )
     })?;
     let golden = RgbaImage::decode_png(&golden_bytes)?;
-    let diff = diff_ratio(&golden, &out.image);
+    let diff = diff_ratio(&golden, image);
     result.diff = Some(diff);
     let mut problems = Vec::new();
     if diff > MAX_DIFF_RATIO {
         let new_path = golden_path.with_extension("png.new");
-        fs::write(&new_path, out.image.encode_png()?)?;
+        fs::write(&new_path, image.encode_png()?)?;
         problems.push(format!(
             "{:.3} % of pixels differ (limit {:.1} %); actual written to {}",
             diff * 100.0,
@@ -802,14 +880,14 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
             new_path.display()
         ));
     }
-    if let Some(path) = case.semantic_path(root) {
+    if let (Some(path), Some(json)) = (case.semantic_path(root), semantic_json) {
         let expected = fs::read_to_string(&path)
             .with_context(|| format!("no semantic tree {}", path.display()))?;
-        let same = expected == out.semantic_json;
+        let same = expected == json;
         result.semantic_ok = Some(same);
         if !same {
             let new_path = path.with_extension("json.new");
-            fs::write(&new_path, &out.semantic_json)?;
+            fs::write(&new_path, json)?;
             problems.push(format!(
                 "semantic tree differs from {}; actual written to {}",
                 path.display(),
@@ -1167,7 +1245,10 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         // it), a case granting what the manifest does not request is
         // refused, and every module's manifest fits its module.
         let cases = load_cases(&root()).unwrap();
-        let form: Vec<_> = cases.iter().filter(|c| c.module == "form").collect();
+        let form: Vec<_> = cases
+            .iter()
+            .filter(|c| c.module == "form" && !c.shell)
+            .collect();
         assert!(!form.is_empty(), "the form page is in the suite");
         assert!(form.iter().all(|c| c.capabilities.ime));
         let filled = form

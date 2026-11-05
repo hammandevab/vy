@@ -21,6 +21,17 @@ fn usage() -> ExitCode {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // As a tab process of the headless shell (conformance's shell cases
+    // and bench start this executable with `--tab`).
+    if args.first().map(String::as_str) == Some("--tab") {
+        return match vy_shell::tab::main(None, None) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("vy-cli --tab: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = match args.first().map(String::as_str) {
         Some("check-abi") => check_abi(&args[1..]),
         Some("render") => render(&args[1..]),

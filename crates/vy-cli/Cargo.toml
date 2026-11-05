@@ -16,6 +16,10 @@ vy-dl.workspace = true
 vy-manifest.workspace = true
 vy-runtime.workspace = true
 vy-render.workspace = true
+# The shell's model without its window: `conformance` renders the chrome
+# cases through it (with this binary as the tab process) and `bench`
+# measures a tab process's cold start.
+vy-shell = { workspace = true, default-features = false }
 anyhow.workspace = true
 png.workspace = true
 

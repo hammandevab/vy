@@ -87,7 +87,13 @@ pub fn settle(shell: &mut Shell, max_ticks: u32, timeout: Duration) -> Result<u6
             ticks += 1;
         }
         let frames = shell.tab_frames(id);
-        if !shell.tick_pending() && (frames > 0 && !shell.wants_tick() || ticks >= max_ticks) {
+        // Settled: drawn and asking for nothing more, out of ticks, or
+        // hidden under its `min_size` where only the fallback shows.
+        if !shell.tick_pending()
+            && (frames > 0 && !shell.wants_tick()
+                || ticks >= max_ticks
+                || (shell.tab_status(id) == "running" && shell.tab_hidden(id)))
+        {
             return Ok(frames);
         }
         let now = Instant::now();

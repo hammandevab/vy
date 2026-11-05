@@ -2577,6 +2577,7 @@ dependencies = [
  "vy-manifest",
  "vy-render",
  "vy-runtime",
+ "vy-shell",
  "wat",
 ]
 

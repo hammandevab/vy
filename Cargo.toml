@@ -46,6 +46,7 @@ wat = "1"
 vy-proto = { path = "crates/vy-proto" }
 vy-publish = { path = "crates/vy-publish" }
 vy-serve = { path = "crates/vy-serve" }
+vy-shell = { path = "crates/vy-shell", default-features = false }
 # CBOR tokenizer only (no derive, no serde, no f16): the canonical checks of
 # SPEC-4.1.3 are done on top of it in vy-manifest::cbor.
 minicbor = { version = "2", default-features = false, features = ["std"] }
