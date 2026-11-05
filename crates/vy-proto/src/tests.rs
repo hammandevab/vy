@@ -1222,3 +1222,11 @@ fn spec_5_2_7_page_requests_through_the_main_process() {
     assert_eq!(server.requests().len(), 5);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// SPEC-7.6.2, SPEC-7.6.3: the key log is consulted at the two key
+/// decisions, the first visit and a rotation.
+#[test]
+#[ignore = "M4: the client does not read /.well-known/vy-log yet"]
+fn spec_7_6_2_7_6_3_key_log_checked_at_key_decisions() {
+    todo!()
+}

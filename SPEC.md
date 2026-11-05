@@ -132,6 +132,8 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 Loggen gör varje nyckel en utgivare tagit i bruk synlig i efterhand; den är en vanlig fil som vem som helst kan spegla och kontrollera utan att lita på servern (§17).
 
 - **[SPEC-7.6.1]** Utgivarens nyckellogg ligger på `https://<värd>/.well-known/vy-log`, är högst 1 MB och ändras bara genom att poster läggs till: en post per rad (tomma rader och rader som börjar med `#` är kommentarer), varje rad den kanoniska CBOR-kodningen (SPEC-4.1.3) som gemena hextecken av en map {host, key_id, key, published, prev_hash}, där `host` är originens värd med `:port` när porten inte är 443, `key` den publika nyckeln (32 byte), `key_id` dess nyckel-id (SPEC-8.1.1), `published` ett datum `ÅÅÅÅ-MM-DD` och `prev_hash` SHA-256 av föregående posts kodning, 32 nollbyte för den första; loggens huvud är SHA-256 av sista postens kodning.
+- **[SPEC-7.6.2]** Vid första besök och vid rotation hämtar klienten loggen; serverar origin en logg godtar klienten bara en nyckel som loggen listar för originens `host` och sparar loggens längd och huvud bredvid pinnen. En logg som inte kan hämtas eller vars kedja inte håller, en nyckel som saknas i loggen och en logg som inte längre börjar med de poster klienten sett (omskriven historik) ger begränsat läge (SPEC-7.4.3) utan att pinnarna ändras.
+- **[SPEC-7.6.3]** En origin utan logg (svar 404) är tillåten i 1.0 och bedöms enbart enligt SPEC-7.4.2–7.4.6; har klienten en gång sparat ett huvud för origin ger en saknad logg begränsat läge.
 
 ## 8. Manifestet
 
