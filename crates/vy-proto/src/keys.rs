@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use vy_manifest::PublicKey;
+use vy_manifest::{is_key_id, PublicKey};
 
 /// Pins and announced successors of one origin.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -46,7 +46,7 @@ impl KeyStore {
                             store.entry(origin).pinned.insert(key.key_id(), key);
                         }
                     }
-                    ["successor", origin, key_id] => {
+                    ["successor", origin, key_id] if is_key_id(key_id) => {
                         store.entry(origin).successors.insert((*key_id).to_string());
                     }
                     _ => {}
@@ -103,7 +103,18 @@ impl KeyStore {
     }
 
     /// Record that a trusted manifest announced `key_id` as the next key.
+    /// Only a well-formed key id is written: the store is a line-oriented
+    /// text file, and anything else from a manifest (a newline, a space)
+    /// could otherwise forge a line for another origin (SPEC-7.4.4,
+    /// SPEC-9.5.2). The manifest validation refuses such ids already; this
+    /// is the last line of defence.
     pub fn announce_successor(&mut self, origin: &str, key_id: &str) -> io::Result<()> {
+        if !is_key_id(key_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{key_id:?} is not a key id"),
+            ));
+        }
         let o = self.entry(origin);
         if o.pinned.contains_key(key_id) || !o.successors.insert(key_id.to_string()) {
             return Ok(());
@@ -156,6 +167,38 @@ mod tests {
         assert!(!s.is_successor("vy://x", &b.key_id()));
         assert_eq!(s.pinned("vy://x", &b.key_id()), Some(b));
         assert!(!s.has_pins("vy://y"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-7.4.4, SPEC-9.5.2: an announced successor that is not a key id
+    /// is refused and never reaches the file, so a manifest cannot smuggle a
+    /// `pin` line for another origin through the line-oriented store
+    /// (review 0003).
+    #[test]
+    fn spec_7_4_4_successor_must_be_a_key_id() {
+        let dir = std::env::temp_dir().join(format!("vy-proto-keys-inject-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let a = SigningKey::from_seed(&[1u8; 32]).public();
+        let forged = format!("x\npin vy://bank.example {a}");
+        {
+            let mut s = KeyStore::open(&dir).unwrap();
+            s.pin("vy://x", a).unwrap();
+            assert!(s.announce_successor("vy://x", &forged).is_err());
+            assert!(s.announce_successor("vy://x", "0123456789ABCDEF").is_err());
+            assert!(s.announce_successor("vy://x", "").is_err());
+            assert!(!s.is_successor("vy://x", &forged));
+        }
+        let text = fs::read_to_string(dir.join("keys")).unwrap();
+        assert_eq!(text, format!("pin vy://x {a}\n"));
+        // A forged line already on disk is ignored on load, too.
+        fs::write(
+            dir.join("keys"),
+            format!("{text}successor vy://x not-a-key-id\n"),
+        )
+        .unwrap();
+        let s = KeyStore::open(&dir).unwrap();
+        assert!(!s.has_pins("vy://bank.example"));
+        assert!(s.origin("vy://x").unwrap().successors.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -27,7 +27,7 @@ pub use package::{
 pub use policy::{default_grant, Grant, Requested};
 pub use sign::{key_file, key_id, parse_key_file, PublicKey, SigningKey, KEY_ID_HEX_LEN};
 pub use validate::{
-    is_bcp47, is_date, is_origin, module_initial_pages, png_dimensions, Problem,
+    is_bcp47, is_date, is_key_id, is_origin, module_initial_pages, png_dimensions, Problem,
     AUTO_STORAGE_QUOTA_KB, MAX_MODULE_BYTES, MAX_RESOURCES_BYTES, RESOURCE_MIMES,
 };
 
@@ -1106,6 +1106,41 @@ mod tests {
         );
         assert!(parse_key_file("# only a comment\n").unwrap().is_empty());
         assert!(parse_key_file("not hex\n").is_err());
+    }
+
+    /// SPEC-7.4.4, SPEC-7.4.2: `next_key_id` names a key and nothing else:
+    /// exactly the 16 hex digits of a key id. The client copies the value
+    /// into its key store, so text with a newline or a space in it would
+    /// otherwise become a pin for another origin (review 0003).
+    #[test]
+    fn spec_7_4_4_next_key_id_is_a_key_id() {
+        let (m, wasm) = hello();
+        let good = test_key().public().key_id();
+        assert!(is_key_id(&good));
+        let with = |id: &str| Manifest {
+            next_key_id: Some(id.to_string()),
+            ..m.clone()
+        };
+        assert!(with(&good).validate(&wasm, &[] as &[&[u8]]).is_empty());
+        for bad in [
+            "",
+            "x",
+            "0123456789abcdeF",
+            "0123456789abcde",
+            "0123456789abcdef0",
+            "x\npin vy://bank.example 3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+            "0123456789abcdef pin vy://bank.example 00",
+            " 123456789abcdef",
+        ] {
+            assert!(!is_key_id(bad), "{bad:?}");
+            let problems = with(bad).validate(&wasm, &[] as &[&[u8]]);
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| matches!(p, Problem::NextKeyIdInvalid(k) if k == bad)),
+                "{bad:?}: {problems:?}"
+            );
+        }
     }
 
     /// Decision 7: image resources carry `w`/`h`, checked against the PNG

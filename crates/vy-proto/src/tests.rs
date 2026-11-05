@@ -5,7 +5,9 @@ use crate::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use vy_manifest::{key_file, Draft, Grant, Hash, Package, ResourceInput, SigningKey};
+use vy_manifest::{
+    key_file, Draft, Grant, Hash, Package, PackageError, Problem, ResourceInput, SigningKey,
+};
 
 /// RFC 8032 §7.1 test vector 1: a publicly known key, never a secret.
 const SEED_A: [u8; 32] = [
@@ -619,6 +621,57 @@ fn spec_7_4_4_key_rotation() {
         .insert("/hello".into(), package(&stranger, None));
     assert!(!f.fetch(&a).unwrap().trusted);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.4.4, SPEC-9.5.2: a trusted publisher cannot reach another
+/// origin's trust through `next_key_id`. The key store is a text file with
+/// one line per pin, so a value with a newline in it used to be written
+/// as a `pin` line for whatever origin it named (review 0003). Such a
+/// manifest is now refused at validation, before trust is even decided,
+/// and the store never sees it.
+#[test]
+fn spec_7_4_4_next_key_id_cannot_forge_pins() {
+    let publisher = key(0);
+    let stranger = key(4);
+    let forged = format!("x\npin vy://bank.example {}", stranger.public());
+    let mut d = draft();
+    d.next_key_id = Some(forged);
+    let wasm = module();
+    let mut manifest = d.finish(&wasm, &[]);
+    manifest.sign(&publisher);
+    let hostile = Package {
+        manifest,
+        module: wasm,
+        resources: vec![],
+    };
+    assert!(matches!(
+        hostile.validate().as_slice(),
+        [Problem::NextKeyIdInvalid(_)]
+    ));
+    for form in [Form::Package, Form::Manifest] {
+        let site = Site::new(hostile.clone(), form, std::slice::from_ref(&publisher));
+        site.lock().unwrap().cache_control = None;
+        let server = serve(&site);
+        let (mut f, dir) = fetcher("forge");
+        let a = addr(&server, "/hello");
+        let err = f.fetch(&a).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::Invalid(p) | Error::Package(PackageError::Invalid(p))
+                    if p.iter().any(|p| matches!(p, Problem::NextKeyIdInvalid(_)))
+            ),
+            "{form:?}: {err}"
+        );
+        assert!(!f.keys().has_pins("vy://bank.example"));
+        assert!(
+            !f.keys().has_pins(&a.origin()),
+            "nothing is pinned for a page that was never trusted"
+        );
+        let text = std::fs::read_to_string(dir.join("keys")).unwrap_or_default();
+        assert!(!text.contains("bank.example"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// SPEC-7.5.1: no Referer, at most 3 redirects.

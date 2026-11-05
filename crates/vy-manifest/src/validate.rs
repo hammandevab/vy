@@ -5,6 +5,7 @@ use crate::manifest::{
     Manifest, MAX_FALLBACK_BYTES, MAX_MANIFEST_BYTES, MAX_NAME_CHARS, MAX_NET_ORIGINS,
     MAX_STORAGE_QUOTA_KB, MAX_SUMMARY_BYTES,
 };
+use crate::sign::KEY_ID_HEX_LEN;
 use crate::Hash;
 use std::fmt;
 use vy_abi::limits;
@@ -179,6 +180,8 @@ pub enum Problem {
     },
     /// `min_size` has a zero side.
     MinSizeZero,
+    /// `next_key_id` is not a key id: 16 lower-case hex digits (SPEC-7.4.4).
+    NextKeyIdInvalid(String),
     /// The encoded manifest is over 64 KB (SPEC-4.1.3).
     ManifestTooLarge {
         /// Encoded size.
@@ -308,6 +311,10 @@ impl fmt::Display for Problem {
                 write!(f, "{field} names resource {index}, which does not exist")
             }
             Self::MinSizeZero => f.write_str("min_size has a zero side"),
+            Self::NextKeyIdInvalid(k) => write!(
+                f,
+                "next_key_id {k:?} is not a key id of {KEY_ID_HEX_LEN} hex digits (SPEC-7.4.4)"
+            ),
             Self::ManifestTooLarge { bytes } => {
                 write!(
                     f,
@@ -438,6 +445,15 @@ pub fn is_origin(s: &str) -> bool {
         Some(p) => p.parse::<u16>().map(|n| n > 0).unwrap_or(false) && !p.starts_with('0'),
     };
     host_ok && port_ok
+}
+
+/// A key id as [`crate::key_id`] derives it: exactly 16 lower-case hex
+/// digits (SPEC-7.4.4). Nothing else may name a key, because the client
+/// writes announced successors to its key store line by line.
+pub fn is_key_id(s: &str) -> bool {
+    s.len() == KEY_ID_HEX_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn is_url_with(s: &str, schemes: &[&str]) -> bool {
@@ -646,6 +662,11 @@ impl Manifest {
         if let Some(s) = &self.min_size {
             if s.w == 0 || s.h == 0 {
                 p.push(Problem::MinSizeZero);
+            }
+        }
+        if let Some(k) = &self.next_key_id {
+            if !is_key_id(k) {
+                p.push(Problem::NextKeyIdInvalid(k.clone()));
             }
         }
 
