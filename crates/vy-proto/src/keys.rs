@@ -3,9 +3,10 @@
 //! On the first visit to an origin the keys published at
 //! `/.well-known/vy-key` are pinned; later manifests must be signed by a
 //! pinned key, or by a key the previous manifest announced as its
-//! successor in `next_key_id`, which is then fetched and pinned in turn.
-//! Which keys a first visit pins is decided in `fetch.rs` (the key file
-//! and DNS must agree, SPEC-7.4.5); this is the store.
+//! successor in `next_key_id`, which is then fetched and pinned in turn,
+//! retiring the keys before it (SPEC-7.4.6). Which keys a first visit pins is decided
+//! in `fetch.rs` (the key file and DNS must agree, SPEC-7.4.5); this is
+//! the store.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -131,11 +132,17 @@ impl KeyStore {
             .unwrap_or(false)
     }
 
-    /// Pin an announced successor once its key is known; the announcement
-    /// is consumed.
+    /// Pin an announced successor once its key is known and a manifest
+    /// signed by it has verified; the announcement is consumed and every
+    /// key pinned before is retired (SPEC-7.4.6). Rotation exists to take
+    /// a key out of service: a client that kept honouring the old key
+    /// would give a stolen one an unlimited life, so after a rotation the
+    /// origin has exactly the key it rotated to, and a page still signed
+    /// by the old key is restricted until the publisher re-signs it.
     pub fn promote(&mut self, origin: &str, key: PublicKey) -> io::Result<()> {
         let o = self.entry(origin);
         o.successors.remove(&key.key_id());
+        o.pinned.clear();
         o.pinned.insert(key.key_id(), key);
         self.save()
     }
@@ -167,6 +174,11 @@ mod tests {
         s.promote("vy://x", b).unwrap();
         assert!(!s.is_successor("vy://x", &b.key_id()));
         assert_eq!(s.pinned("vy://x", &b.key_id()), Some(b));
+        assert_eq!(
+            s.pinned("vy://x", &a.key_id()),
+            None,
+            "the key rotated away from is retired (SPEC-7.4.6)"
+        );
         assert!(!s.has_pins("vy://y"));
         let _ = fs::remove_dir_all(&dir);
     }

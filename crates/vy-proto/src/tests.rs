@@ -954,15 +954,26 @@ fn spec_7_4_3_restricted_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// SPEC-7.4.4: key rotation: a manifest signed with the old key names the
-/// new key id; the new key is then accepted from `.well-known/vy-key`.
+/// SPEC-7.4.4, SPEC-7.4.6: key rotation end to end: a manifest signed with the old
+/// key names the new key id; the new key is then fetched from
+/// `.well-known/vy-key` and accepted for the origin, and the old key is
+/// retired at that moment (the decision: rotation takes a key out of
+/// service, so a client never honours a rotated-away key again). A key the
+/// site publishes without a chain from a trusted manifest is refused
+/// ("ingen annan väg ger en okänd nyckel förtroende"), an announced key
+/// that the key file lacks waits, and a manifest that merely names the
+/// successor without being signed by it neither promotes nor retires.
 #[test]
 fn spec_7_4_4_key_rotation() {
     let old = key(0);
     let new = key(3);
     let stranger = key(4);
     let announcing = package(&old, Some(&new.public().key_id()));
-    let site = Site::new(announcing, Form::Package, std::slice::from_ref(&old));
+    let site = Site::new(
+        announcing.clone(),
+        Form::Package,
+        std::slice::from_ref(&old),
+    );
     site.lock().unwrap().cache_control = None;
     let server = serve(&site);
     let (mut f, dir) = fetcher("rotation");
@@ -970,8 +981,47 @@ fn spec_7_4_4_key_rotation() {
     assert!(f.fetch(&a).unwrap().trusted());
     assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
 
-    // The publisher rotates: new key signs, both keys published.
+    // Announced but not yet in the key file: restricted, the announcement
+    // kept, and a page still signed by the old key is still trusted.
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&new, None));
+    let early = f.fetch(&a).unwrap();
+    assert!(!early.trusted());
+    assert!(matches!(
+        early.restriction(),
+        Some(Restriction::SuccessorNotPublished { key_id }) if *key_id == new.public().key_id()
+    ));
+    assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
+    assert!(f
+        .keys()
+        .pinned(&a.origin(), &old.public().key_id())
+        .is_some());
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), announcing.clone());
+    assert!(f.fetch(&a).unwrap().trusted());
+
+    // A manifest that names the successor's id but is signed by someone
+    // else: a bad signature, and nothing changes in the store.
+    let mut forged = package(&stranger, None);
+    forged.manifest.sig.as_mut().unwrap().key_id = new.public().key_id();
     site.lock().unwrap().keys = key_file(&[old.public(), new.public(), stranger.public()]);
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), forged);
+    let bad = f.fetch(&a).unwrap();
+    assert_eq!(bad.restriction(), Some(&Restriction::BadSignature));
+    assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
+    assert!(f
+        .keys()
+        .pinned(&a.origin(), &old.public().key_id())
+        .is_some());
+
+    // The publisher rotates: the new key signs, both keys published.
     site.lock()
         .unwrap()
         .packages
@@ -984,13 +1034,49 @@ fn spec_7_4_4_key_rotation() {
         .pinned(&a.origin(), &new.public().key_id())
         .is_some());
     assert!(!f.keys().is_successor(&a.origin(), &new.public().key_id()));
+    assert_eq!(
+        f.keys().pinned(&a.origin(), &old.public().key_id()),
+        None,
+        "the old key is retired by the rotation"
+    );
+    let text = std::fs::read_to_string(dir.join("keys")).unwrap();
+    assert_eq!(text, format!("pin {} {}\n", a.origin(), new.public()));
 
-    // A key that was published but never announced is still refused.
+    // A page still signed by the old key is restricted from now on, even
+    // though the key file still lists the key.
+    site.lock()
+        .unwrap()
+        .packages
+        .insert("/hello".into(), package(&old, None));
+    let stale = f.fetch(&a).unwrap();
+    assert!(!stale.trusted());
+    assert!(matches!(
+        stale.restriction(),
+        Some(Restriction::UnknownKey { key_id }) if *key_id == old.public().key_id()
+    ));
+
+    // A key that was published but never announced is refused: no chain
+    // from a trusted manifest, no trust.
     site.lock()
         .unwrap()
         .packages
         .insert("/hello".into(), package(&stranger, None));
-    assert!(!f.fetch(&a).unwrap().trusted());
+    let unknown = f.fetch(&a).unwrap();
+    assert!(!unknown.trusted());
+    assert!(matches!(
+        unknown.restriction(),
+        Some(Restriction::UnknownKey { key_id }) if *key_id == stranger.public().key_id()
+    ));
+    assert_eq!(
+        server.count(WELL_KNOWN_KEY_PATH),
+        4,
+        "the key file is fetched only for a first visit or an announced successor"
+    );
+    assert!(unknown
+        .restriction()
+        .unwrap()
+        .to_string()
+        .contains("SPEC-7.4.4"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
