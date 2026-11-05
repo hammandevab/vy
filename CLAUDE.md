@@ -45,7 +45,7 @@ och körs i en sandbox. Ingen HTML, ingen CSS, ingen JavaScript-motor.
 | Lint | clippy utan varningar | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Test | alla icke-ignorerade tester gröna | `cargo test --workspace` |
 | Spec-spårning | varje `SPEC-id` har minst en testreferens | `python3 tools/spec_trace.py` |
-| Modul | `modules/hello` bygger till wasm och passerar ABI-kontroll | `tools/build_modules.sh && cargo run -p vy-cli -- check-abi target/wasm/hello.wasm` |
+| Modul | `modules/*` bygger till wasm och passerar ABI-kontroll; varje moduls fmt, nativa tester och wasm32-clippy | `tools/build_modules.sh && cargo run -p vy-cli -- check-abi target/wasm/hello.wasm && tools/test_modules.sh` |
 | Pixeldiff (från M1) | max 0,1 % avvikande pixlar mot `conformance/golden/` | `cargo run -p vy-cli -- conformance` |
 | Prestanda (från M3) | ingen regression över 5 % mot SPEC §13 | `cargo run -p vy-cli -- bench` |
 
@@ -80,7 +80,7 @@ crates/vy-shell      fönster, flikar, adressfält (rörs ej före M3)
 crates/vy-cli        headless: render, check-abi, conformance, bench
 modules/hello        referensmodul 0 – text och en rektangel
 conformance/         guldbilder och förväntade semantiska träd
-tools/               spec_trace.py, build_modules.sh
+tools/               spec_trace.py, build_modules.sh, test_modules.sh
 docs/reviews/        granskningssidor, en per PR
 ```
 

@@ -39,8 +39,9 @@ jobs:
         run: python3 tools/spec_trace.py
       - name: ABI check
         run: for m in target/wasm/*.wasm; do cargo run -q -p vy-cli -- check-abi "$m"; done
-      - name: Module lint
-        run: for d in modules/*/; do (cd "$d" && cargo clippy --target wasm32-unknown-unknown -- -D warnings); done
+      # Each module's own fmt, native tests and wasm32 clippy (beslut 33).
+      - name: Module tests and lint
+        run: tools/test_modules.sh
       # SPEC-11.3.1: headless render without a window.
       - name: Headless render
         run: cargo run -p vy-cli -- render target/wasm/hello.wasm --out /tmp/hello.png --size 800x600
@@ -58,12 +59,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Build modules
         run: tools/build_modules.sh
       - name: Test
         run: cargo test --workspace
+      - name: Module tests and lint
+        run: tools/test_modules.sh
       # Same goldens as on Linux; a difference is reported, never papered over
       # with a looser threshold (docs/BUILD-NOTES.md, spec-fråga).
       - name: Conformance
