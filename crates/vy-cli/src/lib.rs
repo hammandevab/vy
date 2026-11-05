@@ -3,6 +3,7 @@
 //! Everything the binary does lives here so the gates can call it as a library.
 #![deny(missing_docs)]
 
+pub mod abi_doc;
 pub mod conformance;
 
 use anyhow::{anyhow, bail, Context, Result};

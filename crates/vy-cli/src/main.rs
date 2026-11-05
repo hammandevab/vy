@@ -13,6 +13,7 @@ fn usage() -> ExitCode {
          vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--grant cap,..]\n           \
          [--resource <file> [--resource-size WxH]].. [--dump-semantic <json>]\n  \
          vy-cli conformance [--update] [--root <dir>]\n  \
+         vy-cli abi-dump      (the frozen ABI 1.0 listing, docs/ABI-1.0.md)\n  \
          vy-cli bench         (M3)"
     );
     ExitCode::from(2)
@@ -24,6 +25,10 @@ fn main() -> ExitCode {
         Some("check-abi") => check_abi(&args[1..]),
         Some("render") => render(&args[1..]),
         Some("conformance") => conformance(&args[1..]),
+        Some("abi-dump") => {
+            print!("{}", vy_cli::abi_doc::abi_listing());
+            return ExitCode::SUCCESS;
+        }
         Some("bench") => {
             eprintln!("bench: not implemented before M3 (see CLAUDE.md)");
             return ExitCode::from(2);

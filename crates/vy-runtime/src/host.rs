@@ -398,26 +398,10 @@ impl Host {
     }
 }
 
-/// Name of an ABI status code for log lines.
+/// Name of an ABI status code for log lines (`E_UNKNOWN` for one 1.0 does
+/// not define).
 pub fn err_name(code: i32) -> &'static str {
-    match code {
-        err::OK => "OK",
-        err::E_DENIED => "E_DENIED",
-        err::E_ARG => "E_ARG",
-        err::E_OOM => "E_OOM",
-        err::E_QUOTA => "E_QUOTA",
-        err::E_RATE => "E_RATE",
-        err::E_DL_STATE => "E_DL_STATE",
-        err::E_DL_FULL => "E_DL_FULL",
-        err::E_DL_CLIP => "E_DL_CLIP",
-        err::E_RESOURCE => "E_RESOURCE",
-        err::E_STYLE => "E_STYLE",
-        err::E_ORIGIN => "E_ORIGIN",
-        err::E_NET => "E_NET",
-        err::E_TOO_LARGE => "E_TOO_LARGE",
-        err::E_GESTURE => "E_GESTURE",
-        _ => "E_UNKNOWN",
-    }
+    err::name(code).unwrap_or("E_UNKNOWN")
 }
 
 /// Why an import refused a call: the ABI status code, plus the cap that was

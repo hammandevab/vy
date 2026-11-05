@@ -46,6 +46,30 @@ pub mod err {
     pub const E_TOO_LARGE: i32 = -32;
     /// Call requires a user gesture within 1 s.
     pub const E_GESTURE: i32 = -40;
+
+    /// Every status code with its name, in the order of appendix A.
+    pub const ALL: [(i32, &str); 15] = [
+        (OK, "OK"),
+        (E_DENIED, "E_DENIED"),
+        (E_ARG, "E_ARG"),
+        (E_OOM, "E_OOM"),
+        (E_QUOTA, "E_QUOTA"),
+        (E_RATE, "E_RATE"),
+        (E_DL_STATE, "E_DL_STATE"),
+        (E_DL_FULL, "E_DL_FULL"),
+        (E_DL_CLIP, "E_DL_CLIP"),
+        (E_RESOURCE, "E_RESOURCE"),
+        (E_STYLE, "E_STYLE"),
+        (E_ORIGIN, "E_ORIGIN"),
+        (E_NET, "E_NET"),
+        (E_TOO_LARGE, "E_TOO_LARGE"),
+        (E_GESTURE, "E_GESTURE"),
+    ];
+
+    /// Name of a status code, or `None` for a code 1.0 does not define.
+    pub fn name(code: i32) -> Option<&'static str> {
+        ALL.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
+    }
 }
 
 /// Event kinds delivered through `vy_event` (SPEC appendix A, SPEC-A.2.1).
@@ -79,6 +103,97 @@ pub mod event {
     pub const BUDGET: i32 = 31;
     /// Capability granted or revoked: a = capability id, b = 1 granted / 0 revoked.
     pub const CAPABILITY: i32 = 32;
+
+    /// One event kind as appendix A lists it: number, name and what
+    /// `a`..`d` carry (`-` for an unused argument).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Kind {
+        /// The `kind` argument of `vy_event`.
+        pub kind: i32,
+        /// Name as the spec writes it.
+        pub name: &'static str,
+        /// Meaning of `a`, `b`, `c` and `d`.
+        pub args: [&'static str; 4],
+    }
+
+    /// Every kind of 1.0 in numeric order (SPEC-A.2.1).
+    pub const ALL: [Kind; 14] = [
+        Kind {
+            kind: POINTER_MOVE,
+            name: "POINTER_MOVE",
+            args: ["x × 100", "y × 100", "knappar", "modifierare"],
+        },
+        Kind {
+            kind: POINTER_DOWN,
+            name: "POINTER_DOWN",
+            args: ["x × 100", "y × 100", "knapp", "modifierare"],
+        },
+        Kind {
+            kind: POINTER_UP,
+            name: "POINTER_UP",
+            args: ["x × 100", "y × 100", "knapp", "modifierare"],
+        },
+        Kind {
+            kind: SCROLL,
+            name: "SCROLL",
+            args: ["dx × 100", "dy × 100", "0 pixlar / 1 rader", "modifierare"],
+        },
+        Kind {
+            kind: KEY_DOWN,
+            name: "KEY_DOWN",
+            args: ["keycode (USB HID)", "modifierare", "repeat", "-"],
+        },
+        Kind {
+            kind: KEY_UP,
+            name: "KEY_UP",
+            args: ["keycode", "modifierare", "-", "-"],
+        },
+        Kind {
+            kind: TEXT_INPUT,
+            name: "TEXT_INPUT",
+            args: ["ptr", "len", "-", "-"],
+        },
+        Kind {
+            kind: IME_COMPOSE,
+            name: "IME_COMPOSE",
+            args: ["ptr", "len", "markör", "-"],
+        },
+        Kind {
+            kind: POINTER_LEAVE,
+            name: "POINTER_LEAVE",
+            args: ["-", "-", "-", "-"],
+        },
+        Kind {
+            kind: FOCUS,
+            name: "FOCUS",
+            args: ["nod-id", "1 in / 0 ut", "0 mus / 1 tangentbord", "-"],
+        },
+        Kind {
+            kind: FETCH_DONE,
+            name: "FETCH_DONE",
+            args: ["req_id", "HTTP-status eller negativ felkod", "bytes", "-"],
+        },
+        Kind {
+            kind: VISIBILITY,
+            name: "VISIBILITY",
+            args: ["1 synlig / 0 gömd", "-", "-", "-"],
+        },
+        Kind {
+            kind: BUDGET,
+            name: "BUDGET",
+            args: ["ms använt", "ms tillåtet", "1 = sista varningen", "-"],
+        },
+        Kind {
+            kind: CAPABILITY,
+            name: "CAPABILITY",
+            args: ["capability-id", "1 beviljad / 0 återkallad", "-", "-"],
+        },
+    ];
+
+    /// Name of a kind, or `None` for one 1.0 does not define.
+    pub fn name(kind: i32) -> Option<&'static str> {
+        ALL.iter().find(|k| k.kind == kind).map(|k| k.name)
+    }
 }
 
 /// `fit` argument of `dl_image` (SPEC-5.2.3) and the `fit` field of the
@@ -148,6 +263,14 @@ pub mod modifier {
     pub const ALT: i32 = 4;
     /// Command (macOS) or Windows key.
     pub const META: i32 = 8;
+
+    /// Every bit with its key, in bit order (SPEC-A.5.1).
+    pub const ALL: [(i32, &str); 4] = [
+        (SHIFT, "Skift"),
+        (CTRL, "Ctrl"),
+        (ALT, "Alt / Option"),
+        (META, "Meta (Cmd / Win)"),
+    ];
 }
 
 /// USB HID usage codes of the keys the host itself acts on (SPEC-10.3.1):
@@ -280,6 +403,69 @@ pub mod op {
     // stay reserved: no import produced them (SPEC-C.1.1, SPEC-C.1.3).
     /// End of list.
     pub const END: u8 = 0xFF;
+
+    /// One opcode as appendix C lists it: code, name, fields and size.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Desc {
+        /// The opcode byte.
+        pub code: u8,
+        /// Name as the spec writes it.
+        pub name: &'static str,
+        /// Fields after the opcode byte, in order, little-endian.
+        pub fields: &'static str,
+        /// Size in bytes including the opcode byte; `len` and `n` are the
+        /// variable parts.
+        pub bytes: &'static str,
+    }
+
+    /// Every opcode of 1.0 in numeric order (SPEC-C.1.1).
+    pub const ALL: [Desc; 7] = [
+        Desc {
+            code: RECT,
+            name: "RECT",
+            fields: "x, y, w, h, radius: f32; color: u32",
+            bytes: "25",
+        },
+        Desc {
+            code: TEXT,
+            name: "TEXT",
+            fields: "x, y, max_w: f32; style_id: u16; len: u16; utf8[len]",
+            bytes: "17 + len",
+        },
+        Desc {
+            code: IMAGE,
+            name: "IMAGE",
+            fields: "x, y, w, h: f32; resource_id: u16; fit: u8",
+            bytes: "20",
+        },
+        Desc {
+            code: PATH,
+            name: "PATH",
+            fields: "color: u32; stroke_w: f32; n: u16; n × (u8 typ + 2 × f32)",
+            bytes: "11 + 9n",
+        },
+        Desc {
+            code: CLIP_PUSH,
+            name: "CLIP_PUSH",
+            fields: "x, y, w, h, radius: f32",
+            bytes: "21",
+        },
+        Desc {
+            code: CLIP_POP,
+            name: "CLIP_POP",
+            fields: "-",
+            bytes: "1",
+        },
+        Desc {
+            code: END,
+            name: "END",
+            fields: "-",
+            bytes: "1",
+        },
+    ];
+
+    /// Opcode bytes that are reserved and never appear in a 1.x list.
+    pub const RESERVED: [u8; 2] = [0x07, 0x08];
 }
 
 /// Hard limits enforced by the host (SPEC-6.1.4, SPEC-6.1.6, SPEC-9.3.1).
@@ -363,6 +549,20 @@ pub struct Sig {
     pub params: &'static [Ty],
     /// Result type, if any.
     pub result: Option<Ty>,
+    /// The parameters with the names SPEC §5 gives them, as one
+    /// `name: type, ...` string; the same count and types as `params`.
+    pub args: &'static str,
+}
+
+impl Ty {
+    /// The wasm type's name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Ty::I32 => "i32",
+            Ty::I64 => "i64",
+            Ty::F32 => "f32",
+        }
+    }
 }
 
 use Ty::{F32, I32, I64};
@@ -373,31 +573,37 @@ pub const EXPORTS: &[Sig] = &[
         name: "vy_init",
         params: &[I32, I32, I32, F32],
         result: Some(I32),
+        args: "abi_minor: i32, width: i32, height: i32, scale: f32",
     },
     Sig {
         name: "vy_frame",
         params: &[I32],
         result: Some(I32),
+        args: "dt_ms: i32",
     },
     Sig {
         name: "vy_event",
         params: &[I32, I32, I32, I32, I32],
         result: Some(I32),
+        args: "kind: i32, a: i32, b: i32, c: i32, d: i32",
     },
     Sig {
         name: "vy_resize",
         params: &[I32, I32, F32],
         result: None,
+        args: "width: i32, height: i32, scale: f32",
     },
     Sig {
         name: "vy_suspend",
         params: &[],
         result: Some(I32),
+        args: "",
     },
     Sig {
         name: "vy_alloc",
         params: &[I32],
         result: Some(I32),
+        args: "size: i32",
     },
 ];
 
@@ -408,78 +614,93 @@ pub const IMPORTS: &[Sig] = &[
         name: "abi_version",
         params: &[],
         result: Some(I32),
+        args: "",
     },
     Sig {
         name: "log",
         params: &[I32, I32, I32],
         result: Some(I32),
+        args: "level: i32, ptr: i32, len: i32",
     },
     Sig {
         name: "request_frame",
         params: &[],
         result: None,
+        args: "",
     },
     Sig {
         name: "exit",
         params: &[I32],
         result: None,
+        args: "code: i32",
     },
     // display list (SPEC-5.2.3)
     Sig {
         name: "dl_begin",
         params: &[],
         result: Some(I32),
+        args: "",
     },
     Sig {
         name: "dl_end",
         params: &[],
         result: Some(I32),
+        args: "",
     },
     Sig {
         name: "dl_rect",
         params: &[F32, F32, F32, F32, F32, I32],
         result: Some(I32),
+        args: "x: f32, y: f32, w: f32, h: f32, radius: f32, color: i32",
     },
     Sig {
         name: "dl_text",
         params: &[F32, F32, F32, I32, I32, I32],
         result: Some(I64),
+        args: "x: f32, y: f32, w: f32, style_id: i32, ptr: i32, len: i32",
     },
     Sig {
         name: "dl_image",
         params: &[F32, F32, F32, F32, I32, I32],
         result: Some(I32),
+        args: "x: f32, y: f32, w: f32, h: f32, resource_id: i32, fit: i32",
     },
     Sig {
         name: "dl_path",
         params: &[I32, I32, I32, F32],
         result: Some(I32),
+        args: "ptr: i32, len: i32, color: i32, stroke_w: f32",
     },
     Sig {
         name: "dl_clip_push",
         params: &[F32, F32, F32, F32, F32],
         result: Some(I32),
+        args: "x: f32, y: f32, w: f32, h: f32, radius: f32",
     },
     Sig {
         name: "dl_clip_pop",
         params: &[],
         result: Some(I32),
+        args: "",
     },
     // text (SPEC-5.2.5)
     Sig {
         name: "text_style",
         params: &[I32, F32, I32, I32],
         result: Some(I32),
+        args: "font_resource_id: i32, size_px: f32, weight: i32, color: i32",
     },
     Sig {
         name: "text_measure",
         params: &[I32, F32, I32, I32],
         result: Some(I64),
+        args: "style_id: i32, max_w: f32, ptr: i32, len: i32",
     },
     Sig {
         name: "text_caret",
         params: &[I32, I32, I32, I32],
         result: Some(I64),
+        args: "style_id: i32, ptr: i32, len: i32, byte_offset: i32",
     },
     // input (SPEC-5.2.6); `pointer_get` was withdrawn before the freeze:
     // the pointer arrives through `POINTER_MOVE` only.
@@ -487,92 +708,110 @@ pub const IMPORTS: &[Sig] = &[
         name: "key_down",
         params: &[I32],
         result: Some(I32),
+        args: "code: i32",
     },
     Sig {
         name: "ime_begin",
         params: &[F32, F32, F32, F32],
         result: Some(I32),
+        args: "x: f32, y: f32, w: f32, h: f32",
     },
     Sig {
         name: "ime_end",
         params: &[],
         result: Some(I32),
+        args: "",
     },
     // network (SPEC-5.2.7)
     Sig {
         name: "fetch_begin",
         params: &[I32, I32, I32, I32, I32],
         result: Some(I32),
+        args: "method: i32, url_ptr: i32, url_len: i32, body_ptr: i32, body_len: i32",
     },
     Sig {
         name: "fetch_poll",
         params: &[I32],
         result: Some(I32),
+        args: "req_id: i32",
     },
     Sig {
         name: "fetch_read",
         params: &[I32, I32, I32],
         result: Some(I32),
+        args: "req_id: i32, dst_ptr: i32, max: i32",
     },
     Sig {
         name: "fetch_cancel",
         params: &[I32],
         result: Some(I32),
+        args: "req_id: i32",
     },
     // storage (SPEC-5.2.9)
     Sig {
         name: "state_put",
         params: &[I32, I32, I32, I32],
         result: Some(I32),
+        args: "key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32",
     },
     Sig {
         name: "state_get",
         params: &[I32, I32, I32, I32],
         result: Some(I32),
+        args: "key_ptr: i32, key_len: i32, dst_ptr: i32, max: i32",
     },
     Sig {
         name: "state_delete",
         params: &[I32, I32],
         result: Some(I32),
+        args: "key_ptr: i32, key_len: i32",
     },
     // navigation (SPEC-5.2.10)
     Sig {
         name: "navigate",
         params: &[I32, I32, I32],
         result: Some(I32),
+        args: "url_ptr: i32, url_len: i32, replace: i32",
     },
     Sig {
         name: "link_register",
         params: &[I32, F32, F32, F32, F32, I32, I32],
         result: Some(I32),
+        args: "id: i32, x: f32, y: f32, w: f32, h: f32, url_ptr: i32, url_len: i32",
     },
     // time and randomness (SPEC-5.2.11)
     Sig {
         name: "now_ms",
         params: &[],
         result: Some(I64),
+        args: "",
     },
     Sig {
         name: "random",
         params: &[I32, I32],
         result: Some(I32),
+        args: "dst_ptr: i32, len: i32",
     },
     // clipboard (SPEC-5.2.12)
     Sig {
         name: "clipboard_read",
         params: &[I32, I32],
         result: Some(I32),
+        args: "dst_ptr: i32, max: i32",
     },
     Sig {
         name: "clipboard_write",
         params: &[I32, I32],
         result: Some(I32),
+        args: "ptr: i32, len: i32",
     },
     // semantics (SPEC-5.2.13)
     Sig {
         name: "sem_node",
         params: &[I32, I32, I32, F32, F32, F32, F32, I32, I32],
         result: Some(I32),
+        args:
+            "id: i32, parent_id: i32, role: i32, x: f32, y: f32, w: f32, h: f32, ptr: i32, len: i32",
     },
 ];
 
@@ -588,6 +827,8 @@ pub fn export(name: &str) -> Option<&'static Sig> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     /// SPEC-2.1.3: the host API has at most 40 imports in 1.0.
@@ -876,6 +1117,56 @@ mod tests {
         }
         const _: () = assert!(limits::MAX_SEM_TEXT_BYTES <= limits::MAX_TEXT_BYTES);
         const _: () = assert!(limits::MAX_STATE_KEY_BYTES < limits::MAX_STATE_VALUE_BYTES);
+    }
+
+    /// SPEC-5.3.5, SPEC-A.1.1, SPEC-A.2.1, SPEC-A.5.1, SPEC-C.1.1: the
+    /// tables the frozen listing (`docs/ABI-1.0.md`) is generated from agree
+    /// with the constants: every named argument list has the arity and types
+    /// of its signature, every status code, event kind, modifier bit and
+    /// opcode has exactly one entry, and the reserved opcodes are nobody's.
+    #[test]
+    fn spec_5_3_5_listing_tables_agree_with_constants() {
+        for s in EXPORTS.iter().chain(IMPORTS) {
+            let named: std::vec::Vec<&str> = s
+                .args
+                .split(',')
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .collect();
+            assert_eq!(named.len(), s.params.len(), "{}: {}", s.name, s.args);
+            for (arg, ty) in named.iter().zip(s.params) {
+                let (name, t) = arg
+                    .split_once(": ")
+                    .unwrap_or_else(|| panic!("{}: {arg}", s.name));
+                assert!(!name.is_empty());
+                assert_eq!(t, ty.name(), "{}: {arg}", s.name);
+            }
+        }
+        assert_eq!(err::ALL.len(), 15);
+        for (code, name) in err::ALL {
+            assert_eq!(err::name(code), Some(name));
+            assert_eq!(err::ALL.iter().filter(|(c, _)| *c == code).count(), 1);
+        }
+        assert_eq!(err::name(-99), None);
+        assert_eq!(event::ALL.len(), 14);
+        for k in event::ALL {
+            assert_eq!(event::name(k.kind), Some(k.name));
+            assert_eq!(event::ALL.iter().filter(|o| o.kind == k.kind).count(), 1);
+        }
+        assert_eq!(event::name(99), None);
+        assert_eq!(
+            event::ALL.map(|k| k.kind),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 31, 32]
+        );
+        assert_eq!(modifier::ALL.map(|(b, _)| b), [1, 2, 4, 8]);
+        assert_eq!(
+            op::ALL.map(|o| o.code),
+            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0xFF]
+        );
+        for o in op::ALL {
+            assert!(!op::RESERVED.contains(&o.code), "{}", o.name);
+        }
+        assert_eq!(op::RESERVED, [0x07, 0x08]);
     }
 
     /// SPEC-C.1.1, SPEC-C.1.3: opcode values are fixed; 0x07 and 0x08 are
