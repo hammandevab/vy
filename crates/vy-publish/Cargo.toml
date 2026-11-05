@@ -1,0 +1,15 @@
+[package]
+name = "vy-publish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Publisher tool: keygen, build and inspect Vy packages"
+
+[[bin]]
+name = "vy-publish"
+path = "src/main.rs"
+
+[dependencies]
+vy-manifest.workspace = true
+getrandom.workspace = true

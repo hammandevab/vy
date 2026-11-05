@@ -4,6 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Vy content format: canonical CBOR manifest, validation, capability policy, signatures, package framing"
 
 [dependencies]
 vy-abi.workspace = true
+minicbor.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true
+wasmparser.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+wat.workspace = true

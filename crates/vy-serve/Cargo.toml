@@ -1,0 +1,15 @@
+[package]
+name = "vy-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Static server for Vy packages, keys and HTML fallback"
+
+[[bin]]
+name = "vy-serve"
+path = "src/main.rs"
+
+[dependencies]
+vy-manifest.workspace = true
+tiny_http.workspace = true
