@@ -1,11 +1,12 @@
 # Release: en tagg v* (eller en manuell körning med version) bygger vy-cli,
-# vy-publish och vy-serve (och vy-shell så snart den har en binär) i release-
-# läge för Linux x86_64, macOS arm64 och Windows x86_64, publicerar
-# referenssidan med tools/publish_site.sh och fäster allt vid en GitHub Release
-# med genererade noteringar:
+# vy-dev, vy-publish och vy-serve (och vy-shell så snart den har en binär) i
+# release-läge för Linux x86_64, macOS arm64 och Windows x86_64, packar Studio
+# (tools/build_studio.sh), publicerar referenssidan med tools/publish_site.sh
+# och fäster allt vid en GitHub Release med genererade noteringar:
 #
-#   vy-<version>-<target>.zip   binärerna + LICENSE
+#   vy-<version>-<target>.zip   binärerna, studio.vyp bredvid vy-dev + LICENSE
 #   vy-site-<version>.zip       de elva paketen, dev.key.pub och previews/
+#                               (utan Studio, som bara körs lokalt av vy-dev)
 #
 # Signeringsnyckeln för paketen är repots secret VY_KEY (64 hextecken, se
 # tools/publish_site.sh); saknas den signeras de med en tillfällig nyckel.
@@ -68,7 +69,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p vy-cli -p vy-publish -p vy-serve
+        run: cargo build --release --locked --target ${{ matrix.target }} -p vy-cli -p vy-dev -p vy-publish -p vy-serve
       # vy-shell is a library until M3; the job must not fail before then.
       - name: Build vy-shell when it has a binary
         shell: bash
@@ -88,10 +89,14 @@ jobs:
           ext=""
           if [ "$RUNNER_OS" = Windows ]; then ext=.exe; fi
           stage=$(mktemp -d)
-          for bin in vy-cli vy-publish vy-serve vy-shell; do
+          for bin in vy-cli vy-dev vy-publish vy-serve vy-shell; do
             f="target/$TARGET/release/$bin$ext"
             if [ -f "$f" ]; then cp "$f" "$stage/"; fi
           done
+          # Studio next to vy-dev, which looks for studio.vyp beside its own
+          # binary; signed with a throwaway key, since vy-dev patches in the
+          # run's origin and token and re-signs at every start (docs/DEVELOPING.md).
+          VY_PUBLISH="target/$TARGET/release/vy-publish$ext" tools/build_studio.sh "$stage/studio.vyp"
           cp LICENSE "$stage/"
           ls -l "$stage"
           zip="$PWD/vy-$VERSION-$TARGET.zip"
