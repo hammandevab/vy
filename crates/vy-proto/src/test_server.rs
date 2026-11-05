@@ -91,6 +91,19 @@ impl TestServer {
                                 requests.lock().unwrap().push(req);
                                 write_response(&stream, &resp);
                             }
+                            // Close the sending side first and drain whatever the
+                            // client still sends (an unread POST body): closing a
+                            // socket with unread data makes the kernel send RST,
+                            // and on macOS the client then sees "Peer disconnected"
+                            // before it has read our response.
+                            let _ = stream.shutdown(Shutdown::Write);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                            let mut sink = [0u8; 4096];
+                            while let Ok(n) = (&stream).read(&mut sink) {
+                                if n == 0 {
+                                    break;
+                                }
+                            }
                             let _ = stream.shutdown(Shutdown::Both);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
