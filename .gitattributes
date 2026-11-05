@@ -1,0 +1,9 @@
+# Textfiler checkas alltid ut med LF, även på Windows (där git annars
+# ger CRLF): tester jämför genererad text byte för byte med filer i
+# repot – docs/ABI-1.0.md (spec_5_3_5_abi_listing_is_frozen) och
+# conformance/semantic/*.json (spec_10_2_3_dump_semantic, konformansen).
+* text=auto eol=lf
+*.png binary
+*.ttf binary
+*.wasm binary
+*.vyp binary
