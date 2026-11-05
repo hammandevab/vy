@@ -17,7 +17,7 @@ pub use host::{
     origin_of, CannedResponse, Capabilities, Link, LogEntry, LogSource, SemNode, Storage,
     DEFAULT_STORAGE_QUOTA_BYTES,
 };
-pub use vy_render::Resource;
+pub use vy_render::{RasterReport, Resource};
 
 use host::Host;
 use sha2::{Digest, Sha256};
@@ -255,6 +255,10 @@ pub struct Runtime {
     /// The next frame is reported as over budget whatever it cost
     /// ([`Runtime::force_budget_breach`]).
     force_breach: bool,
+    /// True once the current frame has counted as a budget breach, by its
+    /// fuel or by its rasterization; the streak is reset at the start of
+    /// the next frame when this is still false (SPEC-5.3.3).
+    frame_over: bool,
     /// True once the host has noted a `vy_event` result other than 0 or 1
     /// (SPEC-5.1.3): the note is logged once per instance.
     event_result_noted: bool,
@@ -334,6 +338,7 @@ impl Runtime {
             visible: true,
             focus: None,
             force_breach: false,
+            frame_over: false,
             event_result_noted: false,
         })
     }
@@ -483,6 +488,13 @@ impl Runtime {
     }
 
     fn run_frame(&mut self, dt_ms: i32) -> Result<&[u8], Error> {
+        // A frame within budget, in fuel and in rasterization, ends the
+        // streak; the rasterization is only known after the frame, so the
+        // reset waits for the next one.
+        if !self.frame_over {
+            self.budget_streak = 0;
+        }
+        self.frame_over = false;
         {
             let host = self.host_mut();
             host.wants_frame = false;
@@ -518,32 +530,12 @@ impl Runtime {
             over_budget: over,
         };
         if over {
-            self.budget_streak += 1;
             let used_ms = if forced {
                 limits::FRAME_BUDGET_MS as i32 + 1
             } else {
                 used.div_ceil(FUEL_PER_MS) as i32
             };
-            let last = self.budget_streak >= 2;
-            // Delivered on the host's own fuel; a module that misbehaves here is simply stopped.
-            let ev = self.exports.event.clone();
-            let _ = self.call(
-                &ev,
-                (
-                    event::BUDGET,
-                    used_ms,
-                    limits::FRAME_BUDGET_MS as i32,
-                    i32::from(last),
-                    0,
-                ),
-            );
-            if last {
-                let suspend = self.exports.suspend.clone();
-                let _ = self.call(&suspend, ());
-                self.suspended = true;
-            }
-        } else {
-            self.budget_streak = 0;
+            self.breach(used_ms);
         }
         match result {
             Err(e) => Err(e),
@@ -566,6 +558,69 @@ impl Runtime {
                 Ok(self.host().dl.bytes())
             }
         }
+    }
+
+    /// Count the current frame as a budget breach and tell the module
+    /// (SPEC-5.3.3): `KIND_BUDGET` with `c = 0` the first time, `c = 1` and
+    /// a forced `vy_suspend` the second time in a row.
+    fn breach(&mut self, used_ms: i32) {
+        self.frame_over = true;
+        self.last_frame.over_budget = true;
+        self.budget_streak += 1;
+        let last = self.budget_streak >= 2;
+        // Delivered on the host's own fuel; a module that misbehaves here is simply stopped.
+        let ev = self.exports.event.clone();
+        let _ = self.call(
+            &ev,
+            (
+                event::BUDGET,
+                used_ms,
+                limits::FRAME_BUDGET_MS as i32,
+                i32::from(last),
+                0,
+            ),
+        );
+        if last {
+            let suspend = self.exports.suspend.clone();
+            let _ = self.call(&suspend, ());
+            self.suspended = true;
+        }
+    }
+
+    /// How rasterizing the last frame went (SPEC-5.3.3). A list the
+    /// rasterizer could not finish within its work budget is a budget
+    /// breach like a slow `vy_frame`: logged, counted in the same streak,
+    /// and delivered as `KIND_BUDGET` with the budget's share of the 8 ms
+    /// in `a`, then a forced `vy_suspend` on the second breach in a row. A
+    /// frame that already breached by its fuel is not counted twice.
+    /// Nothing happens for a finished frame, or after a suspend.
+    pub fn raster_report(&mut self, report: &RasterReport) -> Result<(), Error> {
+        if !report.truncated {
+            return Ok(());
+        }
+        self.host_mut().log(
+            LogSource::Host,
+            level::WARN,
+            format!(
+                "rasterization stopped after {} ops at {} of {} work units (SPEC-5.3.3)",
+                report.ops_done, report.units, report.budget
+            ),
+        );
+        if !self.initialized || self.suspended || self.host().exited.is_some() {
+            return Ok(());
+        }
+        if self.frame_over {
+            return Ok(());
+        }
+        // The budget is the frame's 8 ms: a truncated frame used at least
+        // all of it, so `a` is 9 or the units' share, whichever is more.
+        let share = (report.units as u128 * limits::FRAME_BUDGET_MS as u128)
+            .div_ceil(report.budget.max(1) as u128);
+        let used_ms = i32::try_from(share)
+            .unwrap_or(i32::MAX)
+            .max(limits::FRAME_BUDGET_MS as i32 + 1);
+        self.breach(used_ms);
+        Ok(())
     }
 
     /// A focused node that the frame did not register has lost focus:

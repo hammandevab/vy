@@ -608,6 +608,81 @@ fn spec_5_3_3_frame_budget() {
     );
 }
 
+/// SPEC-5.3.3: a frame whose rasterization the host had to cut short is a
+/// budget breach like a slow `vy_frame`: logged, `KIND_BUDGET` with `c = 0`
+/// and `a` past 8, counted in the same streak so a second one in a row is
+/// the final warning and a forced `vy_suspend`, and a frame within both
+/// budgets resets the streak. A finished rasterization changes nothing, a
+/// frame that already breached by fuel is not counted twice, and nothing
+/// reaches a suspended module.
+#[test]
+fn spec_5_3_3_truncated_raster_is_a_budget_breach() {
+    let truncated = |units: u64| RasterReport {
+        truncated: true,
+        ops_done: 65,
+        units,
+        budget: 1 << 26,
+    };
+    let finished = RasterReport {
+        truncated: false,
+        ops_done: 10,
+        units: 1000,
+        budget: 1 << 26,
+    };
+    let mut rt = load(&budget_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame_with_dt(0).unwrap();
+    rt.raster_report(&finished).unwrap();
+    assert!(!rt.last_frame().over_budget);
+    assert!(module_logs(&rt).is_empty(), "a finished frame is no breach");
+
+    rt.frame_with_dt(0).unwrap();
+    rt.raster_report(&truncated(1 << 26)).unwrap();
+    assert!(rt.last_frame().over_budget);
+    assert_eq!(module_logs(&rt), vec!["budget"], "first breach: a warning");
+    assert!(host_logs(&rt)
+        .iter()
+        .any(|l| l
+            .starts_with("rasterization stopped after 65 ops at 67108864 of 67108864 work units")));
+    assert!(!rt.is_suspended());
+
+    // Within budget in between: the streak starts over.
+    rt.frame_with_dt(0).unwrap();
+    rt.raster_report(&finished).unwrap();
+    rt.frame_with_dt(0).unwrap();
+    rt.raster_report(&truncated(1 << 26)).unwrap();
+    assert_eq!(module_logs(&rt), vec!["budget", "budget"]);
+    assert!(!rt.is_suspended());
+
+    // Two in a row: final warning and forced suspend; a report after that
+    // is logged but delivered to nobody.
+    rt.frame_with_dt(0).unwrap();
+    rt.raster_report(&truncated(3 << 26)).unwrap();
+    assert_eq!(
+        module_logs(&rt),
+        vec!["budget", "budget", "budget", "final", "suspend"]
+    );
+    assert!(rt.is_suspended());
+    rt.raster_report(&truncated(1)).unwrap();
+    assert_eq!(module_logs(&rt).len(), 5);
+
+    // Fuel and raster breaches share the streak: a slow frame whose list
+    // was also cut short counts once, and the next truncated one suspends.
+    let mut rt = load(&budget_module());
+    rt.init(10, 10, 1.0).unwrap();
+    rt.frame_with_dt(3_000_000).unwrap();
+    assert!(rt.last_frame().over_budget);
+    rt.raster_report(&truncated(1 << 26)).unwrap();
+    assert_eq!(module_logs(&rt), vec!["budget"], "counted once");
+    rt.frame_with_dt(0).unwrap();
+    rt.raster_report(&truncated(1 << 26)).unwrap();
+    assert!(rt.is_suspended());
+    assert_eq!(
+        module_logs(&rt),
+        vec!["budget", "budget", "final", "suspend"]
+    );
+}
+
 /// A module whose frame does `dt_ms` text measurements of 64 KB each when
 /// `dt_ms > 0`, and asks `random` for `-dt_ms` bytes when `dt_ms < 0`. Both
 /// are a few wasm instructions; all the work is in the host.
@@ -792,7 +867,9 @@ fn spec_2_1_5_determinism() {
             dls.push(rt.frame_with_dt(16).unwrap().to_vec());
         }
         let images = vy_render::ImageCache::from_bytes(Vec::new());
-        let img = vy_render::render(&dls[2], 120, 60, 1.0, rt.text_engine_mut(), &images).unwrap();
+        let img = vy_render::render(&dls[2], 120, 60, 1.0, rt.text_engine_mut(), &images)
+            .unwrap()
+            .image;
         (dls, img.encode_png().unwrap())
     };
     let (a_dls, a_png) = run();
@@ -2353,8 +2430,9 @@ fn spec_5_2_3_dl_image_fit_and_resources() {
         );
     }
     let images = rt.image_cache();
-    let img =
-        vy_render::render(rt.display_list(), 4, 2, 1.0, &mut TextEngine::new(), images).unwrap();
+    let img = vy_render::render(rt.display_list(), 4, 2, 1.0, &mut TextEngine::new(), images)
+        .unwrap()
+        .image;
     assert_eq!(
         img.pixel(3, 1).unwrap(),
         [255, 0, 0, 255],

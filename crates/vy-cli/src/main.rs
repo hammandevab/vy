@@ -167,11 +167,20 @@ fn render(args: &[String]) -> Result<ExitCode> {
         eprintln!("[{:?} {}] {}", log.source, log.level, log.message);
     }
     println!(
-        "{out}: {}x{} px, {} display list bytes, {} of at most {frames} frame(s) run",
+        "{out}: {}x{} px, {} display list bytes, {} of at most {frames} frame(s) run, {} raster units{}",
         output.image.width,
         output.image.height,
         output.display_list.len(),
-        output.frames_run
+        output.frames_run,
+        output.raster.units,
+        if output.raster.truncated {
+            format!(
+                " (budget exhausted after {} ops, SPEC-5.3.3)",
+                output.raster.ops_done
+            )
+        } else {
+            String::new()
+        }
     );
     Ok(ExitCode::SUCCESS)
 }

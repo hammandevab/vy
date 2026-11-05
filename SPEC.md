@@ -90,7 +90,7 @@ i modulens linjära minne, UTF-8 utan nollterminering. Statuskoder: `0` = ok, ne
 
 - **[SPEC-5.3.1]** Ett anrop till en import utan beviljad capability returnerar `E_DENIED`, loggas, och avslutar inte modulen.
 - **[SPEC-5.3.2]** `dl_*`-anrop utanför `dl_begin`/`dl_end` returnerar `E_DL_STATE` och ignoreras.
-- **[SPEC-5.3.3]** `vy_frame` har en budget på 8 ms logisk tid; första överskridandet ger `KIND_BUDGET` med `c = 0` (varning), det andra i rad ger `KIND_BUDGET` med `c = 1` och därefter ett tvingande `vy_suspend`. Värdens eget arbete i importer (textformning, kopiering) debiteras samma budget; avkodning av paketets resurser debiteras inte.
+- **[SPEC-5.3.3]** `vy_frame` har en budget på 8 ms logisk tid; första överskridandet ger `KIND_BUDGET` med `c = 0` (varning), det andra i rad ger `KIND_BUDGET` med `c = 1` och därefter ett tvingande `vy_suspend`. Värdens eget arbete i importer (textformning, kopiering) debiteras samma budget; avkodning av paketets resurser debiteras inte. Värdens rasterisering av framens display list är bunden av samma budget, räknad i ritade pixlar: överskrids den ritas resten av listan inte, och överskridandet räknas och levereras som `KIND_BUDGET` på samma sätt som ett i `vy_frame`.
 - **[SPEC-5.3.4]** Värden anropar aldrig modulen utanför de sex exporterna; asynkrona svar levereras genom `vy_event`.
 - **[SPEC-5.3.5]** ABI 1.0 fryses vid release; befintliga signaturer ändras aldrig inom 1.x.
 

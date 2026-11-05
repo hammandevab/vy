@@ -9,7 +9,10 @@ pub mod raster;
 pub mod text;
 
 pub use image::{diff_ratio, ImageCache, ImageError, Resource, RgbaImage, MAX_IMAGE_CACHE_BYTES};
-pub use raster::{render, RenderError};
+pub use raster::{
+    raster_budget_units, render, RasterReport, RenderError, Rendered, MASK_WEIGHT, OP_UNITS,
+    PIPELINE_WEIGHT, RASTER_BUDGET_OVERDRAWS, RASTER_BUDGET_UNITS,
+};
 pub use text::{pack_x100, Size, TextEngine};
 
 #[cfg(test)]
@@ -24,7 +27,7 @@ mod tests {
             .unwrap()
     }
 
-    /// `render` with no image resources.
+    /// `render` with no image resources: the image alone.
     fn render(
         dl: &[u8],
         w: u32,
@@ -32,6 +35,17 @@ mod tests {
         scale: f32,
         t: &mut TextEngine,
     ) -> Result<RgbaImage, RenderError> {
+        render_full(dl, w, h, scale, t).map(|r| r.image)
+    }
+
+    /// `render` with no image resources: image and report.
+    fn render_full(
+        dl: &[u8],
+        w: u32,
+        h: u32,
+        scale: f32,
+        t: &mut TextEngine,
+    ) -> Result<Rendered, RenderError> {
         raster::render(dl, w, h, scale, t, &ImageCache::from_bytes(Vec::new()))
     }
 
@@ -546,7 +560,9 @@ mod tests {
         dl.image(14.0, 0.0, 4.0, 2.0, 1, Fit::Stretch).unwrap();
         dl.clip_pop().unwrap();
         dl.end().unwrap();
-        let img = raster::render(dl.bytes(), 20, 2, 1.0, &mut t, &cache).unwrap();
+        let img = raster::render(dl.bytes(), 20, 2, 1.0, &mut t, &cache)
+            .unwrap()
+            .image;
         let px = |x, y| img.pixel(x, y).unwrap();
         // cover: both rows filled, left half red, right half blue
         assert_eq!(
@@ -568,7 +584,9 @@ mod tests {
         assert_eq!(px(19, 1), white);
 
         // DPI: the same list at scale 2 covers twice the physical pixels.
-        let big = raster::render(dl.bytes(), 40, 4, 2.0, &mut t, &cache).unwrap();
+        let big = raster::render(dl.bytes(), 40, 4, 2.0, &mut t, &cache)
+            .unwrap()
+            .image;
         assert_eq!(big.pixel(0, 0).unwrap(), red);
         assert_eq!(big.pixel(3, 3).unwrap(), blue);
         assert_eq!(big.pixel(9, 0).unwrap(), white, "letterbox scales too");
@@ -576,7 +594,9 @@ mod tests {
         assert_eq!(big.pixel(9, 2).unwrap(), red);
         assert_eq!(big.pixel(9, 3).unwrap(), white);
         assert_eq!(
-            raster::render(dl.bytes(), 20, 2, 1.0, &mut t, &cache).unwrap(),
+            raster::render(dl.bytes(), 20, 2, 1.0, &mut t, &cache)
+                .unwrap()
+                .image,
             img
         );
 
@@ -589,14 +609,18 @@ mod tests {
         dl.image(0.0, 0.0, 2.0, 2.0, 1, Fit::Cover).unwrap();
         dl.end().unwrap();
         let mut bytes = dl.bytes().to_vec();
-        let img = raster::render(&bytes, 4, 2, 1.0, &mut t, &cache).unwrap();
+        let img = raster::render(&bytes, 4, 2, 1.0, &mut t, &cache)
+            .unwrap()
+            .image;
         assert_eq!(img.pixel(0, 0).unwrap(), [128, 128, 128, 255]);
         let fit_at = bytes.len() - 2;
         assert_eq!(bytes[fit_at], 0);
         bytes[fit_at] = 3;
         let mut good = ImageCache::from_bytes(vec![png(1, 1, |_, _| red)]);
         good.decode(1).unwrap();
-        let img = raster::render(&bytes, 4, 2, 1.0, &mut t, &good).unwrap();
+        let img = raster::render(&bytes, 4, 2, 1.0, &mut t, &good)
+            .unwrap()
+            .image;
         assert_eq!(img.pixel(0, 0).unwrap(), white);
     }
 
@@ -765,5 +789,217 @@ mod tests {
     #[ignore = "M3: bench"]
     fn spec_13_2_1_raster_budget() {
         todo!()
+    }
+
+    /// A list of `clips` nested rounded (or plain, radius 0) full-canvas
+    /// clips, `rects` full-canvas rectangles, and the pops.
+    fn pathological(clips: u32, rects: u32, radius: f32, w: f32, h: f32) -> Vec<u8> {
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        for i in 0..clips {
+            let inset = i as f32;
+            dl.clip_push(inset, inset, w - 2.0 * inset, h - 2.0 * inset, radius)
+                .unwrap();
+        }
+        for i in 0..rects {
+            dl.rect(0.0, 0.0, w, h, 0.0, 0x1000_00FF + (i % 7) * 0x0010_0000)
+                .unwrap();
+        }
+        for _ in 0..clips {
+            dl.clip_pop().unwrap();
+        }
+        dl.end().unwrap();
+        dl.bytes().to_vec()
+    }
+
+    /// SPEC-5.3.3, SPEC-9.3.1: the rasterizer's work is bounded by the
+    /// frame budget. Ops are charged by the pixels they touch; when the
+    /// budget runs out the remaining ops are not drawn and the report says
+    /// where it stopped. Here: 63 full-canvas translucent fills fit, the
+    /// 64th does not, and a rectangle after them never reaches the canvas.
+    #[test]
+    fn spec_5_3_3_raster_budget_truncates_the_list() {
+        let mut t = TextEngine::new();
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.rect(0.0, 0.0, 128.0, 256.0, 0.0, 0xFF00_00FF).unwrap();
+        for _ in 0..70 {
+            dl.rect(0.0, 0.0, 256.0, 256.0, 0.0, 0x0000_FF80).unwrap();
+        }
+        dl.rect(200.0, 200.0, 56.0, 56.0, 0.0, 0x00FF_00FF).unwrap();
+        dl.end().unwrap();
+        let r = render_full(dl.bytes(), 256, 256, 1.0, &mut t).unwrap();
+        let img = r.image;
+        let report = r.report;
+        assert!(report.truncated, "{report:?}");
+        assert_eq!(report.budget, raster_budget_units(256, 256));
+        assert_eq!(
+            report.budget, RASTER_BUDGET_UNITS,
+            "a small canvas has the floor"
+        );
+        // One opaque half-canvas fill at weight 1, then translucent
+        // full-canvas fills at the pipeline weight, each with the per-op cost.
+        let blue = 64 + 256 * 256 * raster::PIPELINE_WEIGHT;
+        let fitted = (report.budget - (64 + 128 * 256)) / blue;
+        assert_eq!(fitted, 63);
+        assert_eq!(report.ops_done, 1 + fitted as usize);
+        assert!(report.units <= report.budget);
+        assert!(report.units > report.budget - blue, "{report:?}");
+        let corner = img.pixel(230, 230).unwrap();
+        assert!(
+            corner[1] < 20 && corner[2] > 200,
+            "the green rectangle was never drawn: {corner:?}"
+        );
+        assert!(img.pixel(10, 10).unwrap()[2] > 200, "the blue layers were");
+        assert!(img.pixel(10, 10).unwrap()[0] < 10, "and over the red");
+
+        // A list that fits is reported whole.
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.rect(0.0, 0.0, 256.0, 256.0, 0.0, 0x00FF_00FF).unwrap();
+        dl.end().unwrap();
+        let r = render_full(dl.bytes(), 256, 256, 1.0, &mut t).unwrap();
+        assert!(!r.report.truncated);
+        assert_eq!(r.report.ops_done, 1);
+        assert_eq!(r.report.units, 64 + 256 * 256);
+        assert_eq!(r.image.pixel(230, 230).unwrap(), [0, 255, 0, 255]);
+    }
+
+    /// SPEC-5.3.3, SPEC-6.1.4: a clip level keeps its own mask and the
+    /// parent's comes back on pop; a plain clip inside a rounded one, and a
+    /// rounded one inside a plain one, both cut to the intersection; the
+    /// pixels match a list that pushes the same shapes afresh.
+    #[test]
+    fn spec_6_1_4_clip_levels_restore_on_pop() {
+        let mut t = TextEngine::new();
+        let white = [255, 255, 255, 255];
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.clip_push(0.0, 0.0, 50.0, 100.0, 0.0).unwrap(); // left half
+        dl.clip_push(20.0, 20.0, 60.0, 60.0, 15.0).unwrap(); // rounded, overlapping the edge
+        dl.rect(0.0, 0.0, 100.0, 100.0, 0.0, 0xFF00_00FF).unwrap();
+        dl.clip_pop().unwrap();
+        dl.rect(0.0, 90.0, 100.0, 10.0, 0.0, 0x0000_FFFF).unwrap(); // only the plain clip now
+        dl.clip_push(40.0, 0.0, 60.0, 20.0, 3.0).unwrap(); // rounded again, another shape
+        dl.rect(0.0, 0.0, 100.0, 100.0, 0.0, 0x0000_FFFF).unwrap();
+        dl.clip_pop().unwrap();
+        dl.clip_pop().unwrap();
+        dl.rect(90.0, 0.0, 10.0, 10.0, 0.0, 0xFF00_00FF).unwrap(); // unclipped
+        dl.end().unwrap();
+        let img = render(dl.bytes(), 100, 100, 1.0, &mut t).unwrap();
+        let px = |x, y| img.pixel(x, y).unwrap();
+        assert_eq!(px(30, 50), red, "inside both clips");
+        assert_eq!(px(60, 50), white, "cut by the plain parent");
+        assert_eq!(px(21, 21), white, "cut by the rounded corner");
+        assert_eq!(px(10, 50), white, "outside the rounded shape");
+        assert_eq!(px(10, 95), blue, "the parent alone after the pop");
+        assert_eq!(px(60, 95), white, "and still cuts at 50");
+        assert_eq!(
+            px(45, 10),
+            blue,
+            "the second rounded clip, inside the parent"
+        );
+        assert_eq!(px(55, 10), white, "cut by the parent at 50");
+        assert_eq!(px(95, 5), red, "nothing clips after the last pop");
+        assert_eq!(px(45, 85), white, "between the clips nothing drew");
+        assert_eq!(
+            px(10, 10),
+            white,
+            "inside the parent, outside both rounded clips"
+        );
+
+        // The same picture when each clip is its own push from the root.
+        let mut again = DisplayList::new();
+        again.begin().unwrap();
+        again.clip_push(0.0, 0.0, 50.0, 100.0, 0.0).unwrap();
+        again.clip_push(20.0, 20.0, 60.0, 60.0, 15.0).unwrap();
+        again
+            .rect(0.0, 0.0, 100.0, 100.0, 0.0, 0xFF00_00FF)
+            .unwrap();
+        again.clip_pop().unwrap();
+        again.clip_pop().unwrap();
+        again.clip_push(0.0, 0.0, 50.0, 100.0, 0.0).unwrap();
+        again
+            .rect(0.0, 90.0, 100.0, 10.0, 0.0, 0x0000_FFFF)
+            .unwrap();
+        again.clip_pop().unwrap();
+        again.clip_push(0.0, 0.0, 50.0, 100.0, 0.0).unwrap();
+        again.clip_push(40.0, 0.0, 60.0, 20.0, 3.0).unwrap();
+        again
+            .rect(0.0, 0.0, 100.0, 100.0, 0.0, 0x0000_FFFF)
+            .unwrap();
+        again.clip_pop().unwrap();
+        again.clip_pop().unwrap();
+        again.rect(90.0, 0.0, 10.0, 10.0, 0.0, 0xFF00_00FF).unwrap();
+        again.end().unwrap();
+        assert_eq!(render(again.bytes(), 100, 100, 1.0, &mut t).unwrap(), img);
+    }
+
+    /// SPEC-5.3.3, SPEC-9.3.1: the pathological frame of review 0003 — 65 000
+    /// full-screen rectangles at 1280 × 800, 16 s of rasterization — is cut
+    /// off by the budget after 65 of them and finishes in well under two
+    /// seconds even unoptimized. The bound is loose on purpose.
+    #[test]
+    fn spec_5_3_3_bench_65000_fullscreen_rects() {
+        let mut t = TextEngine::new();
+        let bytes = pathological(0, 65_000, 0.0, 1280.0, 800.0);
+        let start = std::time::Instant::now();
+        let r = render_full(&bytes, 1280, 800, 1.0, &mut t).unwrap();
+        let took = start.elapsed();
+        assert!(r.report.truncated);
+        let fits = r.report.budget / (raster::OP_UNITS + 1280 * 800);
+        assert_eq!(fits, 65);
+        assert_eq!(r.report.ops_done, fits as usize, "{:?}", r.report);
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "65 000 full-screen rects took {took:?} (SPEC-5.3.3)"
+        );
+    }
+
+    /// SPEC-5.3.3, SPEC-6.1.4: 32 nested rounded full-screen clips (the
+    /// deepest stack 1.0 allows) with 2 000 full-screen rectangles under
+    /// them — 312 s in review 0003 with 65 000 rectangles, when every push
+    /// rebuilt the whole mask — stays under a second unoptimized: each
+    /// level's mask is built once over its own bounds, and the budget stops
+    /// the frame when the masks alone have used it up.
+    #[test]
+    fn spec_5_3_3_bench_32_rounded_clips_2000_rects() {
+        let mut t = TextEngine::new();
+        let bytes = pathological(32, 2_000, 8.0, 1280.0, 800.0);
+        let start = std::time::Instant::now();
+        let r = render_full(&bytes, 1280, 800, 1.0, &mut t).unwrap();
+        let took = start.elapsed();
+        assert!(r.report.truncated, "{:?}", r.report);
+        assert!(
+            r.report.ops_done >= 32,
+            "the pushes themselves cost nothing"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "32 rounded clips + 2 000 rects took {took:?} (SPEC-5.3.3)"
+        );
+        // Two thousand small rounded cards, each pushed, drawn and popped,
+        // are an ordinary page and fit the budget with room to spare.
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        for i in 0..2_000 {
+            let (x, y) = ((i % 40) as f32 * 32.0, (i / 40) as f32 * 16.0);
+            dl.clip_push(x, y, 30.0, 14.0, 4.0).unwrap();
+            dl.rect(x - 5.0, y - 5.0, 40.0, 24.0, 0.0, 0x3366_99FF)
+                .unwrap();
+            dl.clip_pop().unwrap();
+        }
+        dl.end().unwrap();
+        let start = std::time::Instant::now();
+        let r = render_full(dl.bytes(), 1280, 800, 1.0, &mut t).unwrap();
+        let took = start.elapsed();
+        assert!(!r.report.truncated, "{:?}", r.report);
+        assert!(r.report.units < r.report.budget / 2, "{:?}", r.report);
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "2 000 rounded cards took {took:?}"
+        );
     }
 }

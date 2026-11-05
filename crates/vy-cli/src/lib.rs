@@ -313,6 +313,9 @@ pub struct RenderOutput {
     pub frames_run: u32,
     /// True when the module was force-suspended by the budget (SPEC-5.3.3).
     pub suspended: bool,
+    /// What rasterizing the last frame cost, and whether the budget cut it
+    /// short (SPEC-5.3.3).
+    pub raster: vy_render::RasterReport,
 }
 
 /// Physical pixel size of a logical size at `scale`.
@@ -428,11 +431,17 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
     debug_assert!(frames_run >= 1, "init wants the first frame");
     let (pw, ph) = physical(width, height, scale);
     let (text, images) = rt.raster_parts();
-    let image = vy_render::render(&display_list, pw, ph, scale, text, images)
+    let rendered = vy_render::render(&display_list, pw, ph, scale, text, images)
         .map_err(|e| anyhow!("{e}"))?;
+    // A frame the rasterizer could not finish is a budget breach like a
+    // slow `vy_frame` (SPEC-5.3.3): the module hears about it the same way.
+    rt.raster_report(&rendered.report)
+        .map_err(|e| anyhow!("after the last frame: {e}"))?;
+    let image = rendered.image;
     earlier_logs.extend(rt.logs().iter().cloned());
     Ok(RenderOutput {
         image,
+        raster: rendered.report,
         display_list,
         semantic_json: rt.semantic_tree_json(),
         semantic: rt.semantic_tree().to_vec(),
