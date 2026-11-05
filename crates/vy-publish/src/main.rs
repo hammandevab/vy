@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use vy_manifest::parse_key_file;
 use vy_publish::{
-    build, inspect, keygen, load_resources, read_key, write_key, BuildError, SignatureStatus,
+    build, check_frames, inspect, keygen, load_resources, read_key, write_key, BuildError,
+    SignatureStatus,
 };
 
 fn usage() -> ExitCode {
@@ -14,7 +15,7 @@ fn usage() -> ExitCode {
         "usage:\n  \
          vy-publish keygen --out <dev.key>\n  \
          vy-publish pubkey --key <dev.key> [--out <dev.key.pub>]\n  \
-         vy-publish build --manifest <draft.json> --module <module.wasm> --key <dev.key> --out <page.vyp> [--resource <file>]...\n  \
+         vy-publish build --manifest <draft.json> --module <module.wasm> --key <dev.key> --out <page.vyp> [--resource <file>]... [--allow-slow]\n  \
          vy-publish inspect <page.vyp> [--public-key <dev.key.pub>]\n  \
          vy-publish log-append --log <site>/vy-log --host <host[:port]> --public-key <dev.key.pub> [--published YYYY-MM-DD]"
     );
@@ -48,11 +49,24 @@ struct Args {
 
 impl Args {
     fn parse(args: &[String], value_flags: &[&str]) -> Result<Self, String> {
+        Self::parse_with(args, value_flags, &[])
+    }
+
+    /// As [`Args::parse`], with flags that take no value (recorded as "").
+    fn parse_with(
+        args: &[String],
+        value_flags: &[&str],
+        switches: &[&str],
+    ) -> Result<Self, String> {
         let mut positional = Vec::new();
         let mut flags = Vec::new();
         let mut it = args.iter();
         while let Some(a) = it.next() {
             if let Some(name) = a.strip_prefix("--") {
+                if switches.contains(&name) {
+                    flags.push((name.to_string(), String::new()));
+                    continue;
+                }
                 if !value_flags.contains(&name) {
                     return Err(format!("unknown flag --{name}"));
                 }
@@ -120,7 +134,11 @@ fn cmd_pubkey(args: &[String]) -> Result<ExitCode, String> {
 }
 
 fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
-    let a = Args::parse(args, &["manifest", "module", "key", "out", "resource"])?;
+    let a = Args::parse_with(
+        args,
+        &["manifest", "module", "key", "out", "resource"],
+        &["allow-slow"],
+    )?;
     let (Some(manifest), Some(module), Some(key), Some(out)) = (
         a.value("manifest"),
         a.value("module"),
@@ -147,6 +165,25 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
         }
         Err(e) => return Err(e.to_string()),
     };
+    // SPEC-13.4.1: a module that breaks the 8 ms frame budget is not
+    // published without --allow-slow.
+    match check_frames(&package) {
+        Ok(costs) => {
+            let worst = costs.iter().map(|c| c.fuel).max().unwrap_or(0);
+            println!(
+                "frames:   {} run headless, the costliest {worst} fuel of {}",
+                costs.len(),
+                vy_runtime::FRAME_BUDGET_FUEL
+            );
+        }
+        Err(e @ BuildError::OverBudget { .. }) if a.value("allow-slow").is_some() => {
+            eprintln!("warning: {e}");
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    }
     let bytes = package.pack().map_err(|e| e.to_string())?;
     std::fs::write(out, &bytes).map_err(|e| format!("{out}: {e}"))?;
     println!("identity: {}", package.identity());

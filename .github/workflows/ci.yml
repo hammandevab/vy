@@ -62,7 +62,7 @@ jobs:
       # a debug build here, so the numbers only show that it runs
       # (`cargo run --release -p vy-cli -- bench` for the real ones).
       - name: Bench (informational)
-        run: cargo run -p vy-cli -- bench --iterations 3
+        run: cargo run -p vy-cli -- bench --runs 3
 
   platform:
     strategy:
@@ -103,4 +103,39 @@ jobs:
           path: |
             conformance/golden/*.png.new
             conformance/semantic/*.json.new
+          if-no-files-found: ignore
+
+  # SPEC §13 in release (a debug build only reports the budgets), then the
+  # SPEC-12.2.3 gate: no row's P50 more than 5 % plus a noise floor over the
+  # committed baseline of this runner class (conformance/bench/ubuntu.json,
+  # changed only in a `bench:` commit). Without that file the report is
+  # uploaded, to be committed as the first baseline.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build modules
+        run: tools/build_modules.sh
+      - name: Budget tests (release)
+        run: cargo test --release -p vy-render -p vy-runtime -p vy-cli -- spec_13 spec_6_2_2 spec_12_2_3 --test-threads=1
+      - name: Regression gate (SPEC-12.2.3)
+        run: |
+          cargo build --release -p vy-cli
+          cp target/release/vy-cli "$RUNNER_TEMP/vy-cli"
+          if [ -f conformance/bench/ubuntu.json ]; then
+            "$RUNNER_TEMP/vy-cli" bench --runs 100 --json --compare conformance/bench/ubuntu.json > bench-ubuntu.json
+          else
+            "$RUNNER_TEMP/vy-cli" bench --runs 100 --json > bench-ubuntu.json
+            echo "::notice::no conformance/bench/ubuntu.json: commit the bench-ubuntu artifact as that file in a bench: commit"
+          fi
+      - name: Upload the bench report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-ubuntu
+          path: bench-ubuntu.json
           if-no-files-found: ignore

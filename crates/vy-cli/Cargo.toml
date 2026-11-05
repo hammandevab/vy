@@ -22,6 +22,15 @@ vy-render.workspace = true
 vy-shell = { workspace = true, default-features = false }
 anyhow.workspace = true
 png.workspace = true
+# `bench --json` and its committed baselines (SPEC-12.2.3); both crates are
+# already in the tree through vy-manifest, so nothing new is pulled in.
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
+# SPEC-13.1.3 (bench_tests.rs): a package built and served on loopback, as
+# the publisher builds and the server serves it; workspace crates, test-only.
+vy-proto.workspace = true
+vy-publish.workspace = true
+vy-serve.workspace = true
 wat.workspace = true

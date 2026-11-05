@@ -327,6 +327,27 @@ pub fn physical(width: u32, height: u32, scale: f32) -> (u32, u32) {
     )
 }
 
+/// A module driven through a request's frames and events, before the last
+/// frame is rasterized: what `render` has in hand when it calls
+/// `vy_render::render`, and what `vy-cli bench` times the rasterization of.
+pub(crate) struct Driven {
+    /// The instance, holding the text engine and image cache the
+    /// display list refers to.
+    pub rt: Runtime,
+    /// Display list bytes of the last frame.
+    pub display_list: Vec<u8>,
+    /// Logical width after any `resize`.
+    pub width: u32,
+    /// Logical height after any `resize`.
+    pub height: u32,
+    /// Scale after any `resize`.
+    pub scale: f32,
+    /// Frames run.
+    pub frames_run: u32,
+    /// Logs of instances replaced by a `reinit`.
+    pub earlier_logs: Vec<LogEntry>,
+}
+
 /// Load, init and run up to `frames` frames of a module, then rasterize the
 /// last one (SPEC-11.3.1). No window, no wall clock, no system fonts.
 ///
@@ -338,6 +359,40 @@ pub fn physical(width: u32, height: u32, scale: f32) -> (u32, u32) {
 /// size the final image has; a `reinit` replaces the instance with a fresh
 /// one that starts with the old one's storage.
 pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
+    let Driven {
+        mut rt,
+        display_list,
+        width,
+        height,
+        scale,
+        frames_run,
+        mut earlier_logs,
+    } = drive(req)?;
+    let (pw, ph) = physical(width, height, scale);
+    let (text, images) = rt.raster_parts();
+    let rendered = vy_render::render(&display_list, pw, ph, scale, text, images)
+        .map_err(|e| anyhow!("{e}"))?;
+    // A frame the rasterizer could not finish is a budget breach like a
+    // slow `vy_frame` (SPEC-5.3.3): the module hears about it the same way.
+    rt.raster_report(&rendered.report)
+        .map_err(|e| anyhow!("after the last frame: {e}"))?;
+    let image = rendered.image;
+    earlier_logs.extend(rt.logs().iter().cloned());
+    Ok(RenderOutput {
+        image,
+        raster: rendered.report,
+        display_list,
+        semantic_json: rt.semantic_tree_json(),
+        semantic: rt.semantic_tree().to_vec(),
+        logs: earlier_logs,
+        frames_run,
+        suspended: rt.is_suspended(),
+    })
+}
+
+/// The frames and events of `render`, up to but not including the
+/// rasterization of the last frame.
+pub(crate) fn drive(req: &RenderRequest<'_>) -> Result<Driven> {
     if req.frames == 0 {
         bail!("frames must be at least 1");
     }
@@ -430,25 +485,14 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         }
     }
     debug_assert!(frames_run >= 1, "init wants the first frame");
-    let (pw, ph) = physical(width, height, scale);
-    let (text, images) = rt.raster_parts();
-    let rendered = vy_render::render(&display_list, pw, ph, scale, text, images)
-        .map_err(|e| anyhow!("{e}"))?;
-    // A frame the rasterizer could not finish is a budget breach like a
-    // slow `vy_frame` (SPEC-5.3.3): the module hears about it the same way.
-    rt.raster_report(&rendered.report)
-        .map_err(|e| anyhow!("after the last frame: {e}"))?;
-    let image = rendered.image;
-    earlier_logs.extend(rt.logs().iter().cloned());
-    Ok(RenderOutput {
-        image,
-        raster: rendered.report,
+    Ok(Driven {
+        rt,
         display_list,
-        semantic_json: rt.semantic_tree_json(),
-        semantic: rt.semantic_tree().to_vec(),
-        logs: earlier_logs,
+        width,
+        height,
+        scale,
         frames_run,
-        suspended: rt.is_suspended(),
+        earlier_logs,
     })
 }
 
@@ -1010,21 +1054,25 @@ mod tests {
         assert!(err.contains("fetch_done with no request waiting"), "{err}");
     }
 
-    /// SPEC-13.1.4: compiling a 300 KB module takes at most 60 ms, P95 over
-    /// 100 runs on the reference machine (SPEC §13), and 0 ms on a
-    /// compilation-cache hit. A release-mode measurement for `vy-cli bench`
-    /// (M3); `hello` stands in until a reference page of that size exists
-    /// (M2), and no compilation cache is configured yet, so the 0 ms half
-    /// stays open. Meaningless in a debug build, hence the guard.
+    /// SPEC-13.1.4: compiling a module takes at most 60 ms, P95 over 100
+    /// runs (SPEC §13), and getting it on a compilation-cache hit takes 0 ms
+    /// in whole milliseconds, for every reference module. `hello` stands
+    /// in for the 300 KB module of the sentence for the cold half: the
+    /// largest reference module is 31 KB (see docs/notes/m4-perf.md). A
+    /// release-mode budget: a debug build only reports.
     #[test]
-    #[ignore = "M3: bench"]
     fn spec_13_1_4_compile_time() {
         if cfg!(debug_assertions) {
-            panic!("SPEC-13.1.4 is a release-mode budget; run with --release");
+            eprintln!("SPEC-13.1.4 is a release-mode budget; run with --release");
+            return;
         }
+        let p95 = |mut samples: Vec<std::time::Duration>| {
+            samples.sort();
+            samples[samples.len() * 95 / 100 - 1]
+        };
         let wasm = hello();
         let hash = vy_runtime::sha256(&wasm);
-        let mut samples: Vec<_> = (0..100)
+        let cold = p95((0..100)
             .map(|_| {
                 let t = Instant::now();
                 let rt = Runtime::load(&wasm, &hash, Options::default()).unwrap();
@@ -1032,10 +1080,26 @@ mod tests {
                 drop(rt);
                 elapsed
             })
-            .collect();
-        samples.sort();
-        let p95 = samples[94];
-        assert!(p95.as_millis() <= 60, "P95 compile time {p95:?} > 60 ms");
+            .collect());
+        eprintln!("SPEC-13.1.4: hello compiles in {cold:?} (P95)");
+        assert!(cold.as_millis() <= 60, "P95 compile time {cold:?} > 60 ms");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("target/wasm (tools/build_modules.sh)") {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "wasm") {
+                continue;
+            }
+            let wasm = std::fs::read(&path).unwrap();
+            let hit = p95(crate::bench::cache_hit_times(&wasm, 100).unwrap());
+            eprintln!(
+                "SPEC-13.1.4: {} from the cache in {hit:?} (P95)",
+                path.display()
+            );
+            assert_eq!(hit.as_millis(), 0, "{}: cache hit {hit:?}", path.display());
+            checked += 1;
+        }
+        assert!(checked >= 11, "every reference module");
     }
 
     /// SPEC-11.3.1: `--size` parsing.

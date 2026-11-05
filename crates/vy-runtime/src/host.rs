@@ -344,8 +344,10 @@ pub struct Host {
     /// Responses `fetch_begin` can be answered with (SPEC-5.2.7).
     pub(crate) canned: Vec<CannedResponse>,
     /// Origins the manifest lists under `net`, normalised with
-    /// [`origin_of`]; empty when the caller has no manifest, and then the
-    /// gate of SPEC-5.2.8 is not applied.
+    /// [`origin_of`]: the only origins `fetch_begin` reaches (SPEC-5.2.8).
+    /// An entry that is not an `https://` origin names nothing a request
+    /// can go to, and an empty list (no manifest, or one that names no
+    /// origin) admits no origin at all.
     pub(crate) net_origins: Vec<String>,
     /// Open requests in the order they were begun.
     pub(crate) fetches: Vec<Fetch>,
@@ -386,7 +388,8 @@ pub struct Host {
 
 impl Host {
     /// Host state for one instance: the store limits and everything in
-    /// [`crate::Options`] except the memory cap, which the limits carry.
+    /// [`crate::Options`] except the memory cap, which the limits carry, and
+    /// the compilation cache, which only [`crate::Runtime::load`] uses.
     pub(crate) fn new(limits: StoreLimits, options: crate::Options) -> Self {
         let crate::Options {
             capabilities: caps,
@@ -397,6 +400,7 @@ impl Host {
             net_origins,
             clipboard,
             memory_max_pages: _,
+            compile_cache: _,
             clock,
             random,
             transport,
@@ -1098,14 +1102,20 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     ));
                     return err::E_ARG;
                 };
-                // No manifest means no gate, but plain http is never let
-                // through by default: only to a loopback origin the
-                // manifest names (SPEC-7.1.3).
-                let gated = !host.net_origins.is_empty() || origin.starts_with("http://");
-                if gated && !host.net_origins.contains(&origin) {
-                    host.host_log(format!(
-                        "fetch_begin: E_ORIGIN ({origin} is not in the manifest's net list; no request made)"
-                    ));
+                // The origin must be one the manifest names, always: an
+                // empty list, or one with no origin `origin_of` accepts,
+                // reaches nothing (SPEC-5.2.8), and plain http only ever
+                // reaches a listed loopback origin (SPEC-7.1.3).
+                if !host.net_origins.contains(&origin) {
+                    host.host_log(if host.net_origins.is_empty() {
+                        format!(
+                            "fetch_begin: E_ORIGIN ({origin}: the manifest names no https:// or loopback http:// origin under net; no request made)"
+                        )
+                    } else {
+                        format!(
+                            "fetch_begin: E_ORIGIN ({origin} is not in the manifest's net list; no request made)"
+                        )
+                    });
                     return err::E_ORIGIN;
                 }
                 if host.fetches.len() >= limits::MAX_OPEN_FETCHES as usize {

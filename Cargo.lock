@@ -3178,11 +3178,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "png",
+ "serde",
+ "serde_json",
  "vy-abi",
  "vy-dl",
  "vy-manifest",
+ "vy-proto",
+ "vy-publish",
  "vy-render",
  "vy-runtime",
+ "vy-serve",
  "vy-shell",
  "wat",
 ]
@@ -3243,7 +3248,9 @@ name = "vy-publish"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "vy-abi",
  "vy-manifest",
+ "vy-runtime",
  "wat",
 ]
 

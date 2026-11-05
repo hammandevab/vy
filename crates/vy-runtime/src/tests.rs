@@ -122,11 +122,76 @@ fn spec_6_2_1_frame_only_on_request() {
     assert!(rt.wants_frame(), "resize wants a frame");
 }
 
-/// SPEC-6.2.2: an idle page consumes 0 module CPU.
+/// SPEC-6.2.2: an idle page consumes 0 module CPU. The host runs a frame
+/// only when one is wanted (SPEC-6.2.1), so a page that neither calls
+/// `request_frame` nor gets an event or a resize is never entered: a
+/// thousand ticks of the shell's loop after its first frame run no frame
+/// and spend no fuel. The same page animating (`request_frame` in every
+/// frame, switched on by an event) gets a frame, and spends fuel, on
+/// every tick, and is idle again as soon as it stops asking.
 #[test]
-#[ignore = "M3: shell scheduling"]
 fn spec_6_2_2_idle_is_free() {
-    todo!()
+    let bytes = wasm(&format!(
+        r#"(module
+            (import "vy" "dl_begin" (func $dl_begin (result i32)))
+            (import "vy" "dl_end" (func $dl_end (result i32)))
+            (import "vy" "request_frame" (func $request_frame))
+            (memory (export "memory") 1)
+            (global $animate (mut i32) (i32.const 0))
+            {INIT_OK}
+            (func (export "vy_frame") (param i32) (result i32)
+                (local $i i32)
+                (drop (call $dl_begin))
+                (loop $work
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $work (i32.lt_u (local.get $i) (i32.const 1000))))
+                (drop (call $dl_end))
+                (if (global.get $animate) (then (call $request_frame)))
+                i32.const 0)
+            (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                (if (i32.eq (local.get 0) (i32.const 200))
+                    (then (global.set $animate (local.get 1))))
+                i32.const 0)
+            (func (export "vy_resize") (param i32 i32 f32))
+            (func (export "vy_suspend") (result i32) i32.const 0)
+            (func (export "vy_alloc") (param i32) (result i32) i32.const 1024))"#
+    ));
+    let mut rt = load(&bytes);
+    rt.init(100, 100, 1.0).unwrap();
+    // The shell's loop: a frame on a tick only when one is wanted; the
+    // fuel of every frame it ran.
+    let ticks = |rt: &mut Runtime, n: usize| -> Vec<u64> {
+        let mut fuel = Vec::new();
+        for _ in 0..n {
+            if rt.wants_frame() {
+                rt.frame().unwrap();
+                fuel.push(rt.last_frame().fuel);
+            }
+        }
+        fuel
+    };
+    assert_eq!(ticks(&mut rt, 1).len(), 1, "the first frame after init");
+    assert!(rt.last_frame().fuel > 1000, "a frame costs fuel");
+    let frames = rt.frames();
+    assert!(ticks(&mut rt, 1000).is_empty(), "idle: never entered");
+    assert_eq!(rt.frames(), frames, "no vy_frame, so no fuel");
+
+    assert!(
+        !rt.event(200, 1, 0, 0, 0).unwrap(),
+        "the event asks for nothing"
+    );
+    assert!(ticks(&mut rt, 10).is_empty());
+    // A resize wants one frame; that frame starts the animation.
+    rt.resize(120, 100, 1.0).unwrap();
+    let fuel = ticks(&mut rt, 100);
+    assert_eq!(fuel.len(), 100, "animating: a frame on every tick");
+    assert!(fuel.iter().all(|&f| f > 1000));
+
+    rt.event(200, 0, 0, 0, 0).unwrap();
+    assert_eq!(ticks(&mut rt, 100).len(), 1, "the frame already asked for");
+    let frames = rt.frames();
+    assert!(ticks(&mut rt, 1000).is_empty(), "idle again");
+    assert_eq!(rt.frames(), frames);
 }
 
 /// SPEC-5.3.1, SPEC-2.1.4: a call without its capability returns E_DENIED, is logged,
@@ -348,7 +413,7 @@ fn spec_5_2_7_fetch_read_zero_only_at_end() {
         status: 200,
         body: vec![0; limits::MAX_FETCH_RESPONSE_BYTES as usize + 1],
     };
-    let mut rt = fetch_runtime(vec![huge], &[]);
+    let mut rt = fetch_runtime(vec![huge], &["https://chat.example"]);
     assert_eq!(call(&mut rt, 200, 0, 0), 1);
     assert_eq!(rt.fetch_done().unwrap(), Some(true));
     assert_eq!(fetch_done_events(&mut rt), vec![(1, err::E_TOO_LARGE, 0)]);
@@ -364,7 +429,7 @@ fn spec_5_2_7_fetch_read_zero_only_at_end() {
         status: 204,
         body: Vec::new(),
     };
-    let mut rt = fetch_runtime(vec![empty], &[]);
+    let mut rt = fetch_runtime(vec![empty], &["https://chat.example"]);
     assert_eq!(call(&mut rt, 200, 0, 0), 1);
     rt.fetch_done().unwrap();
     assert_eq!(fetch_done_events(&mut rt), vec![(1, 204, 0)]);
@@ -375,8 +440,11 @@ fn spec_5_2_7_fetch_read_zero_only_at_end() {
 /// SPEC-5.2.8, SPEC-9.5.1: `fetch_begin` to an origin the manifest does
 /// not list is `E_ORIGIN` with no request made, even with a canned
 /// response for it; origins compare as scheme, host and port; a URL that
-/// is not `https://` is `E_ARG`; with no manifest (no origins) the gate is
-/// not applied.
+/// is neither `https://` nor `http://` to loopback is `E_ARG`; a list
+/// without an origin `origin_of` accepts (empty, or only `vy://` entries,
+/// `http://` to a remote host or a bare host) admits no origin, so `net`
+/// granted for such a manifest reaches nothing (SPEC-8.2.2, SPEC-8.2.3).
+/// Plain http to a listed loopback origin is SPEC-7.1.3's test.
 #[test]
 fn spec_5_2_8_origin_gate() {
     let canned = |url: &str| CannedResponse {
@@ -413,8 +481,23 @@ fn spec_5_2_8_origin_gate() {
     );
     let mut rt = fetch_runtime(responses.clone(), &["https://Chat.Example"]);
     assert_eq!(call(&mut rt, 0), 1, "hosts compare case-insensitively");
-    let mut rt = fetch_runtime(responses, &[]);
-    assert_eq!(call(&mut rt, 1), 1, "no manifest, no gate");
+    // A list that names no https:// origin admits none: empty (no
+    // manifest, or `"origins": []`), or only entries a request cannot go
+    // to. The manifest allows `vy://` and `http://` origins (SPEC-8.2.1);
+    // they never open the gate for `https://` requests.
+    for origins in [
+        &[][..],
+        &["vy://chat.example", "http://chat.example", "chat.example"][..],
+    ] {
+        let mut rt = fetch_runtime(responses.clone(), origins);
+        assert_eq!(call(&mut rt, 0), err::E_ORIGIN, "{origins:?}");
+        assert_eq!(call(&mut rt, 1), err::E_ORIGIN, "{origins:?}");
+        assert_eq!(rt.open_fetches(), 0, "{origins:?}: no request made");
+        assert!(host_logs(&rt)
+            .iter()
+            .any(|l| l
+                .contains("the manifest names no https:// or loopback http:// origin under net")));
+    }
 
     assert_eq!(
         origin_of("https://Chat.example:8443/a?b#c").as_deref(),
@@ -1992,6 +2075,7 @@ fn spec_5_2_7_fetch_and_storage_denied_headless() {
     ));
     let opts = Options {
         capabilities: Capabilities::from_names(["net", "storage"]).unwrap(),
+        net_origins: vec!["https://chat.example".into()],
         ..Options::default()
     };
     let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
@@ -3140,7 +3224,7 @@ fn spec_5_2_7_external_transport_queues_requests() {
     assert_eq!(rt.fetch_complete(3, 200, Vec::new()).unwrap(), None);
     assert_eq!(rt.fetch_complete(99, 200, Vec::new()).unwrap(), None);
     // The canned transport never queues anything.
-    let mut canned = fetch_runtime(vec![], &[]);
+    let mut canned = fetch_runtime(vec![], &["https://chat.example"]);
     assert_eq!(call(&mut canned, 200, 0, 0), err::E_DENIED);
     assert!(canned.take_fetch_requests().is_empty());
 }
@@ -3330,8 +3414,8 @@ fn spec_5_2_11_external_clock_and_keyed_random() {
 /// and only to an origin the manifest names: a page served from
 /// `vy://localhost:<port>` reaches its own `http://localhost:<port>`, while
 /// `http://` to another host is `E_ARG` as before, another loopback origin
-/// is `E_ORIGIN`, user info does not smuggle a host past the check, and the
-/// open gate of a host without a manifest never covers plain http. The
+/// is `E_ORIGIN`, user info does not smuggle a host past the check, and an
+/// empty list (no manifest) reaches no origin, plain http included. The
 /// tab process knows only the manifest's list; `plain_http_allowed` is the
 /// rule the host process, which knows the page's address, applies on top:
 /// a page reaches only its own loopback origin.
@@ -3392,7 +3476,7 @@ fn spec_7_1_3_plain_http_only_to_a_listed_loopback_origin() {
     assert_eq!(
         call(&mut open, 0),
         err::E_ORIGIN,
-        "no manifest: the open gate does not cover plain http"
+        "an empty list (no manifest) reaches nothing, plain http included"
     );
     let mut https_only = runtime(&["https://localhost:8081"]);
     assert_eq!(
@@ -3463,4 +3547,166 @@ fn spec_7_1_3_plain_http_only_to_a_listed_loopback_origin() {
         plain_http_allowed("https://api.example", "page.example"),
         "https is not this rule"
     );
+}
+
+/// A fresh directory under the temporary directory for one test.
+fn cache_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("vy-code-{tag}-{}-{nanos}", std::process::id()))
+}
+
+/// The entries (`*.code`) in a cache directory.
+fn entries(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "code"))
+        .collect();
+    out.sort();
+    out
+}
+
+fn cached_load(bytes: &[u8], cache: CompileCache) -> Runtime {
+    let opts = Options {
+        compile_cache: cache,
+        ..Options::default()
+    };
+    Runtime::load(bytes, &sha256(bytes), opts).unwrap()
+}
+
+/// The first two frames of a loaded module, for comparing instances.
+fn two_frames(mut rt: Runtime) -> Vec<Vec<u8>> {
+    rt.init(120, 60, 1.0).unwrap();
+    let a = rt.frame().unwrap().to_vec();
+    let b = rt.frame().unwrap().to_vec();
+    vec![a, b]
+}
+
+/// SPEC-13.1.4: the client's main process compiles a module once and
+/// writes the machine code to its cache; every later load, its own or a
+/// tab's that may only read, takes the code from there instead of
+/// compiling, and the module draws exactly what a compiled one draws. The
+/// default is no cache, which writes nothing.
+#[test]
+fn spec_13_1_4_compile_cache_hit_skips_compilation() {
+    let bytes = drawing_module();
+    let dir = cache_dir("hit");
+    let off = cached_load(&bytes, CompileCache::Off);
+    assert_eq!(off.load_stats().source, CompileSource::Compiled);
+    assert!(!off.load_stats().written);
+    let reference = two_frames(off);
+    assert!(
+        entries(&dir).is_empty() && !dir.exists(),
+        "Off touches nothing"
+    );
+
+    let first = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
+    assert_eq!(first.load_stats().source, CompileSource::Compiled);
+    assert!(first.load_stats().written);
+    assert_eq!(entries(&dir).len(), 1);
+    assert_eq!(two_frames(first), reference);
+
+    for cache in [
+        CompileCache::ReadWrite(dir.clone()),
+        CompileCache::ReadOnly(dir.clone()),
+    ] {
+        let rt = cached_load(&bytes, cache.clone());
+        let stats = rt.load_stats();
+        assert_eq!(stats.source, CompileSource::CacheHit, "{cache:?}");
+        assert!(!stats.written);
+        assert_eq!(two_frames(rt), reference, "{cache:?}");
+    }
+    assert_eq!(entries(&dir).len(), 1, "a hit writes nothing");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700, "the directory is the user's alone");
+        assert_eq!(mode(&entries(&dir)[0]), 0o600);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SPEC-13.1.4 and the threat in docs/notes/m4-perf.md: a tab process
+/// that may only read the cache never writes it, a damaged or truncated
+/// entry is a miss (and the writer replaces it), another module's entry is
+/// never taken, and a directory others may write is not used at all.
+#[test]
+fn compile_cache_trusts_only_the_writer() {
+    let bytes = drawing_module();
+    let other = budget_module();
+    let dir = cache_dir("trust");
+
+    // Read-only: no directory made, nothing written.
+    let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+    assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+    assert!(!rt.load_stats().written && !dir.exists());
+
+    // The main process precompiles; the hash is checked first.
+    let wrong = sha256(b"not the module");
+    assert!(matches!(
+        precompile(&dir, &bytes, &wrong),
+        Err(Error::HashMismatch { .. })
+    ));
+    assert!(entries(&dir).is_empty());
+    let stats = precompile(&dir, &bytes, &sha256(&bytes)).unwrap();
+    assert!(stats.written);
+    assert_eq!(
+        precompile(&dir, &bytes, &sha256(&bytes)).unwrap().source,
+        CompileSource::CacheHit
+    );
+    let reference = two_frames(cached_load(&bytes, CompileCache::Off));
+    let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+    assert_eq!(rt.load_stats().source, CompileSource::CacheHit);
+    assert_eq!(two_frames(rt), reference);
+
+    // Another module finds nothing of this one's.
+    let rt = cached_load(&other, CompileCache::ReadOnly(dir.clone()));
+    assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+
+    // A flipped payload byte, then a truncated file: misses; read-only
+    // leaves them, the writer replaces them.
+    let entry = entries(&dir).pop().unwrap();
+    let good = std::fs::read(&entry).unwrap();
+    let mut flipped = good.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x40;
+    for damaged in [
+        flipped,
+        good[..good.len() / 2].to_vec(),
+        b"VYCODE01".to_vec(),
+    ] {
+        std::fs::write(&entry, &damaged).unwrap();
+        let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+        assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+        assert_eq!(two_frames(rt), reference);
+        assert_eq!(
+            std::fs::read(&entry).unwrap(),
+            damaged,
+            "read-only never writes"
+        );
+        let rt = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
+        assert!(rt.load_stats().written);
+        let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
+        assert_eq!(rt.load_stats().source, CompileSource::CacheHit);
+    }
+
+    // A directory group or others may write is not trusted.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let rt = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
+        assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+        assert!(!rt.load_stats().written);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
