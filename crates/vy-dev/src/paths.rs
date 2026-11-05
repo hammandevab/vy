@@ -5,6 +5,8 @@ use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use vy_manifest::SigningKey;
 
+/// File name of the Studio package next to the binary.
+pub const STUDIO_PACKAGE: &str = "studio.vyp";
 /// File name of the developer key under [`data_dir`].
 pub const KEY_FILE: &str = "dev.key";
 /// Environment variable naming the key `vy-dev build` signs with; `serve`
@@ -72,6 +74,35 @@ pub fn load_or_create_key(path: &Path) -> Result<(SigningKey, bool)> {
     Ok((key, created))
 }
 
+/// Where the Studio package is looked for: the override alone when there
+/// is one; else `studio.vyp` next to this binary (a release), then one
+/// directory up (a checkout: `target/studio.vyp`, which
+/// `tools/build_studio.sh` writes, next to `target/debug/` and
+/// `target/release/`).
+pub fn studio_candidates(explicit: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(p) = explicit {
+        return vec![p.to_path_buf()];
+    }
+    let mut out = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        out.push(dir.join(STUDIO_PACKAGE));
+        if let Some(parent) = dir.parent() {
+            out.push(parent.join(STUDIO_PACKAGE));
+        }
+    }
+    out
+}
+
+/// The first Studio package among [`studio_candidates`] that exists.
+pub fn find_studio(explicit: Option<&Path>) -> Option<PathBuf> {
+    studio_candidates(explicit)
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +126,16 @@ mod tests {
         assert!(pub_path.is_file(), "a missing .pub is written again");
         assert_eq!(key_path(Some(&path)).unwrap(), path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn studio_lookup_order() {
+        let explicit = PathBuf::from("/x/studio.vyp");
+        assert_eq!(studio_candidates(Some(&explicit)), vec![explicit.clone()]);
+        assert_eq!(find_studio(Some(&explicit)), None, "it does not exist");
+        let c = studio_candidates(None);
+        assert_eq!(c.len(), 2);
+        assert!(c.iter().all(|p| p.ends_with(STUDIO_PACKAGE)));
     }
 
     #[test]

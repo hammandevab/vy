@@ -12,7 +12,7 @@ fn usage() -> ExitCode {
         "usage:\n  \
          vy-dev new <dir> [--name <name>] [--sdk <vy-checkout>]\n  \
          vy-dev build [<dir>] [--key <dev.key>] [--out <page.vyp>]\n  \
-         vy-dev serve [<dir>] [--port {DEFAULT_PORT}] [--studio-port {DEFAULT_STUDIO_PORT}] [--key <dev.key>] [--agent-cmd <cmd>] [--quiet]"
+         vy-dev serve [<dir>] [--port {DEFAULT_PORT}] [--studio-port {DEFAULT_STUDIO_PORT}] [--key <dev.key>] [--agent-cmd <cmd>] [--studio <studio.vyp>] [--quiet]"
     );
     ExitCode::from(2)
 }
@@ -148,7 +148,7 @@ fn cmd_build(args: &[String]) -> Result<ExitCode> {
 fn cmd_serve(args: &[String]) -> Result<ExitCode> {
     let a = Args::parse(
         args,
-        &["port", "studio-port", "key", "agent-cmd"],
+        &["port", "studio-port", "key", "agent-cmd", "studio"],
         &["quiet"],
     )?;
     let dir = a.positional.first().map(String::as_str).unwrap_or(".");
@@ -159,6 +159,7 @@ fn cmd_serve(args: &[String]) -> Result<ExitCode> {
         key_path: a.value("key").map(PathBuf::from),
         target_dir: None,
         agent_cmd: a.value("agent-cmd").map(String::from),
+        studio_package: a.value("studio").map(PathBuf::from),
         log: !a.has("quiet"),
     };
     let handle = vy_dev::start(config)?;
@@ -171,12 +172,23 @@ fn cmd_serve(args: &[String]) -> Result<ExitCode> {
     let project = &handle.dev.project;
     eprintln!("vy-dev: {} in {}", project.name, project.dir.display());
     eprintln!("  page:   {}", handle.address());
-    eprintln!("  studio: {}", handle.studio_address());
+    match &handle.studio_package {
+        Some(p) => eprintln!("  studio: {}   ({})", handle.studio_address(), p.display()),
+        None => eprintln!(
+            "  studio: no studio.vyp next to this binary or one directory up; build one with tools/build_studio.sh or pass --studio (the dev API answers anyway)"
+        ),
+    }
     eprintln!("  api:    {}", handle.api_url("/_dev/state"));
     eprintln!(
         "  key:    {} ({})",
         handle.key_id,
         handle.key_path.display()
+    );
+    let agent = handle.dev.agent_command();
+    eprintln!(
+        "  agent:  {} ({})",
+        agent.program,
+        agent.resolved_program().display()
     );
     eprintln!("  listening on 127.0.0.1 only; Ctrl+C stops");
     // The threads run until the process is stopped.

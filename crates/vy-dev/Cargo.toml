@@ -24,6 +24,8 @@ anyhow.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+# Event kinds and method names when the Studio test drives the module.
+vy-abi.workspace = true
 # The client's own request path (`Fetcher::request`, `transport_allowed`) in the
 # origin-boundary tests.
 vy-proto.workspace = true

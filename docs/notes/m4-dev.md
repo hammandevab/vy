@@ -4,7 +4,9 @@ Byggagentens noteringar för grenen `m4/dev` (från main `3bc0bcb`). Gransknings
 annan agent. Spåret: en användare startar `vy-dev` i en projektkatalog, öppnar Studio i Vy, skriver
 "gör en sida som …", och Claude Code bygger sidan, som visas i Vy.
 
-Rörda kataloger: `crates/vy-dev` (ny), `tools/fake_agent.sh` och `tools/fake_agent.ps1` (nya),
+Rörda kataloger: `crates/vy-dev` (ny), `modules/studio` (ny), `conformance/manifests/studio.json`,
+fyra fall i `conformance/cases.toml` med guldbilder och två semantiska träd, `tools/fake_agent.sh`,
+`tools/fake_agent.ps1` och `tools/build_studio.sh` (nya),
 `docs/notes/m4-dev.md` (den här sidan), `Cargo.toml` (en medlemsrad), `Cargo.lock`, och utanför
 spåret `crates/vy-runtime/src/{host,lib,tests}.rs` och `crates/vy-cli/src/conformance.rs` med
 formatraden i `conformance/cases.toml` och `conformance/README.md` (se *Berör andra spår*).
@@ -18,6 +20,7 @@ formatraden i `conformance/cases.toml` och `conformance/README.md` (se *Berör a
 | 2 `vy-dev serve` | `vy-dev serve [<dir>] [--port 8080] [--studio-port 8081] [--key <dev.key>] [--agent-cmd <cmd>] [--quiet]`. Två `tiny_http`-servrar, båda på `127.0.0.1`: origin A `vy://localhost:8080/<namn>` är en `vy_serve::Site` över `target/vy-dev/site/` som öppnas på nytt efter varje lyckat bygge (blobbar från gamla byggen släpps), origin B `vy://localhost:8081/` är Studio (steg 5) och dev-API:t under `/_dev/`. Nyckeln och dess `.pub` (`/.well-known/vy-key` på båda) som i 2a; skapad nyckel skrivs ut. En byggtråd med kondvariabel kör kedjan vid start och på begäran; en bevakare läser källornas mtime och längd var 500 ms (`src/`, `res/`, `Cargo.toml`, `manifest.json`, utkastets resurser; inte `Cargo.lock`, som cargo själv skriver) och begär ett bygge när filerna stått still ett intervall och skiljer sig från vad förra bygget utgick från. Byggfel hamnar i byggloggen och statusen, sidan från senaste lyckade bygge serveras vidare. Manifest och paket får `Cache-Control: no-cache`. | `serve_builds_and_serves_two_origins` (start → bygge → signerat paket på A, nyckeln på båda, sidan finns inte på B och API:t inte på A, vakten nekar `Origin`, `Sec-Fetch-Site`, `Referer`, fel `Host` och `X-Forwarded-Host`-förfalskning, `POST /_dev/build` ger samma paket, en trasig källa ger `error` i tillståndet medan sidan finns kvar, en rättad källa byggs av bevakaren, `vy-dev build` från kommandoraden ger samma paket), `fresh_rewrites_cache_control_for_pages_only`, `loopback_hosts`, `guard_refuses_browsers_and_foreign_hosts` |
 | 3 dev-API och agent | På origin B, varje väg med `token=<körningens nyckel>`: `GET /_dev/state` → `{name, address, build: {status, log, builds}, agent: {running, last_exit}, seq}`; `POST /_dev/build` → 202; `POST /_dev/agent` (kroppen = uppdraget, UTF-8, högst 64 KB) → 202, 409 när en agent redan kör, 400/413 för tomt, ogiltigt eller för långt, 500 med orsak när programmet inte startar; `POST /_dev/agent/stop` → `{stopped}`; `GET /_dev/agent/events?after=<seq>&wait=<ms>&raw=0&limit=<n>` → `{next, entries: [{seq, kind, text, status?}]}`, long-poll upp till 20 s. Agenten startas som `<cmd> -p --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cargo *),Bash(vy-cli *),Bash(vy-dev build*),Bash(ls *)"` i projektkatalogen med uppdraget på stdin, `vy-dev`s egen katalog först på `PATH` (där `vy-cli` ligger i en release) och `VY_DEV_KEY` satt. Kommandot: `--agent-cmd`, annars `VY_AGENT_CMD`, annars `claude`; på Windows slås ett namn utan filändelse upp med `PATHEXT` (på `PATH`, eller bredvid sig själv för en sökväg), så `claude.cmd` hittas. Utdata läses rad för rad in i en ringlogg (4 000 poster, 8 KB per post): varje rå rad (`raw`), assistentens text (`assistant`), verktygets namn och vad det rörde (`tool`, t.ex. `Edit src/lib.rs`), slutresultatet (`result`), start/stopp/exit (`agent`) och byggen (`build` med `status`). En agent i taget; när den avslutas begärs ett bygge; under tiden begär bevakaren inget. Stopp: `taskkill /T /F` på Windows, annars processträdet ur `ps` med `SIGTERM` och efter 1,5 s `SIGKILL`. | `agent_runs_streams_stops_and_triggers_a_build` med `tools/fake_agent.sh` (uppdraget kommer fram på stdin med exakt de fasta flaggorna, händelserna kommer som text och verktygsnamn utan råa rader, 409 under en körning, stopp avslutar agenten och dess barnprocess, exit bygger och agentens ändring syns i modulen på A, råa rader med `raw=1`, tom long-poll efter `wait`, `limit` ger de nyaste, exitkod 3 rapporteras), `an_agent_that_does_not_start_is_reported`, `commands_parse`, `finds_scripts_with_pathext`, `process_trees`, `stream_json_lines_become_entries`, `select_filters_raw_and_keeps_the_newest`, `sequence_and_cap` |
 | 4 Studio (`modules/studio`) | En vanlig ABI 1.0-sida på `vy-sdk` (60 KB wasm): rubrik med projektets namn, statuspiller (väntar / bygger / klar / fel), adressen till sidan under utveckling som länk (`link_register` + nod `link`), uppdragsfält (`textbox`, `ime_begin`/`ime_end` efter värdens fokus, en rad som rullar så slutet syns), **Kör** (blir **Stoppa** medan agenten arbetar) och **Bygg om**, en rad för vad senaste knappen gjorde, agentens logg (lista med assistentens text, verktygsnamn, resultat och bygghändelser; följer nyaste posten, `SCROLL` och Page Up/Down rullar) och byggloggen (svansen som får plats, felrader röda). Nätet: `GET /_dev/state` och `GET /_dev/agent/events` som long-poll (`wait=1000`, `raw=0`, `limit=200`) som ställs om så fort den svarar, `POST` för knapparna, alla mot sin egen origin med `fetch_begin` → `FETCH_DONE` → `fetch_poll` = 1 → `fetch_read` till 0. `storage` håller senaste uppdraget. Var API:t finns och körningens nyckel står i en platshållare (`VYDEV-STUDIO-CONFIG http://localhost:8081 000…`, 128 byte i en `static` som läses med volatila läsningar) som `vy-dev` skriver över före signering (steg 5). Utan `net` säger sidan det och väntar på `CAPABILITY`; tappad förbindelse visas och prövas igen efter 2 s. Egen JSON-läsare (`json.rs`, RFC 8259, djup ≤ 32). Manifestutkast `conformance/manifests/studio.json` (`ime`, `net` mot `http://localhost:8081`, `storage` 16 KB, `memory_max` 256). | Nativt: `reads_the_dev_api_answers`, `strings_unescape`, `refuses_what_is_not_json`, `config_placeholder_and_patched`, `spec_5_3_1_without_net_studio_says_so`, `answers_become_state_and_log`, `spec_10_1_1_the_tree_names_everything`, `spec_5_2_9_typing_and_the_kept_mission`, `layout_fits`. Konformans: `studio-800x600@1` (träd `studio`), `studio-800x600@1-running` (fokus, uppdrag, Kör, agentens poster, 202; träd `studio-running`), `studio-400x700@2`, `studio-800x600@1-error` – inspelade svar med platshållarnyckeln, `fetch_done` i begärd ordning. |
+| 5 Studio i `vy-dev serve` | `vy-dev serve` letar `studio.vyp` (`--studio <fil>`, annars bredvid binären, annars en katalog upp: `target/studio.vyp` i en checkout, som `tools/build_studio.sh` skriver). Paketet anpassas till körningen innan det serveras som `index` på origin B: modulens konfigurationsblock får `http://localhost:<studio-port> <nyckel>` (exakt en förekomst av markören, samma längd, utfyllt med mellanslag), manifestets `net` blir den origin ensam, modulens hash och storlek följer de nya byten, och utvecklarnyckeln signerar. Finns inget paket svarar API:t ändå och terminalen säger hur man bygger ett. `tools/build_studio.sh [ut]` bygger modulen och packar den med en slängnyckel (`VY_PUBLISH` kan peka på en färdig `vy-publish`). | `studio_runs_a_mission_through_the_client_path`: paketet som `build_studio.sh` gör, `vy-dev serve --studio`, `vy-proto` hämtar Studio från `vy://localhost:<b>/` och litar på den, `net`/`ime`/`storage` beviljas utan fråga, modulen bär körningens origin och nyckel och inte platshållaren, `vy-runtime` kör den riktiga modulen med `Transport::External`, varje begäran prövas mot `plain_http_allowed` och utförs med `Fetcher::request` som skalets laddare gör; adressen blir en länk, ett uppdrag skrivs och körs med Kör, den falska agenten får det, och agentens text, verktygsnamn och "agenten är klar" syns i Studios träd. `studio_config_block_is_patched_in_place`, `studio_lookup_order`. |
 
 ## Beslut
 
@@ -155,6 +158,7 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
 | Crate | Vad | Varför inte själv | Drar in |
 | --- | --- | --- | --- |
 | `getrandom` 0.2 (fanns via `ring` och `vy-publish`) | 16 byte OS-entropi till dev-API:ts nyckel per körning | OS-anrop per plattform; `std` har ingen säker slump | 0 nya (samma version som redan är låst) |
+| `vy-abi` (bara `dev-dependencies`) | händelsetyper och metodnamn när Studio-testet driver modulen | konstanterna finns där och ska inte kopieras | 0 nya |
 | `vy-proto` (bara `dev-dependencies`) | klientens egen begäranväg i `origin_boundary` | testet ska pröva klientens kod, inte en kopia | 0 nya (ureq, rustls fanns) |
 
 ## Öppna frågor
@@ -200,9 +204,23 @@ redan fanns i arbetsytan: `vy-manifest`, `vy-publish`, `vy-serve`, `vy-runtime` 
 
 ## Release
 
-Kommer med steg 5. Redan nu: `tools/publish_site.sh` (orörd, enligt uppdraget) går igenom
-`conformance/manifests/*.json` och kommer därför att publicera `studio.vyp` på den offentliga
-sajten. Det är ofarligt (från en fjärrorigin når Studio aldrig `http://localhost`, transporten
-nekar, och sidan visar "ingen kontakt"), men Studio är inte avsedd att vara offentlig: release-
-eller deploy-spåret bör hoppa över utkast vars `net` pekar på loopback, eller över `studio.json` vid
-namn.
+**Releasezippen** (`.github/workflows/release.yml`, `vy-<version>-<target>.zip`, inte ändrad här)
+behöver, per mål:
+
+1. `vy-dev` (`vy-dev.exe` på Windows): `cargo build --release --locked -p vy-dev`, i samma katalog som
+   `vy-cli`. `vy-dev serve` lägger sin egen katalog först på agentens `PATH`, så loopen i projektets
+   `CLAUDE.md` (`vy-cli check-abi`, `vy-cli render`, `vy-dev build`) hittar dem utan att användaren
+   rör `PATH`.
+2. `studio.vyp` bredvid `vy-dev`: `VY_PUBLISH=target/release/vy-publish tools/build_studio.sh
+   <staging>/studio.vyp` (kräver `wasm32-unknown-unknown`, som jobbet redan har för modulerna).
+   Paketet signeras med en slängnyckel; ingen hemlighet behövs, eftersom `vy-dev` skriver in origin
+   och nyckel och signerar om med användarens utvecklarnyckel vid varje start.
+3. Inget mer: Claude Code installeras av användaren (`claude` på `PATH`), Rust med
+   `wasm32-unknown-unknown` likaså (`docs/DEVELOPING.md`).
+
+**Dockerfile/Railway** behöver inget: den offentliga sajten serverar inte Studio och kör inte
+`vy-dev`. Men `tools/publish_site.sh` (orörd enligt uppdraget) går igenom
+`conformance/manifests/*.json` och publicerar därför också `studio.vyp` på den offentliga sajten.
+Det är ofarligt (från en fjärrorigin når Studio aldrig `http://localhost`: transporten nekar och
+sidan visar "ingen kontakt"), men Studio ska inte vara offentlig: deploy-spåret bör hoppa över
+`studio.json` (eller utkast vars `net` pekar på loopback) i skriptet.

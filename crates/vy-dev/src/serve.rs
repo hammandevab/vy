@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use vy_manifest::{MEDIA_MANIFEST, MEDIA_PACKAGE};
+use vy_manifest::{Hash, NetRequest, Package, SigningKey, MEDIA_MANIFEST, MEDIA_PACKAGE};
 use vy_serve::{Config, Reply, RequestInfo, Site};
 
 /// How often the sources are polled for changes.
@@ -56,6 +56,9 @@ pub struct ServeConfig {
     pub target_dir: Option<PathBuf>,
     /// The agent command line; `None` is `VY_AGENT_CMD`, else `claude`.
     pub agent_cmd: Option<String>,
+    /// The Studio package; `None` looks for `studio.vyp` next to this
+    /// binary ([`paths::find_studio`]).
+    pub studio_package: Option<PathBuf>,
     /// Log every request to stderr.
     pub log: bool,
 }
@@ -70,6 +73,7 @@ impl ServeConfig {
             key_path: None,
             target_dir: None,
             agent_cmd: None,
+            studio_package: None,
             log: false,
         }
     }
@@ -89,6 +93,9 @@ pub struct Handle {
     pub key_created: bool,
     /// The key's id (SPEC-8.1.1).
     pub key_id: String,
+    /// The Studio package served at `/` on the Studio origin, if one was
+    /// found.
+    pub studio_package: Option<PathBuf>,
     servers: Vec<Arc<tiny_http::Server>>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -213,6 +220,19 @@ pub fn start(config: ServeConfig) -> Result<Handle> {
 
     let (page_server, port) = bind(config.port)?;
     let (studio_server, studio_port) = bind(config.studio_port)?;
+    let access = Access::new(studio_port)?;
+    // Studio is `index` on its origin, fitted to this run: its origin and
+    // token written into the module, `net` set to that origin, signed with
+    // the developer key. Without a package the API still answers.
+    let studio_index = studio_dir.join("index.vyp");
+    let _ = std::fs::remove_file(&studio_index);
+    let studio_package = paths::find_studio(config.studio_package.as_deref());
+    if let Some(p) = &studio_package {
+        let origin = format!("http://localhost:{studio_port}");
+        install_studio(p, &key, &origin, &access.token, &studio_index)?;
+    } else if let Some(p) = &config.studio_package {
+        return Err(anyhow!("{}: no such Studio package", p.display()));
+    }
     let page_site = Arc::new(PageSite::open(site_config(&site_dir, port, &pub_path))?);
     let studio_site = Arc::new(
         Site::open(&site_config(&studio_dir, studio_port, &pub_path))
@@ -235,7 +255,6 @@ pub fn start(config: ServeConfig) -> Result<Handle> {
             .and_then(|p| p.parent().map(Path::to_path_buf)),
         env,
     };
-    let access = Access::new(studio_port)?;
     let dev = Arc::new(Dev::new(project, key, package_path, address, agent, access));
     dev.request_build();
 
@@ -283,9 +302,88 @@ pub fn start(config: ServeConfig) -> Result<Handle> {
         key_path,
         key_created,
         key_id,
+        studio_package,
         servers: vec![page_server, studio_server],
         threads,
     })
+}
+
+/// Bytes that start the config block in the Studio module
+/// (`modules/studio`, `CONFIG`): `VYDEV-STUDIO-CONFIG <origin> <token>`,
+/// padded with spaces to [`STUDIO_CONFIG_LEN`] bytes.
+pub const STUDIO_CONFIG_MARKER: &[u8] = b"VYDEV-STUDIO-CONFIG ";
+/// Length of the config block, marker included.
+pub const STUDIO_CONFIG_LEN: usize = 128;
+
+/// Write `origin` and `token` into the config block of a Studio module.
+/// The block must occur exactly once; what follows the marker is replaced,
+/// padded with spaces, so the module keeps its size and layout.
+pub fn patch_studio_module(module: &mut [u8], origin: &str, token: &str) -> Result<()> {
+    let at: Vec<usize> = module
+        .windows(STUDIO_CONFIG_MARKER.len())
+        .enumerate()
+        .filter(|(_, w)| *w == STUDIO_CONFIG_MARKER)
+        .map(|(i, _)| i)
+        .collect();
+    let [start] = at[..] else {
+        return Err(anyhow!(
+            "not a Studio module: its config block occurs {} times, not once",
+            at.len()
+        ));
+    };
+    let payload = format!("{origin} {token}");
+    let room = STUDIO_CONFIG_LEN - STUDIO_CONFIG_MARKER.len();
+    if payload.len() > room
+        || payload
+            .bytes()
+            .any(|b| !(0x21..0x7f).contains(&b) && b != b' ')
+    {
+        return Err(anyhow!("{payload:?} does not fit the Studio config block"));
+    }
+    let block = start + STUDIO_CONFIG_MARKER.len();
+    let end = block + room;
+    if end > module.len() {
+        return Err(anyhow!("the Studio config block is cut short"));
+    }
+    module[block..end].fill(b' ');
+    module[block..block + payload.len()].copy_from_slice(payload.as_bytes());
+    Ok(())
+}
+
+/// Fit a Studio package to this run and write it to `out`: the module's
+/// config block gets `origin` and `token` ([`patch_studio_module`]), the
+/// manifest's `net` becomes `origin` alone (the page's own, granted without
+/// asking, SPEC-8.2.3), the module's hash and size follow the new bytes,
+/// and `key` signs it (SPEC-7.4.1) so the client trusts it like the page
+/// under development.
+pub fn install_studio(
+    package: &Path,
+    key: &SigningKey,
+    origin: &str,
+    token: &str,
+    out: &Path,
+) -> Result<Package> {
+    let bytes = std::fs::read(package).with_context(|| format!("reading {}", package.display()))?;
+    let mut p = Package::unpack(&bytes).map_err(|e| anyhow!("{}: {e}", package.display()))?;
+    patch_studio_module(&mut p.module, origin, token)
+        .with_context(|| format!("{}", package.display()))?;
+    p.manifest.module.hash = Hash::of(&p.module);
+    p.manifest.module.size = p.module.len() as u64;
+    p.manifest.capabilities.net = Some(NetRequest {
+        origins: vec![origin.to_string()],
+    });
+    p.manifest.sign(key);
+    let problems = p.validate();
+    if !problems.is_empty() {
+        let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
+        return Err(anyhow!(
+            "{}: the fitted Studio package does not validate: {}",
+            package.display(),
+            list.join("; ")
+        ));
+    }
+    crate::build::write_atomically(out, &p.pack().map_err(|e| anyhow!("{e}"))?)?;
+    Ok(p)
 }
 
 /// Poll the sources every [`POLL_INTERVAL`]. Sources that stayed put for
@@ -430,6 +528,35 @@ fn serve_studio(site: &Site, dev: &Arc<Dev>, mut request: tiny_http::Request, lo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The config block is rewritten in place, padded, and only when it
+    /// occurs exactly once and the payload fits.
+    #[test]
+    fn studio_config_block_is_patched_in_place() {
+        let mut block = STUDIO_CONFIG_MARKER.to_vec();
+        block.extend_from_slice(b"http://localhost:8081 00000000000000000000000000000000");
+        block.resize(STUDIO_CONFIG_LEN, b' ');
+        let mut module = b"\0asm head ".to_vec();
+        module.extend_from_slice(&block);
+        module.extend_from_slice(b" tail");
+        let len = module.len();
+        patch_studio_module(&mut module, "http://localhost:9000", "ab12").unwrap();
+        assert_eq!(module.len(), len);
+        let text = String::from_utf8_lossy(&module);
+        assert!(text.contains("VYDEV-STUDIO-CONFIG http://localhost:9000 ab12 "));
+        assert!(!text.contains("0000"));
+        assert!(text.ends_with(" tail") && text.starts_with("\0asm head "));
+        let mut twice = module.clone();
+        twice.extend_from_slice(&block);
+        assert!(patch_studio_module(&mut twice, "http://localhost:1", "t").is_err());
+        assert!(patch_studio_module(&mut b"no block".to_vec(), "http://localhost:1", "t").is_err());
+        let long = "x".repeat(STUDIO_CONFIG_LEN);
+        assert!(patch_studio_module(&mut module, "http://localhost:1", &long).is_err());
+        assert!(patch_studio_module(&mut module, "http://localhost:1", "a\nb").is_err());
+        let mut cut = STUDIO_CONFIG_MARKER.to_vec();
+        cut.extend_from_slice(b"short");
+        assert!(patch_studio_module(&mut cut, "http://localhost:1", "t").is_err());
+    }
 
     #[test]
     fn fresh_rewrites_cache_control_for_pages_only() {
