@@ -26,8 +26,8 @@ pub use cache::{
 };
 pub use dns::{DnsError, SystemResolver, TxtResolver};
 pub use fetch::{
-    transport_allowed, Error, Fetched, Fetcher, Form, Options, ACCEPT, BLOB_PATH_PREFIX,
-    MAX_BLOB_BYTES, MAX_KEY_FILE_BYTES, MAX_REDIRECTS, WELL_KNOWN_KEY_PATH,
+    transport_allowed, Error, Fetched, Fetcher, Form, Options, Restriction, ACCEPT,
+    BLOB_PATH_PREFIX, MAX_BLOB_BYTES, MAX_KEY_FILE_BYTES, MAX_REDIRECTS, WELL_KNOWN_KEY_PATH,
 };
 pub use keys::{KeyStore, OriginKeys};
 pub use url::{accepts, cache_control, media_type, resolve, CacheControl, HttpUrl};

@@ -4,7 +4,8 @@
 //! `/.well-known/vy-key` are pinned; later manifests must be signed by a
 //! pinned key, or by a key the previous manifest announced as its
 //! successor in `next_key_id`, which is then fetched and pinned in turn.
-//! The DNS TXT half of SPEC-7.4.2 is not consulted yet (M4).
+//! Which keys a first visit pins is decided in `fetch.rs` (the key file
+//! and DNS must agree, SPEC-7.4.5); this is the store.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

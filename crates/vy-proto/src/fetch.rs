@@ -7,6 +7,7 @@ use crate::cache::{
     now_secs, BlobCache, HttpCache, HttpRecord, DEFAULT_CACHE_CAP_BYTES,
     DEFAULT_HTTP_CACHE_CAP_BYTES,
 };
+use crate::dns::{DnsError, SystemResolver, TxtResolver};
 use crate::keys::KeyStore;
 use crate::url::{cache_control, media_type, resolve, CacheControl, HttpUrl};
 use std::fmt;
@@ -15,8 +16,8 @@ use std::time::Duration;
 use ureq::config::Config;
 use ureq::Agent;
 use vy_manifest::{
-    parse_key_file, Grant, Hash, Manifest, Package, PackageError, Problem, Trust,
-    MAX_MANIFEST_BYTES, MEDIA_MANIFEST, MEDIA_PACKAGE,
+    dns_txt_name, parse_dns_txt, parse_key_file, Grant, Hash, Manifest, Package, PackageError,
+    Problem, PublicKey, Trust, MAX_MANIFEST_BYTES, MEDIA_MANIFEST, MEDIA_PACKAGE,
 };
 
 /// The `Accept` header of every page request (SPEC-7.1.1).
@@ -173,6 +174,86 @@ impl Options {
     }
 }
 
+/// Why a fetched page is not trusted (SPEC-7.4.3): the reason the shell
+/// shows next to its "restricted mode" marker. None of these is an error
+/// of the fetch; the page is rendered, without capabilities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restriction {
+    /// The manifest carries no signature.
+    Unsigned,
+    /// The signature does not verify under the key it names.
+    BadSignature,
+    /// A pinned origin: the key is neither pinned nor announced as a
+    /// successor (SPEC-7.4.4).
+    UnknownKey {
+        /// The key id the manifest names.
+        key_id: String,
+    },
+    /// `/.well-known/vy-key` could not be fetched.
+    KeyFileUnavailable(String),
+    /// A first visit: the key is not among those both the key file and
+    /// DNS publish (SPEC-7.4.2).
+    KeyNotPublished {
+        /// The key id the manifest names.
+        key_id: String,
+    },
+    /// A first visit: `_vy.<host>` has no `v=vy1` TXT record (SPEC-7.4.5).
+    DnsNoRecord {
+        /// The name looked up.
+        name: String,
+    },
+    /// A first visit: the TXT records and the key file name no key in
+    /// common (SPEC-7.4.5).
+    DnsMismatch {
+        /// The name looked up.
+        name: String,
+    },
+    /// A first visit: the lookup failed (SPEC-7.4.5).
+    DnsFailed {
+        /// The name looked up.
+        name: String,
+        /// Why.
+        error: DnsError,
+    },
+    /// An announced successor is not in `/.well-known/vy-key` (SPEC-7.4.4).
+    SuccessorNotPublished {
+        /// The key id announced.
+        key_id: String,
+    },
+}
+
+impl fmt::Display for Restriction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsigned => f.write_str("the manifest is not signed"),
+            Self::BadSignature => f.write_str("the signature does not verify"),
+            Self::UnknownKey { key_id } => {
+                write!(f, "key {key_id} is not pinned for the origin and was never announced (SPEC-7.4.4)")
+            }
+            Self::KeyFileUnavailable(e) => write!(f, "{WELL_KNOWN_KEY_PATH}: {e}"),
+            Self::KeyNotPublished { key_id } => {
+                write!(f, "key {key_id} is not among the keys published for a first visit ({WELL_KNOWN_KEY_PATH} and, off loopback, DNS; SPEC-7.4.5)")
+            }
+            Self::DnsNoRecord { name } => {
+                write!(f, "no v=vy1 TXT record at {name} (SPEC-7.4.5)")
+            }
+            Self::DnsMismatch { name } => {
+                write!(
+                    f,
+                    "the TXT records at {name} and {WELL_KNOWN_KEY_PATH} share no key (SPEC-7.4.5)"
+                )
+            }
+            Self::DnsFailed { name, error } => write!(f, "TXT lookup of {name} failed: {error}"),
+            Self::SuccessorNotPublished { key_id } => {
+                write!(
+                    f,
+                    "announced key {key_id} is not in {WELL_KNOWN_KEY_PATH} (SPEC-7.4.4)"
+                )
+            }
+        }
+    }
+}
+
 /// Which of the two response forms the server sent (SPEC-7.2.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Form {
@@ -199,6 +280,8 @@ pub struct Fetched {
     /// (SPEC-7.4.3). Private, so the only way from a page to a grant is
     /// [`Fetched::grants`].
     trust: Option<Trust>,
+    /// Why there is no trust, when there is none.
+    restriction: Option<Restriction>,
     /// Id of the key the manifest names.
     pub key_id: String,
     /// Response form.
@@ -217,6 +300,12 @@ impl Fetched {
     /// false means restricted mode (SPEC-7.4.3).
     pub fn trusted(&self) -> bool {
         self.trust.is_some()
+    }
+
+    /// Why the page runs in restricted mode, for the shell to show
+    /// (SPEC-7.4.5); `None` when it is trusted.
+    pub fn restriction(&self) -> Option<&Restriction> {
+        self.restriction.as_ref()
     }
 
     /// Default grant per requested capability (SPEC-8.2.3); every one is
@@ -282,31 +371,61 @@ pub struct Fetcher {
     blobs: BlobCache,
     http: HttpCache,
     keys: KeyStore,
+    resolver: Box<dyn TxtResolver>,
 }
 
 impl Fetcher {
-    /// Open the caches under `options.cache_dir`.
+    /// Open the caches under `options.cache_dir`, with the system's DNS
+    /// resolver for the first visit of an origin (SPEC-7.4.5).
     pub fn new(options: Options) -> Result<Self, Error> {
-        let io = |e: std::io::Error| Error::Io(e.to_string());
-        let config = Config::builder()
-            // Redirects are followed by hand so every hop is checked for
-            // TLS (SPEC-7.1.3) and counted (SPEC-7.5.1).
+        Self::with_resolver(options, Box::new(SystemResolver::default()))
+    }
+
+    /// As [`Fetcher::new`], with `resolver` answering the TXT lookups.
+    pub fn with_resolver(options: Options, resolver: Box<dyn TxtResolver>) -> Result<Self, Error> {
+        let agent = Agent::new_with_config(Self::config(&options));
+        Self::with_parts(options, resolver, agent)
+    }
+
+    /// The HTTP configuration: no automatic redirects (they are followed
+    /// by hand so every hop is checked for TLS, SPEC-7.1.3, and counted,
+    /// SPEC-7.5.1), no ambient proxy (SPEC-2.1.4: an environment variable
+    /// must not redirect a page fetch; explicit proxy settings are a later
+    /// option), no content encoding, one whole-request timeout.
+    fn config(options: &Options) -> Config {
+        Config::builder()
             .max_redirects(0)
             .http_status_as_error(false)
-            // No ambient proxy (SPEC-2.1.4): an environment variable must
-            // not redirect a page fetch. Explicit proxy settings are a
-            // later option.
             .proxy(None)
             .user_agent("vy-proto/0.1")
             .accept_encoding("")
             .timeout_global(Some(options.timeout))
-            .build();
+            .build()
+    }
+
+    /// Open the caches under `options.cache_dir` around a ready `agent`.
+    /// Tests build the agent with a connector that reaches a loopback
+    /// server under a remote name; the product uses [`Fetcher::new`].
+    pub(crate) fn with_parts(
+        options: Options,
+        resolver: Box<dyn TxtResolver>,
+        agent: Agent,
+    ) -> Result<Self, Error> {
+        let io = |e: std::io::Error| Error::Io(e.to_string());
         Ok(Fetcher {
-            agent: Agent::new_with_config(config),
+            agent,
             blobs: BlobCache::open(&options.cache_dir, options.cache_cap_bytes).map_err(io)?,
             http: HttpCache::open(&options.cache_dir, options.http_cache_cap_bytes).map_err(io)?,
             keys: KeyStore::open(&options.cache_dir).map_err(io)?,
+            resolver,
         })
+    }
+
+    /// The agent's configuration for a test agent built around another
+    /// connector.
+    #[cfg(test)]
+    pub(crate) fn test_config(options: &Options) -> Config {
+        Self::config(options)
     }
 
     /// The content-addressed cache.
@@ -453,12 +572,16 @@ impl Fetcher {
             .as_ref()
             .map(|s| s.key_id.clone())
             .unwrap_or_default();
-        let trust = self.trust(address, &package.manifest, &mut requests);
+        let (trust, restriction) = match self.trust(address, &package.manifest, &mut requests) {
+            Ok(trust) => (Some(trust), None),
+            Err(why) => (None, Some(why)),
+        };
         Ok(Fetched {
             address: address.clone(),
             identity: package.identity(),
             package,
             trust,
+            restriction,
             key_id,
             form,
             requests,
@@ -678,56 +801,109 @@ impl Fetcher {
     }
 
     /// Decide trust for the manifest of `address` (SPEC-7.4.2, SPEC-7.4.3,
-    /// SPEC-7.4.4): the key must be pinned for the origin, or be
-    /// discoverable on a first visit, or have been announced as successor;
-    /// the token is the signature's verification under that key.
+    /// SPEC-7.4.4, SPEC-7.4.5): the key must be pinned for the origin, or
+    /// be published by both the key file and DNS on a first visit, or have
+    /// been announced as successor and be in the key file; the token is
+    /// the signature's verification under that key. Anything else is
+    /// restricted mode, with the reason.
     fn trust(
         &mut self,
         address: &Address,
         manifest: &Manifest,
         requests: &mut u32,
-    ) -> Option<Trust> {
+    ) -> Result<Trust, Restriction> {
         let Some(sig) = &manifest.sig else {
-            return None;
+            return Err(Restriction::Unsigned);
         };
         let origin = address.origin();
         let key = match self.keys.pinned(&origin, &sig.key_id) {
-            Some(k) => Some(k),
-            None => {
-                let first_visit = !self.keys.has_pins(&origin);
-                let successor = self.keys.is_successor(&origin, &sig.key_id);
-                if first_visit || successor {
-                    match self.discover_keys(address, requests) {
-                        Ok(published) => {
-                            if first_visit {
-                                for k in &published {
-                                    let _ = self.keys.pin(&origin, *k);
-                                }
-                            } else if let Some(k) =
-                                published.iter().find(|k| k.key_id() == sig.key_id)
-                            {
-                                let _ = self.keys.promote(&origin, *k);
-                            }
-                            self.keys.pinned(&origin, &sig.key_id)
-                        }
-                        Err(_) => None,
-                    }
-                } else {
-                    None
+            Some(k) => k,
+            None if !self.keys.has_pins(&origin) => {
+                // First visit: pin what both sources publish (SPEC-7.4.5).
+                let agreed = self.first_visit_keys(address, requests)?;
+                for k in &agreed {
+                    let _ = self.keys.pin(&origin, *k);
                 }
+                agreed
+                    .into_iter()
+                    .find(|k| k.key_id() == sig.key_id)
+                    .ok_or_else(|| Restriction::KeyNotPublished {
+                        key_id: sig.key_id.clone(),
+                    })?
+            }
+            None if self.keys.is_successor(&origin, &sig.key_id) => {
+                // Rotation (SPEC-7.4.4): the announced key comes from the
+                // key file alone; DNS is not asked again.
+                let published = self
+                    .discover_keys(address, requests)
+                    .map_err(|e| Restriction::KeyFileUnavailable(e.to_string()))?;
+                let key = published
+                    .into_iter()
+                    .find(|k| k.key_id() == sig.key_id)
+                    .ok_or_else(|| Restriction::SuccessorNotPublished {
+                        key_id: sig.key_id.clone(),
+                    })?;
+                // The signature decides before the store changes: a
+                // manifest that names the successor but is not signed by
+                // it must not retire the old key.
+                if manifest.verify(&key).is_none() {
+                    return Err(Restriction::BadSignature);
+                }
+                let _ = self.keys.promote(&origin, key);
+                key
+            }
+            None => {
+                return Err(Restriction::UnknownKey {
+                    key_id: sig.key_id.clone(),
+                })
             }
         };
-        let trust = key.and_then(|k| manifest.verify(&k));
-        if trust.is_some() {
-            if let Some(next) = &manifest.next_key_id {
-                let _ = self.keys.announce_successor(&origin, next);
-            }
+        let trust = manifest.verify(&key).ok_or(Restriction::BadSignature)?;
+        if let Some(next) = &manifest.next_key_id {
+            let _ = self.keys.announce_successor(&origin, next);
         }
-        trust
+        Ok(trust)
     }
 
-    /// `GET /.well-known/vy-key` (SPEC-7.4.2). DNS TXT `_vy.<host>` is not
-    /// consulted yet.
+    /// The keys a first visit may pin (SPEC-7.4.2, SPEC-7.4.5): those in
+    /// `/.well-known/vy-key` that a `v=vy1` TXT record at `_vy.<host>`
+    /// also names. Loopback has no DNS (SPEC-7.1.3) and takes the key file
+    /// alone. A missing record, a disagreement or a failed lookup is a
+    /// restriction: nothing is pinned, the next visit asks again.
+    fn first_visit_keys(
+        &mut self,
+        address: &Address,
+        requests: &mut u32,
+    ) -> Result<Vec<PublicKey>, Restriction> {
+        let published = self
+            .discover_keys(address, requests)
+            .map_err(|e| Restriction::KeyFileUnavailable(e.to_string()))?;
+        if address.is_localhost() {
+            return Ok(published);
+        }
+        let name = dns_txt_name(address.host());
+        let records = self
+            .resolver
+            .txt(&name)
+            .map_err(|error| Restriction::DnsFailed {
+                name: name.clone(),
+                error,
+            })?;
+        let in_dns: Vec<PublicKey> = records.iter().filter_map(|r| parse_dns_txt(r)).collect();
+        if in_dns.is_empty() {
+            return Err(Restriction::DnsNoRecord { name });
+        }
+        let agreed: Vec<PublicKey> = published
+            .into_iter()
+            .filter(|k| in_dns.contains(k))
+            .collect();
+        if agreed.is_empty() {
+            return Err(Restriction::DnsMismatch { name });
+        }
+        Ok(agreed)
+    }
+
+    /// `GET /.well-known/vy-key` (SPEC-7.4.2).
     fn discover_keys(
         &self,
         address: &Address,
