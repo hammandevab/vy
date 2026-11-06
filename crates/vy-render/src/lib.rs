@@ -802,7 +802,7 @@ mod tests {
     /// engine, the same bytes `vy-cli bench` times as `raster.ops-2000`. A
     /// release-mode budget: a debug build only reports.
     #[test]
-    #[ignore = "M4: over budget on this machine: P95 44-56 ms in release (P50 34-35 ms), docs/notes/m4-perf.md"]
+    #[ignore = "M5: CPU raster in release, P95 17.5 ms (P50 14.9 ms) at load 0.2-0.5 and 44-56 ms (P50 34-35 ms) at load 4-6, vs 2 ms; GPU path, spec question 65, docs/notes/m4-perf.md"]
     fn spec_13_2_1_raster_budget() {
         if cfg!(debug_assertions) {
             eprintln!("SPEC-13.2.1 is a release-mode budget; run with --release");

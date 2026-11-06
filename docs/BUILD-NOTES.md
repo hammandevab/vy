@@ -64,7 +64,8 @@ med spåret och dess egen numrering inom parentes. Spårens noteringar använder
     referensmodulen (31 KB) över loopback. Ska sviten ha en syntetisk 300 KB-modul och en simulerad
     länk, eller räcker uppskattningen tills referensmaskinen finns?
 65. **SPEC-13.2.1 på vilken maskin, med vilken rasterisering** (m4/perf, 55). 2 ms för 2 000 opkoder
-    hålls inte med CPU-rasteriseringen som ger dagens guldbilder (34 ms på byggmaskinen). Gäller
+    hålls inte med CPU-rasteriseringen som ger dagens guldbilder (P50 34 ms, P95 44–56 ms på
+    byggmaskinen vid last 4–6; P50 14,9 ms, P95 17,5 ms vid last 0,2–0,5, granskning 0008). Gäller
     budgeten GPU-vägen, ska ramen räknas om, eller budgeten höjas för CPU-vägen? Testet
     `spec_13_2_1_raster_budget` är ignorerat med det uppmätta värdet.
 

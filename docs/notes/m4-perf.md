@@ -424,7 +424,7 @@ skälet, och ägaren avgör.
 | `spec_13_1_4_compile_time` | vy-cli | `hello` kallt; varje referensmodul ur kompileringscachen | P95 22 ms (≤ 60); träff P95 0,34–0,83 ms (0 ms) |
 | `spec_13_1_2_first_frame_cache_hit` | vy-cli | Enter till komponerad bild, lokal fil, flikprocess (`hello`, `text`) | P95 62 / 87 ms (≤ 100) |
 | `spec_13_1_3_first_frame_cold` | vy-cli | `text` byggd med `vy-publish`, serverad av `vy-serve` på loopback, ny HTTP-cache och nyckelförråd varje körning, ny flikprocess utan kompileringscache | P95 138 ms (≤ 400) |
-| `spec_13_2_1_raster_budget` | vy-render | `frame_2000` 1280 × 800, varm textmotor | P95 44–56 ms, P50 34–35 ms mot 2 ms: **ignorerat med värdet** |
+| `spec_13_2_1_raster_budget` | vy-render | `frame_2000` 1280 × 800, varm textmotor | P95 44–56 ms, P50 34–35 ms vid last 4–6, och P95 17,5 ms, P50 14,9 ms vid last 0,2–0,5 (granskning 0008), mot 2 ms: **ignorerat med båda värdena** |
 | `spec_13_2_2_input_latency` | vy-cli | pekarhändelse in i `dashboard`-fliken till komponerad bild | P95 7,4 ms (≤ 16) |
 | `spec_13_2_3_scroll_fps` | vy-cli | rullning av `text`, frame + rasterisering; textcachens missar | P95 2,4 ms (≤ 16,7); missar 2,6 % / 0 % (≤ 5) |
 | `spec_6_2_2_idle_is_free` | vy-runtime | skalets tickregel över en sida som bränner bränsle i `vy_frame` | 1 000 tomgångstick: 0 frames, 0 bränsle; animerande: en frame per tick; åter tomgång när den slutar be (alla byggen) |
