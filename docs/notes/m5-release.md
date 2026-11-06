@@ -5,14 +5,14 @@ en annan agent. Sessionen kan startas om: läget står här och i `git log`.
 
 ## Läge
 
-| Steg | Vad | Läge |
-| --- | --- | --- |
-| 1 | SPEC-9.7.1 reproducerbara byggen | moduler och releasejobb klara; spec-förtydligande kvar |
-| 2 | SPEC-12.3.1 storleksbudget som test | – |
-| 3 | `a11y-linux` under taket, på som standard på Linux | – |
-| 4 | kodsignering i `release.yml`, `docs/RELEASING.md` | – |
-| 5 | versionen: `vy-dev new` pinnar taggen, arbetsytans version, kontroll i `release.yml` | – |
-| 6 | noteringarna klara | – |
+| Steg | Vad | Läge | Commit |
+| --- | --- | --- | --- |
+| 1 | SPEC-9.7.1 reproducerbara byggen | klart; binärerna jämförda lokalt, CI-jobbet `repro` okört | `d74827e`, `54ca612`, `f783931` (`spec:`) |
+| 2 | SPEC-12.3.1 storleksbudget som test | klientens halva grön i release; kodbasens halva ignorerad med talet (spec-fråga 67) | `bc8d80e`, `c271466` |
+| 3 | `a11y-linux` under taket, på som standard på Linux | klart, 24 212 688 byte (med m5/gpu:s GL 24 524 312) | `12475ed`, `5fc61c8`, `bc669ab` |
+| 4 | kodsignering i `release.yml`, `docs/RELEASING.md` | skrivet, okört (inga secrets, ingen Windows/macOS) | `e9a5bc7` |
+| 5 | versionen: `vy-dev new` pinnar taggen, 0.2.0, kontroll i `release.yml` | klart | `2084f6d` |
+| 6 | noteringarna | klart | sista commit |
 
 ## Steg 1 – reproducerbara byggen (SPEC-9.7.1)
 
@@ -253,3 +253,73 @@ eller macOS-maskin, `pwsh` finns inte här. YAML:en parsas; bash-delarna är syn
   går igenom, `v0.3.0` stoppar med "set it to 0.3.0 and commit first".
 - Nästa release: höj versionen i ett eget commit (låsfilerna följer), tagga sedan. `docs/RELEASING.md`
   (*Släppa en version*) säger det och varför.
+
+## Beslut
+
+1. **Paketens reproducerbarhet är paketidentiteten** (SPEC-4.1.2), inte filens byte: Studio signeras
+   med en engångsnyckel och ska fortsätta med det (vy-dev signerar om). Skrivet in i SPEC-9.7.1
+   (`spec:`-commit `f783931`), med vad som jämförs (samma commit, mål, verktygskedja och slags
+   maskin; sökväg, användare och tid får skilja) och att en signerad binär jämförs osignerad.
+2. **Modulernas metadatahash** rättas med en rustc-wrapper i stället för att flytta modulerna in i
+   en gemensam arbetsyta (deras profiler skiljer sig från arbetsytans, och `modules/` är m5/sdk:s)
+   eller bygga i en fast absolut katalog (krockar mellan samtidiga byggen, fungerar inte på Windows).
+3. **Ett byggskript för releasen** (`tools/build_release.sh`) som `release.yml`, CI och receptet
+   kör, i stället för kommandon inskrivna i tre YAML-filer.
+4. **Releasen byggs utan cache** och med actions pinnade på commit.
+5. **25 MB läses decimalt** (25 000 000 byte), det strängare, som granskning 0006 föreslog; spec-fråga
+   56 om MB/MiB står kvar för ägaren.
+6. **Typsnitten:** bara serif och mono komprimeras; att komprimera sans och bold sparar 755 777 byte
+   till men kostar varje process 3–5 ms (flikens kallstart +36 %).
+7. **Storleksprofilen** gäller bara crates som enbart Linux-skalet bygger (AT-SPI och X11/Wayland),
+   så att inget annat bygge och ingen annan plattform ändras, och inget i en frames arbete.
+8. **Kodbasens tokens:** räkningen är byte/4 över git-spårade textfiler; testet är ignorerat med
+   talet i stället för att få en definition som råkar ge under 400 000.
+
+## Nya beroenden
+
+Inga nya crates. `vy-render` får en kant till `zstd` 0.14 (fanns i trädet genom vy-manifest och
+vy-proto, i varje binär som länkar vy-render); `Cargo.lock` får en rad. Verktyg: `tools/repro_rustc.rs`
+och `tools/release_files.py` använder bara standardbiblioteken. I `release.yml` en ny action,
+`azure/artifact-signing-action` v2.0.0 (Microsofts egen, för Windows-signering; körs bara med
+secrets), pinnad på commit.
+
+## Öppet
+
+1. **CI-jobben är okörda.** `repro` (Linux grind, macOS och Windows `continue-on-error`), `size`,
+   `release.yml` med `build_release.sh`, `SHA256SUMS`, `BUILD.md`, versionskontrollen och
+   signeringen har inte körts på GitHub; YAML:en parsas, skripten är körda här på Linux.
+   Windows-delen av `repro_env.sh` (`pwd -W`, `cygpath`, `/Brepro`) och macOS-delen är bara lästa.
+   Första körningen av `repro` på macOS och Windows avgör om `continue-on-error` kan tas bort.
+2. **Signeringen** kräver ägarens köp och secrets (`docs/RELEASING.md`); den är okörd.
+3. **Spec-fråga 67** (kodbasens 400 000 tokens) för ägaren; `spec_12_3_1_codebase_tokens` ignorerat.
+4. **Marginalen** mot 25 MB är 475 688 byte (1,9 %) med m5/gpu:s GL-väg. Nästa större tillägg i
+   skalet äter den; kandidater som inte är prövade: `lto = "fat"` (påverkar alla binärer och
+   byggtiden), `opt-level = "s"` för fler kalla crates (rustls, ureq, arboard), och att kompilera
+   bort `pulley-interpreter` (kräver en ändring i wasmtime). Windows- och macOS-klientens storlek är
+   okänd tills `release.yml` körts; den stoppar över taket.
+5. **Typsnitten:** cosmic-text läser varje snitt av en annan vikt vid matchning (`FontMatchKey::new`
+   letar efter en variabel `wght`-axel), så fet text packar upp serif och mono. En cosmic-text som
+   frågar fontdb om axeln först, eller egna snitt utan den kontrollen, skulle göra uppackningen
+   helt lat; inget för det här spåret.
+6. `docs/DEVELOPING.md` säger fortfarande "vy-sdk från disk i stället för git" om `--sdk`; att det nu
+   är releasens tagg står i `docs/RELEASING.md` (m5/sdk äger DEVELOPING).
+
+## Berör andra spår
+
+- **m5/sdk:** `modules/*/Cargo.lock` (tolv filer, `vy-abi` och `vy-sdk` 0.1.0 → 0.2.0); en modul
+  som läggs till eller får beroenden måste ha en aktuell `Cargo.lock`, eftersom `build_modules.sh` nu
+  bygger med `--locked`. `tools/build_modules.sh` tar modulnamn som argument och kör genom
+  `tools/repro_rustc.rs`; `tools/build_studio.sh` bygger genom det. `vy-dev`:s mall: bara raden med
+  `vy-sdk` (`scaffold.rs`, `SDK_TAG`) och testerna för den; CLAUDE.md-mallen är orörd. Spec-frågornas
+  numrering: m5/sdk använder inga nya; m5/gpu har 66, det här spåret 67.
+- **m5/gpu:** `crates/vy-render/src/text.rs` – typsnittsladdningen (`BundledFace`, `FaceData`,
+  `BUNDLED_FACES`, slingan i `TextEngine::new`) och ett test; rasteriseringen är orörd. Provsammanslagen
+  med m5/gpu: en konflikt, raden `default = [...]` i `crates/vy-shell/Cargo.toml`, som ska bli
+  `["window", "gl", "a11y-linux"]`; resten, `text.rs` inräknat, slogs ihop automatiskt. Rotens
+  `Cargo.toml` får båda spårens tillägg (m5/gpu: `glow`, `glutin`; här: kommentaren vid AccessKit
+  och `[profile.release.package]` sist). `crates/vy-shell/src/lib.rs`: bara
+  `spec_9_7_1_reproducible_build`.
+- **Alla:** arbetsytans version är 0.2.0; `Cargo.lock` följer. Release-profilen har
+  `[profile.release.package]` med 51 crates på `opt-level = "s"`. `vy-shell` bygger AT-SPI-stacken
+  (+80 crates) som standard också i debug, så `cargo test --workspace` tar längre tid första gången.
+  `.gitattributes` har `*.zst binary`. `docs/BUILD-NOTES.md`: en mening om läget i spec-fråga 56.
