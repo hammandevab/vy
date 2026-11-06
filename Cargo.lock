@@ -3264,6 +3264,7 @@ dependencies = [
  "unicode-script",
  "vy-abi",
  "vy-dl",
+ "zstd",
 ]
 
 [[package]]

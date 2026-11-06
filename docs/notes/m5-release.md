@@ -111,3 +111,32 @@ en riktig tokeniserare). Ska taket höjas (t.ex. 1 000 000), ska "kodbasen" bety
 (utan `docs/notes`, `docs/reviews`, låsfiler och genererade `conformance/semantic/*.json`: ungefär
 720 000), eller ska meningen bli ett mål snarare än en grind? Räkningen i testet är ett förslag; en
 annan definition är ett `spec:`-commit med testet.
+
+## Steg 3 – `a11y-linux` under taket (pågår)
+
+Utgångsläget på `0fc0453` + steg 1 (release, `--target x86_64-unknown-linux-gnu`, miljön ur
+`repro_env.sh`, strippad): `vy-shell` **22 364 840** byte, `--features a11y-linux` **25 476 976**
+(+3 112 136; 476 976 över taket). Integrationens tal på `3b1cbac` utan `--target`: 22 322 112 och
+25 435 064.
+
+**wasmtime.** `vy-runtime` har redan `default-features = false` och bara `cranelift`, `runtime`,
+`std`. `pulley-interpreter` går inte att välja bort i wasmtime 50: `runtime` slår på
+`pulley-interpreter/interp` och `wasmtime-internal-cranelift` beroendet har `features = ["pulley"]`
+ovillkorligt; `incremental-cache` kommer från `wasmtime-internal-cranelift`:s standardfunktioner,
+som wasmtime inte stänger av. Inget att vinna utan att laga wasmtime.
+
+**Typsnitten, första försöket: alla fyra zstd-komprimerade, uppackade vid start.** 1 009 331 byte i
+stället för 2 192 440 (nivå 19); `vy-cli` blev 1 213 456 byte mindre. Men uppackningen kostar i
+varje process: i release 1,6 ms för DejaVu Sans, 1,5 bold, 0,9 serif, 0,8 mono (last 2–3). Och
+cosmic-text läser både sans och sans bold redan i `TextEngine::new` (provat: efter `new` var de två
+uppackade, serif och mono inte), så att packa upp lat per snitt räddar bara serif och mono. Mätt
+med `vy-cli bench --runs 100 --only tab.cold-start`, A/B med två release-binärer omväxlande:
+**P50 14,9 → 20,3 ms** (P95 21,1 → 29,5), +36 %, långt över SPEC-12.2.3:s 5 %. Förkastat.
+
+**Valt: serif och mono komprimerade, sans och sans bold som de är.** Snitten registreras med
+`fontdb::Database::push_face_info` och metadata (familj, PostScript-namn, vikt, monospace), så att
+inget tolkas i `new`; bytena läses först när texten formas, och de komprimerade packas upp då, en
+gång per process (`OnceLock`, `zstd::bulk::decompress` till exakt storlek ur ramhuvudet). Sparar
+354 728 byte. `bundled_faces_are_the_ttf_files` jämför bytena med `.ttf` och metadata med vad
+`fontdb` läser ur dem. Ändringen i `text.rs` är bara typsnittsladdningen (statiska data och slingan
+i `TextEngine::new`) och testet; `.ttf`-filerna ligger kvar i `fonts/` (testet läser dem).

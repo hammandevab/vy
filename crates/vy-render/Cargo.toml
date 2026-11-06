@@ -13,3 +13,6 @@ tiny-skia.workspace = true
 cosmic-text.workspace = true
 unicode-script.workspace = true
 png.workspace = true
+# The bundled fonts are zstd-compressed in the binary (src/text.rs, SPEC-12.3.1):
+# the decoder every binary that links vy-render already has through vy-manifest.
+zstd.workspace = true
