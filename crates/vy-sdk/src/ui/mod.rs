@@ -1,6 +1,6 @@
-//! Ready-made controls for pages: text fields, buttons, a checkbox, a
-//! radio group, a slider, a virtualised list, a scroll area and two layout
-//! stacks.
+//! Ready-made controls for pages: [`TextBox`] (one line or several),
+//! [`Button`], [`Checkbox`], [`RadioGroup`], [`Slider`], a virtualised
+//! [`List`], a [`ScrollView`], and the layout stacks [`Column`] and [`Row`].
 //!
 //! The components are ordinary module code on top of [`Frame`] and the
 //! typed imports: nothing here needs anything the ABI lacks, every one is
@@ -28,7 +28,7 @@
 //!   on it however the rest of the tree changes.
 //! - **Focus** is the host's (SPEC-10.3.1): a component learns it from
 //!   `Event::Focus` with its id and draws the focus mark itself
-//!   (SPEC-10.3.3). A list or scroll area has no focusable role
+//!   (SPEC-10.3.3). A [`List`] or [`ScrollView`] has no focusable role
 //!   (SPEC-10.3.2); it takes keys while *active*, after a press inside it
 //!   that gave no node focus.
 //! - **Style** comes from a [`Theme`], built once in `App::init` (it
@@ -79,7 +79,9 @@ mod button;
 mod checkbox;
 mod input;
 mod layout;
+mod list;
 mod radio;
+mod scroll;
 mod slider;
 mod textbox;
 mod theme;
@@ -88,7 +90,9 @@ pub use button::{Button, ButtonKind};
 pub use checkbox::Checkbox;
 pub use input::{Input, Response};
 pub use layout::{split, Column, Row};
+pub use list::{List, Rows};
 pub use radio::RadioGroup;
+pub use scroll::{ScrollView, BAR_W, LINE_PX};
 pub use slider::Slider;
 pub use textbox::{TextBox, MAX_LINE_BYTES, MAX_MULTILINE_BYTES};
 pub use theme::{Palette, Theme, Words};

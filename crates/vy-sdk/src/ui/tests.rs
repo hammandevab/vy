@@ -479,3 +479,269 @@ fn spec_2_1_3_stacks() {
     assert_eq!(split::<1>(area, 10.0)[0], area);
     let _: Color = Palette::DARK.accent;
 }
+
+fn wheel(dy: f32, lines: bool) -> Event<'static> {
+    Event::Scroll {
+        dx: 0.0,
+        dy,
+        lines,
+        modifiers: Modifiers(0),
+    }
+}
+
+fn hover(x: f32, y: f32) -> Event<'static> {
+    Event::PointerMove {
+        x,
+        y,
+        buttons: 0,
+        modifiers: Modifiers(0),
+    }
+}
+
+/// SPEC-10.1.1, SPEC-10.3.2, SPEC-A.2.1: a scroll area clips its content to
+/// the viewport and draws a thumb; the wheel scrolls it under the pointer
+/// (or with the pointer unknown) and is left alone at the ends; it takes
+/// keys only while active – after a press inside it that gave no node the
+/// host's focus – and the thumb drags; `reveal` scrolls the least that
+/// brings a rectangle into view.
+#[test]
+fn spec_10_3_2_scroll_view() {
+    let t = theme();
+    let v = Rect::new(0.0, 0.0, 200.0, 100.0);
+    let content = 400.0;
+    let mut s = ScrollView::new();
+    let off = s.offset();
+    let (ops, _) = drawn(|f| {
+        s.draw(f, v, &t, content, |f| {
+            f.rect(Rect::new(0.0, -off, 10.0, 10.0), 0.0, Palette::LIGHT.ink)
+        })
+    });
+    assert_eq!(
+        ops[0],
+        Op::ClipPush {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+            radius: 0.0
+        }
+    );
+    assert_eq!(ops[2], Op::ClipPop);
+    assert_eq!(
+        rects(&ops)[1],
+        (192.0, 2.0, 6.0, 24.0, Palette::LIGHT.track.0),
+        "the thumb"
+    );
+    assert_eq!(ScrollView::max_offset(v, content), 300.0);
+
+    let send = |s: &mut ScrollView, e: Event<'static>| {
+        let mut ui = Input::new(e);
+        (s.event(&mut ui, v, &t, content), ui.taken())
+    };
+    assert_eq!(
+        send(&mut s, wheel(50.0, false)),
+        (Response::Redraw, true),
+        "pointer unknown"
+    );
+    assert_eq!(send(&mut s, wheel(1.0, true)), (Response::Redraw, true));
+    assert_eq!(s.offset(), 50.0 + LINE_PX);
+    send(&mut s, hover(300.0, 50.0));
+    assert_eq!(
+        send(&mut s, wheel(10.0, false)),
+        (Response::Nothing, false),
+        "pointer elsewhere"
+    );
+    send(&mut s, hover(100.0, 50.0));
+    assert_eq!(send(&mut s, wheel(-500.0, false)), (Response::Redraw, true));
+    assert_eq!(
+        send(&mut s, wheel(-1.0, false)),
+        (Response::Nothing, false),
+        "at the top: not ours"
+    );
+
+    assert_eq!(
+        send(&mut s, key(key::DOWN)),
+        (Response::Nothing, false),
+        "not active"
+    );
+    assert_eq!(
+        send(&mut s, down(50.0, 50.0)),
+        (Response::Redraw, false),
+        "active; the press is the content's"
+    );
+    assert!(s.active());
+    let keys = [
+        (key::DOWN, LINE_PX),
+        (key::PAGE_DOWN, LINE_PX + 60.0),
+        (key::SPACE, LINE_PX + 120.0),
+        (key::END, 300.0),
+        (key::UP, 300.0 - LINE_PX),
+        (key::HOME, 0.0),
+    ];
+    for (code, want) in keys {
+        assert!(send(&mut s, key(code)).1, "key {code} taken");
+        assert_eq!(s.offset(), want, "key {code}");
+    }
+    send(&mut s, key(key::END));
+    send(&mut s, key_with(key::SPACE, 1));
+    assert_eq!(s.offset(), 240.0, "Shift+Space pages up");
+    assert_eq!(send(&mut s, key(key::END)).0, Response::Redraw);
+    assert_eq!(send(&mut s, key(key::END)), (Response::Nothing, true));
+    assert_eq!(send(&mut s, key(key::LEFT)), (Response::Nothing, false));
+    let (ops, _) = drawn(|f| s.draw(f, v, &t, content, |_| Ok(())));
+    let ring: Vec<_> = rects(&ops)
+        .into_iter()
+        .filter(|r| r.4 == Palette::LIGHT.ring.0)
+        .collect();
+    assert_eq!(
+        ring.len(),
+        4,
+        "an outline, since the area has no background"
+    );
+
+    // The host's focus on a control inside ends the activity, and a press
+    // that focused it (FOCUS first) does not start it again.
+    assert_eq!(send(&mut s, focus(-1, true)), (Response::Redraw, false));
+    assert!(!s.active());
+    send(&mut s, down(50.0, 50.0));
+    assert!(!s.active());
+    send(&mut s, focus(-1, false));
+    let mut ui = Input::new(down(50.0, 50.0));
+    ui.take();
+    s.event(&mut ui, v, &t, content);
+    assert!(!s.active(), "an inner component took the press");
+    send(&mut s, down(50.0, 50.0));
+    assert!(s.active());
+    send(&mut s, down(250.0, 50.0));
+    assert!(!s.active(), "a press outside");
+
+    // The bar: the thumb (now at the bottom) drags, the track pages.
+    let thumb = s.thumb(v, content).unwrap();
+    assert_eq!((thumb.y, thumb.h), (74.0, 24.0));
+    assert_eq!(send(&mut s, down(195.0, 80.0)), (Response::Redraw, true));
+    assert!(s.dragging());
+    assert_eq!(
+        send(&mut s, drag(195.0, 2.0 + 6.0 + 36.0)).0,
+        Response::Redraw
+    );
+    assert_eq!(s.offset(), 150.0, "half way down the track");
+    assert_eq!(send(&mut s, up(195.0, 42.0)), (Response::Redraw, true));
+    assert!(!s.dragging());
+    send(&mut s, down(195.0, 10.0));
+    assert_eq!(s.offset(), 90.0, "a press above the thumb pages up");
+    let mut short = Input::new(down(195.0, 10.0));
+    assert!(
+        ScrollView::new().event(&mut short, v, &t, 50.0).redraw(),
+        "no bar: just the press, which makes the area active"
+    );
+    assert!(!short.taken());
+
+    // reveal: below, above, taller than the view.
+    let mut s = ScrollView::new();
+    assert!(s.reveal(Rect::new(0.0, 150.0, 10.0, 20.0), v, content));
+    assert_eq!(s.offset(), 70.0);
+    assert!(!s.reveal(Rect::new(0.0, 50.0, 10.0, 20.0), v, content));
+    assert!(s.reveal(Rect::new(0.0, -30.0, 10.0, 20.0), v, content));
+    assert_eq!(s.offset(), 40.0);
+    s.scroll_to(0.0, v, content);
+    s.reveal(Rect::new(0.0, 60.0, 10.0, 300.0), v, content);
+    assert_eq!(s.offset(), 60.0, "a tall rectangle: its top");
+    s.clamp(v, 120.0);
+    assert_eq!(s.offset(), 20.0);
+}
+
+/// SPEC-10.1.1, SPEC-10.3.2: a list draws only the rows in view but
+/// registers a `listitem` for every row under its `list` node; a press
+/// selects a row and on the selected row activates it; while active the
+/// keys move the selection and scroll it into view, Enter activates; the
+/// host's focus elsewhere ends the activity.
+#[test]
+fn spec_10_1_1_list() {
+    let t = theme();
+    let r = Rect::new(0.0, 0.0, 200.0, 120.0);
+    let rows: Vec<alloc::string::String> = (1..=50).map(|i| alloc::format!("Rad {i}")).collect();
+    let rows = &rows[..];
+    let mut l = List::new(40.0);
+    assert_eq!(l.visible(r, 50), 0..3);
+    let (ops, sem) = drawn(|f| l.draw(f, r, &t, rows));
+    assert_eq!(texts(&ops).len(), 3, "virtualised: three rows drawn");
+    assert_eq!(sem.len(), 51, "the list and every row");
+    assert_eq!((sem[0].role, sem[0].parent_id), (Role::List as i32, 0));
+    assert!(sem[1..]
+        .iter()
+        .all(|n| n.role == Role::ListItem as i32 && n.parent_id == sem[0].id));
+    assert_eq!((sem[50].text.as_str(), sem[50].y), ("Rad 50", 49.0 * 40.0));
+
+    let send = |l: &mut List, e: Event<'static>| {
+        let mut ui = Input::new(e);
+        (l.event(&mut ui, r, &t, rows), ui.taken())
+    };
+    assert_eq!(
+        send(&mut l, key(key::DOWN)),
+        (Response::Nothing, false),
+        "not active"
+    );
+    assert_eq!(send(&mut l, down(50.0, 50.0)), (Response::Changed, true));
+    assert_eq!((l.selected(), l.active()), (Some(1), true));
+    assert_eq!(send(&mut l, down(50.0, 50.0)), (Response::Activated, true));
+    assert_eq!(send(&mut l, key(key::DOWN)), (Response::Changed, true));
+    assert_eq!(l.selected(), Some(2));
+    assert_eq!(send(&mut l, key(key::END)).0, Response::Changed);
+    assert_eq!((l.selected(), l.offset()), (Some(49), 50.0 * 40.0 - 120.0));
+    assert_eq!(l.visible(r, 50), 47..50);
+    assert_eq!(
+        send(&mut l, key(key::DOWN)),
+        (Response::Nothing, true),
+        "at the end"
+    );
+    assert_eq!(send(&mut l, key(key::HOME)).0, Response::Changed);
+    assert_eq!(l.offset(), 0.0);
+    send(&mut l, key(key::PAGE_DOWN));
+    assert_eq!(l.selected(), Some(2), "a page is the rows in view less one");
+    send(&mut l, key(key::PAGE_UP));
+    assert_eq!(l.selected(), Some(0));
+    assert_eq!(send(&mut l, key(key::ENTER)), (Response::Activated, true));
+    assert_eq!(send(&mut l, key(key::ESCAPE)), (Response::Nothing, false));
+
+    let (ops, sem) = drawn(|f| l.draw(f, r, &t, rows));
+    assert_eq!(sem[1].text, "Rad 1 (vald)");
+    let rs = rects(&ops);
+    assert_eq!(
+        rs[0],
+        (-3.0, -3.0, 206.0, 126.0, Palette::LIGHT.ring.0),
+        "active: a ring"
+    );
+    assert!(rs.contains(&(0.0, 0.0, 200.0, 40.0, Palette::LIGHT.selection.0)));
+    assert!(
+        rs.iter()
+            .any(|r| r.0 == 192.0 && r.4 == Palette::LIGHT.track.0),
+        "a scroll bar"
+    );
+
+    // The wheel goes to the list's scroll area.
+    assert_eq!(send(&mut l, wheel(2.0, true)), (Response::Redraw, true));
+    assert_eq!(l.offset(), 80.0);
+    assert_eq!(l.row_at(r, 50, 10.0, 5.0), Some(2));
+    assert_eq!(l.row_rect(r, 2).y, 0.0);
+
+    send(&mut l, focus(-9, true));
+    assert!(!l.active());
+    assert!(!send(&mut l, key(key::DOWN)).1);
+    l.set_active(true);
+    assert!(l.select(None, r, 50));
+    assert_eq!(l.selected(), None);
+    assert_eq!(send(&mut l, key(key::DOWN)).0, Response::Changed);
+    assert_eq!(l.selected(), Some(0));
+
+    // Arrays and slices of &str are rows too.
+    let mut small = List::new(30.0);
+    let (_, sem) = drawn(|f| small.draw(f, r, &t, &["Ett", "Två"]));
+    assert_eq!(sem.len(), 3);
+    assert!(Rows::is_empty(&[""; 0]));
+    assert_eq!(
+        send(&mut l, down(50.0, 500.0)),
+        (Response::Redraw, false),
+        "a press outside ends the activity, and is not the list's"
+    );
+    assert!(!l.active());
+}
