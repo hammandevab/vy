@@ -26,8 +26,8 @@ use alloc::format;
 use alloc::string::String;
 use vy_sdk::prelude::*;
 use vy_sdk::ui::{
-    self, Button, Checkbox, Column, Input, List, Palette, RadioGroup, Row, ScrollView, Slider,
-    TextBox, Theme,
+    self, Button, Checkbox, Column, Input, List, Multiline, Palette, RadioGroup, Row, ScrollView,
+    Slider, TextBox, Theme,
 };
 use vy_sdk::{clipboard_write, text_measure};
 
@@ -156,7 +156,7 @@ struct Page {
     s: Styles,
     main: ScrollView,
     name: TextBox,
-    note: TextBox,
+    note: TextBox<Multiline>,
     news: Checkbox,
     size: RadioGroup,
     volume: Slider,

@@ -9,6 +9,7 @@ use crate::sem::{NodeId, Role};
 use crate::{math, Rect, StyleId, VyError};
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::marker::PhantomData;
 use core::ops::Range;
 use vy_abi::limits;
 
@@ -70,10 +71,14 @@ struct Para {
 ///   empty, the selection behind the text while focused. A one-line field
 ///   scrolls sideways to keep the caret in view; a multi-line one wraps at
 ///   word boundaries and scrolls down.
+///
+/// The line mode is part of the type: `TextBox` (one line, the default) and
+/// `TextBox<Multiline>`, so a page with one-line fields only carries no
+/// wrapping code.
 #[derive(Clone, Debug)]
-pub struct TextBox {
+pub struct TextBox<L: Lines = OneLine> {
     id: i32,
-    multiline: bool,
+    lines: PhantomData<L>,
     text: String,
     caret: usize,
     anchor: usize,
@@ -93,18 +98,61 @@ pub struct TextBox {
     wrap: Wrap,
 }
 
-impl TextBox {
+/// The line mode of a [`TextBox`]: [`OneLine`] or [`Multiline`].
+pub trait Lines: Copy + core::fmt::Debug + 'static {
+    /// True when the field wraps and takes line breaks.
+    const MULTI: bool;
+    /// Most bytes a field of this mode takes unless `with_max_len` says
+    /// otherwise.
+    const MAX_BYTES: usize;
+}
+
+/// A one-line field: Enter activates it, a line break typed or pasted
+/// becomes a space, and the text scrolls sideways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OneLine {}
+
+/// A multi-line field: Enter breaks the line, the text wraps at word
+/// boundaries and scrolls down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Multiline {}
+
+impl Lines for OneLine {
+    const MULTI: bool = false;
+    const MAX_BYTES: usize = MAX_LINE_BYTES;
+}
+
+impl Lines for Multiline {
+    const MULTI: bool = true;
+    const MAX_BYTES: usize = MAX_MULTILINE_BYTES;
+}
+
+impl TextBox<OneLine> {
     /// An empty one-line field with node id `id` (negative, SPEC-5.2.13).
     pub fn new(id: i32) -> Self {
+        Self::empty(id)
+    }
+}
+
+impl TextBox<Multiline> {
+    /// An empty multi-line field with node id `id`; its type is
+    /// `TextBox<Multiline>`.
+    pub fn multiline(id: i32) -> Self {
+        Self::empty(id)
+    }
+}
+
+impl<L: Lines> TextBox<L> {
+    fn empty(id: i32) -> Self {
         Self {
             id,
-            multiline: false,
+            lines: PhantomData,
             text: String::new(),
             caret: 0,
             anchor: 0,
             compose: String::new(),
             compose_caret: 0,
-            max_len: MAX_LINE_BYTES,
+            max_len: L::MAX_BYTES,
             focused: false,
             dragging: false,
             hover: false,
@@ -116,15 +164,6 @@ impl TextBox {
             last_copy: None,
             revision: 0,
             wrap: Wrap::default(),
-        }
-    }
-
-    /// An empty multi-line field with node id `id`.
-    pub fn multiline(id: i32) -> Self {
-        Self {
-            multiline: true,
-            max_len: MAX_MULTILINE_BYTES,
-            ..Self::new(id)
         }
     }
 
@@ -155,7 +194,7 @@ impl TextBox {
 
     /// True for a multi-line field.
     pub fn is_multiline(&self) -> bool {
-        self.multiline
+        L::MULTI
     }
 
     /// Most bytes the field takes.
@@ -233,7 +272,7 @@ impl TextBox {
         let mut clean = String::new();
         for c in s.chars() {
             let c = match c {
-                '\n' if self.multiline => '\n',
+                '\n' if L::MULTI => '\n',
                 '\n' | '\t' => ' ',
                 c if c.is_control() => continue,
                 c => c,
@@ -334,7 +373,7 @@ impl TextBox {
 
     /// Where the first line's text starts.
     fn origin(&self, r: Rect, theme: &Theme) -> (f32, f32) {
-        let y = if self.multiline {
+        let y = if L::MULTI {
             r.y + Self::pad_y(theme)
         } else {
             r.y + (r.h - theme.line_h) / 2.0
@@ -361,7 +400,7 @@ impl TextBox {
         }
         self.wrap.key = None;
         self.wrap.lines.clear();
-        if !self.multiline {
+        if !L::MULTI {
             self.wrap.lines.push((0, self.text.len()));
             self.wrap.key = Some(key);
             return Ok(());
@@ -454,18 +493,18 @@ impl TextBox {
             return self.caret;
         }
         let (tx, ty) = self.origin(r, theme);
-        let k = if self.multiline {
+        let k = if L::MULTI {
             let row = math::floor((y - ty + self.scroll_y) / theme.line_h);
             (row.max(0.0) as usize).min(self.wrap.lines.len().saturating_sub(1))
         } else {
             0
         };
-        let scroll_x = if self.multiline { 0.0 } else { self.scroll_x };
+        let scroll_x = if L::MULTI { 0.0 } else { self.scroll_x };
         self.offset_in_line(theme, k, x - tx + scroll_x)
     }
 
     fn vertical(&mut self, down: bool, extend: bool, r: Rect, theme: &Theme) -> Response {
-        if !self.multiline || self.layout(theme, Self::text_w(r)).is_err() {
+        if !L::MULTI || self.layout(theme, Self::text_w(r)).is_err() {
             return Response::Nothing;
         }
         let k = self.line_of(self.caret);
@@ -541,7 +580,7 @@ impl TextBox {
         ui.take();
         let sel = self.selection();
         match code {
-            key::ENTER if !self.multiline => Response::Activated,
+            key::ENTER if !L::MULTI => Response::Activated,
             key::ENTER => {
                 if self.insert("\n") {
                     Response::Changed
@@ -630,7 +669,7 @@ impl TextBox {
                 self.hover = false;
                 Response::Nothing
             }
-            Event::Scroll { dy, lines, .. } if self.multiline && self.hover => {
+            Event::Scroll { dy, lines, .. } if L::MULTI && self.hover => {
                 if self.layout(theme, Self::text_w(r)).is_err() {
                     return Response::Nothing;
                 }
@@ -680,7 +719,7 @@ impl TextBox {
     fn scroll_into_view(&mut self, r: Rect, theme: &Theme) {
         let k = self.line_of(self.caret);
         let (s, line) = self.line_str(k);
-        if self.multiline {
+        if L::MULTI {
             let max = (self.content_h(theme) - self.view_h(r, theme)).max(0.0);
             if self.reveal {
                 let y = k as f32 * theme.line_h;
@@ -756,13 +795,9 @@ impl TextBox {
             }
             return Ok(());
         }
-        let x0 = if self.multiline {
-            tx
-        } else {
-            tx - self.scroll_x
-        };
+        let x0 = if L::MULTI { tx } else { tx - self.scroll_x };
         let n = self.wrap.lines.len();
-        let (first, last) = if self.multiline {
+        let (first, last) = if L::MULTI {
             let first = math::floor(self.scroll_y / lh).max(0.0) as usize;
             let last = math::ceil((self.scroll_y + self.view_h(r, theme)) / lh) as usize;
             (first.min(n), last.min(n))
@@ -822,7 +857,7 @@ impl TextBox {
                 f.rect(caret_rect(x0 + xc, y), 0.0, p.ink)?;
             }
         }
-        if self.multiline {
+        if L::MULTI {
             let view = self.view_h(r, theme);
             let content = self.content_h(theme);
             if content > view {

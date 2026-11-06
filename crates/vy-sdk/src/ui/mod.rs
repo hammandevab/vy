@@ -94,7 +94,7 @@ pub use list::{List, Rows};
 pub use radio::RadioGroup;
 pub use scroll::{ScrollView, BAR_W, LINE_PX};
 pub use slider::Slider;
-pub use textbox::{TextBox, MAX_LINE_BYTES, MAX_MULTILINE_BYTES};
+pub use textbox::{Lines, Multiline, OneLine, TextBox, MAX_LINE_BYTES, MAX_MULTILINE_BYTES};
 pub use theme::{Palette, Theme, Words};
 
 use crate::event::Event;

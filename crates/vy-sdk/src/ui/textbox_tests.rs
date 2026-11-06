@@ -19,7 +19,7 @@ fn near(a: f32, b: f32) -> bool {
     (a - b).abs() < 1e-3
 }
 
-fn send(tb: &mut TextBox, e: Event<'_>, r: Rect, t: &Theme) -> (Response, bool) {
+fn send<L: Lines>(tb: &mut TextBox<L>, e: Event<'_>, r: Rect, t: &Theme) -> (Response, bool) {
     let mut ui = Input::new(e);
     let resp = tb.event(&mut ui, r, t);
     (resp, ui.taken())
