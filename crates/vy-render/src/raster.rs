@@ -2,7 +2,9 @@
 //!
 //! Every op is drawn in order, later over earlier (SPEC-6.1.3). Coordinates
 //! are logical pixels scaled by `scale` to physical pixels (SPEC-6.3.1).
-//! Headless and windowed rendering share this function (SPEC-11.3.2).
+//! Headless and windowed rendering share this code (SPEC-11.3.2): [`render`]
+//! is the reference, and [`crate::Renderer`] runs the same `Canvas` over
+//! regions of the canvas, as described at `Canvas`.
 //!
 //! Two things bound the host's own work here (SPEC-5.3.3, SPEC-9.3.1):
 //!

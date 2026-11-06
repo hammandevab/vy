@@ -180,7 +180,7 @@ Loggen gör varje nyckel en utgivare tagit i bruk synlig i efterhand; den är en
 - **[SPEC-11.2.1]** Display lists skickas från flikprocess till huvudprocess över delat minne (ringbuffert per flik).
 - **[SPEC-11.2.2]** En krasch i en flikprocess påverkar inte andra flikar eller huvudprocessen.
 - **[SPEC-11.3.1]** `vy-cli render <adress eller fil> --out <png> --size WxH [--scale S]` ger en deterministisk PNG utan fönster.
-- **[SPEC-11.3.2]** Headless-rendering och fönsterrendering använder samma kodväg i `vy-render`.
+- **[SPEC-11.3.2]** Headless-rendering och fönsterrendering använder samma kodväg i `vy-render`: fönstret får rita om bara det som ändrats sedan föregående frame och dela upp ytan i band som ritas parallellt, men varje bild det ritar är byte för byte den som headless-rendering ger för samma display list, storlek och skala; konformanssviten använder alltid headless-vägen.
 - **[SPEC-11.4.1]** Devtools kan spela in alla events och värd-svar för en session och spela upp dem mot samma modul för exakt reproduktion.
 - **[SPEC-11.5.1]** Klienten har inget tilläggssystem.
 

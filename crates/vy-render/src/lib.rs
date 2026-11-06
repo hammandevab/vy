@@ -1,7 +1,10 @@
 //! Rasterization: rectangles, paths, images, text shaping and glyph cache (SPEC §6).
 //!
-//! M1 ships a software rasterizer used by `vy-cli render`; wgpu arrives with M3.
-//! Headless and windowed rendering share this code path (SPEC-11.3.2).
+//! [`render`] is the reference: `vy-cli render`, the conformance suite and
+//! the shell's headless screenshots use it. The window uses [`Renderer`],
+//! which runs the same drawing code (`raster.rs`) over the regions that
+//! changed and in bands on threads, and gives the reference's bytes for
+//! every frame (SPEC-11.3.2). There is no GPU path (docs/notes/m5-gpu.md).
 #![deny(missing_docs)]
 
 pub mod bench;
