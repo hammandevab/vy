@@ -1,8 +1,9 @@
 //! The build pipeline of a page, in one step: `cargo build` for wasm32, the
 //! ABI check `vy-cli check-abi` runs, the manifest draft against the module
-//! and its resources (`vy_publish::build`), and a signed package written
-//! whole or not at all. Every stage writes to one log; a failure stops the
-//! pipeline and is reported, never raised past it.
+//! and its resources (`vy_publish::build`), the 8 ms frame check
+//! `vy-publish build` makes (SPEC-13.4.1, a warning here), and a signed
+//! package written whole or not at all. Every stage writes to one log; a
+//! failure stops the pipeline and is reported, never raised past it.
 
 use crate::project::Project;
 use crate::scaffold::lib_name;
@@ -201,7 +202,10 @@ fn run(
         .map_err(|e| anyhow!("{e}"))?;
     let package = vy_publish::build(&draft, module, resources, key).map_err(|e| anyhow!("{e}"))?;
 
-    // 4. The package, written whole or not at all.
+    // 4. The 8 ms frame check `vy-publish build` makes (SPEC-13.4.1).
+    frame_check(&package, log);
+
+    // 5. The package, written whole or not at all.
     let bytes = package.pack().map_err(|e| anyhow!("packing: {e}"))?;
     write_atomically(out, &bytes)?;
     log.line(&format!(
@@ -211,6 +215,39 @@ fn run(
         package.identity()
     ));
     Ok(package)
+}
+
+/// Run the publish-time frame check (`vy_publish::check_frames`,
+/// SPEC-13.4.1) and log its verdict. A frame over the 8 ms budget, or a
+/// module the check cannot run, is a warning and not a failure: the dev
+/// build is served on loopback only and the page must keep running while
+/// it is fixed, but `vy-publish build` refuses such a module, so the agent
+/// in Studio is told now.
+fn frame_check(package: &Package, log: &mut Log<'_>) {
+    let ms = |fuel: u64| fuel as f64 / vy_runtime::FUEL_PER_MS as f64;
+    let budget_ms = vy_runtime::FRAME_BUDGET_FUEL / vy_runtime::FUEL_PER_MS;
+    log.line(&format!(
+        "$ vy-publish build: frame check, {budget_ms} ms per frame (SPEC-13.4.1)"
+    ));
+    match vy_publish::check_frames(package) {
+        Ok(costs) => {
+            let worst = costs.iter().map(|c| c.fuel).max().unwrap_or(0);
+            log.line(&format!(
+                "frames: {} run headless, the costliest {:.1} ms of logical time ({worst} fuel)",
+                costs.len(),
+                ms(worst)
+            ));
+        }
+        Err(vy_publish::BuildError::OverBudget { frame, fuel, .. }) => log.line(&format!(
+            "warning: {frame} used {:.1} ms of logical time ({fuel} fuel), over the {budget_ms} ms \
+             frame budget (SPEC-13.4.1); served here, but vy-publish build refuses it without \
+             --allow-slow",
+            ms(fuel)
+        )),
+        Err(e) => log.line(&format!(
+            "warning: the frame check (SPEC-13.4.1) could not run the module: {e}"
+        )),
+    }
 }
 
 /// Write `bytes` to `path` through a temporary file next to it and a
