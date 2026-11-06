@@ -32,6 +32,7 @@ pub mod math;
 pub mod mock;
 mod raw;
 pub mod sem;
+pub mod ui;
 
 pub mod heap;
 
