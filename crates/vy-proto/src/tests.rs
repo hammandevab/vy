@@ -1511,3 +1511,17 @@ fn spec_7_6_2_7_6_3_key_log_checked_at_key_decisions() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// SPEC-9.5.3: a page whose own address is not loopback never reaches the
+/// user's machine, over https either (review 0007, finding 3).
+#[test]
+#[ignore = "SPEC-9.5.3: the private-network rule lands in the next commit"]
+fn spec_9_5_3_private_network_rule() {
+    let (f, dir) = fetcher("private-network");
+    let r = f.request("GET", "https://127.0.0.1:9/", b"", false, 1 << 20);
+    assert!(
+        matches!(&r, Err(e) if e.to_string().contains("SPEC-9.5.3")),
+        "{r:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
