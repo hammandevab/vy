@@ -194,8 +194,8 @@ struct Tab {
     /// The selection's highlight in page coordinates, for the frame count
     /// and selection it was computed for.
     selection_rects: Option<(u64, Selection, Vec<Rect>)>,
-    /// The file the tab's process records its session to (devtools,
-    /// SPEC-11.4.1); the next process of the tab is started with it.
+    /// The file the tab's session is recorded to (devtools, SPEC-11.4.1):
+    /// the frames the main process sends the tab's next process.
     record: Option<PathBuf>,
     /// The recording this tab replays; its last frame stays when the
     /// replay ends.
@@ -204,6 +204,14 @@ struct Tab {
     /// and whether a check is under way.
     live_version: Option<[u8; 32]>,
     check_pending: bool,
+    /// The OS sandbox of the tab's process (SPEC-9.1.3): what the main
+    /// process put around it and what the process reported of its own
+    /// lockdown before any page code ran in it. `None` until then, and
+    /// always for a thread-backed tab, which has no process of its own.
+    sandbox: Option<crate::sandbox::Report>,
+    /// A loaded page waiting to start because a process let go of for its
+    /// origin has not answered with its storage yet (SPEC-5.2.9).
+    parked: Option<Box<LoadedPage>>,
 }
 
 impl Tab {
@@ -257,6 +265,8 @@ impl Tab {
             replay: None,
             live_version: None,
             check_pending: false,
+            sandbox: None,
+            parked: None,
         }
     }
 
@@ -453,6 +463,8 @@ pub struct Shell {
     external_opens: Vec<String>,
     /// Processes let go of whose storage answer is still to come.
     retired: VecDeque<Retired>,
+    /// Ends the processes let go of, off this thread.
+    reaper: process::Reaper,
     /// The find bar, while open.
     find: Option<Find>,
     /// The devtools panel, while open.
@@ -513,6 +525,7 @@ impl Shell {
             quit: false,
             external_opens: Vec::new(),
             retired: VecDeque::new(),
+            reaper: process::Reaper::new()?,
             find: None,
             devtools: None,
             live_reload: false,
@@ -606,6 +619,13 @@ impl Shell {
         if let Some(c) = self.tab_mut(id).and_then(|t| t.conn.as_mut()) {
             c.kill();
         }
+    }
+
+    /// The OS sandbox of a tab's process as the shell knows it
+    /// (SPEC-9.1.3): `None` before the process reported and for a
+    /// thread-backed tab.
+    pub fn tab_sandbox(&self, id: TabId) -> Option<crate::sandbox::Report> {
+        self.tab(id).and_then(|t| t.sandbox.clone())
     }
 
     /// A tab's state, for tests and the status line.
@@ -808,7 +828,8 @@ impl Shell {
             return;
         };
         let mut tab = self.tabs.remove(index);
-        retire_process(&mut tab, &mut self.retired);
+        retire_process(&mut tab, &mut self.retired, &self.reaper, grace_deadline());
+        self.unpark();
         self.loader.close_tab(id);
         if self.tabs.is_empty() {
             self.quit = true;
@@ -943,7 +964,7 @@ impl Shell {
             let Some(tab) = find_tab(&mut self.tabs, id) else {
                 return;
             };
-            retire_process(tab, &mut self.retired);
+            retire_process(tab, &mut self.retired, &self.reaper, grace_deadline());
             tab.generation += 1;
             generation = tab.generation;
             let display = source.display();
@@ -992,7 +1013,10 @@ impl Shell {
             tab.replay = None;
             tab.live_version = None;
             tab.check_pending = false;
+            tab.sandbox = None;
+            tab.parked = None;
         }
+        self.unpark();
         if Some(id) == self.active_tab() {
             let display = self.tab(id).map(|t| t.display.clone()).unwrap_or_default();
             self.address.set_committed(&display);
@@ -1202,7 +1226,16 @@ impl Shell {
     }
 
     /// A loaded page: decide its grants, start its process and load it.
+    /// While a process let go of for the same origin has not answered with
+    /// its storage, the page waits (see [`Shell::unpark`]): it would start
+    /// with what was saved before (SPEC-5.2.9).
     fn start_page(&mut self, id: TabId, page: LoadedPage) {
+        if self.awaits_storage(page.origin.as_deref()) {
+            if let Some(tab) = find_tab(&mut self.tabs, id) {
+                tab.parked = Some(Box::new(page));
+            }
+            return;
+        }
         let resolved = match page.origin.as_deref() {
             Some(o) if page.trusted => self.grants.resolve(o, &page.verdicts),
             _ => page
@@ -1223,8 +1256,6 @@ impl Shell {
         };
         let page_rect = self.layout.page;
         let scale = self.scale;
-        let sink = self.inbox_tx.clone();
-        let waker = self.config.waker.clone();
         let exe = self.config.exe.clone();
         let (clock_ms, random) = if self.config.headless {
             (self.clock_headless, RandomSource::default())
@@ -1263,13 +1294,7 @@ impl Shell {
         };
         let generation = self.tab(id).map_or(0, |t| t.generation);
         let record = self.tab(id).and_then(|t| t.record.clone());
-        let forward = move |tab_id: TabId, inbound: Inbound| {
-            let ok = sink
-                .send(Incoming::Tab(tab_id, generation, inbound))
-                .is_ok();
-            waker.wake();
-            ok
-        };
+        let forward = self.sink_for(generation);
         let conn = match &exe {
             Some(exe) => process::spawn_process(exe, id, forward, record.as_deref(), None),
             None => process::spawn_thread(id, forward),
@@ -1350,7 +1375,10 @@ impl Shell {
     fn tab_message(&mut self, id: TabId, m: ToShell) {
         let active = Some(id) == self.active_tab();
         match m {
+            ToShell::Sandbox(report) => self.sandbox_reported(id, Some(report)),
             ToShell::Loaded { ok, error, .. } => {
+                // A load answered without a report leaves none to come.
+                self.sandbox_reported(id, None);
                 if let Some(tab) = self.tab_mut(id) {
                     if ok {
                         tab.loaded = true;
@@ -1533,6 +1561,43 @@ impl Shell {
         }
     }
 
+    /// The sandbox report of tab `id`'s process (SPEC-9.1.3), or `None` when
+    /// its load was answered without one. A report counts only before the
+    /// load is answered, while no page code has run in the process, and
+    /// only once: one after that could come from the page and is ignored.
+    /// No report counts as no sandbox. A sandbox that is not whole goes to
+    /// the tab's log in detail and to the chrome as its marker.
+    fn sandbox_reported(&mut self, id: TabId, report: Option<crate::sandbox::Report>) {
+        let active = Some(id) == self.active_tab();
+        let Some(tab) = find_tab(&mut self.tabs, id) else {
+            return;
+        };
+        let Some(conn) = tab.conn.as_ref().filter(|c| c.is_process()) else {
+            return;
+        };
+        if tab.sandbox.is_some() || tab.state != State::Loading {
+            if report.is_some() {
+                tab.log(
+                    "[host] sandbox report ignored: it counts only before the load is answered"
+                        .into(),
+                );
+            }
+            return;
+        }
+        let own = report.unwrap_or_else(|| crate::sandbox::Report {
+            layers: Vec::new(),
+            warnings: vec!["the tab process sent no sandbox report".into()],
+        });
+        let sandbox = conn.host_sandbox().clone().and(&own);
+        if sandbox.marker().is_some() {
+            tab.log(format!("[host warn] sandbox: {sandbox}"));
+        }
+        tab.sandbox = Some(sandbox);
+        if active {
+            self.frame_dirty = true;
+        }
+    }
+
     /// Save a page's storage for `origin` (SPEC-5.2.9): only a page granted
     /// `storage` has anything to save, and only within its quota
     /// (SPEC-9.3.1); the tab process is not trusted to have kept either.
@@ -1583,12 +1648,62 @@ impl Shell {
                         tab.log(format!("{e} (the previous page)"));
                     }
                 }
+                self.unpark();
             }
             Inbound::Gone { .. } => {
                 self.retired.remove(at);
+                self.unpark();
             }
             Inbound::Message(_) => {}
         }
+    }
+
+    /// True while a process let go of for `origin` may still answer with
+    /// its storage.
+    fn awaits_storage(&self, origin: Option<&str>) -> bool {
+        origin.is_some_and(|o| self.retired.iter().any(|r| r.origin == o))
+    }
+
+    /// Start every parked page whose origin no longer awaits a storage
+    /// answer: it came, or its process ended without one (killed at its
+    /// deadline at the latest), or it was given up (`MAX_RETIRED`).
+    fn unpark(&mut self) {
+        let ready: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| {
+                t.parked
+                    .as_ref()
+                    .is_some_and(|p| !self.awaits_storage(p.origin.as_deref()))
+            })
+            .map(|t| t.id)
+            .collect();
+        for id in ready {
+            if let Some(page) = self.tab_mut(id).and_then(|t| t.parked.take()) {
+                self.start_page(id, *page);
+            }
+        }
+    }
+
+    /// Where a process of generation `generation` delivers: the inbox,
+    /// waking the window.
+    fn sink_for(&self, generation: u64) -> impl process::Sink {
+        let sink = self.inbox_tx.clone();
+        let waker = self.config.waker.clone();
+        move |tab_id: TabId, inbound: Inbound| {
+            let ok = sink
+                .send(Incoming::Tab(tab_id, generation, inbound))
+                .is_ok();
+            waker.wake();
+            ok
+        }
+    }
+
+    /// Tab processes let go of that have not ended yet (each ends by its
+    /// deadline, `process::SHUTDOWN_GRACE` after it was let go of): their
+    /// storage answers may still come. For drivers that wait for them.
+    pub fn retiring(&self) -> usize {
+        self.reaper.pending()
     }
 
     /// A page's own request (SPEC-5.2.7): with `net` granted, to an origin
@@ -1811,6 +1926,10 @@ impl Shell {
             restricted: tab
                 .is_some_and(|t| !t.trusted && matches!(t.state, State::Running | State::Loading)),
             restriction: tab.and_then(|t| t.restriction),
+            sandbox: tab
+                .filter(|t| matches!(t.state, State::Running | State::Loading))
+                .and_then(|t| t.sandbox.as_ref())
+                .and_then(crate::sandbox::Report::marker),
             inaccessible: tab
                 .is_some_and(|t| t.state == State::Running && t.has_tree == Some(false)),
             loading: tab.is_some_and(|t| t.state == State::Loading),
@@ -2963,8 +3082,9 @@ impl Shell {
     }
 
     /// Record the active tab's session (SPEC-11.4.1): the page is loaded
-    /// again in a process started with `--record`, so the file holds the
-    /// whole inbound stream from the load on.
+    /// again in a new process whose every inbound frame the main process
+    /// also writes to the file, so it holds the whole stream from the load
+    /// on. The tab process is locked down as always (SPEC-9.1.3).
     fn start_recording(&mut self) {
         let dir = self.recordings_dir();
         let Some(id) = self.active_tab() else {
@@ -3003,7 +3123,9 @@ impl Shell {
         let Some(path) = tab.record.take() else {
             return;
         };
-        tab.send(&ToTab::StopRecording);
+        if let Some(conn) = &tab.conn {
+            conn.stop_recording();
+        }
         self.set_devtools_status(format!("Sparad: {}", path.display()));
     }
 
@@ -3012,9 +3134,10 @@ impl Shell {
         self.tabs.get(self.active).and_then(|t| t.record.clone())
     }
 
-    /// Replay a recording in a new tab (SPEC-11.4.1): a tab process started
-    /// with `--replay` reads its whole inbound stream from the file and
-    /// produces the session's frames again; the last one stays.
+    /// Replay a recording in a new tab (SPEC-11.4.1): the main process
+    /// reads the file and sends its frames, as the whole inbound stream,
+    /// to a new locked-down tab process, which produces the session's
+    /// frames again; the last one stays.
     pub fn open_replay(&mut self, path: PathBuf) -> Option<TabId> {
         let Some(exe) = self.config.exe.clone() else {
             self.set_devtools_status("Uppspelning kräver en flikprocess.".into());
@@ -3025,18 +3148,10 @@ impl Shell {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let sink = self.inbox_tx.clone();
-        let waker = self.config.waker.clone();
+        let generation = self.tab(id).map_or(0, |t| t.generation) + 1;
+        let forward = self.sink_for(generation);
         let tab = find_tab(&mut self.tabs, id)?;
-        tab.generation += 1;
-        let generation = tab.generation;
-        let forward = move |tab_id: TabId, inbound: Inbound| {
-            let ok = sink
-                .send(Incoming::Tab(tab_id, generation, inbound))
-                .is_ok();
-            waker.wake();
-            ok
-        };
+        tab.generation = generation;
         tab.display = name.clone();
         tab.title = format!("Uppspelning: {name}");
         tab.replay = Some(path.clone());
@@ -3402,14 +3517,48 @@ impl Shell {
 
     /// The window is closing: every tab leaves, saving its storage on the
     /// way (the tab answers the shutdown with it; see `ToShell::Storage`).
+    /// All are let go of at once with one deadline, and each answer is
+    /// saved as it comes, so this takes at most one
+    /// `process::SHUTDOWN_GRACE` however many tabs there are, and less
+    /// when every process leaves in time; processes let go of earlier are
+    /// waited for too.
     pub fn shutdown(mut self) {
-        let ids: Vec<TabId> = self.tabs.iter().map(|t| t.id).collect();
-        for id in ids {
-            if let Some(conn) = find_tab(&mut self.tabs, id).and_then(|t| t.conn.take()) {
-                conn.shutdown();
+        let deadline = grace_deadline();
+        for mut tab in std::mem::take(&mut self.tabs) {
+            retire_process(&mut tab, &mut self.retired, &self.reaper, deadline);
+        }
+        while self.reaper.pending() > 0 {
+            match self
+                .inbox_rx
+                .recv_timeout(std::time::Duration::from_millis(10))
+            {
+                Ok(m) => self.handle(m),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+        self.reaper.finish();
         self.drain();
+    }
+}
+
+#[cfg(test)]
+impl Shell {
+    /// A new tab whose process is a stand-in that never answers or leaves
+    /// until it is killed (`process::stalled`), running a page of its own
+    /// origin as far as the shell knows; and the cell that holds the
+    /// instant the stand-in is killed.
+    pub(crate) fn open_stalled_tab(&mut self) -> (TabId, Arc<std::sync::Mutex<Option<Instant>>>) {
+        let id = self.open_tab(None);
+        let generation = self.tab(id).map_or(0, |t| t.generation) + 1;
+        let (conn, killed) = process::stalled(id, self.sink_for(generation)).unwrap();
+        let tab = find_tab(&mut self.tabs, id).unwrap();
+        tab.generation = generation;
+        tab.origin = Some(format!("vy://stalled-{id}.example"));
+        tab.conn = Some(conn);
+        tab.state = State::Running;
+        tab.loaded = true;
+        (id, killed)
     }
 }
 
@@ -3433,14 +3582,25 @@ fn caret_at(tab: &mut Tab, px: f32, py: f32, nearest: bool) -> Option<Caret> {
     })
 }
 
+/// When a process let go of now must have left: `process::SHUTDOWN_GRACE`
+/// from now.
+fn grace_deadline() -> Instant {
+    Instant::now() + process::SHUTDOWN_GRACE
+}
+
 /// Let go of `tab`'s process, keeping what its storage answer needs (see
-/// [`Retired`]). `Shutdown` is the flush: the tab calls `vy_suspend`,
-/// answers with [`ToShell::Storage`] and leaves; `TabConnection::shutdown`
-/// waits for the process to end (at most 500 ms, then it is killed) and
-/// for its reader, so the answer is in the inbox when this returns, ahead
-/// of anything the tab's next page brings, which is how a reload of the
-/// same origin reads what the previous process saved.
-fn retire_process(tab: &mut Tab, retired: &mut VecDeque<Retired>) {
+/// [`Retired`]), without waiting (granskning 0006:1). `Shutdown` is the
+/// flush: the tab calls `vy_suspend`, answers with [`ToShell::Storage`]
+/// and leaves; the reaper ends the process by `deadline` (killing it
+/// then), and the answer reaches the inbox whenever it comes. A page of
+/// the same origin waits for it ([`Shell::start_page`]), which is how a
+/// reload reads what the previous process saved.
+fn retire_process(
+    tab: &mut Tab,
+    retired: &mut VecDeque<Retired>,
+    reaper: &process::Reaper,
+    deadline: Instant,
+) {
     let Some(conn) = tab.conn.take() else {
         return;
     };
@@ -3456,7 +3616,7 @@ fn retire_process(tab: &mut Tab, retired: &mut VecDeque<Retired>) {
             quota: tab.storage_quota_bytes,
         });
     }
-    conn.shutdown();
+    reaper.retire(conn, deadline);
 }
 
 /// The tab with `id` among `tabs`.

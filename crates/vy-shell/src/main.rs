@@ -4,7 +4,7 @@
 //! ```text
 //! vy-shell [<vy-address | file.vyp | file.wasm>]          open a window
 //! vy-shell --screenshot <png> --size WxH [--scale S] [--manifest <draft.json>] <address or file>
-//! vy-shell --tab [--record <file>] [--replay <file>]      a tab process (started by the shell)
+//! vy-shell --tab                                          a tab process (started by the shell)
 //! vy-shell --tab --sandbox-probe                          lock down, try file/socket/process, report
 //! ```
 //!
@@ -20,7 +20,7 @@ fn usage() -> ExitCode {
         "usage:\n  \
          vy-shell [<vy://address | page.vyp | module.wasm>]\n  \
          vy-shell --screenshot <out.png> --size WxH [--scale S] [--manifest <draft.json>] <address or file>\n  \
-         vy-shell --tab [--record <file>] [--replay <file>] [--sandbox-probe]   (started by the shell itself)"
+         vy-shell --tab [--sandbox-probe]   (started by the shell itself)"
     );
     ExitCode::from(2)
 }
@@ -28,32 +28,18 @@ fn usage() -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--tab") {
-        let mut record = None;
-        let mut replay = None;
-        let mut probe = false;
-        let mut it = args[1..].iter();
-        while let Some(a) = it.next() {
-            match a.as_str() {
-                "--record" => record = it.next().map(PathBuf::from),
-                "--replay" => replay = it.next().map(PathBuf::from),
-                "--sandbox-probe" => probe = true,
-                _ => return usage(),
-            }
-        }
+        let probe = match &args[1..] {
+            [] => false,
+            [flag] if flag == "--sandbox-probe" => true,
+            _ => return usage(),
+        };
         // The OS sandbox (SPEC-9.1.3) before anything from the shell is
-        // read. A recording or replay opens its file inside the loop, so
-        // those developer runs are not locked down.
+        // read, for every tab: a recording or a replay is the main
+        // process's (`process::spawn_process`), so no tab opens a file.
         // The probe tries to read and start this executable: the same
         // image every self-spawn names (`process::self_exe`).
         let exe = vy_shell::process::self_exe().unwrap_or_default();
-        let report = if record.is_none() && replay.is_none() {
-            vy_shell::sandbox::lockdown(vy_shell::sandbox::Mode::from_env())
-        } else {
-            vy_shell::sandbox::Report {
-                warnings: vec!["--record/--replay".into()],
-                ..Default::default()
-            }
-        };
+        let report = vy_shell::sandbox::lockdown(vy_shell::sandbox::Mode::from_env());
         if probe {
             let attempts = vy_shell::sandbox::probe(&exe);
             print!("{}", vy_shell::sandbox::probe_text(&report, &attempts));
@@ -66,7 +52,7 @@ fn main() -> ExitCode {
         for w in &report.warnings {
             eprintln!("vy-shell --tab: sandbox not applied: {w}");
         }
-        return match vy_shell::tab::main(record.as_deref(), replay.as_deref()) {
+        return match vy_shell::tab::main(None, None) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("vy-shell --tab: {e}");

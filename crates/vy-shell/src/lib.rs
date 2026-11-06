@@ -175,6 +175,7 @@ mod tests {
             can_forward: false,
             restricted: true,
             restriction: None,
+            sandbox: None,
             inaccessible: true,
             loading: false,
             badges: &[],
@@ -936,6 +937,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SPEC-8.2.4, SPEC-5.1.6, SPEC-5.2.12 (granskning 0006:2): pasting
+    /// with Ctrl+V is the user's input and reaches the page as `TEXT_INPUT`
+    /// even in restricted mode, with no capability at all; the page still
+    /// cannot read the clipboard itself without `clipboard`, not even right
+    /// after the paste, with a key press as its gesture.
+    #[test]
+    fn spec_8_2_4_paste_is_user_input_even_restricted() {
+        use crate::shell::hid;
+        use vy_abi::modifier::CTRL;
+        // Logs the text of every TEXT_INPUT; tries `clipboard_read` on
+        // every KEY_DOWN.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+                (import "vy" "clipboard_read" (func $read (param i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 7))
+                        (then (drop (call $log (i32.const 1) (local.get 1) (local.get 2)))))
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then (drop (call $read (i32.const 8192) (i32.const 4096)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 4096))"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("vy-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("paste.wasm");
+        std::fs::write(&path, &wasm).unwrap();
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(Source::File { path, draft: None }));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert!(texts(&shell.chrome_display_list()).contains(&"begränsat läge".to_string()));
+        assert_eq!(shell.tab_badges(tab), vec![], "no capabilities at all");
+        shell.set_clipboard_text("klistrat in");
+        assert!(
+            shell.key(hid::V, true, CTRL, false),
+            "consumed by the shell"
+        );
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        let logs = shell.tab_logs(tab);
+        assert!(
+            logs.contains(&"[module info] klistrat in".to_string()),
+            "{logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.contains("clipboard_read")),
+            "Ctrl+V itself never reaches the page as a key: {logs:?}"
+        );
+        shell.key(0x04, true, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        assert!(
+            shell
+                .tab_logs(tab)
+                .iter()
+                .any(|l| l.contains("clipboard_read: E_DENIED")),
+            "{:?}",
+            shell.tab_logs(tab)
+        );
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// SPEC-5.2.9, SPEC-5.1.5, SPEC-9.5.1: what a page put in its storage
     /// is saved when the tab's process is let go of, not only when the tab
     /// is hidden: on a reload (F5) and a navigation in the same tab, whose
@@ -1002,6 +1073,18 @@ mod tests {
             shell.key(code, true, 0, false);
             shell.key(code, false, 0, false);
         };
+        // Letting a process go does not wait for it: its answer is handled
+        // when it comes, so wait until every process let go of has ended.
+        let let_go = |shell: &mut Shell| {
+            let deadline = Instant::now() + TIMEOUT;
+            while shell.retiring() > 0 {
+                assert!(Instant::now() < deadline, "a process let go of never ended");
+                if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(10)) {
+                    shell.handle(m);
+                }
+            }
+            shell.drain();
+        };
         // F5: the old process's answer comes under the old generation.
         let tab = shell.open_tab_loaded(page.clone());
         settle(&mut shell, 1, TIMEOUT).unwrap();
@@ -1010,7 +1093,7 @@ mod tests {
         key(&mut shell, 0x04);
         assert!(saved().is_empty(), "nothing saved while the page runs");
         shell.reload();
-        shell.drain();
+        let_go(&mut shell);
         assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])], "saved on F5");
         // A navigation in the same tab: the same.
         let tab = shell.open_tab_loaded(page.clone());
@@ -1024,7 +1107,7 @@ mod tests {
             },
             true,
         );
-        shell.drain();
+        let_go(&mut shell);
         assert_eq!(
             saved(),
             vec![(b"k".to_vec(), vec![0x05])],
@@ -1035,7 +1118,7 @@ mod tests {
         settle(&mut shell, 1, TIMEOUT).unwrap();
         key(&mut shell, 0x06);
         shell.key(crate::shell::hid::W, true, vy_abi::modifier::CTRL, false);
-        shell.drain();
+        let_go(&mut shell);
         assert_eq!(
             saved(),
             vec![(b"k".to_vec(), vec![0x06])],
@@ -1048,6 +1131,81 @@ mod tests {
         shell.shutdown();
         assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x07])], "saved on close");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SPEC-5.2.9, SPEC-9.1.1 (granskning 0006:1): letting tab processes go
+    /// never waits on the UI thread, and many let go of together share one
+    /// grace period instead of waiting one each. Six tabs whose processes
+    /// never answer (stand-ins over real pipes) are closed: every close
+    /// returns before any of them is killed. Two more are still open when
+    /// the window closes. Every one of the eight is killed only after its
+    /// whole grace period, and all within less than one grace period of
+    /// each other: one deadline in all. (Waiting in each close, the kills
+    /// would come during the closes and a grace period apart.)
+    #[test]
+    fn spec_5_2_9_letting_tabs_go_waits_once() {
+        use crate::process::SHUTDOWN_GRACE;
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tabs: Vec<_> = (0..8).map(|_| shell.open_stalled_tab()).collect();
+        let start = Instant::now();
+        for (id, _) in &tabs[..6] {
+            shell.close_tab(*id);
+        }
+        let killed = |tabs: &[(
+            crate::process::TabId,
+            std::sync::Arc<std::sync::Mutex<Option<Instant>>>,
+        )]| {
+            tabs.iter()
+                .filter_map(|(_, k)| *k.lock().unwrap())
+                .collect::<Vec<Instant>>()
+        };
+        assert_eq!(killed(&tabs), [], "a close waited for its process");
+        assert_eq!(shell.retiring(), 6);
+        shell.shutdown();
+        let kills = killed(&tabs);
+        assert_eq!(kills.len(), 8, "every stand-in was killed");
+        let first = *kills.iter().min().unwrap();
+        let last = *kills.iter().max().unwrap();
+        assert!(first >= start + SHUTDOWN_GRACE, "each had its grace period");
+        assert!(
+            last - first < SHUTDOWN_GRACE,
+            "one deadline for all, not one each: {:?} between the first kill and the last",
+            last - first
+        );
+    }
+
+    /// SPEC-5.2.9, SPEC-5.1.5 (granskning 0006:1): a page whose origin
+    /// still has a process let go of that may answer with its storage waits
+    /// for that answer, so it never starts with what was saved before. Here
+    /// the process never answers: the page of the same origin starts only
+    /// once that process has been killed at its deadline.
+    #[test]
+    fn spec_5_2_9_a_page_waits_for_its_origins_storage() {
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let (old, killed) = shell.open_stalled_tab();
+        let wasm = std::fs::read(module_path("hello")).unwrap();
+        let origin = format!("vy://stalled-{old}.example");
+        let page = LoadedPage {
+            display: format!("{origin}/"),
+            origin: Some(origin),
+            manifest: None,
+            sha256: vy_runtime::sha256(&wasm),
+            wasm,
+            resources: Vec::new(),
+            trusted: false,
+            restriction: None,
+            verdicts: Vec::new(),
+            is_localhost: false,
+        };
+        shell.close_tab(old);
+        let tab = shell.open_tab_loaded(page);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert!(
+            killed.lock().unwrap().is_some(),
+            "the page started while the process let go of for its origin ran"
+        );
+        shell.shutdown();
     }
 
     /// SPEC-10.1.1, SPEC-9.6.1: find on page (Ctrl+F) searches the page's
@@ -1304,10 +1462,11 @@ mod tests {
     }
 
     /// SPEC-11.4.1, SPEC-2.1.5: "Inspelning" records the active tab's
-    /// session from a fresh load (`--record`), stops on request with the
-    /// file complete, lists it, and replays it in a new tab (`--replay`):
-    /// the replayed session ends on the same display list, byte for byte,
-    /// as the recorded one when it was stopped.
+    /// session from a fresh load (the main process writes what it sends the
+    /// tab), stops on request with the file complete, lists it, and replays
+    /// it in a new tab (the main process sends the file's frames): the
+    /// replayed session ends on the same display list, byte for byte, as
+    /// the recorded one when it was stopped.
     #[test]
     fn spec_11_4_1_devtools_record_and_replay() {
         use crate::devtools::{Command, Pane};
@@ -1332,9 +1491,8 @@ mod tests {
         let last = shell.tab_display_list(game);
         shell.devtools_run(Command::StopRecording);
         assert!(shell.recording().is_none());
-        // The tab handles its messages in order: once it has answered a
-        // tick sent after the stop (a key makes one due), the file is
-        // flushed and complete.
+        // The writer sends in order: once the tab has answered a tick sent
+        // after the stop (a key makes one due), the file is complete.
         shell.key(0x04, true, 0, false);
         shell.key(0x04, false, 0, false);
         settle(&mut shell, 1, TIMEOUT).unwrap();
@@ -1359,6 +1517,116 @@ mod tests {
         assert_eq!(shell.tab_display_list(replay), last, "the same session");
         shell.shutdown();
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// SPEC-9.1.3, SPEC-9.6.1 (granskning 0007:5): a tab process reports
+    /// its sandbox to the shell before its load is answered, and the chrome
+    /// shows a sandbox that is not whole. A real tab process here reports
+    /// the probe's lockdown, with a marker only if that is not whole. A
+    /// report that a layer failed, the first the shell handles for its
+    /// process, puts "sandlåda: delvis" in the chrome and the detail in the
+    /// tab's log; the tab's own report after it, and a whole one claimed
+    /// after the load, are ignored and logged: only the first report before
+    /// any page code ran counts. A thread-backed tab has no process to
+    /// report and no marker.
+    #[test]
+    fn spec_9_1_3_sandbox_state_in_the_chrome() {
+        use crate::sandbox::{Report, MARKER_PARTIAL};
+        let exe = shell_exe();
+        let mut shell = headless_shell(Some(exe.clone()), 800.0, 600.0, 1.0).unwrap();
+        let real = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(real), "running");
+        let report = shell.tab_sandbox(real).expect("the process reported");
+        if cfg!(target_os = "linux") {
+            let probe = crate::process::probe_process(&exe).unwrap();
+            assert!(
+                probe.starts_with(&format!("sandbox: {report}\n")),
+                "{probe}"
+            );
+        }
+        let marked = |shell: &mut crate::shell::Shell| -> Vec<String> {
+            texts(&shell.chrome_display_list())
+                .into_iter()
+                .filter(|t| t.starts_with("sandlåda"))
+                .collect()
+        };
+        assert_eq!(
+            marked(&mut shell),
+            report
+                .marker()
+                .map(String::from)
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+
+        // Another tab: once the loader has answered, its process is started
+        // and loading; a report that a layer failed is handled first.
+        let tab = shell.open_tab(Some(local("hello")));
+        loop {
+            let m = shell
+                .inbox()
+                .recv_timeout(TIMEOUT)
+                .expect("the loader answers");
+            let page =
+                matches!(&m, Incoming::Load(crate::page::Done::Page { tab: t, .. }) if *t == tab);
+            shell.handle(m);
+            if page {
+                break;
+            }
+        }
+        assert_eq!(shell.tab_status(tab), "loading");
+        let partial = Report {
+            layers: vec!["seccomp allowlist".into()],
+            warnings: vec!["landlock: Operation not supported (os error 95)".into()],
+        };
+        let generation = shell.tab_generation(tab);
+        let report_of = |shell: &mut crate::shell::Shell, r: &Report| {
+            shell.handle(Incoming::Tab(
+                tab,
+                generation,
+                Inbound::Message(ToShell::Sandbox(r.clone())),
+            ));
+        };
+        report_of(&mut shell, &partial);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        let shown = shell.tab_sandbox(tab).unwrap();
+        assert_eq!(shown.warnings, partial.warnings, "the tab's own came later");
+        assert_eq!(shown.marker(), Some(MARKER_PARTIAL));
+        assert_eq!(marked(&mut shell), [MARKER_PARTIAL]);
+        let logs = shell.tab_logs(tab);
+        assert!(
+            logs.contains(&format!("[host warn] sandbox: {shown}")),
+            "{logs:?}"
+        );
+        let ignored = |shell: &crate::shell::Shell| {
+            shell
+                .tab_logs(tab)
+                .iter()
+                .filter(|l| l.starts_with("[host] sandbox report ignored"))
+                .count()
+        };
+        assert_eq!(ignored(&shell), 1, "the tab's own report");
+        // After the load, a whole sandbox claimed changes nothing.
+        report_of(
+            &mut shell,
+            &Report {
+                layers: vec!["seccomp allowlist".into()],
+                warnings: vec![],
+            },
+        );
+        assert_eq!(shell.tab_sandbox(tab), Some(shown));
+        assert_eq!(marked(&mut shell), [MARKER_PARTIAL]);
+        assert_eq!(ignored(&shell), 2);
+        shell.shutdown();
+
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let thread = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_sandbox(thread), None);
+        assert!(marked(&mut shell).is_empty());
+        shell.shutdown();
     }
 
     /// A one-path HTTP server for live reload: `/` answers with the
@@ -1767,9 +2035,9 @@ mod tests {
         out
     }
 
-    /// SPEC-11.4.1, SPEC-2.1.5: a tab process started with `--record`
-    /// writes every inbound frame; started with `--replay` of that file
-    /// it reproduces the session exactly: the same display lists, byte
+    /// SPEC-11.4.1, SPEC-2.1.5: a recorded tab process has every inbound
+    /// frame written to the file by the main process; a tab process fed
+    /// that file reproduces the session exactly: the same display lists, byte
     /// for byte, from a page that uses `random` and `now_ms` (the game),
     /// since the random key and every clock reading are part of the
     /// inbound stream.

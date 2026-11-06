@@ -34,12 +34,29 @@
 //! - **macOS:** `sandbox_init` with a deny-default profile; if the call
 //!   fails the tab runs unsandboxed and says so.
 //!
+//! Every tab process is locked down, a recorded or replayed one included:
+//! the main process writes and reads recordings (`crate::process`).
+//! Every layer fails open, so the tab reports what applied and what did
+//! not to the main process before any page code runs in it
+//! (`ToShell::Sandbox`, [`applied`]); the shell adds what it put around
+//! the process itself (the Windows job object or AppContainer), logs the
+//! detail in the tab's log and shows [`MARKER_PARTIAL`] or [`MARKER_OFF`]
+//! in the chrome when the sandbox is not whole ([`Report::marker`]).
 //! `VY_SANDBOX=off` turns the child-side lockdown off for debugging; the
 //! job object on Windows stays. `vy-shell --tab --sandbox-probe` locks
 //! down and then tries to read a file, write one, open a socket and start
 //! a process, and reports what was refused ([`probe`]).
 
 use std::fmt;
+use std::sync::OnceLock;
+
+/// The chrome's marker when some layer of a tab's sandbox did not apply.
+pub const MARKER_PARTIAL: &str = "sandlåda: delvis";
+/// The chrome's marker when none did.
+pub const MARKER_OFF: &str = "sandlåda: av";
+
+/// What this process's [`lockdown`] put in place.
+static APPLIED: OnceLock<Report> = OnceLock::new();
 
 /// How strictly to sandbox, from `VY_SANDBOX`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +90,28 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
+impl Report {
+    /// The chrome's marker for this sandbox when it is not whole:
+    /// [`MARKER_OFF`] when no layer applied, [`MARKER_PARTIAL`] when some
+    /// did not; `None` when every layer did.
+    pub fn marker(&self) -> Option<&'static str> {
+        if self.warnings.is_empty() {
+            None
+        } else if self.layers.is_empty() {
+            Some(MARKER_OFF)
+        } else {
+            Some(MARKER_PARTIAL)
+        }
+    }
+
+    /// This report followed by `more`'s layers and warnings.
+    pub fn and(mut self, more: &Report) -> Report {
+        self.layers.extend(more.layers.iter().cloned());
+        self.warnings.extend(more.warnings.iter().cloned());
+        self
+    }
+}
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.layers.is_empty() {
@@ -89,15 +128,22 @@ impl fmt::Display for Report {
 
 /// Lock the current process down as a tab process (SPEC-9.1.3). Call once,
 /// after startup and before anything from the shell is read; there is no
-/// way back.
+/// way back. The report is also kept for [`applied`].
 pub fn lockdown(mode: Mode) -> Report {
     let mut report = Report::default();
     if mode == Mode::Off {
         report.warnings.push("VY_SANDBOX=off".into());
-        return report;
+    } else {
+        platform::lockdown(mode, &mut report);
     }
-    platform::lockdown(mode, &mut report);
+    let _ = APPLIED.set(report.clone());
     report
+}
+
+/// What [`lockdown`] put in place in this process, once it has run: what
+/// a tab process reports to the main process (`ToShell::Sandbox`).
+pub fn applied() -> Option<&'static Report> {
+    APPLIED.get()
 }
 
 /// One attempt of the probe.
@@ -225,6 +271,10 @@ mod platform {
 
     /// The calls a locked-down tab may make (see the module text); each
     /// was seen in a trace or is what std, glibc or wasmtime fall back to.
+    /// Not `prlimit64`: std and glibc read `RLIMIT_STACK` and
+    /// `RLIMIT_NOFILE` at startup, before the lockdown, and no tab process
+    /// calls it after (traced over the shell's tests); with another pid it
+    /// would change the limits of the user's other processes.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn allowed() -> Vec<libc::c_long> {
         let mut v = vec![
@@ -260,7 +310,6 @@ mod platform {
             libc::SYS_set_robust_list,
             libc::SYS_rseq,
             libc::SYS_membarrier,
-            libc::SYS_prlimit64,
             libc::SYS_restart_syscall,
             libc::SYS_exit,
             libc::SYS_exit_group,
@@ -482,22 +531,96 @@ mod platform {
     mod tests {
         use super::*;
 
-        /// The filter's jumps land where they should: every listed call
-        /// at the allow return, the special cases at their checks.
-        #[test]
-        fn filter_layout() {
-            let f = filter(42);
-            let allow = f
-                .iter()
-                .position(|i| i.code == BPF_RET_K && i.k == SECCOMP_RET_ALLOW)
-                .unwrap();
-            for (at, i) in f.iter().enumerate() {
-                if i.code == BPF_JEQ_K && allowed().contains(&(i.k as libc::c_long)) && at < allow {
-                    assert_eq!(at + 1 + i.jt as usize, allow, "{}", i.k);
+        /// Run the classic BPF program `f` on one call, as the kernel does
+        /// (`struct seccomp_data`, native byte order); the action it returns.
+        fn run(f: &[SockFilter], arch: u32, nr: libc::c_long, args: [u64; 6]) -> u32 {
+            let mut data = [0u8; 64];
+            data[0..4].copy_from_slice(&(nr as u32).to_ne_bytes());
+            data[4..8].copy_from_slice(&arch.to_ne_bytes());
+            for (i, a) in args.iter().enumerate() {
+                let at = OFF_ARG0 as usize + 8 * i;
+                data[at..at + 8].copy_from_slice(&a.to_ne_bytes());
+            }
+            let (mut pc, mut acc) = (0usize, 0u32);
+            loop {
+                let i = f[pc];
+                pc += 1;
+                let jump = |taken: bool| usize::from(if taken { i.jt } else { i.jf });
+                match i.code {
+                    BPF_LD_W_ABS => {
+                        let k = i.k as usize;
+                        acc = u32::from_ne_bytes(data[k..k + 4].try_into().unwrap());
+                    }
+                    BPF_JEQ_K => pc += jump(acc == i.k),
+                    BPF_JGE_K => pc += jump(acc >= i.k),
+                    BPF_JSET_K => pc += jump(acc & i.k != 0),
+                    BPF_RET_K => return i.k,
+                    other => panic!("opcode {other:#x} is not in the filter"),
                 }
             }
-            assert_eq!(f.last().unwrap().k, SECCOMP_RET_ERRNO | libc::ENOSYS as u32);
+        }
+
+        /// SPEC-9.1.3: the filter as the kernel runs it. Every listed call
+        /// is allowed; `prlimit64` is refused for any pid, this one and 0
+        /// included (granskning 0007:4: nothing calls it after the lockdown,
+        /// and with another pid it reaches the user's other processes);
+        /// `tgkill` reaches only this process, `clone` makes only threads,
+        /// `clone3` is `ENOSYS`; files, sockets, exec and signals to others
+        /// are `EPERM`; a foreign architecture or the x32 ABI is killed.
+        #[test]
+        fn filter_layout() {
+            let pid = 42u32;
+            let f = filter(pid);
             assert!(f.len() < 100);
+            let call = |nr: libc::c_long, args: [u64; 6]| run(&f, AUDIT_ARCH, nr, args);
+            let eperm = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+            for nr in allowed() {
+                assert_eq!(call(nr, [0; 6]), SECCOMP_RET_ALLOW, "call {nr}");
+            }
+            for target in [0, u64::from(pid), 1, 4242] {
+                let limit = [target, libc::RLIMIT_NOFILE as u64, 0, 0, 0, 0];
+                assert_eq!(call(libc::SYS_prlimit64, limit), eperm, "pid {target}");
+            }
+            let own = u64::from(pid);
+            assert_eq!(
+                call(libc::SYS_tgkill, [own, own, 6, 0, 0, 0]),
+                SECCOMP_RET_ALLOW
+            );
+            assert_eq!(call(libc::SYS_tgkill, [1, 1, 9, 0, 0, 0]), eperm);
+            let thread = (libc::CLONE_VM | libc::CLONE_THREAD | libc::CLONE_SIGHAND) as u64;
+            assert_eq!(
+                call(libc::SYS_clone, [thread, 0, 0, 0, 0, 0]),
+                SECCOMP_RET_ALLOW
+            );
+            let fork = libc::SIGCHLD as u64;
+            assert_eq!(call(libc::SYS_clone, [fork, 0, 0, 0, 0, 0]), eperm);
+            assert_eq!(
+                call(libc::SYS_clone3, [0; 6]),
+                SECCOMP_RET_ERRNO | libc::ENOSYS as u32
+            );
+            for nr in [
+                libc::SYS_openat,
+                libc::SYS_socket,
+                libc::SYS_connect,
+                libc::SYS_execve,
+                libc::SYS_ptrace,
+                libc::SYS_kill,
+                libc::SYS_process_vm_writev,
+                libc::SYS_setrlimit,
+            ] {
+                assert_eq!(call(nr, [0; 6]), eperm, "call {nr}");
+            }
+            let i386 = 0x4000_0003;
+            assert_eq!(
+                run(&f, i386, libc::SYS_read, [0; 6]),
+                SECCOMP_RET_KILL_PROCESS
+            );
+            if cfg!(target_arch = "x86_64") {
+                assert_eq!(
+                    call(libc::SYS_read | 0x4000_0000, [0; 6]),
+                    SECCOMP_RET_KILL_PROCESS
+                );
+            }
         }
     }
 }
@@ -1150,5 +1273,35 @@ mod tests {
             "sandbox: a, b; not applied: c: no\nfile-read: refused (denied)\nsocket: allowed\n"
         );
         assert_eq!(lockdown(Mode::Off).warnings, ["VY_SANDBOX=off"]);
+        assert_eq!(applied().unwrap().warnings, ["VY_SANDBOX=off"]);
+    }
+
+    /// SPEC-9.1.3: the chrome's marker says whether every layer applied;
+    /// the shell's own layers and the tab's add up.
+    #[test]
+    fn report_marker() {
+        let line = |s: &str| vec![s.to_string()];
+        let whole = Report {
+            layers: line("seccomp allowlist"),
+            warnings: vec![],
+        };
+        assert_eq!(whole.marker(), None);
+        let partial = Report {
+            layers: line("seccomp allowlist"),
+            warnings: line("landlock: not supported"),
+        };
+        assert_eq!(partial.marker(), Some(MARKER_PARTIAL));
+        let off = Report {
+            layers: vec![],
+            warnings: line("VY_SANDBOX=off"),
+        };
+        assert_eq!(off.marker(), Some(MARKER_OFF));
+        let host = Report {
+            layers: line("job object"),
+            warnings: vec![],
+        };
+        let both = host.and(&off);
+        assert_eq!(both.marker(), Some(MARKER_PARTIAL), "the job still stands");
+        assert_eq!(both.to_string(), "job object; not applied: VY_SANDBOX=off");
     }
 }
