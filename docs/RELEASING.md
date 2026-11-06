@@ -77,8 +77,13 @@ stage/vy-publish inspect stage/studio.vyp                                       
 1. Sätt `version` under `[workspace.package]` i `Cargo.toml` till den nya versionen och kör grindarna
    (låsfilerna följer med: `Cargo.lock` och `modules/*/Cargo.lock`, som `build_modules.sh` läser
    med `--locked`).
-2. Commit, tagga `v<version>` och pusha taggen. Jobbet `version` stoppar releasen om taggen och
-   arbetsytans version inte är samma.
+2. Commit, tagga `v<version>` och pusha taggen (eller kör `release` manuellt med versionen). Jobbet
+   `version` stoppar releasen om taggen och arbetsytans version inte är samma.
+
+Varför versionen måste stämma: `vy-dev new` skriver `vy-sdk = { git =
+"https://github.com/hammandevab/vy", tag = "v<vy-devs version>" }` i ett nytt projekt (utan
+`--sdk`), så att projektet bygger mot SDK:n i den release vars `vy-dev` skapade det och inte mot
+main. Versionen är arbetsytans, och taggen måste därför finnas med den versionen.
 
 ## Storlek (SPEC-12.3.1)
 

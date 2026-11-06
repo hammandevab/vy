@@ -236,3 +236,20 @@ USA/Kanada); OV-certifikat 150–300 USD/år (nyckel i HSM sedan 2023); Apple De
 per medlemsår (D-U-N-S för en organisation). **Inget av det är kört**: inga secrets, ingen Windows-
 eller macOS-maskin, `pwsh` finns inte här. YAML:en parsas; bash-delarna är syntaxkontrollerade
 (`bash -n`) och detekteringen provkörd.
+
+## Steg 5 – versionen
+
+- **Arbetsytans version** är nu `0.2.0` (`[workspace.package]`), som releasen på `0fc0453`; den var
+  `0.1.0`, så taggen `v0.2.0` och binärerna i den releasen hade olika version. `Cargo.lock` och de
+  tolv `modules/*/Cargo.lock` följer med (`vy-abi` och `vy-sdk` 0.1.0 → 0.2.0, `cargo update
+  --workspace --offline`); `build_modules.sh` läser dem med `--locked`.
+- **`vy-dev new`** skriver `vy-sdk = { git = "https://github.com/hammandevab/vy", tag = "v0.2.0" }`
+  i ett projekt utan `--sdk`: `scaffold::SDK_TAG = concat!("v", env!("CARGO_PKG_VERSION"))`, vy-devs
+  egen version, som är arbetsytans. `sdk_tag_is_the_release_version` (nytt) läser versionen ur rotens
+  `Cargo.toml` och kräver att raden i det skapade projektet är exakt den; `writes_a_project` prövar
+  raden med `SDK_TAG`.
+- **`release.yml`**: jobbet `version` checkar ut koden och stoppar med `::error::` om taggen (eller
+  den manuella versionen) inte är `v` + arbetsytans version (`tomllib`). Provkört lokalt: `v0.2.0`
+  går igenom, `v0.3.0` stoppar med "set it to 0.3.0 and commit first".
+- Nästa release: höj versionen i ett eget commit (låsfilerna följer), tagga sedan. `docs/RELEASING.md`
+  (*Släppa en version*) säger det och varför.

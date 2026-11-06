@@ -11,11 +11,11 @@ dependencies = [
 
 [[package]]
 name = "vy-abi"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "vy-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vy-abi",
 ]

@@ -50,6 +50,11 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       version: ${{ steps.v.outputs.version }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The tag is the workspace version (every crate's, vy-sdk's included):
+      # `vy-dev new` pins new projects to tag v<its own version>, so a release
+      # whose tag is not that version would pin projects to a tag without
+      # that SDK (docs/RELEASING.md).
       - id: v
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -60,6 +65,11 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "error: version must look like v0.1.0, got $tag" >&2; exit 1 ;;
           esac
+          workspace=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [ "$workspace" != "${tag#v}" ]; then
+            echo "::error::tag $tag, but [workspace.package] version in Cargo.toml is $workspace: set it to ${tag#v} and commit first (docs/RELEASING.md)"
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
