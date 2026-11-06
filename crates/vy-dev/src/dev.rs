@@ -6,11 +6,12 @@
 //! sockets; `serve` wraps it in `tiny_http`.
 //!
 //! Who may call the API matters (see `docs/notes/m4-dev.md`, *Hotbild*):
-//! `serve` binds loopback only, and [`Access::guard`] refuses a request
-//! that looks like a browser's (an `Origin`, `Referer` or `Sec-Fetch-*`
-//! header, which a web page's request carries and a Vy client's never
-//! does), one whose `Host` is not `localhost:<port>` or `127.0.0.1:<port>`
-//! of the API (DNS rebinding), and one without this run's random token,
+//! `serve` binds loopback only, and [`Access::refuse_foreign`] refuses,
+//! on every path of the Studio origin, a request that looks like a
+//! browser's (an `Origin`, `Referer` or `Sec-Fetch-*` header, which a web
+//! page's request carries and a Vy client's never does) and one whose
+//! `Host` is not `localhost:<port>` or `127.0.0.1:<port>` of the API (DNS
+//! rebinding); [`Access::guard`] adds this run's random token for the API,
 //! which `serve` writes into the Studio module it serves and nowhere a page
 //! can read it. The page under development is served on another origin,
 //! and `net` is granted automatically to a page's own origin only
@@ -146,15 +147,32 @@ impl Access {
         }
     }
 
-    /// The refusal for a request that must not reach the API, or `None`.
-    pub fn guard(&self, req: &ApiRequest) -> Option<ApiReply> {
+    /// The refusal for a request that must not reach the Studio origin at
+    /// all, or `None`: a browser's (`browser_like`, [`is_browser_header`])
+    /// and one whose `Host` is not `localhost:<port>` or
+    /// `127.0.0.1:<port>` ([`host_matches`], DNS rebinding). Every path on
+    /// the Studio origin passes this first, not only the API's: the Studio
+    /// package and its module carry this run's token.
+    pub fn refuse_foreign(&self, host: Option<&str>, browser_like: bool) -> Option<ApiReply> {
         let refuse = |why: &str| Some(ApiReply::json(403, json!({ "error": why })));
-        if req.browser_like {
-            return refuse("the dev API answers the Vy client, not web pages");
+        if browser_like {
+            return refuse("the Studio origin answers the Vy client, not web pages");
         }
-        if !host_matches(req.host.as_deref(), self.port) {
-            return refuse("the dev API answers to localhost:<port> and 127.0.0.1:<port> only");
+        if !host_matches(host, self.port) {
+            return refuse(
+                "the Studio origin answers to localhost:<port> and 127.0.0.1:<port> only",
+            );
         }
+        None
+    }
+
+    /// The refusal for a request that must not reach the API, or `None`:
+    /// [`Access::refuse_foreign`], then this run's token.
+    pub fn guard(&self, req: &ApiRequest) -> Option<ApiReply> {
+        if let Some(refused) = self.refuse_foreign(req.host.as_deref(), req.browser_like) {
+            return Some(refused);
+        }
+        let refuse = |why: &str| Some(ApiReply::json(403, json!({ "error": why })));
         let query = req.path.split_once('?').map_or("", |(_, q)| q);
         let token = query_value(query, "token").unwrap_or("");
         if !same_bytes(token.as_bytes(), self.token.as_bytes()) {

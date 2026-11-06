@@ -94,11 +94,17 @@ körning (punkt 6) det andra. API:t finns inte på A
 **Vad mer skyddar API:t.**
 
 1. *Bara loopback.* Båda servrarna binder `127.0.0.1`; inget på nätverket når dem.
-2. *Host-kontroll mot DNS-rebinding.* `/_dev/` svarar bara när `Host` är `localhost:<studio-port>`
-   eller `127.0.0.1:<studio-port>` (punkt 7). En webbsida som fått sitt namn att peka på 127.0.0.1
-   skickar sitt eget namn i `Host` och får 403. `X-Forwarded-Host` läses inte för API:t (vem som
-   helst kan sätta det), bara den rå `Host`.
-3. *Inga webbläsare.* En begäran med `Origin`, `Referer` eller något `Sec-Fetch-*`-huvud nekas (403).
+2. *Host-kontroll mot DNS-rebinding.* Studios origin svarar på *varje* väg (`/`, `/index`,
+   `/_vy/<hash>`, nyckelfilen och `/_dev/`) bara när `Host` är `localhost:<studio-port>` eller
+   `127.0.0.1:<studio-port>` (punkt 7); före granskning 0005 fynd 1 gällde det bara `/_dev/`, och
+   paketet med modulen, där nyckeln står, gick att läsa under ett främmande namn. En webbsida som
+   fått sitt namn att peka på 127.0.0.1 skickar sitt eget namn i `Host` och får 403.
+   `X-Forwarded-Host` läses inte (vem som helst kan sätta det), bara den rå `Host`. Sidans origin
+   (A) har samma `Host`-kontroll för sin egen port: den bär ingen nyckel och gör inget, men utan
+   kontrollen kunde en webbsida genom rebinding läsa sidan under utveckling (opublicerat arbete).
+   Webbläsarhuvudena nekas inte på A, eftersom HTML-reserven är till för webbläsare.
+3. *Inga webbläsare.* En begäran med `Origin`, `Referer` eller något `Sec-Fetch-*`-huvud nekas (403)
+   på varje väg på Studios origin, inte bara under `/_dev/`.
    Webbläsare sätter `Origin` på varje POST mellan origins och `Sec-Fetch-*` på allt, och en sida kan
    inte ta bort dem; Vy-klientens `vy-proto` skickar inget av dem (SPEC-7.5.1). Det stänger CSRF mot
    localhost: en "enkel" `fetch("http://127.0.0.1:8081/_dev/agent", {method: "POST", mode:
@@ -111,7 +117,7 @@ körning (punkt 6) det andra. API:t finns inte på A
    nyckel på 32 hextecken. Varje anrop till `/_dev/` måste ha `token=<nyckel>` i frågan, annars 403;
    jämförelsen tar lika lång tid var nycklarna än skiljer sig. Nyckeln skrivs in i Studio-modulen
    som `vy-dev` signerar och serverar (steg 5) och skrivs ut i terminalen (`api:`-raden), ingen
-   annanstans. En Vy-sida kan inte läsa den ur Studio: `fetch_begin` kan inte sätta `Accept`, så
+   annanstans. En webbsida når inte paketet (punkt 2 och 3). En Vy-sida kan inte läsa den ur Studio: `fetch_begin` kan inte sätta `Accept`, så
    servern svarar HTML (som inte bär nyckeln) på `/` och `/index`, och modulen som blob kräver en hash
    sidan aldrig ser (den beror på nyckeln). Den okodade Studio-modulen i repot har platshållaren
    `000…` (konformansfallet), som aldrig är en körnings nyckel.

@@ -112,6 +112,54 @@ fn http_raw(
 
 const VY_ACCEPT: (&str, &str) = ("Accept", MEDIA_PACKAGE);
 
+/// `n` as unsigned LEB128, as wasm writes sizes.
+fn leb128(mut n: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// A Studio package as `tools/build_studio.sh` makes one, with the
+/// smallest module that has Studio's config block: one memory and a custom
+/// section holding the block with the placeholder, signed with a throwaway
+/// key. `vy-dev serve` fits it to the run like the real one.
+fn studio_package(path: &Path) {
+    let mut block = vy_dev::serve::STUDIO_CONFIG_MARKER.to_vec();
+    block.extend_from_slice(b"http://localhost:8081 00000000000000000000000000000000");
+    block.resize(vy_dev::serve::STUDIO_CONFIG_LEN, b' ');
+    let name = b"vy-dev-test";
+    let mut custom = leb128(name.len());
+    custom.extend_from_slice(name);
+    custom.extend_from_slice(&block);
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    // Memory section: one memory of one page.
+    module.extend_from_slice(&[5, 3, 1, 0, 1]);
+    module.push(0);
+    module.extend_from_slice(&leb128(custom.len()));
+    module.extend_from_slice(&custom);
+    let draft = vy_manifest::Draft::from_json(
+        &std::fs::read_to_string(root().join("conformance/manifests/studio.json")).unwrap(),
+    )
+    .unwrap();
+    let throwaway = vy_manifest::SigningKey::from_seed(&[5; 32]);
+    let package = vy_publish::build(&draft, module, vec![], &throwaway).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, package.pack().unwrap()).unwrap();
+}
+
+fn holds(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
+}
+
 #[test]
 fn serve_builds_and_serves_two_origins() {
     let tmp = std::env::temp_dir().join(format!("vy-dev-serve-{}", std::process::id()));
@@ -125,12 +173,15 @@ fn serve_builds_and_serves_two_origins() {
     .create()
     .unwrap();
     let key_path = tmp.join("keys").join("dev.key");
+    let studio_vyp = tmp.join("studio.vyp");
+    studio_package(&studio_vyp);
 
     let handle = start(ServeConfig {
         port: 0,
         studio_port: 0,
         key_path: Some(key_path.clone()),
         target_dir: Some(target_dir()),
+        studio_package: Some(studio_vyp),
         ..ServeConfig::new(&project)
     })
     .unwrap();
@@ -218,6 +269,100 @@ fn serve_builds_and_serves_two_origins() {
     );
     assert_eq!(http(b, "GET", "/_dev/build", &[], b"").status, 405);
     assert_eq!(http(b, "GET", "/_dev/nothing", &[], b"").status, 404);
+
+    // The Studio package and its module carry this run's token (review
+    // 0005, finding 1): under Studio's own name they are served, under a
+    // rebound name or to a browser nothing on the origin is, the API with
+    // the token neither.
+    let token = TOKEN.get().unwrap().as_str();
+    let index = http(b, "GET", "/index", &[VY_ACCEPT], b"");
+    assert_eq!(index.status, 200);
+    let studio = Package::unpack(&index.body).unwrap();
+    let blob = format!("/_vy/{}", studio.manifest.module.hash.hex());
+    let module = http(b, "GET", &blob, &[], b"");
+    assert_eq!(module.status, 200);
+    assert!(holds(&module.body, token), "the module carries the token");
+    assert_eq!(http(b, "GET", "/", &[VY_ACCEPT], b"").status, 200);
+    let rebound = format!("rebind.example:{b}");
+    let api_with_token = format!("/_dev/state?token={token}");
+    for path in [
+        "/",
+        "/index",
+        blob.as_str(),
+        "/.well-known/vy-key",
+        api_with_token.as_str(),
+    ] {
+        for headers in [
+            &[("Host", rebound.as_str()), VY_ACCEPT][..],
+            &[("Host", "rebind.example"), VY_ACCEPT][..],
+            &[("Host", other_port.as_str()), VY_ACCEPT][..],
+            &[("Origin", "https://rebind.example"), VY_ACCEPT][..],
+            &[("Sec-Fetch-Mode", "no-cors"), VY_ACCEPT][..],
+            &[("Referer", "https://rebind.example/"), VY_ACCEPT][..],
+        ] {
+            let r = http_raw(b, "GET", path, headers, b"");
+            assert_eq!(r.status, 403, "{path} {headers:?}");
+            assert!(!holds(&r.body, token), "{path} {headers:?}");
+            assert_eq!(r.header("Access-Control-Allow-Origin"), None);
+        }
+        let own = http_raw(
+            b,
+            "GET",
+            path,
+            &[("Host", with_127.as_str()), VY_ACCEPT],
+            b"",
+        );
+        assert_eq!(own.status, 200, "{path} under 127.0.0.1");
+    }
+    // The page origin answers only under its own name too; it holds no
+    // token, so a browser (the HTML fallback) is let in there.
+    let page_rebound = format!("rebind.example:{a}");
+    assert_eq!(
+        http(
+            a,
+            "GET",
+            "/e2e-sida",
+            &[("Host", page_rebound.as_str()), VY_ACCEPT],
+            b""
+        )
+        .status,
+        403
+    );
+    assert_eq!(
+        http(
+            a,
+            "GET",
+            "/.well-known/vy-key",
+            &[("Host", localhost.as_str())],
+            b""
+        )
+        .status,
+        403,
+        "the Studio port's name is not the page origin's"
+    );
+    let page_127 = format!("127.0.0.1:{a}");
+    assert_eq!(
+        http(
+            a,
+            "GET",
+            "/e2e-sida",
+            &[("Host", page_127.as_str()), VY_ACCEPT],
+            b""
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        http(
+            a,
+            "GET",
+            "/e2e-sida",
+            &[("Sec-Fetch-Mode", "navigate")],
+            b""
+        )
+        .status,
+        200
+    );
 
     // A build trigger: the same sources build to the same package.
     let r = http(b, "POST", "/_dev/build", &[], b"");

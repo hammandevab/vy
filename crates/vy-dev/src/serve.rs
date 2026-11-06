@@ -12,8 +12,12 @@
 //! grants for its own origin only (SPEC-8.2.3), cannot call the API that
 //! builds and runs an agent in its project.
 //!
-//! Both bind `127.0.0.1` only. The developer key is served at
-//! `/.well-known/vy-key` on both, which is what the client pins on first
+//! Both bind `127.0.0.1` only and answer only under their own name
+//! (`localhost:<port>` or `127.0.0.1:<port>` in `Host`), so a web page
+//! that rebinds its name to 127.0.0.1 reads nothing; the Studio origin
+//! also refuses every request with a browser's headers, on every path,
+//! since its package carries this run's token. The developer key is served
+//! at `/.well-known/vy-key` on both, which is what the client pins on first
 //! visit (SPEC-7.4.2).
 
 use crate::agent::AgentCommand;
@@ -280,7 +284,7 @@ pub fn start(config: ServeConfig) -> Result<Handle> {
         let log = config.log;
         threads.push(std::thread::spawn(move || {
             while let Ok(request) = server.recv() {
-                serve_page(&site.current(), request, log);
+                serve_page(&site.current(), port, request, log);
             }
         }));
     }
@@ -471,15 +475,66 @@ fn log_line(log: bool, method: &str, url: &str, status: u16, len: usize) {
     }
 }
 
-fn serve_page(site: &Site, request: tiny_http::Request, log: bool) {
+/// A JSON reply from the router, never cached.
+fn json_reply(reply: dev::ApiReply) -> Reply {
+    Reply {
+        status: reply.status,
+        headers: vec![
+            (
+                "Content-Type".into(),
+                "application/json; charset=utf-8".into(),
+            ),
+            ("Cache-Control".into(), "no-store".into()),
+        ],
+        body: reply.body,
+    }
+}
+
+/// The page origin answers only under its own name (`localhost:<port>`
+/// or `127.0.0.1:<port>`), so a web page that rebinds its name to
+/// 127.0.0.1 cannot read the page under development. Browser headers are
+/// let through here: the HTML fallback is for browsers, and nothing on
+/// this origin acts or holds the run's token.
+fn serve_page(site: &Site, port: u16, request: tiny_http::Request, log: bool) {
     let info = request_info(&request);
-    let reply = fresh(site.reply(&info));
+    let reply = if dev::host_matches(info.host.as_deref(), port) {
+        fresh(site.reply(&info))
+    } else {
+        json_reply(dev::ApiReply::json(
+            403,
+            serde_json::json!({
+                "error": "the page origin answers to localhost:<port> and 127.0.0.1:<port> only"
+            }),
+        ))
+    };
     log_line(log, &info.method, &info.url, reply.status, reply.body.len());
     send(request, reply);
 }
 
+/// Every path on the Studio origin is refused to a browser and under a
+/// foreign `Host` ([`dev::Access::refuse_foreign`]): `/`, `/index` and the
+/// module's blob carry this run's token. The dev API under `/_dev/` also
+/// needs the token ([`dev::Access::guard`]).
 fn serve_studio(site: &Site, dev: &Arc<Dev>, mut request: tiny_http::Request, log: bool) {
     let info = request_info(&request);
+    let browser_like = request
+        .headers()
+        .iter()
+        .any(|h| dev::is_browser_header(h.field.as_str().as_str()));
+    if let Some(refused) = dev
+        .access()
+        .refuse_foreign(info.host.as_deref(), browser_like)
+    {
+        log_line(
+            log,
+            &info.method,
+            &info.url,
+            refused.status,
+            refused.body.len(),
+        );
+        send(request, json_reply(refused));
+        return;
+    }
     let path = info.url.split('?').next().unwrap_or("/");
     if !dev::is_api_path(path) {
         let reply = fresh(site.reply(&info));
@@ -487,10 +542,6 @@ fn serve_studio(site: &Site, dev: &Arc<Dev>, mut request: tiny_http::Request, lo
         send(request, reply);
         return;
     }
-    let browser_like = request
-        .headers()
-        .iter()
-        .any(|h| dev::is_browser_header(h.field.as_str().as_str()));
     let mut body = Vec::new();
     {
         use std::io::Read;
@@ -509,20 +560,7 @@ fn serve_studio(site: &Site, dev: &Arc<Dev>, mut request: tiny_http::Request, lo
     };
     let reply = dev.api(&api);
     log_line(log, &info.method, &info.url, reply.status, reply.body.len());
-    send(
-        request,
-        Reply {
-            status: reply.status,
-            headers: vec![
-                (
-                    "Content-Type".into(),
-                    "application/json; charset=utf-8".into(),
-                ),
-                ("Cache-Control".into(), "no-store".into()),
-            ],
-            body: reply.body,
-        },
-    );
+    send(request, json_reply(reply));
 }
 
 #[cfg(test)]
