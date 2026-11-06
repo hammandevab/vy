@@ -36,32 +36,33 @@
 //!
 //! ```
 //! use vy_sdk::prelude::*;
-//! use vy_sdk::ui::{Button, Checkbox, Input, Theme};
+//! use vy_sdk::ui::{Button, Input, TextBox, Theme};
 //!
-//! struct Page { window: Window, theme: Theme, terms: Checkbox, send: Button, sent: bool }
+//! struct Page { window: Window, theme: Theme, name: TextBox, send: Button, sent: bool }
 //!
 //! impl Page {
+//!     /// Every rectangle from the window: draw and event use the same.
 //!     fn layout(&self) -> (Rect, Rect) {
 //!         let w = (self.window.width - 48.0).max(0.0);
-//!         (Rect::new(24.0, 24.0, w, 28.0), Rect::new(24.0, 68.0, 120.0, 40.0))
+//!         (Rect::new(24.0, 24.0, w, 40.0), Rect::new(24.0, 76.0, 120.0, 40.0))
 //!     }
 //! }
 //!
 //! impl App for Page {
 //!     fn init(window: Window, _: i32) -> Result<Self, VyError> {
-//!         let theme = Theme::new()?;
-//!         Ok(Page { window, theme, terms: Checkbox::new(-1, false), send: Button::new(-2), sent: false })
+//!         let theme = Theme::new()?; // registers the styles once
+//!         Ok(Page { window, theme, name: TextBox::new(-1), send: Button::new(-2), sent: false })
 //!     }
 //!     fn frame(&mut self, f: &mut Frame, _: i32) -> Result<(), VyError> {
-//!         let (terms, send) = self.layout();
-//!         self.terms.draw(f, terms, &self.theme, "Jag godkänner villkoren")?;
-//!         self.send.draw(f, send, &self.theme, "Skicka")
+//!         let (field, button) = self.layout();
+//!         self.name.draw(f, field, &self.theme, "Ditt namn")?;
+//!         self.send.draw(f, button, &self.theme, "Skicka")
 //!     }
 //!     fn event(&mut self, event: Event<'_>) -> bool {
-//!         let (terms, send) = self.layout();
+//!         let (field, button) = self.layout();
 //!         let mut ui = Input::new(event);
-//!         self.terms.event(&mut ui, terms, &self.theme);
-//!         if self.send.event(&mut ui, send, &self.theme).activated() && self.terms.checked {
+//!         let enter = self.name.event(&mut ui, field, &self.theme).activated();
+//!         if self.send.event(&mut ui, button, &self.theme).activated() || enter {
 //!             self.sent = true;
 //!         }
 //!         ui.redraw()
@@ -71,6 +72,7 @@
 //! # vy_sdk::mock::reset();
 //! # let mut page = Page::init(Window { width: 400.0, height: 300.0, scale: 1.0 }, 0).unwrap();
 //! # assert!(vy_sdk::mock::run_frame(&mut page, 0).is_ok());
+//! # vy_sdk::mock::with(|h| assert_eq!(h.sem.len(), 2));
 //! ```
 
 mod button;
@@ -79,6 +81,7 @@ mod input;
 mod layout;
 mod radio;
 mod slider;
+mod textbox;
 mod theme;
 
 pub use button::{Button, ButtonKind};
@@ -87,6 +90,7 @@ pub use input::{Input, Response};
 pub use layout::{split, Column, Row};
 pub use radio::RadioGroup;
 pub use slider::Slider;
+pub use textbox::{TextBox, MAX_LINE_BYTES, MAX_MULTILINE_BYTES};
 pub use theme::{Palette, Theme, Words};
 
 use crate::event::Event;
@@ -113,6 +117,11 @@ pub(crate) fn focus_of(event: &Event<'_>, id: i32) -> Option<bool> {
         Event::Focus { node, gained, .. } if node.0 == id => Some(gained),
         _ => None,
     }
+}
+
+/// `text` cut to at most `max` bytes at a character boundary.
+pub(crate) fn clip_str(text: &str, max: usize) -> &str {
+    &text[..text.floor_char_boundary(max)]
 }
 
 /// The focus ring around `r` (corners `radius`) in the theme's ring colour.
