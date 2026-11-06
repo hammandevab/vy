@@ -201,3 +201,38 @@ GL-vägen kostar här 249 376 byte (m5/gpu: 247 624). Samordnarens tal för main
 var 25 790 640; spårets besparing på 1 264 288 ger 24 526 352, inom 2 040 byte av det uppmätta.
 Sammanslagningen hade en konflikt (raden `default` i `vy-shell/Cargo.toml`), allt annat, också
 `vy-render/src/text.rs` (m5/gpu: `Glyph::key`), slogs ihop automatiskt.
+
+## Steg 4 – kodsignering i `release.yml`
+
+Ett steg *Signing secrets* avgör per runner hur det signeras: på Windows `azure` om alla sex
+Azure-secrets finns, annars `pfx` om båda PFX-secrets finns; på macOS `apple` om alla sex
+Apple-secrets finns. Saknas alla blir det en `::notice` ("the binaries are not code-signed") och
+jobbet fortsätter; finns bara några av ett sätts secrets blir det en `::warning` med de saknade
+namnen och ingen signering (provkört lokalt med bash: inga, en av sex, båda PFX). Signeringen sker
+efter att de osignerade binärernas SHA-256 skrivits och före zip-filen.
+
+- **Windows, Azure Artifact Signing:** `azure/artifact-signing-action` v2.0.0, pinnat på
+  `c7ab2a8…` (`git ls-remote`; repot heter också `azure/trusted-signing-action`), `files-folder`
+  `stage`, filter `exe`, SHA-256, tidsstämpel `timestamp.acs.microsoft.com`. Secrets:
+  `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT`,
+  `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` (uppdragets ENDPOINT/ACCOUNT/PROFILE med
+  prefix, så att namnen säger vad de är).
+- **Windows, PFX:** signtool ur den nyaste Windows Kits, `/fd SHA256 /tr <WINDOWS_TIMESTAMP_URL
+  eller digicert> /td SHA256`, i PowerShell (MSYS skriver annars om `/f`-flaggorna till sökvägar);
+  filen tas bort i `finally`. Båda Windows-vägarna följs av `signtool verify /pa /v`.
+- **macOS:** tillfällig nyckelring, `codesign --force --timestamp --options runtime`, med
+  `tools/macos-entitlements.plist` (`com.apple.security.cs.allow-unsigned-executable-memory`) för
+  de fyra binärer som kör wasmtime; wasmtime 50 gör koden körbar med `mprotect` utan `MAP_JIT`
+  (sökt i källan: ingen `MAP_JIT`), vilket den härdade körmiljön bara tillåter med den rättigheten.
+  `codesign --verify --strict`, sedan `notarytool submit --wait --output-format json`; inte
+  `Accepted` → loggen hämtas och steget faller. Nyckelringen och nyckelfilerna tas bort i en
+  `trap`.
+- `BUILD.md` får kolumnen *Signerad* ur fragmentet (`ja (azure)`, `ja (pfx)`, `ja (apple)`, `nej`),
+  och `SHA256SUMS` de osignerade raderna för ett signerat mål.
+
+Kostnader och vad ägaren gör står i `docs/RELEASING.md` (*Kodsignering*), med källor: Azure Artifact
+Signing ~9,99 USD/månad (Basic, Microsoft Learn 2026-08-29; organisationer i EU, enskilda bara i
+USA/Kanada); OV-certifikat 150–300 USD/år (nyckel i HSM sedan 2023); Apple Developer Program 99 USD
+per medlemsår (D-U-N-S för en organisation). **Inget av det är kört**: inga secrets, ingen Windows-
+eller macOS-maskin, `pwsh` finns inte här. YAML:en parsas; bash-delarna är syntaxkontrollerade
+(`bash -n`) och detekteringen provkörd.

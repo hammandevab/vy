@@ -79,3 +79,95 @@ stage/vy-publish inspect stage/studio.vyp                                       
    med `--locked`).
 2. Commit, tagga `v<version>` och pusha taggen. Jobbet `version` stoppar releasen om taggen och
    arbetsytans version inte är samma.
+
+## Storlek (SPEC-12.3.1)
+
+`release.yml` skriver varje fils storlek i loggen och klientens (`vy-shell`) i körningens
+sammanfattning, per plattform, och stoppar releasen om klienten är över 25 000 000 byte. CI:s jobb
+`size` prövar samma sak på Linux för varje ändring (`spec_12_3_1_size_budget` i release).
+
+## Kodsignering
+
+Utan signatur varnar Windows SmartScreen för `vy-shell.exe` och macOS Gatekeeper vägrar starta en
+nedladdad binär utan att användaren går via Systeminställningar. `release.yml` signerar när
+secrets finns och hoppar annars över med en notis; jobbet är grönt i båda fallen. Är bara några av
+ett sätts secrets satta blir det en varning och ingen signering.
+
+### Windows
+
+**Rekommenderat: Azure Artifact Signing** (hette Trusted Signing). Microsoft anger "ungefär 9,99
+USD/månad" för nivån Basic, som rymmer 5 000 signaturer i månaden (Premium: 100 000; priset visas
+inte på prissidan utan JavaScript, kontrollera aktuellt pris). Tjänsten säljs till organisationer i
+USA, Kanada, EU och Storbritannien; enskilda utvecklare bara i USA och Kanada, så från Sverige är
+det en organisation (bolaget) som registrerar sig. Microsoft validerar identiteten först, räkna med
+några arbetsdagar. Äldre riktlinjer krävde tre års verifierbar historik för en organisation;
+kontrollera om det gäller när ansökan görs. Källa: Microsoft Learn, *Code signing options for
+Windows app developers*, uppdaterad 2026-08-29.
+
+Vad ägaren gör:
+
+1. Ett Azure-abonnemang (betala per användning) och resursleverantören `Microsoft.CodeSigning`.
+2. Ett Artifact Signing-konto i en region, t.ex. North Europe; kontots *endpoint* är en adress av
+   formen `https://neu.codesigning.azure.net/`.
+3. Identitetsvalidering för organisationen (*Public Trust*), sedan en certifikatprofil av typen
+   Public Trust.
+4. En appregistrering i Entra ID med en klienthemlighet, och rollen *Certificate Profile Signer*
+   (Artifact/Trusted Signing) för appen på kontot eller profilen.
+5. Repots secrets: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
+   `AZURE_SIGNING_ENDPOINT` (endpoint-adressen), `AZURE_SIGNING_ACCOUNT` (kontots namn),
+   `AZURE_SIGNING_PROFILE` (profilens namn).
+
+Steget är `azure/artifact-signing-action` v2.0.0 (pinnat på commit), som kör signtool med
+Microsofts signeringsklient över varje `.exe`, SHA-256 och tidsstämpel från
+`http://timestamp.acs.microsoft.com`; därefter `signtool verify /pa`.
+
+**Alternativ: ett certifikat som PFX.** `WINDOWS_PFX_BASE64` (filen i base64) och
+`WINDOWS_PFX_PASSWORD`; tidsstämpeln från repovariabeln `WINDOWS_TIMESTAMP_URL`, annars
+`http://timestamp.digicert.com`. Ett OV-certifikat kostar enligt samma källa 150–300 USD/år, men
+sedan juni 2023 måste nyckeln ligga i en HSM eller hårdvarutoken, så ett nytt publikt certifikat går
+sällan att lägga som fil i CI; vägen är till för ett äldre certifikat eller en egen CA. EV-certifikat
+(400+ USD/år) ger inte längre något försprång i SmartScreen. Öppen källkod kan få gratis signering
+genom SignPath Foundation (egen integration, inte inkopplad här).
+
+SmartScreen bygger rykte över tid även för signerade binärer; samma signeringsidentitet release
+efter release hjälper.
+
+### macOS
+
+**Apple Developer Program**, 99 USD per medlemsår, i lokal valuta där den finns (kontrollera
+aktuellt pris i kronor vid registreringen). Developer ID-certifikat och notarisering ingår. En
+organisation behöver vara en juridisk person med ett D-U-N-S-nummer, en fungerande webbplats på
+en egen domän och en e-postadress på den domänen, och den som registrerar måste få binda
+organisationen; en enskild person registrerar sig med sitt juridiska namn, som då visas som
+utgivare. Källa: developer.apple.com, *Membership Details* och *Enrollment*.
+
+Vad ägaren gör:
+
+1. Registrera organisationen i Apple Developer Program.
+2. Skapa ett certifikat av typen *Developer ID Application* (kontoinnehavaren gör det), exportera
+   det med nyckeln som `.p12` med ett lösenord.
+3. Skapa en API-nyckel för App Store Connect (*Users and Access → Integrations*, en teamnyckel med
+   rollen Developer), ladda ned `AuthKey_<id>.p8` och notera nyckel-id och issuer-id.
+4. Repots secrets: `APPLE_CERTIFICATE_P12_BASE64` (`base64 -i cert.p12`),
+   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` (t.ex. `Developer ID Application: Namn
+   (TEAMID)`), `APPLE_API_KEY_P8_BASE64` (`base64 -i AuthKey_<id>.p8`), `APPLE_API_KEY_ID`,
+   `APPLE_API_ISSUER_ID`.
+
+Steget lägger certifikatet i en tillfällig nyckelring, signerar varje binär med `codesign
+--options runtime --timestamp` (härdad körmiljö, som notariseringen kräver), skickar en zip med
+binärerna till `xcrun notarytool submit --wait` och stoppar om svaret inte är `Accepted` (loggen
+skrivs då ut). `vy-shell`, `vy-cli`, `vy-dev` och `vy-publish` kör wasmtime, som gör kompilerad kod
+körbar med `mprotect` utan `MAP_JIT`; de får därför rättigheten
+`com.apple.security.cs.allow-unsigned-executable-memory` ur `tools/macos-entitlements.plist`.
+`vy-serve` signeras utan. En fristående binär kan inte bära en häftad notariseringsbiljett;
+Gatekeeper slår upp den på nätet vid första start.
+
+**Inget av signeringsstegen är kört**: det finns inga secrets här och ingen Windows- eller
+macOS-maskin. Första releasen med secrets är provet; `codesign --verify` och `signtool verify` i
+jobbet fäller den om något är fel.
+
+### Reproducerbarhet och signatur
+
+Signaturen ändrar binären. `SHA256SUMS` har därför för ett signerat mål både de levererade filerna
+(`vy-<version>-<mål>/…`) och de osignerade (`vy-<version>-<mål>.unsigned/…`), och ett ombygge
+jämförs med de senare. `BUILD.md` säger per mål om binärerna är signerade och hur.
