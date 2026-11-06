@@ -433,29 +433,46 @@ mod tests {
         let ext = pathext(Some(".COM;.EXE;.BAT;.CMD;;junk"));
         assert_eq!(ext, [".COM", ".EXE", ".BAT", ".CMD"]);
         assert_eq!(pathext(None), ext);
-        assert_eq!(
+        // Windows and macOS file systems ignore case, so the first
+        // extension in PATHEXT order that names the file wins there
+        // (`tool.EXE` for `tool.exe`); the file is the same either way.
+        let same = |found: Option<PathBuf>, want: PathBuf, what: &str| {
+            let found = found.unwrap_or_else(|| panic!("{what}: not found"));
+            assert!(
+                found == want
+                    || found
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&want.to_string_lossy()),
+                "{what}: found {}, want {}",
+                found.display(),
+                want.display()
+            );
+        };
+        same(
             find_program("claude", &path, &ext),
-            Some(bin.join("claude.CMD"))
+            bin.join("claude.CMD"),
+            "claude",
         );
-        assert_eq!(
+        same(
             find_program("tool", &path, &ext),
-            Some(bin.join("tool.exe"))
+            bin.join("tool.exe"),
+            "tool",
         );
-        assert_eq!(
+        same(
             find_program("other", &path, &ext),
-            Some(bin.join("other.cmd")),
-            "lower-case extensions too"
+            bin.join("other.cmd"),
+            "lower-case extensions too",
         );
-        assert_eq!(
+        same(
             find_program("tool.exe", &path, &ext),
-            Some(bin.join("tool.exe")),
-            "a name with an extension is tried as given"
+            bin.join("tool.exe"),
+            "a name with an extension is tried as given",
         );
         let with_dir = format!("{}/claude", bin.display());
-        assert_eq!(
+        same(
             find_program(&with_dir, OsStr::new(""), &ext),
-            Some(PathBuf::from(format!("{with_dir}.CMD"))),
-            "a path is completed where it points, not on PATH"
+            PathBuf::from(format!("{with_dir}.CMD")),
+            "a path is completed where it points, not on PATH",
         );
         assert_eq!(find_program("nothing", &path, &ext), None);
         let _ = std::fs::remove_dir_all(&dir);

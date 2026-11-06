@@ -83,13 +83,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build modules
         run: tools/build_modules.sh
+      # Every failing test binary is reported, and the later checks run even
+      # when tests fail, so one CI round shows everything a platform breaks.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
       - name: Module tests and lint
+        if: ${{ !cancelled() }}
         run: tools/test_modules.sh
       # Same goldens as on Linux; a difference is reported, never papered over
       # with a looser threshold (docs/BUILD-NOTES.md, spec-fråga).
       - name: Conformance
+        if: ${{ !cancelled() }}
         run: cargo run -p vy-cli -- conformance
       - name: Build the client
         run: cargo build --release -p vy-shell
