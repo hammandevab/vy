@@ -1003,6 +1003,18 @@ mod tests {
             shell.key(code, true, 0, false);
             shell.key(code, false, 0, false);
         };
+        // Letting a process go does not wait for it: its answer is handled
+        // when it comes, so wait until every process let go of has ended.
+        let let_go = |shell: &mut Shell| {
+            let deadline = Instant::now() + TIMEOUT;
+            while shell.retiring() > 0 {
+                assert!(Instant::now() < deadline, "a process let go of never ended");
+                if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(10)) {
+                    shell.handle(m);
+                }
+            }
+            shell.drain();
+        };
         // F5: the old process's answer comes under the old generation.
         let tab = shell.open_tab_loaded(page.clone());
         settle(&mut shell, 1, TIMEOUT).unwrap();
@@ -1011,7 +1023,7 @@ mod tests {
         key(&mut shell, 0x04);
         assert!(saved().is_empty(), "nothing saved while the page runs");
         shell.reload();
-        shell.drain();
+        let_go(&mut shell);
         assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])], "saved on F5");
         // A navigation in the same tab: the same.
         let tab = shell.open_tab_loaded(page.clone());
@@ -1025,7 +1037,7 @@ mod tests {
             },
             true,
         );
-        shell.drain();
+        let_go(&mut shell);
         assert_eq!(
             saved(),
             vec![(b"k".to_vec(), vec![0x05])],
@@ -1036,7 +1048,7 @@ mod tests {
         settle(&mut shell, 1, TIMEOUT).unwrap();
         key(&mut shell, 0x06);
         shell.key(crate::shell::hid::W, true, vy_abi::modifier::CTRL, false);
-        shell.drain();
+        let_go(&mut shell);
         assert_eq!(
             saved(),
             vec![(b"k".to_vec(), vec![0x06])],
@@ -1049,6 +1061,81 @@ mod tests {
         shell.shutdown();
         assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x07])], "saved on close");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SPEC-5.2.9, SPEC-9.1.1 (granskning 0006:1): letting tab processes go
+    /// never waits on the UI thread, and many let go of together share one
+    /// grace period instead of waiting one each. Six tabs whose processes
+    /// never answer (stand-ins over real pipes) are closed: every close
+    /// returns before any of them is killed. Two more are still open when
+    /// the window closes. Every one of the eight is killed only after its
+    /// whole grace period, and all within less than one grace period of
+    /// each other: one deadline in all. (Waiting in each close, the kills
+    /// would come during the closes and a grace period apart.)
+    #[test]
+    fn spec_5_2_9_letting_tabs_go_waits_once() {
+        use crate::process::SHUTDOWN_GRACE;
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tabs: Vec<_> = (0..8).map(|_| shell.open_stalled_tab()).collect();
+        let start = Instant::now();
+        for (id, _) in &tabs[..6] {
+            shell.close_tab(*id);
+        }
+        let killed = |tabs: &[(
+            crate::process::TabId,
+            std::sync::Arc<std::sync::Mutex<Option<Instant>>>,
+        )]| {
+            tabs.iter()
+                .filter_map(|(_, k)| *k.lock().unwrap())
+                .collect::<Vec<Instant>>()
+        };
+        assert_eq!(killed(&tabs), [], "a close waited for its process");
+        assert_eq!(shell.retiring(), 6);
+        shell.shutdown();
+        let kills = killed(&tabs);
+        assert_eq!(kills.len(), 8, "every stand-in was killed");
+        let first = *kills.iter().min().unwrap();
+        let last = *kills.iter().max().unwrap();
+        assert!(first >= start + SHUTDOWN_GRACE, "each had its grace period");
+        assert!(
+            last - first < SHUTDOWN_GRACE,
+            "one deadline for all, not one each: {:?} between the first kill and the last",
+            last - first
+        );
+    }
+
+    /// SPEC-5.2.9, SPEC-5.1.5 (granskning 0006:1): a page whose origin
+    /// still has a process let go of that may answer with its storage waits
+    /// for that answer, so it never starts with what was saved before. Here
+    /// the process never answers: the page of the same origin starts only
+    /// once that process has been killed at its deadline.
+    #[test]
+    fn spec_5_2_9_a_page_waits_for_its_origins_storage() {
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let (old, killed) = shell.open_stalled_tab();
+        let wasm = std::fs::read(module_path("hello")).unwrap();
+        let origin = format!("vy://stalled-{old}.example");
+        let page = LoadedPage {
+            display: format!("{origin}/"),
+            origin: Some(origin),
+            manifest: None,
+            sha256: vy_runtime::sha256(&wasm),
+            wasm,
+            resources: Vec::new(),
+            trusted: false,
+            restriction: None,
+            verdicts: Vec::new(),
+            is_localhost: false,
+        };
+        shell.close_tab(old);
+        let tab = shell.open_tab_loaded(page);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert!(
+            killed.lock().unwrap().is_some(),
+            "the page started while the process let go of for its origin ran"
+        );
+        shell.shutdown();
     }
 
     /// SPEC-10.1.1, SPEC-9.6.1: find on page (Ctrl+F) searches the page's

@@ -19,6 +19,12 @@
 //! sends the tab to the recording as well, and the writer thread of a
 //! replaying tab feeds it the frames of a recording instead of the
 //! shell's. The file holds exactly the frames the tab was sent.
+//!
+//! A tab the shell lets go of (a navigation, a closed tab, the window
+//! closing) is sent `Shutdown` and handed to a [`Reaper`], which ends it
+//! by its deadline on a thread of its own; the UI thread never waits for
+//! a tab process to leave, and the answer to the shutdown (the page's
+//! storage) arrives like any other message.
 
 use crate::ipc::{read_frame, write_frame, ChannelTransport, ToShell, ToTab};
 use crate::tab::TabLoop;
@@ -26,9 +32,17 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+/// How long a tab process let go of has to answer its `Shutdown` (with its
+/// storage, SPEC-5.2.9) and leave before it is killed.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+/// How often a waiting end is looked at.
+const POLL: Duration = Duration::from_millis(5);
 
 /// A tab's number in the shell, stable for its life.
 pub type TabId = u32;
@@ -73,6 +87,9 @@ enum Proc {
     ),
     #[cfg(windows)]
     Strict(crate::sandbox::StrictChild),
+    /// A stand-in for tests ([`stalled`]).
+    #[cfg(test)]
+    Stalled(StalledProc),
 }
 
 impl Proc {
@@ -81,6 +98,8 @@ impl Proc {
             Proc::Std(c, _) => c.id(),
             #[cfg(windows)]
             Proc::Strict(c) => c.id(),
+            #[cfg(test)]
+            Proc::Stalled(_) => 0,
         }
     }
 
@@ -93,6 +112,8 @@ impl Proc {
             Proc::Strict(c) => {
                 let _ = c.kill();
             }
+            #[cfg(test)]
+            Proc::Stalled(p) => p.kill(),
         }
     }
 
@@ -101,6 +122,8 @@ impl Proc {
             Proc::Std(c, _) => Ok(c.try_wait()?.map(|s| s.to_string())),
             #[cfg(windows)]
             Proc::Strict(c) => c.try_wait(),
+            #[cfg(test)]
+            Proc::Stalled(p) => Ok(p.killed().map(|_| "killed".into())),
         }
     }
 
@@ -111,6 +134,8 @@ impl Proc {
             }
             #[cfg(windows)]
             Proc::Strict(c) => c.wait(),
+            #[cfg(test)]
+            Proc::Stalled(_) => {}
         }
     }
 
@@ -119,8 +144,54 @@ impl Proc {
         match self {
             Proc::Std(_, j) => j.as_ref(),
             Proc::Strict(c) => Some(&c.job),
+            #[cfg(test)]
+            Proc::Stalled(_) => None,
         }
     }
+}
+
+/// A tab process stand-in for tests: the shell's ends are real pipes, but
+/// nothing reads what it is sent or answers, and it leaves only when it
+/// is killed, which closes its ends and notes the instant.
+#[cfg(test)]
+pub(crate) struct StalledProc {
+    ends: Option<(io::PipeReader, io::PipeWriter)>,
+    killed: Arc<std::sync::Mutex<Option<Instant>>>,
+}
+
+#[cfg(test)]
+impl StalledProc {
+    fn kill(&mut self) {
+        self.killed.lock().unwrap().get_or_insert_with(Instant::now);
+        self.ends = None;
+    }
+
+    fn killed(&self) -> Option<Instant> {
+        *self.killed.lock().unwrap()
+    }
+}
+
+/// A connection to a [`StalledProc`] for tab `id`, and the cell that holds
+/// the instant it is killed.
+#[cfg(test)]
+pub(crate) fn stalled(
+    id: TabId,
+    sink: impl Sink,
+) -> io::Result<(TabConnection, Arc<std::sync::Mutex<Option<Instant>>>)> {
+    let (child_in, shell_in) = io::pipe()?;
+    let (shell_out, child_out) = io::pipe()?;
+    let killed = Arc::new(std::sync::Mutex::new(None));
+    let process = Proc::Stalled(StalledProc {
+        ends: Some((child_in, child_out)),
+        killed: killed.clone(),
+    });
+    let pipes = (
+        process,
+        Box::new(shell_in) as Box<dyn Write + Send>,
+        Box::new(shell_out) as Box<dyn io::Read + Send>,
+        crate::sandbox::Report::default(),
+    );
+    Ok((connect(id, sink, pipes, Source::Shell(None))?, killed))
 }
 
 /// What a process-backed tab's writer thread is told.
@@ -532,19 +603,29 @@ impl TabConnection {
         }
     }
 
-    /// Ask the tab to leave, wait briefly, then make sure it has.
-    pub fn shutdown(mut self) {
+    /// Ask the tab to leave: [`ToTab::Shutdown`], then the end of its
+    /// input. Its answer (the page's storage) still comes through the
+    /// reader.
+    fn ask_to_leave(&mut self) {
         let _ = self.send(&ToTab::Shutdown);
         self.feed = None;
+    }
+
+    /// True once the tab has ended: its process exited, or its thread
+    /// returned.
+    fn has_ended(&mut self) -> bool {
+        match &mut self.kind {
+            Kind::Process(c) => !matches!(c.try_wait(), Ok(None)),
+            Kind::Thread(h) => h.as_ref().is_none_or(JoinHandle::is_finished),
+        }
+    }
+
+    /// End the tab now: kill a process that still runs (a thread cannot
+    /// be, so it is waited for), then wait for the writer and the reader,
+    /// so everything the tab sent has been delivered.
+    fn end(&mut self) {
         match &mut self.kind {
             Kind::Process(c) => {
-                let start = Instant::now();
-                while start.elapsed() < Duration::from_millis(500) {
-                    if matches!(c.try_wait(), Ok(Some(_))) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
                 c.kill();
                 c.wait();
             }
@@ -560,6 +641,119 @@ impl TabConnection {
         if let Some(r) = self.reader.take() {
             let _ = r.join();
         }
+    }
+
+    /// Ask the tab to leave, wait up to [`SHUTDOWN_GRACE`], then make sure
+    /// it has; everything it sent has been delivered when this returns.
+    /// This waits on the calling thread: the shell lets its tabs go through
+    /// a [`Reaper`] instead.
+    pub fn shutdown(mut self) {
+        self.ask_to_leave();
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        while !self.has_ended() && Instant::now() < deadline {
+            thread::sleep(POLL);
+        }
+        self.end();
+    }
+}
+
+/// Tab connections being let go of, ended on a thread of their own so the
+/// caller never waits (SPEC-5.2.9). Each is sent `Shutdown` when it is
+/// handed over and has until its deadline to leave; then it is killed.
+/// Their readers keep delivering meanwhile, so a page's storage answer
+/// reaches the sink whenever it comes, before its process ends. Many let
+/// go of at once with one deadline take that one deadline in all.
+pub struct Reaper {
+    tx: Option<Sender<(TabConnection, Instant)>>,
+    pending: Arc<AtomicUsize>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Reaper {
+    /// A reaper and its thread.
+    pub fn new() -> io::Result<Reaper> {
+        let (tx, rx) = mpsc::channel();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let count = pending.clone();
+        let thread = thread::Builder::new()
+            .name("tab-reaper".into())
+            .spawn(move || reap(&rx, &count))?;
+        Ok(Reaper {
+            tx: Some(tx),
+            pending,
+            thread: Some(thread),
+        })
+    }
+
+    /// Send `conn` its `Shutdown` now and have it ended by `deadline`.
+    /// Returns at once.
+    pub fn retire(&self, mut conn: TabConnection, deadline: Instant) {
+        conn.ask_to_leave();
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        if let Some(tx) = &self.tx {
+            if let Err(mpsc::SendError((mut conn, _))) = tx.send((conn, deadline)) {
+                conn.end();
+                self.pending.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Connections handed over that have not ended yet: their answers may
+    /// still come. Zero means everything they sent has been delivered.
+    pub fn pending(&self) -> usize {
+        self.pending.load(Ordering::SeqCst)
+    }
+
+    /// Wait until every connection handed over has ended, each by its
+    /// deadline, and stop the thread.
+    pub fn finish(&mut self) {
+        self.tx = None;
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for Reaper {
+    /// Without [`Reaper::finish`] the thread still ends what it holds, at
+    /// their deadlines, on its own.
+    fn drop(&mut self) {
+        self.tx = None;
+    }
+}
+
+/// The reaper's thread: take connections as they come, end each once it
+/// has ended by itself or its deadline has passed, until no more can come
+/// and none is left.
+fn reap(rx: &Receiver<(TabConnection, Instant)>, pending: &AtomicUsize) {
+    let mut live: Vec<(TabConnection, Instant)> = Vec::new();
+    let mut open = true;
+    while open || !live.is_empty() {
+        if live.is_empty() {
+            match rx.recv() {
+                Ok(c) => live.push(c),
+                Err(_) => open = false,
+            }
+        } else if open {
+            match rx.recv_timeout(POLL) {
+                Ok(c) => live.push(c),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => open = false,
+            }
+        } else {
+            thread::sleep(POLL);
+        }
+        live.extend(rx.try_iter());
+        let now = Instant::now();
+        live.retain_mut(|(conn, deadline)| {
+            if conn.has_ended() || now >= *deadline {
+                conn.end();
+                pending.fetch_sub(1, Ordering::SeqCst);
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 

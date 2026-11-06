@@ -94,8 +94,9 @@ impl App {
             });
         }
         if shell.quit() {
-            // The last tab was closed: what its process answered (its
-            // storage) is still in the inbox; `shutdown` handles it.
+            // The last tab was closed: its process may still answer with
+            // its storage; `shutdown` waits for that (one grace period at
+            // most) and saves it.
             if let Some(shell) = self.shell.take() {
                 shell.shutdown();
             }
