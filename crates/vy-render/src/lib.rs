@@ -9,6 +9,7 @@ pub mod image;
 pub mod raster;
 #[cfg(test)]
 mod raster_reference;
+pub mod renderer;
 pub mod text;
 
 pub use image::{diff_ratio, ImageCache, ImageError, Resource, RgbaImage, MAX_IMAGE_CACHE_BYTES};
@@ -16,6 +17,7 @@ pub use raster::{
     raster_budget_units, render, RasterReport, RenderError, Rendered, MASK_WEIGHT, OP_UNITS,
     PIPELINE_WEIGHT, RASTER_BUDGET_OVERDRAWS, RASTER_BUDGET_UNITS,
 };
+pub use renderer::{FrameInfo, RasterPath, Renderer};
 pub use text::{pack_x100, CacheStats, Size, TextEngine};
 
 #[cfg(test)]

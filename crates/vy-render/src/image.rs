@@ -255,6 +255,15 @@ pub struct ImageCache {
     slots: Vec<Slot>,
     pub(crate) decoded_bytes: usize,
     decodes: u32,
+    generation: u64,
+}
+
+/// The source of [`ImageCache::generation`]: unique across every cache
+/// of the process.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ImageCache {
@@ -264,6 +273,7 @@ impl ImageCache {
             slots: resources.into_iter().map(Slot::Raw).collect(),
             decoded_bytes: 0,
             decodes: 0,
+            generation: next_generation(),
         }
     }
 
@@ -283,6 +293,7 @@ impl ImageCache {
                 .collect(),
             decoded_bytes: 0,
             decodes: 0,
+            generation: next_generation(),
         }
     }
 
@@ -308,7 +319,17 @@ impl ImageCache {
         }
         self.decoded_bytes += image.data.len();
         *slot = Slot::Ready(image);
+        self.generation = next_generation();
         true
+    }
+
+    /// A number that is the same for two calls exactly when nothing
+    /// [`ImageCache::get`] answers changed in between and the cache is
+    /// the same one: unique per cache, and new after every decode or
+    /// [`ImageCache::set_decoded`]. The damage tracking of
+    /// [`crate::Renderer`] repaints everything when it moves.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Number of resources in the package (ids `1..=count`).
@@ -363,6 +384,7 @@ impl ImageCache {
                 }
             };
         *slot = outcome;
+        self.generation = next_generation();
         cost
     }
 
