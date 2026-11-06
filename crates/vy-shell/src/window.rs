@@ -1,12 +1,22 @@
-//! The window: `winit` for the window, input and DPI, `softbuffer` to
-//! present the frame the shell composited on the CPU (SPEC-9.1.2: the
-//! only pixels are the main process's). Pages are rasterized by
-//! `vy_render::Renderer` on its fast path – the reference's bytes, with
-//! damage tracking and bands on threads (SPEC-11.3.2, SPEC-13.2.1;
-//! docs/notes/m5-gpu.md says why there is no GPU path) – and the window
-//! converts and presents only the rectangle that changed since the last
-//! present ([`Presented`]). Everything the window does is a call into
-//! [`Shell`]; nothing here decides anything.
+//! The window: `winit` for the window, input and DPI, and two ways to
+//! present (SPEC-9.1.2: the only pixels, and the only GL context, are the
+//! main process's), decided when the window opens and left for good on
+//! any GL failure (docs/notes/m5-gpu.md, spec-fråga 66):
+//!
+//! 1. **OpenGL** (`gl` feature; Linux and Windows): the shell composites
+//!    chrome and overlays with the page area transparent, the page is
+//!    drawn by `vy_render::gl` into a framebuffer when its list changes,
+//!    and both are put on the window (`crate::gl`). Within SPEC-11.3.2's
+//!    tolerance of the reference.
+//! 2. **CPU** (`softbuffer`): the page rasterized by
+//!    `vy_render::Renderer`'s fast path – the reference's bytes, with
+//!    damage tracking and bands on threads, itself falling back to the
+//!    reference – into the shell's frame, of which only the rectangle that
+//!    changed since the last present is converted and sent ([`Presented`]).
+//!
+//! The path is logged on stderr and in every tab's log (devtools).
+//! Everything the window does is a call into [`Shell`]; nothing here
+//! decides anything.
 
 use crate::compose::to_xrgb;
 use crate::external::SystemOpener;
@@ -43,6 +53,10 @@ impl From<accesskit_winit::Event> for UserEvent {
 
 struct App {
     shell: Option<Shell>,
+    /// The GL path while it works.
+    gpu: Option<gpu::Gpu>,
+    /// The page version the GL framebuffer holds.
+    gpu_page: Option<gpu::Version>,
     proxy: EventLoopProxy<UserEvent>,
     /// The AccessKit adapter (SPEC-10.2.1), made before the window shows.
     adapter: Option<accesskit_winit::Adapter>,
@@ -158,6 +172,12 @@ impl App {
     /// handed to the window system as damage; a frame that changed
     /// nothing is presented whole, for an expose.
     fn present(&mut self) {
+        if let (Some(g), Some(shell)) = (self.gpu.as_mut(), self.shell.as_mut()) {
+            match gpu::present(g, shell, &mut self.presented, &mut self.gpu_page) {
+                Ok(()) => return,
+                Err(e) => self.leave_gpu(e),
+            }
+        }
         let (Some(shell), Some(surface)) = (self.shell.as_mut(), self.surface.as_mut()) else {
             return;
         };
@@ -189,6 +209,45 @@ impl App {
     }
 }
 
+impl App {
+    /// Leave the GL path for the CPU path, for good: the shell draws the
+    /// page into its frame again and `softbuffer` presents it.
+    fn leave_gpu(&mut self, why: String) {
+        eprintln!("vy-shell: GL failed ({why}); presenting on the CPU");
+        self.gpu = None;
+        self.gpu_page = None;
+        self.presented = Presented::default();
+        if let Some(shell) = self.shell.as_mut() {
+            shell.set_page_layer(false);
+            shell.set_raster_path(format!(
+                "GL failed ({why}); {}",
+                vy_render::Renderer::new(vy_render::RasterPath::Fast).describe()
+            ));
+        }
+        if let Some(window) = &self.window {
+            self.surface = cpu_surface(window);
+        }
+    }
+}
+
+/// A `softbuffer` surface on `window`, or `None` with a line on stderr.
+fn cpu_surface(window: &Rc<Window>) -> Option<softbuffer::Surface<Rc<Window>, Rc<Window>>> {
+    let context = match softbuffer::Context::new(window.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("vy-shell: no drawing surface: {e}");
+            return None;
+        }
+    };
+    match softbuffer::Surface::new(&context, window.clone()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("vy-shell: no drawing surface: {e}");
+            None
+        }
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -201,8 +260,8 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title("Vy")
             .with_inner_size(LogicalSize::new(1024.0, 720.0))
             .with_min_inner_size(LogicalSize::new(320.0, 240.0));
-        let window = match el.create_window(attributes) {
-            Ok(w) => Rc::new(w),
+        let (window, gpu) = match gpu::open(el, attributes) {
+            Ok((w, g)) => (Rc::new(w), g),
             Err(e) => {
                 eprintln!("vy-shell: cannot open a window: {e}");
                 el.exit();
@@ -215,22 +274,21 @@ impl ApplicationHandler<UserEvent> for App {
             self.proxy.clone(),
         ));
         window.set_visible(true);
-        eprintln!(
-            "vy-shell: presentation: softbuffer, damage only; {}",
-            vy_render::Renderer::new(vy_render::RasterPath::Fast).describe()
-        );
-        let context = match softbuffer::Context::new(window.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("vy-shell: no drawing surface: {e}");
-                el.exit();
-                return;
-            }
+        let raster_line = match &gpu {
+            Some(g) => gpu::describe(g),
+            None => vy_render::Renderer::new(vy_render::RasterPath::Fast).describe(),
         };
-        match softbuffer::Surface::new(&context, window.clone()) {
-            Ok(s) => self.surface = Some(s),
-            Err(e) => {
-                eprintln!("vy-shell: no drawing surface: {e}");
+        eprintln!(
+            "vy-shell: presentation: {}; {raster_line}",
+            if gpu.is_some() {
+                "OpenGL"
+            } else {
+                "softbuffer, damage only"
+            }
+        );
+        if gpu.is_none() {
+            self.surface = cpu_surface(&window);
+            if self.surface.is_none() {
                 el.exit();
                 return;
             }
@@ -262,6 +320,9 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        shell.set_raster_path(raster_line);
+        shell.set_page_layer(gpu.is_some());
+        self.gpu = gpu;
         let sources = std::mem::take(&mut self.initial);
         if sources.is_empty() {
             shell.open_tab(None);
@@ -321,6 +382,9 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             WindowEvent::Resized(PhysicalSize { width, height }) => {
+                if let Some(g) = &self.gpu {
+                    gpu::resize(g, width, height);
+                }
                 shell.resize(
                     (f64::from(width) / scale) as f32,
                     (f64::from(height) / scale) as f32,
@@ -330,6 +394,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let size = self.window.as_ref().map(|w| w.inner_size());
                 if let Some(size) = size {
+                    if let Some(g) = &self.gpu {
+                        gpu::resize(g, size.width, size.height);
+                    }
                     shell.resize(
                         (f64::from(size.width) / scale_factor) as f32,
                         (f64::from(size.height) / scale_factor) as f32,
@@ -554,6 +621,133 @@ fn to_xrgb_area(img: &RgbaImage, out: &mut [u32], area: Area) {
     }
 }
 
+/// The GL path (`gl` feature, not macOS).
+#[cfg(all(feature = "gl", not(target_os = "macos")))]
+mod gpu {
+    use super::Presented;
+    use crate::shell::Shell;
+    use vy_render::gl::{GlError, PageAt};
+    use winit::event_loop::ActiveEventLoop;
+    use winit::window::{Window, WindowAttributes};
+
+    pub type Gpu = crate::gl::GlContext;
+    /// See `PageLayer::version`.
+    pub type Version = (u32, u64, u32, u32, u32, u64);
+
+    /// The window, with a GL context when one can be made.
+    pub fn open(
+        el: &ActiveEventLoop,
+        attributes: WindowAttributes,
+    ) -> Result<(Window, Option<Gpu>), String> {
+        match crate::gl::open(el, attributes.clone()) {
+            Ok((w, g)) => Ok((w, Some(g))),
+            Err(no) => {
+                eprintln!("vy-shell: no GL ({}); the CPU path", no.why);
+                match no.window {
+                    Some(w) => Ok((w, None)),
+                    None => el
+                        .create_window(attributes)
+                        .map(|w| (w, None))
+                        .map_err(|e| e.to_string()),
+                }
+            }
+        }
+    }
+
+    pub fn describe(g: &Gpu) -> String {
+        g.describe()
+    }
+
+    pub fn resize(g: &Gpu, width: u32, height: u32) {
+        g.resize(width, height);
+    }
+
+    /// Composite the shell's frame (transparent where the page shows),
+    /// draw the page when it changed, present. `Err`: leave the GL path.
+    pub fn present(
+        g: &mut Gpu,
+        shell: &mut Shell,
+        presented: &mut Presented,
+        drawn: &mut Option<Version>,
+    ) -> Result<(), String> {
+        let changed = presented.update(shell.frame());
+        let mut at = None;
+        let mut report = None;
+        if let Some(layer) = shell.page_layer() {
+            let p = layer.place;
+            if *drawn != Some(layer.version) {
+                let before = layer.raster.path();
+                match layer.raster.render_gl(
+                    &g.gl,
+                    &mut g.raster,
+                    layer.list,
+                    p.width,
+                    p.height,
+                    p.scale,
+                    layer.text,
+                    layer.images,
+                ) {
+                    Ok(r) => report = Some((p.tab, r, before)),
+                    // A list the reference refuses too: nothing to show.
+                    Err(GlError::Render(_)) => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+                *drawn = Some(layer.version);
+            }
+            at = Some(PageAt {
+                x: p.at.0,
+                y: p.at.1,
+                clip: p.clip,
+            });
+        }
+        if let Some((tab, r, before)) = report {
+            shell.page_drawn(tab, r, before);
+        }
+        g.raster
+            .present(&g.gl, shell.frame(), changed.map(|a| (a.y0, a.y1)), at)
+            .map_err(|e| e.to_string())?;
+        g.swap().map_err(|e| e.to_string())
+    }
+}
+
+/// No GL path in this build: the CPU path only.
+#[cfg(not(all(feature = "gl", not(target_os = "macos"))))]
+mod gpu {
+    use super::Presented;
+    use crate::shell::Shell;
+    use winit::event_loop::ActiveEventLoop;
+    use winit::window::{Window, WindowAttributes};
+
+    pub enum Gpu {}
+    pub type Version = ();
+
+    pub fn open(
+        el: &ActiveEventLoop,
+        attributes: WindowAttributes,
+    ) -> Result<(Window, Option<Gpu>), String> {
+        el.create_window(attributes)
+            .map(|w| (w, None))
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn describe(g: &Gpu) -> String {
+        match *g {}
+    }
+
+    pub fn resize(g: &Gpu, _: u32, _: u32) {
+        match *g {}
+    }
+
+    pub fn present(
+        g: &mut Gpu,
+        _: &mut Shell,
+        _: &mut Presented,
+        _: &mut Option<Version>,
+    ) -> Result<(), String> {
+        match *g {}
+    }
+}
+
 /// Open the window with `sources` in tabs (an empty tab when none) and
 /// run until it closes.
 pub fn run(sources: Vec<Source>) -> Result<(), String> {
@@ -563,6 +757,8 @@ pub fn run(sources: Vec<Source>) -> Result<(), String> {
     let proxy = event_loop.create_proxy();
     let mut app = App {
         shell: None,
+        gpu: None,
+        gpu_page: None,
         proxy,
         adapter: None,
         a11y_active: false,

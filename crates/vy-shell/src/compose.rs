@@ -47,6 +47,35 @@ pub fn blit(
     }
 }
 
+/// Make the pixels of `rect` (left, top, width, height) transparent: the
+/// page area of a layered frame, where the window draws the page under it.
+pub fn clear(dst: &mut RgbaImage, rect: (i64, i64, i64, i64)) {
+    let (x, y, w, h) = rect;
+    let (x0, y0) = (x.max(0), y.max(0));
+    let x1 = (x + w).min(i64::from(dst.width));
+    let y1 = (y + h).min(i64::from(dst.height));
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    for row in y0..y1 {
+        let d = (row as usize * dst.width as usize + x0 as usize) * 4;
+        dst.data[d..d + ((x1 - x0) * 4) as usize].fill(0);
+    }
+}
+
+/// Source over of a straight-alpha colour `(r, g, b, a)` onto the
+/// premultiplied pixel `d`: `c = (s × a + d × (255 − a) + 127) / 255` and
+/// alpha `a + (d_a × (255 − a) + 127) / 255`. On an opaque pixel the alpha
+/// stays 255 and the colour is the straight blend the shell always did; on
+/// the transparent page area of a layered frame it is premultiplied.
+fn over(d: &mut [u8], src: [u32; 3], a: u32) {
+    for (c, sv) in src.iter().enumerate() {
+        let dv = u32::from(d[c]);
+        d[c] = ((sv * a + dv * (255 - a) + 127) / 255) as u8;
+    }
+    d[3] = (a + (u32::from(d[3]) * (255 - a) + 127) / 255) as u8;
+}
+
 /// Blend `src` over `dst` at `(x, y)` with `src`'s straight alpha, for
 /// the status overlay.
 pub fn blend(dst: &mut RgbaImage, src: &RgbaImage, x: i64, y: i64) {
@@ -63,12 +92,12 @@ pub fn blend(dst: &mut RgbaImage, src: &RgbaImage, x: i64, y: i64) {
             if a == 0 {
                 continue;
             }
-            for c in 0..3 {
-                let sv = u32::from(src.data[s + c]);
-                let dv = u32::from(dst.data[d + c]);
-                dst.data[d + c] = ((sv * a + dv * (255 - a) + 127) / 255) as u8;
-            }
-            dst.data[d + 3] = 255;
+            let sv = [
+                u32::from(src.data[s]),
+                u32::from(src.data[s + 1]),
+                u32::from(src.data[s + 2]),
+            ];
+            over(&mut dst.data[d..d + 4], sv, a);
         }
     }
 }
@@ -97,11 +126,7 @@ pub fn fill_blend(
     for row in y0..y1 {
         for col in x0..x1 {
             let d = ((row as usize) * dst.width as usize + col as usize) * 4;
-            for (c, sv) in src.iter().enumerate() {
-                let dv = u32::from(dst.data[d + c]);
-                dst.data[d + c] = ((sv * a + dv * (255 - a) + 127) / 255) as u8;
-            }
-            dst.data[d + 3] = 255;
+            over(&mut dst.data[d..d + 4], src, a);
         }
     }
 }
@@ -154,5 +179,47 @@ mod tests {
         assert_eq!(words, [0x0001_0203, 0x0001_0203]);
         assert_eq!(physical(800.0, 600.0, 1.5), (1200, 900));
         assert_eq!(physical(0.0, 0.0, 1.0), (1, 1));
+    }
+
+    /// SPEC-9.6.1, SPEC-11.3.2: on the GL path the shell leaves the page
+    /// area transparent and the overlays (selection, find, the status pill)
+    /// blend onto it premultiplied; the window then puts that frame over the
+    /// page (`out = frame + page × (1 − α)`), which gives what blending them
+    /// onto the page itself gives, within a unit of rounding. On opaque
+    /// pixels nothing changed: the alpha stays 255.
+    #[test]
+    fn spec_9_6_1_layered_overlays_match_the_composited_frame() {
+        let overlays = |img: &mut RgbaImage| {
+            fill_blend(img, (0, 0, 4, 4), 0x3366_FF60, (0, 0, 4, 4));
+            fill_blend(img, (1, 1, 2, 2), 0xFFCC_0080, (0, 0, 4, 4));
+            blend(img, &solid(2, 2, [10, 200, 30, 200]), 2, 2);
+        };
+        for page in [[255u8, 255, 255, 255], [0, 0, 0, 255], [90, 140, 200, 255]] {
+            let mut composited = solid(4, 4, page);
+            overlays(&mut composited);
+            let mut layer = solid(4, 4, [9, 9, 9, 255]);
+            clear(&mut layer, (0, 0, 4, 4));
+            assert!(layer.data.iter().all(|&b| b == 0));
+            overlays(&mut layer);
+            for (c, l) in composited
+                .data
+                .chunks_exact(4)
+                .zip(layer.data.chunks_exact(4))
+            {
+                assert_eq!(c[3], 255, "opaque stays opaque");
+                for k in 0..3 {
+                    let under = u32::from(page[k]) * (255 - u32::from(l[3]));
+                    let out = u32::from(l[k]) + (under + 127) / 255;
+                    assert!(
+                        out.abs_diff(u32::from(c[k])) <= 1,
+                        "{page:?}: {l:?} vs {c:?}"
+                    );
+                }
+            }
+        }
+        let mut dst = solid(2, 2, [1, 2, 3, 255]);
+        clear(&mut dst, (1, 0, 5, 5));
+        assert_eq!(dst.pixel(0, 0), Some([1, 2, 3, 255]));
+        assert_eq!(dst.pixel(1, 1), Some([0, 0, 0, 0]));
     }
 }
