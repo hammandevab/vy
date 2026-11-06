@@ -2327,11 +2327,131 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// SPEC-9.7.1: reproducible builds publish hash and recipe.
+    /// SPEC-9.7.1: the same commit builds to the same bytes in any checkout.
+    /// The working tree (what `git ls-files --cached --others
+    /// --exclude-standard` lists) is copied to two directories at different
+    /// depths, and `tools/build_modules.sh` runs in each with its own module
+    /// target directories and another time zone: every `.wasm` is byte for
+    /// byte the same. A package is reproducible when its unsigned manifest is
+    /// (the package identity, SPEC-4.1.2, which names the module's and every
+    /// resource's hash), since signing with a fresh key, as
+    /// `tools/build_studio.sh` does, changes only the signature: every draft
+    /// in `conformance/manifests/` finished over each copy's module and
+    /// resources has the same identity, and signed with two keys the packages
+    /// differ but unpack to that identity. The release binaries are too slow
+    /// to build twice here; CI's `repro` job builds them in two directories
+    /// and compares their SHA-256 (docs/RELEASING.md).
     #[test]
-    #[ignore = "M5: release"]
     fn spec_9_7_1_reproducible_build() {
-        todo!()
+        let src = root();
+        let listed = std::process::Command::new("git")
+            .args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ])
+            .current_dir(&src)
+            .output()
+            .expect("git: the test copies the working tree that git lists");
+        assert!(listed.status.success(), "git ls-files");
+        let base = std::env::temp_dir().join(format!("vy-repro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let copies = [base.join("a/vy"), base.join("b/further/down/vy")];
+        for (copy, tz) in copies.iter().zip(["UTC", "Asia/Tokyo"]) {
+            for name in listed.stdout.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+                let name = std::str::from_utf8(name).unwrap();
+                let from = src.join(name);
+                if !from.is_file() {
+                    continue; // deleted in the working tree
+                }
+                let to = copy.join(name);
+                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+                std::fs::copy(&from, &to).unwrap();
+            }
+            let built = std::process::Command::new("bash")
+                .arg("tools/build_modules.sh")
+                .current_dir(copy)
+                .env("TZ", tz)
+                .env_remove("CARGO_TARGET_DIR")
+                .env_remove("CARGO_BUILD_TARGET_DIR")
+                .output()
+                .unwrap();
+            assert!(
+                built.status.success(),
+                "{}: {}",
+                copy.display(),
+                String::from_utf8_lossy(&built.stderr)
+            );
+        }
+
+        let names: Vec<String> = std::fs::read_dir(src.join("modules"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.join("Cargo.toml").is_file())
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.len() >= 12, "{names:?}");
+        let wasm = |copy: &Path, name: &str| {
+            std::fs::read(copy.join(format!("target/wasm/{name}.wasm"))).unwrap()
+        };
+        let mut differ = Vec::new();
+        for name in &names {
+            if wasm(&copies[0], name) != wasm(&copies[1], name) {
+                differ.push(name.clone());
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "modules differ between checkouts: {differ:?}"
+        );
+
+        let drafts = src.join("conformance/manifests");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&drafts).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let finish = |copy: &Path| {
+                let dir = copy.join("conformance/manifests");
+                let draft = Draft::from_json(
+                    &std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap(),
+                )
+                .unwrap();
+                let resources = draft.load_resources(&dir).unwrap();
+                let module = wasm(copy, &name);
+                let manifest = draft.finish(&module, &resources);
+                let resources = resources.into_iter().map(|r| r.bytes).collect();
+                vy_manifest::Package {
+                    manifest,
+                    module,
+                    resources,
+                }
+            };
+            let mut a = finish(&copies[0]);
+            let mut b = finish(&copies[1]);
+            assert_eq!(a.identity(), b.identity(), "{name}: unsigned manifest");
+            assert_eq!(
+                (&a.module, &a.resources),
+                (&b.module, &b.resources),
+                "{name}"
+            );
+            let identity = a.identity();
+            a.manifest.sign(&SigningKey::from_seed(&[1; 32]));
+            b.manifest.sign(&SigningKey::from_seed(&[2; 32]));
+            let (pa, pb) = (a.pack().unwrap(), b.pack().unwrap());
+            assert_ne!(pa, pb, "{name}: two keys, two signatures");
+            for packed in [pa, pb] {
+                let unpacked = vy_manifest::Package::unpack(&packed).unwrap();
+                assert_eq!(unpacked.identity(), identity, "{name}");
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, names.len(), "a draft per module");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// SPEC-10.2.2, SPEC-2.1.5: the host owns text selection and copies
