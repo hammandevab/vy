@@ -227,6 +227,10 @@ mod platform {
 
     /// The calls a locked-down tab may make (see the module text); each
     /// was seen in a trace or is what std, glibc or wasmtime fall back to.
+    /// Not `prlimit64`: std and glibc read `RLIMIT_STACK` and
+    /// `RLIMIT_NOFILE` at startup, before the lockdown, and no tab process
+    /// calls it after (traced over the shell's tests); with another pid it
+    /// would change the limits of the user's other processes.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn allowed() -> Vec<libc::c_long> {
         let mut v = vec![
@@ -262,7 +266,6 @@ mod platform {
             libc::SYS_set_robust_list,
             libc::SYS_rseq,
             libc::SYS_membarrier,
-            libc::SYS_prlimit64,
             libc::SYS_restart_syscall,
             libc::SYS_exit,
             libc::SYS_exit_group,
@@ -484,22 +487,96 @@ mod platform {
     mod tests {
         use super::*;
 
-        /// The filter's jumps land where they should: every listed call
-        /// at the allow return, the special cases at their checks.
-        #[test]
-        fn filter_layout() {
-            let f = filter(42);
-            let allow = f
-                .iter()
-                .position(|i| i.code == BPF_RET_K && i.k == SECCOMP_RET_ALLOW)
-                .unwrap();
-            for (at, i) in f.iter().enumerate() {
-                if i.code == BPF_JEQ_K && allowed().contains(&(i.k as libc::c_long)) && at < allow {
-                    assert_eq!(at + 1 + i.jt as usize, allow, "{}", i.k);
+        /// Run the classic BPF program `f` on one call, as the kernel does
+        /// (`struct seccomp_data`, native byte order); the action it returns.
+        fn run(f: &[SockFilter], arch: u32, nr: libc::c_long, args: [u64; 6]) -> u32 {
+            let mut data = [0u8; 64];
+            data[0..4].copy_from_slice(&(nr as u32).to_ne_bytes());
+            data[4..8].copy_from_slice(&arch.to_ne_bytes());
+            for (i, a) in args.iter().enumerate() {
+                let at = OFF_ARG0 as usize + 8 * i;
+                data[at..at + 8].copy_from_slice(&a.to_ne_bytes());
+            }
+            let (mut pc, mut acc) = (0usize, 0u32);
+            loop {
+                let i = f[pc];
+                pc += 1;
+                let jump = |taken: bool| usize::from(if taken { i.jt } else { i.jf });
+                match i.code {
+                    BPF_LD_W_ABS => {
+                        let k = i.k as usize;
+                        acc = u32::from_ne_bytes(data[k..k + 4].try_into().unwrap());
+                    }
+                    BPF_JEQ_K => pc += jump(acc == i.k),
+                    BPF_JGE_K => pc += jump(acc >= i.k),
+                    BPF_JSET_K => pc += jump(acc & i.k != 0),
+                    BPF_RET_K => return i.k,
+                    other => panic!("opcode {other:#x} is not in the filter"),
                 }
             }
-            assert_eq!(f.last().unwrap().k, SECCOMP_RET_ERRNO | libc::ENOSYS as u32);
+        }
+
+        /// SPEC-9.1.3: the filter as the kernel runs it. Every listed call
+        /// is allowed; `prlimit64` is refused for any pid, this one and 0
+        /// included (granskning 0007:4: nothing calls it after the lockdown,
+        /// and with another pid it reaches the user's other processes);
+        /// `tgkill` reaches only this process, `clone` makes only threads,
+        /// `clone3` is `ENOSYS`; files, sockets, exec and signals to others
+        /// are `EPERM`; a foreign architecture or the x32 ABI is killed.
+        #[test]
+        fn filter_layout() {
+            let pid = 42u32;
+            let f = filter(pid);
             assert!(f.len() < 100);
+            let call = |nr: libc::c_long, args: [u64; 6]| run(&f, AUDIT_ARCH, nr, args);
+            let eperm = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+            for nr in allowed() {
+                assert_eq!(call(nr, [0; 6]), SECCOMP_RET_ALLOW, "call {nr}");
+            }
+            for target in [0, u64::from(pid), 1, 4242] {
+                let limit = [target, libc::RLIMIT_NOFILE as u64, 0, 0, 0, 0];
+                assert_eq!(call(libc::SYS_prlimit64, limit), eperm, "pid {target}");
+            }
+            let own = u64::from(pid);
+            assert_eq!(
+                call(libc::SYS_tgkill, [own, own, 6, 0, 0, 0]),
+                SECCOMP_RET_ALLOW
+            );
+            assert_eq!(call(libc::SYS_tgkill, [1, 1, 9, 0, 0, 0]), eperm);
+            let thread = (libc::CLONE_VM | libc::CLONE_THREAD | libc::CLONE_SIGHAND) as u64;
+            assert_eq!(
+                call(libc::SYS_clone, [thread, 0, 0, 0, 0, 0]),
+                SECCOMP_RET_ALLOW
+            );
+            let fork = libc::SIGCHLD as u64;
+            assert_eq!(call(libc::SYS_clone, [fork, 0, 0, 0, 0, 0]), eperm);
+            assert_eq!(
+                call(libc::SYS_clone3, [0; 6]),
+                SECCOMP_RET_ERRNO | libc::ENOSYS as u32
+            );
+            for nr in [
+                libc::SYS_openat,
+                libc::SYS_socket,
+                libc::SYS_connect,
+                libc::SYS_execve,
+                libc::SYS_ptrace,
+                libc::SYS_kill,
+                libc::SYS_process_vm_writev,
+                libc::SYS_setrlimit,
+            ] {
+                assert_eq!(call(nr, [0; 6]), eperm, "call {nr}");
+            }
+            let i386 = 0x4000_0003;
+            assert_eq!(
+                run(&f, i386, libc::SYS_read, [0; 6]),
+                SECCOMP_RET_KILL_PROCESS
+            );
+            if cfg!(target_arch = "x86_64") {
+                assert_eq!(
+                    call(libc::SYS_read | 0x4000_0000, [0; 6]),
+                    SECCOMP_RET_KILL_PROCESS
+                );
+            }
         }
     }
 }
