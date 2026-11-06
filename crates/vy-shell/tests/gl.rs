@@ -322,6 +322,7 @@ mod imp {
     fn run(ctx: &mut GlContext) -> Result<Outcome, String> {
         let mut lines = vec![format!("GL: {}", ctx.raster.version())];
         let mut failures = Vec::new();
+        let mut budget = None;
         let mut check = |class: &str, d: &Diff, what: &str| {
             if d.share() > DIFFERING_SHARE {
                 failures.push(format!(
@@ -348,6 +349,50 @@ mod imp {
             }
         }
         lines.push(frame.line("frame_2000"));
+
+        // SPEC-13.2.1 on this context, in release: the frame drawn whole 100
+        // times, each waited out (`glFinish`). A software GL (llvmpipe) is
+        // no GPU: the line is the report, and the budget is asserted only
+        // with VY_GL_BUDGET set (the owner's PC, docs/notes/m5-gpu.md).
+        if !cfg!(debug_assertions) {
+            let mut t = TextEngine::new();
+            let f = vy_render::bench::frame_2000(&mut t, 1280.0, 800.0);
+            let mut r = Renderer::new(RasterPath::Fast);
+            let mut wall = Vec::new();
+            let mut prep = Vec::new();
+            for i in 0..110 {
+                let start = std::time::Instant::now();
+                r.render_gl(
+                    &ctx.gl,
+                    &mut ctx.raster,
+                    &f.list,
+                    1280,
+                    800,
+                    1.0,
+                    &mut t,
+                    &f.images,
+                )
+                .map_err(|e| e.to_string())?;
+                // SAFETY: the context is current on this thread.
+                unsafe { glow::HasContext::finish(&ctx.gl) };
+                if i >= 10 {
+                    wall.push(start.elapsed());
+                    prep.push(ctx.raster.stats().prepare);
+                }
+            }
+            wall.sort();
+            prep.sort();
+            let stats = ctx.raster.stats();
+            lines.push(format!(
+                "SPEC-13.2.1 on this context: P50 {:?}, P95 {:?} per frame to glFinish; CPU before the GPU (instances, clip table, paths, GL calls) P50 {:?}; {} instances, {} draw calls, {} bytes uploaded per frame",
+                wall[49], wall[94], prep[49], stats.instances, stats.draws, stats.upload_bytes
+            ));
+            if std::env::var_os("VY_GL_BUDGET").is_some()
+                && wall[94] > std::time::Duration::from_millis(2)
+            {
+                budget = Some(format!("SPEC-13.2.1: P95 {:?} over 2 ms", wall[94]));
+            }
+        }
 
         // Random lists.
         let images = picture();
@@ -417,6 +462,7 @@ mod imp {
             }
         }
         lines.push(pages.line("pages"));
+        failures.extend(budget);
         Ok(Outcome { lines, failures })
     }
 

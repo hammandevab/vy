@@ -83,13 +83,24 @@ pub struct GlStats {
     pub upload_bytes: usize,
     /// Glyph bitmaps added to the atlas.
     pub new_glyphs: usize,
+    /// CPU time from the resolved frame to the last GL call issued:
+    /// building the instances, the clip table and the paths, and the
+    /// calls themselves (not the GPU's work; a software GL does its
+    /// vertex work inside the calls).
+    pub prepare: std::time::Duration,
+    /// Of `prepare`, building the instances, the clip table and the
+    /// paths: the CPU work of the pipeline itself, before any GL call.
+    pub build: std::time::Duration,
 }
 
-/// Bytes per instance: quad, shape and extra (3 × vec4), colour (RGBA8),
-/// kind and clip (ivec4).
-const INSTANCE_BYTES: usize = 68;
+/// Bytes per instance: quad (4 × i16, whole pixels), shape (vec4), extra
+/// (vec2), colour (RGBA8), kind and clip (2 × u32).
+const INSTANCE_BYTES: usize = 44;
 /// Side of the glyph atlas.
 const ATLAS_SIDE: i32 = 2048;
+/// The atlas position of a glyph whose bitmap is shorter than its
+/// placement says: the reference draws nothing for it, nor does this.
+const NO_BITMAP: (i32, i32) = (-1, -1);
 /// Clip-table entries per texture row (two texels each).
 const CLIPS_PER_ROW: usize = 1024;
 /// Frames an image texture survives unused.
@@ -102,24 +113,24 @@ const KIND_IMAGE: i32 = 3;
 const KIND_PATH: i32 = 4;
 
 const VERTEX: &str = r#"
-layout(location = 0) in vec4 a_quad;
+layout(location = 0) in ivec4 a_quad;
 layout(location = 1) in vec4 a_shape;
-layout(location = 2) in vec4 a_extra;
+layout(location = 2) in vec2 a_extra;
 layout(location = 3) in vec4 a_color;
-layout(location = 4) in ivec4 a_misc;
+layout(location = 4) in uvec2 a_misc;
 uniform vec2 u_size;
 flat out vec4 v_shape;
-flat out vec4 v_extra;
+flat out vec2 v_extra;
 flat out vec4 v_color;
-flat out ivec4 v_misc;
+flat out ivec2 v_misc;
 void main() {
     vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
-    vec2 q = mix(a_quad.xy, a_quad.zw, corner);
+    vec2 q = mix(vec2(a_quad.xy), vec2(a_quad.zw), corner);
     gl_Position = vec4(q.x / u_size.x * 2.0 - 1.0, 1.0 - q.y / u_size.y * 2.0, 0.0, 1.0);
     v_shape = a_shape;
     v_extra = a_extra;
     v_color = a_color;
-    v_misc = a_misc;
+    v_misc = ivec2(a_misc);
 }
 "#;
 
@@ -130,9 +141,9 @@ uniform highp sampler2D u_clips;
 uniform sampler2D u_image;
 uniform float u_height;
 flat in vec4 v_shape;
-flat in vec4 v_extra;
+flat in vec2 v_extra;
 flat in vec4 v_color;
-flat in ivec4 v_misc;
+flat in ivec2 v_misc;
 out vec4 o_color;
 
 float rrect(vec2 p, vec4 r, float rad) {
@@ -279,6 +290,16 @@ struct Atlas {
     shelves: Shelves,
     at: HashMap<CacheKey, (i32, i32)>,
     dirty: Option<Pixels>,
+    /// Unique across every atlas of the process and new at every clear:
+    /// what a run's remembered positions are checked against.
+    generation: u64,
+}
+
+/// The source of [`Atlas::generation`].
+static ATLAS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn atlas_generation() -> u64 {
+    ATLAS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Atlas {
@@ -286,6 +307,34 @@ impl Atlas {
         self.at.clear();
         self.shelves = Shelves::new(ATLAS_SIDE, ATLAS_SIDE);
         self.dirty = None;
+        self.generation = atlas_generation();
+    }
+
+    /// The atlas positions of every glyph of `run`: remembered on the run
+    /// when it was drawn since the atlas last started over, otherwise
+    /// looked up (and added) glyph by glyph. `Ok(None)`: the atlas is full.
+    fn run(
+        &mut self,
+        run: &crate::raster::ResolvedRun,
+        glyphs: &[SwashImage],
+        keys: &[CacheKey],
+        stats: &mut GlStats,
+    ) -> Result<Option<crate::raster::AtlasSpots>, GlError> {
+        let mut memo = run.atlas.lock().unwrap_or_else(|e| e.into_inner());
+        if memo.0 == self.generation && memo.1.len() == run.glyphs.len() {
+            return Ok(Some(std::sync::Arc::clone(&memo.1)));
+        }
+        let mut at = Vec::with_capacity(run.glyphs.len());
+        for g in &run.glyphs {
+            let i = g.image as usize;
+            match self.glyph(keys[i], &glyphs[i], stats)? {
+                Some(p) => at.push(p),
+                None => return Ok(None),
+            }
+        }
+        let at: crate::raster::AtlasSpots = at.into();
+        *memo = (self.generation, std::sync::Arc::clone(&at));
+        Ok(Some(at))
     }
 
     /// Where glyph `key` is, adding it; `Err` for a bitmap the pipeline
@@ -308,7 +357,7 @@ impl Atlas {
         };
         if image.data.len() < n * per {
             // The reference draws nothing for it either.
-            return Ok(Some((0, 0)));
+            return Ok(Some(NO_BITMAP));
         }
         let Some((x, y)) = self.shelves.place(w, h) else {
             return Ok(None);
@@ -387,22 +436,26 @@ pub struct GlRaster {
 
 /// One instance being built.
 struct Inst {
-    quad: [f32; 4],
+    quad: [i16; 4],
     shape: [f32; 4],
-    extra: [f32; 4],
+    extra: [f32; 2],
     color: u32,
     kind: i32,
     clip: i32,
 }
 
 fn push(buf: &mut Vec<u8>, i: &Inst) {
-    for v in i.quad.iter().chain(&i.shape).chain(&i.extra) {
-        buf.extend_from_slice(&v.to_ne_bytes());
+    let mut b = [0u8; INSTANCE_BYTES];
+    for (k, v) in i.quad.iter().enumerate() {
+        b[k * 2..k * 2 + 2].copy_from_slice(&v.to_ne_bytes());
     }
-    buf.extend_from_slice(&i.color.to_be_bytes());
-    for v in [i.kind, i.clip, 0, 0] {
-        buf.extend_from_slice(&v.to_ne_bytes());
+    for (k, v) in i.shape.iter().chain(&i.extra).enumerate() {
+        b[8 + k * 4..12 + k * 4].copy_from_slice(&v.to_ne_bytes());
     }
+    b[32..36].copy_from_slice(&i.color.to_be_bytes());
+    b[36..40].copy_from_slice(&(i.kind as u32).to_ne_bytes());
+    b[40..44].copy_from_slice(&(i.clip as u32).to_ne_bytes());
+    buf.extend_from_slice(&b);
 }
 
 fn union(a: &Pixels, b: &Pixels) -> Pixels {
@@ -414,8 +467,10 @@ fn union(a: &Pixels, b: &Pixels) -> Pixels {
     }
 }
 
-fn quad(p: &Pixels) -> [f32; 4] {
-    [p.x0 as f32, p.y0 as f32, p.x1 as f32, p.y1 as f32]
+/// Whole pixels as an instance's quad. Every op's footprint lies on the
+/// canvas, whose side is at most `MAX_CANVAS_SIDE_PX` = 16 384.
+fn quad(p: &Pixels) -> [i16; 4] {
+    [p.x0 as i16, p.y0 as i16, p.x1 as i16, p.y1 as i16]
 }
 
 /// Compile and link a program from the shared sources, with the version
@@ -554,6 +609,7 @@ impl GlRaster {
                 shelves: Shelves::new(ATLAS_SIDE, ATLAS_SIDE),
                 at: HashMap::new(),
                 dirty: None,
+                generation: atlas_generation(),
             },
             paths,
             clips,
@@ -593,6 +649,7 @@ impl GlRaster {
         }
         self.frame += 1;
         self.stats = GlStats::default();
+        let started = std::time::Instant::now();
         let mut built = self.build(gl, f, glyphs, keys, images)?;
         if built.is_none() {
             // The atlas filled up: start it over and try once more.
@@ -602,6 +659,7 @@ impl GlRaster {
         let Some((batches, clip_table, path_atlas)) = built else {
             return Err(GlError::Unsupported("more glyphs than the atlas holds"));
         };
+        self.stats.build = started.elapsed();
         // SAFETY: `gl` is current (the contract of `new`), and every
         // slice handed over is as long as the size given with it.
         unsafe {
@@ -642,23 +700,22 @@ impl GlRaster {
                 gl.bind_texture(glow::TEXTURE_2D, image);
                 let base = (start * INSTANCE_BYTES) as i32;
                 let stride = INSTANCE_BYTES as i32;
-                for (loc, off) in [(0u32, 0), (1, 16), (2, 32)] {
+                for loc in 0..5 {
                     gl.enable_vertex_attrib_array(loc);
-                    gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, stride, base + off);
                     gl.vertex_attrib_divisor(loc, 1);
                 }
-                gl.enable_vertex_attrib_array(3);
-                gl.vertex_attrib_pointer_f32(3, 4, glow::UNSIGNED_BYTE, true, stride, base + 48);
-                gl.vertex_attrib_divisor(3, 1);
-                gl.enable_vertex_attrib_array(4);
-                gl.vertex_attrib_pointer_i32(4, 4, glow::INT, stride, base + 52);
-                gl.vertex_attrib_divisor(4, 1);
+                gl.vertex_attrib_pointer_i32(0, 4, glow::SHORT, stride, base);
+                gl.vertex_attrib_pointer_f32(1, 4, glow::FLOAT, false, stride, base + 8);
+                gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, stride, base + 24);
+                gl.vertex_attrib_pointer_f32(3, 4, glow::UNSIGNED_BYTE, true, stride, base + 32);
+                gl.vertex_attrib_pointer_i32(4, 2, glow::UNSIGNED_INT, stride, base + 36);
                 gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, count as i32);
                 self.stats.draws += 1;
             }
             gl.bind_vertex_array(None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
+        self.stats.prepare = started.elapsed();
         gl_error(gl, "page")?;
         // Images not drawn for a while go.
         let frame = self.frame;
@@ -723,7 +780,12 @@ impl GlRaster {
                             e[6] = 1.0;
                         }
                         Some(r) => match raster::exact_pixels(&r, cw, ch) {
-                            Some(p) => e[..4].copy_from_slice(&quad(&p)),
+                            Some(p) => e[..4].copy_from_slice(&[
+                                p.x0 as f32,
+                                p.y0 as f32,
+                                p.x1 as f32,
+                                p.y1 as f32,
+                            ]),
                             None => e[6] = 2.0,
                         },
                         None => e[6] = 2.0,
@@ -757,7 +819,7 @@ impl GlRaster {
                                 &Inst {
                                     quad: quad(&fp),
                                     shape: r,
-                                    extra: [rad, 0.0, 0.0, 0.0],
+                                    extra: [rad, 0.0],
                                     color: *color,
                                     kind: if rounded { KIND_RRECT } else { KIND_RECT },
                                     clip,
@@ -777,7 +839,7 @@ impl GlRaster {
                                 &Inst {
                                     quad: quad(&fp),
                                     shape: [x * s, y * s, (x + w) * s, (y + h) * s],
-                                    extra: [0.0; 4],
+                                    extra: [0.0; 2],
                                     color: raster::IMAGE_PLACEHOLDER_COLOR,
                                     kind: KIND_RECT,
                                     clip,
@@ -812,7 +874,7 @@ impl GlRaster {
                                     &Inst {
                                         quad: quad(&q),
                                         shape: [p.rx, p.ry, p.kx, p.ky],
-                                        extra: [0.0; 4],
+                                        extra: [0.0; 2],
                                         color: 0,
                                         kind: KIND_IMAGE,
                                         clip,
@@ -824,7 +886,11 @@ impl GlRaster {
                             let Some(Some(t)) = f.text_ops.get(i) else {
                                 continue;
                             };
-                            for g in &t.run.glyphs {
+                            let Some(at) = self.atlas.run(&t.run, glyphs, keys, &mut self.stats)?
+                            else {
+                                return Ok(None);
+                            };
+                            for (g, &(ax, ay)) in t.run.glyphs.iter().zip(at.iter()) {
                                 let img = &glyphs[g.image as usize];
                                 let gb = Pixels {
                                     x0: g.x,
@@ -835,20 +901,15 @@ impl GlRaster {
                                 let Some(q) = gb.intersect(&fp) else {
                                     continue;
                                 };
-                                let Some((ax, ay)) = self.atlas.glyph(
-                                    keys[g.image as usize],
-                                    img,
-                                    &mut self.stats,
-                                )?
-                                else {
-                                    return Ok(None);
-                                };
+                                if (ax, ay) == NO_BITMAP {
+                                    continue;
+                                }
                                 push(
                                     &mut self.instances,
                                     &Inst {
                                         quad: quad(&q),
                                         shape: [ax as f32, ay as f32, 0.0, 0.0],
-                                        extra: [g.x as f32, g.y as f32, 0.0, 0.0],
+                                        extra: [g.x as f32, g.y as f32],
                                         color: t.color,
                                         kind: KIND_GLYPH,
                                         clip,
@@ -869,7 +930,7 @@ impl GlRaster {
                                 &Inst {
                                     quad: quad(&fp),
                                     shape: [ax as f32, ay as f32, 0.0, 0.0],
-                                    extra: [fp.x0 as f32, fp.y0 as f32, 0.0, 0.0],
+                                    extra: [fp.x0 as f32, fp.y0 as f32],
                                     color: *color,
                                     kind: KIND_PATH,
                                     clip,

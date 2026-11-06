@@ -697,7 +697,16 @@ pub(crate) struct ResolvedRun {
     pub(crate) bounds: Option<Pixels>,
     /// Sum of the glyph boxes' areas: what the budget charges for them.
     pub(crate) px: u64,
+    /// Where the GL path's atlas holds these glyphs (`gl` feature): the
+    /// atlas's generation and a position per glyph, so a run drawn again
+    /// costs one lookup, not one per glyph.
+    #[cfg(feature = "gl")]
+    pub(crate) atlas: std::sync::Mutex<(u64, AtlasSpots)>,
 }
+
+/// The atlas position of every glyph of a run (see `ResolvedRun::atlas`).
+#[cfg(feature = "gl")]
+pub(crate) type AtlasSpots = std::sync::Arc<[(i32, i32)]>;
 
 /// One glyph of a [`ResolvedRun`].
 #[derive(Clone, Copy)]

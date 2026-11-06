@@ -899,7 +899,13 @@ impl RunCache {
                 image: id,
             });
         });
-        let run = Arc::new(ResolvedRun { glyphs, bounds, px });
+        let run = Arc::new(ResolvedRun {
+            glyphs,
+            bounds,
+            px,
+            #[cfg(feature = "gl")]
+            atlas: std::sync::Mutex::new((0, Arc::from(Vec::new()))),
+        });
         self.glyphs += run.glyphs.len();
         self.runs
             .entry(hash)
