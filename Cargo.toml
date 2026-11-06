@@ -79,8 +79,9 @@ arboard = { version = "3.7", default-features = false }
 # The platform's accessibility API for the semantic tree (SPEC-10.2.1): the
 # schema crate (always; the tree conversion is tested without a window)
 # and the winit adapter (UIA on Windows, NSAccessibility on macOS). AT-SPI
-# on Linux (`accesskit_unix`, zbus) is vy-shell's opt-in `a11y-linux`
-# feature: it adds 3.1 MB, which takes the Linux client past 25 MB.
+# on Linux (`accesskit_unix`, zbus) is vy-shell's `a11y-linux` feature, on
+# by default; its crates are built for size (below) to keep the Linux
+# client under 25 MB.
 accesskit = "0.25"
 accesskit_winit = { version = "0.34", default-features = false, features = ["rwh_06"] }
 
@@ -90,3 +91,44 @@ codegen-units = 1
 # Symbols and debug info are not shipped: the client binary is capped at
 # 25 MB (SPEC-12.3.1) and release.yml zips what this profile produces.
 strip = true
+
+# The AT-SPI stack that vy-shell's `a11y-linux` adds on Linux (SPEC-10.2.1;
+# the crates no other binary and no other platform builds) is optimized for
+# size: it answers a screen reader over D-Bus, outside every frame, and at
+# opt-level 3 it took the client past SPEC-12.3.1's 25 MB. 733 952 bytes
+# smaller this way (docs/notes/m5-release.md).
+[profile.release.package]
+accesskit_atspi_common = { opt-level = "s" }
+accesskit_unix = { opt-level = "s" }
+async-broadcast = { opt-level = "s" }
+async-channel = { opt-level = "s" }
+async-executor = { opt-level = "s" }
+async-io = { opt-level = "s" }
+async-lock = { opt-level = "s" }
+async-process = { opt-level = "s" }
+async-signal = { opt-level = "s" }
+async-task = { opt-level = "s" }
+atomic-waker = { opt-level = "s" }
+atspi = { opt-level = "s" }
+atspi-common = { opt-level = "s" }
+atspi-proxies = { opt-level = "s" }
+blocking = { opt-level = "s" }
+concurrent-queue = { opt-level = "s" }
+endi = { opt-level = "s" }
+enumflags2 = { opt-level = "s" }
+event-listener = { opt-level = "s" }
+event-listener-strategy = { opt-level = "s" }
+futures-core = { opt-level = "s" }
+futures-io = { opt-level = "s" }
+futures-lite = { opt-level = "s" }
+futures-task = { opt-level = "s" }
+futures-util = { opt-level = "s" }
+hex = { opt-level = "s" }
+ordered-stream = { opt-level = "s" }
+parking = { opt-level = "s" }
+piper = { opt-level = "s" }
+signal-hook-registry = { opt-level = "s" }
+zbus = { opt-level = "s" }
+zbus_names = { opt-level = "s" }
+zbus_xml = { opt-level = "s" }
+zvariant = { opt-level = "s" }

@@ -112,7 +112,7 @@ en riktig tokeniserare). Ska taket höjas (t.ex. 1 000 000), ska "kodbasen" bety
 720 000), eller ska meningen bli ett mål snarare än en grind? Räkningen i testet är ett förslag; en
 annan definition är ett `spec:`-commit med testet.
 
-## Steg 3 – `a11y-linux` under taket (pågår)
+## Steg 3 – `a11y-linux` under taket, på som standard
 
 Utgångsläget på `0fc0453` + steg 1 (release, `--target x86_64-unknown-linux-gnu`, miljön ur
 `repro_env.sh`, strippad): `vy-shell` **22 364 840** byte, `--features a11y-linux` **25 476 976**
@@ -140,3 +140,32 @@ gång per process (`OnceLock`, `zstd::bulk::decompress` till exakt storlek ur ra
 354 728 byte. `bundled_faces_are_the_ttf_files` jämför bytena med `.ttf` och metadata med vad
 `fontdb` läser ur dem. Ändringen i `text.rs` är bara typsnittsladdningen (statiska data och slingan
 i `TextEngine::new`) och testet; `.ttf`-filerna ligger kvar i `fonts/` (testet läser dem).
+
+**AT-SPI-stacken för storlek.** Med typsnitten var `vy-shell --features a11y-linux` 25 099 216 byte,
+fortfarande 99 216 över. De 34 crates som bara `a11y-linux` drar in på Linux (zbus, zvariant,
+zbus_names, zbus_xml, atspi, atspi-common, atspi-proxies, accesskit_atspi_common, accesskit_unix,
+async-*, blocking, event-listener, futures-*, …; inga proc-makron) får `opt-level = "s"` i
+release-profilen (`[profile.release.package]` i rotens `Cargo.toml`): **24 365 264** byte, 733 952
+mindre. Kontrollerat med `cargo tree`: ingen av dem finns i `vy-cli`, `vy-dev`, `vy-publish`,
+`vy-serve` (alla mål), i Linux-skalet utan `a11y-linux` eller i skalet för Windows och macOS, så
+inget annat bygge ändras. Stacken svarar en skärmläsare över D-Bus i en egen tråd och ligger inte i
+någon frame; den är inte mätt (det kräver en session-buss och en skärmläsare, och
+`spec_13_1_1_cold_start` kräver fönster). `accesskit_consumer`, som alla plattformar använder, står
+kvar på 3.
+
+**`a11y-linux` på som standard** (`default = ["window", "a11y-linux"]` i vy-shell). Funktionen gör
+inget på Windows och macOS: `accesskit_unix` är ett målberoende i `accesskit_winit`
+(`cfg(target_os = "linux" | BSD)`), och korskontrollen för `x86_64-pc-windows-msvc` och
+`aarch64-apple-darwin` är ren. `vy-cli` tar `vy-shell` utan standardfunktioner och påverkas inte.
+
+| `vy-shell`, release, Linux x86_64, strippad | Byte | Mot 25 000 000 |
+| --- | --- | --- |
+| `0fc0453`, utan `a11y-linux` | 22 364 840 | −2 635 160 |
+| `0fc0453`, `--features a11y-linux` | 25 476 976 | **+476 976** |
+| + serif och mono komprimerade | 25 099 216 | **+99 216** |
+| + AT-SPI-stacken `opt-level = "s"`, `a11y-linux` som standard | **24 365 264** | −634 736 (2,5 %) |
+
+`spec_12_3_1_size_budget` i release mot den sista: "24365264 bytes, cap 25000000, margin 634736",
+grönt. `vy-cli` blev 20 428 856 → 19 215 400 med alla fyra snitt komprimerade (förkastat, ovan);
+med bara serif och mono räknas ungefär 355 000 mindre än förut. Konformans 59/59 à 0,000 % efter
+varje steg (snitten är samma byte efter uppackning).
