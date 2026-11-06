@@ -137,6 +137,7 @@ mod tests {
             wasm,
             resources,
             trusted: true,
+            restriction: None,
             verdicts,
             is_localhost: false,
         }
@@ -173,6 +174,7 @@ mod tests {
             can_back: false,
             can_forward: false,
             restricted: true,
+            restriction: None,
             inaccessible: true,
             loading: false,
             badges: &[],
@@ -977,6 +979,7 @@ mod tests {
             wasm,
             resources: Vec::new(),
             trusted: true,
+            restriction: None,
             verdicts: vec![("storage", vy_manifest::Grant::Auto)],
             is_localhost: false,
         };
@@ -1453,6 +1456,69 @@ mod tests {
         }
         .pack()
         .unwrap()
+    }
+
+    /// SPEC-7.4.3, SPEC-7.4.5: the chrome says why a fetched page is
+    /// restricted, in Swedish beside the marker, from the fetch's own
+    /// reason (`Fetched::restriction`): through the loader for a signed
+    /// page whose origin serves no key file, and for a first visit whose
+    /// `_vy.<host>` has no TXT record; the tab's log keeps the detail. A
+    /// local file has no origin to trust and shows the marker alone.
+    #[test]
+    fn spec_7_4_3_restriction_reason_in_the_chrome() {
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let shown = |shell: &mut crate::shell::Shell| texts(&shell.chrome_display_list());
+
+        // Fetched through the loader: no /.well-known/vy-key on the origin.
+        let server = PageServer::start(hello_package("Utan nyckelfil"));
+        let address = format!("vy://127.0.0.1:{}/", server.port);
+        let tab = shell.open_tab(Some(Source::parse(&address).unwrap()));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        let chrome = shown(&mut shell);
+        assert!(
+            chrome.contains(&"begränsat läge: nyckelfilen kunde inte hämtas".to_string()),
+            "{chrome:?}"
+        );
+        assert!(
+            shell
+                .tab_logs(tab)
+                .iter()
+                .any(|l| l.starts_with("[host info] restricted mode: /.well-known/vy-key")),
+            "{:?}",
+            shell.tab_logs(tab)
+        );
+
+        // A first visit without a TXT record, as the fetch reports it.
+        let mut page = trusted_page("hello", &[]);
+        page.trusted = false;
+        page.restriction = Some(vy_proto::Restriction::DnsNoRecord {
+            name: "_vy.hello.example".into(),
+        });
+        for (_, grant) in &mut page.verdicts {
+            *grant = vy_manifest::Grant::Denied;
+        }
+        let tab = shell.open_tab_loaded(page);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        let chrome = shown(&mut shell);
+        assert!(
+            chrome.contains(&"begränsat läge: nyckeln saknas i DNS".to_string()),
+            "{chrome:?}"
+        );
+        assert!(shell.tab_logs(tab).iter().any(|l| {
+            l
+            == "[host info] restricted mode: no v=vy1 TXT record at _vy.hello.example (SPEC-7.4.5)"
+        }));
+
+        // A local file: the marker alone.
+        let file = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(file), "running");
+        let chrome = shown(&mut shell);
+        assert!(chrome.contains(&"begränsat läge".to_string()), "{chrome:?}");
+        assert!(!chrome.iter().any(|t| t.starts_with("begränsat läge:")));
+        shell.shutdown();
     }
 
     /// SPEC-7.3.2, SPEC-11.4.1: live reload (devtools "Studio") asks the

@@ -31,6 +31,9 @@ pub const DIALOG_H: f32 = 40.0;
 pub const LOADING_H: f32 = 3.0;
 /// Width of a tab.
 pub const TAB_W: f32 = 184.0;
+/// The room, in logical pixels, the address text keeps before the
+/// restricted marker gives up its reason (SPEC-7.4.3).
+pub const MIN_ADDRESS_ROOM: f32 = 200.0;
 
 const CHROME_BG: u32 = 0xECEB_E7FF;
 const STRIP_BG: u32 = 0xDEDC_D6FF;
@@ -155,6 +158,10 @@ pub struct View<'a> {
     pub can_forward: bool,
     /// The page runs in restricted mode (SPEC-7.4.3).
     pub restricted: bool,
+    /// Why, short and in Swedish (`page::restriction_reason`), shown after
+    /// the marker as "begränsat läge: <why>" while the address keeps
+    /// [`MIN_ADDRESS_ROOM`]; `None` shows the marker alone.
+    pub restriction: Option<&'a str>,
     /// The page has no semantic tree (SPEC-10.4.1).
     pub inaccessible: bool,
     /// The page is loading (the bar under the address row).
@@ -439,7 +446,42 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
         5.0,
         FIELD_BG,
     );
-    // Markers and badges from the right, inside the field.
+    // Markers and badges from the right, inside the field. The restricted
+    // marker carries its reason when the address keeps room enough after
+    // every pill is placed; otherwise the marker stands alone.
+    let restricted_label = view.restricted.then(|| {
+        let alone = "begränsat läge".to_string();
+        let Some(why) = view.restriction else {
+            return alone;
+        };
+        let long = format!("{alone}: {why}");
+        let pill_w = |text: &mut TextEngine, style: u16, label: &str| {
+            text.measure(style, 0.0, label).unwrap_or_default().w + 14.0 + 4.0
+        };
+        let mut others = 0.0;
+        if view.zoom != 1.0 {
+            let zoom = format!("{} %", (view.zoom * 100.0).round() as i32);
+            others += pill_w(text, styles.small_muted, &zoom);
+        }
+        if view.inaccessible {
+            others += pill_w(text, styles.small_muted, "otillgänglig");
+        }
+        for (name, granted) in view.badges {
+            let style = if *granted {
+                styles.small_badge
+            } else {
+                styles.small_muted
+            };
+            others += pill_w(text, style, name);
+        }
+        let long_w = pill_w(text, styles.small_restricted, &long);
+        let room = field.right() - 6.0 - others - long_w - 4.0 - (field.x + 10.0);
+        if room >= MIN_ADDRESS_ROOM {
+            long
+        } else {
+            alone
+        }
+    });
     let mut right = field.right() - 6.0;
     let mut mark =
         |dl: &mut DisplayList, text: &mut TextEngine, style: u16, bg: u32, label: &str| -> Rect {
@@ -465,14 +507,8 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
             &format!("{} %", (view.zoom * 100.0).round() as i32),
         );
     }
-    if view.restricted {
-        mark(
-            &mut dl,
-            text,
-            styles.small_restricted,
-            RESTRICTED_BG,
-            "begränsat läge",
-        );
+    if let Some(label) = &restricted_label {
+        mark(&mut dl, text, styles.small_restricted, RESTRICTED_BG, label);
     }
     if view.inaccessible {
         mark(
@@ -941,6 +977,7 @@ mod tests {
             can_back: false,
             can_forward: false,
             restricted: false,
+            restriction: None,
             inaccessible: false,
             loading: false,
             badges: &[],
@@ -1101,5 +1138,53 @@ mod tests {
         let (_, layout) = draw(&narrow, &mut text, &styles);
         assert!(layout.page.h > 0.0);
         assert!(layout.address.w >= 40.0);
+    }
+    /// SPEC-7.4.3: the restricted marker carries its reason while the
+    /// address keeps [`MIN_ADDRESS_ROOM`], and stands alone in a window too
+    /// narrow for both; without a reason it is the marker alone.
+    #[test]
+    fn spec_7_4_3_restriction_reason_beside_the_marker() {
+        let mut text = TextEngine::new();
+        let styles = Styles::register(&mut text);
+        let tabs = vec![TabInfo {
+            id: 1,
+            title: "Sida".into(),
+            loading: false,
+        }];
+        let mut address = AddressField::new();
+        address.set_committed("vy://exempel.se/");
+        let texts = |v: &View<'_>, text: &mut TextEngine| -> Vec<String> {
+            vy_dl::decode(&draw(v, text, &styles).0)
+                .unwrap()
+                .iter()
+                .filter_map(|op| match op {
+                    vy_dl::Op::Text { text, .. } => {
+                        Some(String::from_utf8_lossy(text).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut v = view(&tabs, &address);
+        v.restricted = true;
+        v.restriction = Some("nyckeln saknas i DNS");
+        let wide = texts(&v, &mut text);
+        assert!(wide.contains(&"begränsat läge: nyckeln saknas i DNS".to_string()));
+        assert!(wide.contains(&"vy://exempel.se/".to_string()));
+        v.width = 420.0;
+        let narrow = texts(&v, &mut text);
+        assert!(narrow.contains(&"begränsat läge".to_string()), "{narrow:?}");
+        assert!(!narrow.iter().any(|t| t.starts_with("begränsat läge:")));
+        v.width = 800.0;
+        v.restriction = None;
+        let alone = texts(&v, &mut text);
+        assert!(alone.contains(&"begränsat läge".to_string()));
+        assert!(!alone.iter().any(|t| t.starts_with("begränsat läge:")));
+        // A trusted page has no marker, whatever the field says.
+        v.restricted = false;
+        v.restriction = Some("nyckeln saknas i DNS");
+        assert!(!texts(&v, &mut text)
+            .iter()
+            .any(|t| t.starts_with("begränsat")));
     }
 }

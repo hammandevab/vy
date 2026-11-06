@@ -138,6 +138,10 @@ struct Tab {
     state: State,
     history: History,
     trusted: bool,
+    /// Why the page is restricted, short and in Swedish, for the chrome
+    /// beside "begränsat läge" (SPEC-7.4.3); `None` when trusted or when
+    /// the page is a local file.
+    restriction: Option<&'static str>,
     caps: Vec<Resolved>,
     asks: VecDeque<&'static str>,
     is_localhost: bool,
@@ -215,6 +219,7 @@ impl Tab {
             state: State::Empty,
             history: History::new(),
             trusted: false,
+            restriction: None,
             caps: Vec::new(),
             asks: VecDeque::new(),
             is_localhost: false,
@@ -952,6 +957,7 @@ impl Shell {
             tab.title = String::new();
             tab.state = State::Loading;
             tab.trusted = false;
+            tab.restriction = None;
             tab.caps.clear();
             tab.asks.clear();
             tab.net_origins.clear();
@@ -1283,6 +1289,10 @@ impl Shell {
             .map(|m| m.name.clone())
             .unwrap_or_else(|| page.display.clone());
         tab.trusted = page.trusted;
+        tab.restriction = page.restriction.as_ref().map(page::restriction_reason);
+        if let Some(why) = &page.restriction {
+            tab.log(format!("[host info] restricted mode: {why}"));
+        }
         tab.is_localhost = page.is_localhost;
         tab.net_origins = net_origins
             .iter()
@@ -1798,6 +1808,7 @@ impl Shell {
             can_forward: tab.is_some_and(|t| t.history.can_forward()),
             restricted: tab
                 .is_some_and(|t| !t.trusted && matches!(t.state, State::Running | State::Loading)),
+            restriction: tab.and_then(|t| t.restriction),
             inaccessible: tab
                 .is_some_and(|t| t.state == State::Running && t.has_tree == Some(false)),
             loading: tab.is_some_and(|t| t.state == State::Loading),

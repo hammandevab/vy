@@ -881,6 +881,7 @@ fn load_shell_page(root: &Path, case: &Case, address: &str) -> Result<LoadedPage
         wasm,
         resources: resources.into_iter().map(|r| (r.bytes, r.pixels)).collect(),
         trusted: true,
+        restriction: None,
         verdicts,
         is_localhost: address.is_localhost(),
     })

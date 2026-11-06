@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::thread;
 use vy_manifest::{Draft, Grant, Manifest, Package};
-use vy_proto::{Address, Error as FetchError, Fetcher, Options as FetchOptions};
+use vy_proto::{Address, Error as FetchError, Fetcher, Options as FetchOptions, Restriction};
 
 /// What a tab is asked to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +84,10 @@ pub struct LoadedPage {
     /// True when the signature verified under a trusted key (SPEC-7.4.2);
     /// false is restricted mode (SPEC-7.4.3).
     pub trusted: bool,
+    /// Why a fetched page is restricted (SPEC-7.4.3, SPEC-7.4.5), shown
+    /// beside the marker; `None` for a trusted page and for a local file,
+    /// which has no origin to trust.
+    pub restriction: Option<Restriction>,
     /// The default policy's verdict per requested capability; every one
     /// `Denied` for an untrusted page (SPEC-8.2.3, SPEC-7.4.3).
     pub verdicts: Vec<(&'static str, Grant)>,
@@ -147,6 +151,27 @@ impl LoadError {
     }
 }
 
+/// The reason a page is restricted, short and in Swedish, as the chrome
+/// shows it after "begränsat läge: " (SPEC-7.4.3, SPEC-7.4.5). Exhaustive,
+/// so a new reason in `vy-proto` does not build without its text here.
+pub fn restriction_reason(r: &Restriction) -> &'static str {
+    match r {
+        Restriction::Unsigned => "sidan är osignerad",
+        Restriction::BadSignature => "signaturen stämmer inte",
+        Restriction::UnknownKey { .. } => "okänd nyckel för sajten",
+        Restriction::KeyFileUnavailable(_) => "nyckelfilen kunde inte hämtas",
+        Restriction::KeyNotPublished { .. } => "nyckeln är inte publicerad",
+        Restriction::DnsNoRecord { .. } => "nyckeln saknas i DNS",
+        Restriction::DnsMismatch { .. } => "DNS anger en annan nyckel",
+        Restriction::DnsFailed { .. } => "DNS-uppslaget misslyckades",
+        Restriction::SuccessorNotPublished { .. } => "den nya nyckeln är inte publicerad",
+        Restriction::LogInvalid(_) => "nyckelloggen är ogiltig",
+        Restriction::NotInLog { .. } => "nyckeln saknas i nyckelloggen",
+        Restriction::LogRewritten => "nyckelloggen har skrivits om",
+        Restriction::LogWithdrawn => "nyckelloggen har tagits bort",
+    }
+}
+
 /// Load `source`, fetching through `fetcher` for an address.
 pub fn load(fetcher: &mut Fetcher, source: &Source) -> Result<LoadedPage, LoadError> {
     match source {
@@ -157,6 +182,7 @@ pub fn load(fetcher: &mut Fetcher, source: &Source) -> Result<LoadedPage, LoadEr
                 other => LoadError::Fetch(other.to_string()),
             })?;
             let trusted = fetched.trusted();
+            let restriction = fetched.restriction().cloned();
             let verdicts = fetched.grants();
             let Package {
                 manifest,
@@ -176,6 +202,7 @@ pub fn load(fetcher: &mut Fetcher, source: &Source) -> Result<LoadedPage, LoadEr
                 wasm: module,
                 resources,
                 trusted,
+                restriction,
                 verdicts,
                 is_localhost: address.is_localhost(),
             })
@@ -223,6 +250,7 @@ fn load_file(path: &Path, draft: Option<&Path>) -> Result<LoadedPage, LoadError>
                     wasm: bytes,
                     resources,
                     trusted: false,
+                    restriction: None,
                     verdicts,
                     is_localhost: false,
                 });
@@ -271,6 +299,7 @@ fn load_file(path: &Path, draft: Option<&Path>) -> Result<LoadedPage, LoadError>
         sha256,
         resources,
         trusted: false,
+        restriction: None,
         verdicts,
         is_localhost: false,
     })
@@ -477,6 +506,42 @@ mod tests {
             .join("../..")
             .canonicalize()
             .unwrap()
+    }
+
+    /// SPEC-7.4.3, SPEC-7.4.5, SPEC-7.6.2: every reason `vy-proto` gives
+    /// for restricted mode has its own short Swedish text for the chrome.
+    #[test]
+    fn spec_7_4_3_every_restriction_has_a_reason() {
+        let id = || "0123456789abcdef".to_string();
+        let name = || "_vy.exempel.se".to_string();
+        let all = [
+            Restriction::Unsigned,
+            Restriction::BadSignature,
+            Restriction::UnknownKey { key_id: id() },
+            Restriction::KeyFileUnavailable("404".into()),
+            Restriction::KeyNotPublished { key_id: id() },
+            Restriction::DnsNoRecord { name: name() },
+            Restriction::DnsMismatch { name: name() },
+            Restriction::DnsFailed {
+                name: name(),
+                error: vy_proto::DnsError::Timeout,
+            },
+            Restriction::SuccessorNotPublished { key_id: id() },
+            Restriction::LogInvalid("bruten kedja".into()),
+            Restriction::NotInLog { key_id: id() },
+            Restriction::LogRewritten,
+            Restriction::LogWithdrawn,
+        ];
+        let reasons: std::collections::BTreeSet<&str> =
+            all.iter().map(restriction_reason).collect();
+        assert_eq!(reasons.len(), all.len(), "one text per reason");
+        for r in &reasons {
+            assert!(!r.is_empty() && r.chars().count() <= 36, "{r}");
+        }
+        assert_eq!(
+            restriction_reason(&Restriction::DnsNoRecord { name: name() }),
+            "nyckeln saknas i DNS"
+        );
     }
 
     /// SPEC-7.4.3, SPEC-8.2.3: a local module or package runs in
