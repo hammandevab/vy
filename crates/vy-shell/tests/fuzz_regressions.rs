@@ -69,6 +69,81 @@ fn fuzz_corpora_replay() {
     }
 }
 
+/// m4/fix-shell: the tab's sandbox report (`ToShell::Sandbox`, tag 78,
+/// SPEC-9.1.3), as Linux sends it whole, with a layer missing, and with
+/// the lockdown off: the seeds `write_seeds` writes for it.
+fn sandbox_reports() -> Vec<(&'static str, vy_shell::sandbox::Report)> {
+    use vy_shell::sandbox::Report;
+    let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    vec![
+        (
+            "sandbox.bin",
+            Report {
+                layers: lines(&[
+                    "inherited descriptors closed",
+                    "no_new_privs",
+                    "landlock (abi 7)",
+                    "seccomp allowlist",
+                ]),
+                warnings: Vec::new(),
+            },
+        ),
+        (
+            "sandbox-partial.bin",
+            Report {
+                layers: lines(&[
+                    "inherited descriptors closed",
+                    "no_new_privs",
+                    "seccomp allowlist",
+                ]),
+                warnings: lines(&["landlock: Operation not supported (os error 95)"]),
+            },
+        ),
+        (
+            "sandbox-off.bin",
+            Report {
+                layers: Vec::new(),
+                warnings: lines(&["VY_SANDBOX=off"]),
+            },
+        ),
+    ]
+}
+
+/// The sandbox report's seeds are in the IPC corpus, byte for byte what
+/// the writer makes, so `fuzz_corpora_replay` and the fuzzer start from
+/// tag 78; and mutations of them (its lists, counts and line caps) never
+/// panic the IPC entry point, which the first-six-seeds pass of
+/// `fuzz_mutation_smoke` does not reach.
+#[test]
+fn fuzz_ipc_corpus_has_the_sandbox_report() {
+    use vy_shell::ipc::ToShell;
+    let saved = inputs("ipc");
+    let mut state = 0x5A4D_B0C5_0078_0078u64;
+    for (name, report) in sandbox_reports() {
+        let path = root().join("fuzz/corpus/ipc").join(name);
+        let seed = &saved
+            .iter()
+            .find(|(p, _)| *p == path)
+            .unwrap_or_else(|| panic!("{} is missing (VY_WRITE_FUZZ_SEEDS=1)", path.display()))
+            .1;
+        assert_eq!(seed[0], 78, "{name}");
+        assert_eq!(
+            ToShell::decode(seed).unwrap(),
+            ToShell::Sandbox(report),
+            "{name}"
+        );
+        for _ in 0..1000 {
+            let m = mutate(seed, &mut state);
+            let r = catch_unwind(AssertUnwindSafe(|| entry::ipc(&m)));
+            assert!(
+                r.is_ok(),
+                "ipc: a mutation of {name} panics; input {}",
+                hex(&m)
+            );
+        }
+    }
+}
+
 /// xorshift64*: the same mutations on every run and machine.
 fn next(state: &mut u64) -> u64 {
     *state ^= *state >> 12;
@@ -297,6 +372,9 @@ fn write_seeds() {
     ];
     for (name, bytes) in messages {
         write("ipc", name, &bytes);
+    }
+    for (name, report) in sandbox_reports() {
+        write("ipc", name, &ToShell::Sandbox(report).encode());
     }
 
     for (i, a) in [
