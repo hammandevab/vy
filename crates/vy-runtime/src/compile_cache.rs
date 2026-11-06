@@ -263,7 +263,8 @@ pub(crate) fn module(
     ))
 }
 
-#[cfg(test)]
+// The ownership check is Unix's; on Windows only existence is checked.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -272,7 +273,6 @@ mod tests {
     /// directory is given to uid 65534; as anyone else `/`, which root
     /// owns and others cannot write, stands for a directory of another
     /// user.
-    #[cfg(unix)]
     #[test]
     fn private_dirs_are_owned_by_this_user() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
