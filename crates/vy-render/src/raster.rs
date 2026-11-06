@@ -121,7 +121,7 @@ pub(crate) fn sane(values: &[f32]) -> bool {
         .all(|v| v.is_finite() && v.abs() <= MAX_MAGNITUDE)
 }
 
-fn sane_path(cmds: &[PathCmd], stroke_w: f32) -> bool {
+pub(crate) fn sane_path(cmds: &[PathCmd], stroke_w: f32) -> bool {
     sane(&[stroke_w])
         && cmds.iter().all(|c| match *c {
             PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => sane(&[x, y]),
@@ -194,7 +194,14 @@ fn paint_over(rgba: u32) -> Paint<'static> {
 
 /// Rounded rectangle path in logical coordinates, built in `pb` (whose
 /// buffers are reused); `None` if degenerate.
-fn rounded_rect(mut pb: PathBuilder, x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
+pub(crate) fn rounded_rect(
+    mut pb: PathBuilder,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+) -> Option<Path> {
     if !(w > 0.0 && h > 0.0) || !x.is_finite() || !y.is_finite() {
         return None;
     }
@@ -285,7 +292,7 @@ fn pixel_edge(v: f32) -> i32 {
 /// The pixels a non-anti-aliased fill of `r` covers on a `w` × `h` canvas:
 /// what a mask built from a plain clip rectangle holds, computed instead of
 /// rasterized. `None` when nothing is covered.
-fn exact_pixels(r: &Rect, w: u32, h: u32) -> Option<Pixels> {
+pub(crate) fn exact_pixels(r: &Rect, w: u32, h: u32) -> Option<Pixels> {
     if r.width().abs() <= NEARLY_ZERO || r.height().abs() <= NEARLY_ZERO {
         return None;
     }
@@ -737,23 +744,23 @@ struct Canvas<'a> {
 /// (the whole scaled image, which may overflow the destination under
 /// `cover` or underfill it under `contain`) and the destination rectangle
 /// that clips it.
-struct Placement {
+pub(crate) struct Placement {
     /// Left of the scaled image.
-    rx: f32,
+    pub(crate) rx: f32,
     /// Top of the scaled image.
-    ry: f32,
+    pub(crate) ry: f32,
     /// Physical pixels per source pixel, horizontally.
-    kx: f32,
+    pub(crate) kx: f32,
     /// Physical pixels per source pixel, vertically.
-    ky: f32,
+    pub(crate) ky: f32,
     /// Pixel columns to fill: `px0..px1`.
-    px0: i32,
+    pub(crate) px0: i32,
     /// See `px0`.
-    px1: i32,
+    pub(crate) px1: i32,
     /// Pixel rows to fill: `py0..py1`.
-    py0: i32,
+    pub(crate) py0: i32,
     /// See `py0`.
-    py1: i32,
+    pub(crate) py1: i32,
 }
 
 impl Placement {
@@ -767,7 +774,7 @@ impl Placement {
 /// (SPEC-5.2.3: 0 cover, 1 contain, 2 stretch), limited to a `cw` × `ch`
 /// canvas. `None` when nothing is visible or `fit` is unknown.
 #[allow(clippy::too_many_arguments)]
-fn place(
+pub(crate) fn place(
     fit_mode: u8,
     iw: u32,
     ih: u32,

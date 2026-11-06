@@ -256,6 +256,7 @@ pub struct ImageCache {
     pub(crate) decoded_bytes: usize,
     decodes: u32,
     generation: u64,
+    id: u64,
 }
 
 /// The source of [`ImageCache::generation`]: unique across every cache
@@ -274,6 +275,7 @@ impl ImageCache {
             decoded_bytes: 0,
             decodes: 0,
             generation: next_generation(),
+            id: next_generation(),
         }
     }
 
@@ -294,6 +296,7 @@ impl ImageCache {
             decoded_bytes: 0,
             decodes: 0,
             generation: next_generation(),
+            id: next_generation(),
         }
     }
 
@@ -330,6 +333,14 @@ impl ImageCache {
     /// [`crate::Renderer`] repaints everything when it moves.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// A number unique to this cache in the process. A decoded image never
+    /// changes behind its id ([`ImageCache::set_decoded`] refuses a second
+    /// one), so (cache id, resource id) names its pixels for as long as the
+    /// cache lives: what the GL path keys its textures on.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Number of resources in the package (ids `1..=count`).

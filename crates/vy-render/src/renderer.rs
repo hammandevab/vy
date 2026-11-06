@@ -77,8 +77,10 @@ pub struct FrameInfo {
     pub redrawn: Option<[u32; 4]>,
     /// True when the whole canvas was drawn.
     pub full: bool,
-    /// Bands the drawing was split into (1: no threads).
+    /// Bands the drawing was split into (1: no threads; 0 on the GPU).
     pub bands: usize,
+    /// True when the frame was drawn by the GL path (`gl` feature).
+    pub gpu: bool,
 }
 
 /// A rasterizer that keeps its last frame (see the module docs).
@@ -91,7 +93,21 @@ pub struct Renderer {
     report: RasterReport,
     info: FrameInfo,
     last: Option<Record>,
-    runs: RunCache,
+    pub(crate) runs: RunCache,
+    /// Why the fast path was given up for the reference, if it was.
+    fell_back: Option<String>,
+}
+
+/// A frame resolved for drawing (steps 1 and 2 of the module docs): what
+/// the bands and the GL path draw from.
+pub(crate) struct Resolved {
+    pub(crate) ops: Vec<Op>,
+    pub(crate) styles: Vec<Option<StyleKey>>,
+    pub(crate) text_ops: Vec<Option<TextOp>>,
+    pub(crate) report: RasterReport,
+    pub(crate) footprints: Vec<Option<Pixels>>,
+    pub(crate) size: IntSize,
+    pub(crate) scale: f32,
 }
 
 /// What the damage tracking compares the next list with.
@@ -107,7 +123,7 @@ struct Record {
 }
 
 /// Everything about a text style that its pixels depend on.
-type StyleKey = (i32, u32, u16, u16, u32);
+pub(crate) type StyleKey = (i32, u32, u16, u16, u32);
 
 fn style_key(s: &Style) -> StyleKey {
     (
@@ -140,6 +156,7 @@ impl Renderer {
             info: FrameInfo::default(),
             last: None,
             runs: RunCache::default(),
+            fell_back: None,
         }
     }
 
@@ -155,10 +172,22 @@ impl Renderer {
         self.path
     }
 
+    /// Why the fast path was given up for the reference, when it was:
+    /// a panic while drawing a frame. The renderer then stays on the
+    /// reference (the last link of the window's fallback chain).
+    pub fn fell_back(&self) -> Option<&str> {
+        self.fell_back.as_deref()
+    }
+
     /// One line for the log: which path, how many bands.
     pub fn describe(&self) -> String {
         match self.path {
-            RasterPath::Reference => "raster: software reference (vy_render::render)".into(),
+            RasterPath::Reference => match &self.fell_back {
+                Some(why) => format!(
+                    "raster: software reference (vy_render::render), the fast path having failed: {why}"
+                ),
+                None => "raster: software reference (vy_render::render)".into(),
+            },
             RasterPath::Fast => format!(
                 "raster: fast software path, byte for byte the reference: damage tracking, up to {} band{} on threads",
                 self.bands,
@@ -207,13 +236,38 @@ impl Renderer {
                     redrawn: Some([0, 0, width, height]),
                     full: true,
                     bands: 1,
+                    gpu: false,
                 };
                 Ok(r.report)
             }
             RasterPath::Fast => {
-                self.render_fast(display_list, width, height, scale, text, images, true)
+                let fast = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.render_fast(display_list, width, height, scale, text, images, true)
+                }));
+                match fast {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // The fallback chain's last link: a bug in the fast
+                        // path costs speed, never the page.
+                        let why = e
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_owned())
+                            .or_else(|| e.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "panic".into());
+                        self.give_up(why);
+                        self.render(display_list, width, height, scale, text, images)
+                    }
+                }
             }
         }
+    }
+
+    /// Leave the fast path for the reference, for good.
+    pub(crate) fn give_up(&mut self, why: String) {
+        self.path = RasterPath::Reference;
+        self.fell_back = Some(why);
+        self.last = None;
+        self.runs = RunCache::default();
     }
 
     /// [`Renderer::render`] on the fast path without damage tracking: the
@@ -242,43 +296,15 @@ impl Renderer {
         images: &ImageCache,
         damage: bool,
     ) -> Result<RasterReport, RenderError> {
-        let ops = vy_dl::decode(display_list).map_err(RenderError::Decode)?;
-        let size = raster::check_size(width, height, scale)?;
-        self.runs.trim();
-        let mut text_ops = Vec::with_capacity(ops.len());
-        let mut styles = Vec::with_capacity(ops.len());
-        for op in &ops {
-            let Op::Text {
-                x,
-                y,
-                max_w,
-                style_id,
-                text: bytes,
-            } = op
-            else {
-                styles.push(None);
-                text_ops.push(None);
-                continue;
-            };
-            let style = text.get_style(*style_id);
-            styles.push(style.as_ref().map(style_key));
-            text_ops.push(match style {
-                Some(st) if raster::sane(&[*x, *y]) => Some(
-                    self.runs
-                        .resolve(text, *style_id, &st, *x, *y, *max_w, scale, bytes),
-                ),
-                _ => None,
-            });
-        }
-        let (report, footprints) = raster::dry_pass(
-            &ops,
-            width,
-            height,
+        let Resolved {
+            ops,
+            styles,
+            text_ops,
+            report,
+            footprints,
+            size,
             scale,
-            &text_ops,
-            &self.runs.images,
-            images,
-        )?;
+        } = self.resolve(display_list, width, height, scale, text, images)?;
         let parents = parents(&ops);
         let canvas = raster::whole(width, height);
         let same_canvas = self.last.as_ref().is_some_and(|l| {
@@ -329,6 +355,7 @@ impl Renderer {
             }),
             full,
             bands,
+            gpu: false,
         };
         self.last = (!report.truncated).then(|| Record {
             width,
@@ -341,6 +368,110 @@ impl Renderer {
             footprints,
         });
         Ok(report)
+    }
+
+    /// Rasterize `display_list` on the GPU into `target`'s page
+    /// framebuffer: the same arguments and report as [`Renderer::render`],
+    /// the picture within SPEC-11.3.2's tolerance. A frame the pipeline
+    /// does not draw is drawn by this renderer's CPU path and uploaded
+    /// ([`FrameInfo::gpu`] says which); a GL failure is returned, and the
+    /// caller leaves the GL path.
+    #[cfg(feature = "gl")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_gl(
+        &mut self,
+        gl: &glow::Context,
+        target: &mut crate::gl::GlRaster,
+        display_list: &[u8],
+        width: u32,
+        height: u32,
+        scale: f32,
+        text: &mut TextEngine,
+        images: &ImageCache,
+    ) -> Result<RasterReport, crate::gl::GlError> {
+        use crate::gl::GlError;
+        let f = self
+            .resolve(display_list, width, height, scale, text, images)
+            .map_err(GlError::Render)?;
+        match target.draw_page(gl, &f, &self.runs.images, &self.runs.keys, images) {
+            Ok(()) => {
+                self.report = f.report;
+                self.info = FrameInfo {
+                    redrawn: Some([0, 0, width, height]),
+                    full: true,
+                    bands: 0,
+                    gpu: true,
+                };
+                Ok(f.report)
+            }
+            Err(GlError::Unsupported(_)) => {
+                let report = self
+                    .render(display_list, width, height, scale, text, images)
+                    .map_err(GlError::Render)?;
+                target.upload_page(gl, &self.image)?;
+                Ok(report)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Steps 1 and 2 of the module docs: the list decoded, its text runs
+    /// resolved (from the cache or laid out now) and the dry pass run.
+    pub(crate) fn resolve(
+        &mut self,
+        display_list: &[u8],
+        width: u32,
+        height: u32,
+        scale: f32,
+        text: &mut TextEngine,
+        images: &ImageCache,
+    ) -> Result<Resolved, RenderError> {
+        let ops = vy_dl::decode(display_list).map_err(RenderError::Decode)?;
+        let size = raster::check_size(width, height, scale)?;
+        self.runs.trim();
+        let mut text_ops = Vec::with_capacity(ops.len());
+        let mut styles = Vec::with_capacity(ops.len());
+        for op in &ops {
+            let Op::Text {
+                x,
+                y,
+                max_w,
+                style_id,
+                text: bytes,
+            } = op
+            else {
+                styles.push(None);
+                text_ops.push(None);
+                continue;
+            };
+            let style = text.get_style(*style_id);
+            styles.push(style.as_ref().map(style_key));
+            text_ops.push(match style {
+                Some(st) if raster::sane(&[*x, *y]) => Some(
+                    self.runs
+                        .resolve(text, *style_id, &st, *x, *y, *max_w, scale, bytes),
+                ),
+                _ => None,
+            });
+        }
+        let (report, footprints) = raster::dry_pass(
+            &ops,
+            width,
+            height,
+            scale,
+            &text_ops,
+            &self.runs.images,
+            images,
+        )?;
+        Ok(Resolved {
+            ops,
+            styles,
+            text_ops,
+            report,
+            footprints,
+            size,
+            scale,
+        })
     }
 
     /// Bands for drawing `region`: as many as the machine has (at most
@@ -639,10 +770,13 @@ fn op_eq(a: &Op, b: &Op) -> bool {
 /// Text runs resolved to positioned glyphs, kept across frames, and the
 /// glyph bitmaps they index (step 1 of the module docs).
 #[derive(Default)]
-struct RunCache {
+pub(crate) struct RunCache {
     runs: HashMap<u64, Vec<(RunKey, Arc<ResolvedRun>)>>,
     index: HashMap<CacheKey, u32>,
-    images: Vec<SwashImage>,
+    pub(crate) images: Vec<SwashImage>,
+    /// The cache key of each bitmap in `images`: what the GL path's
+    /// glyph atlas is keyed on.
+    pub(crate) keys: Vec<CacheKey>,
     glyphs: usize,
 }
 
@@ -740,13 +874,14 @@ impl RunCache {
             };
         }
         let s = String::from_utf8_lossy(bytes);
-        let (index, images) = (&mut self.index, &mut self.images);
+        let (index, images, keys) = (&mut self.index, &mut self.images, &mut self.keys);
         let mut glyphs = Vec::new();
         let mut bounds: Option<Pixels> = None;
         let mut px = 0u64;
         let _ = engine.rasterize(style_id, (x, y), max_w, scale, &s, |g| {
             let id = *index.entry(g.key).or_insert_with(|| {
                 images.push(g.image.clone());
+                keys.push(g.key);
                 (images.len() - 1) as u32
             });
             let (w, h) = (g.image.placement.width, g.image.placement.height);

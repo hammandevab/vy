@@ -8,6 +8,8 @@
 #![deny(missing_docs)]
 
 pub mod bench;
+#[cfg(feature = "gl")]
+pub mod gl;
 pub mod image;
 pub mod raster;
 #[cfg(test)]
