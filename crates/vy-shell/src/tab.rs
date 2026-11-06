@@ -16,7 +16,6 @@
 use crate::ipc::{IpcTransport, LoadRequest, StyleSpec, ToShell, ToTab};
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
 use vy_abi::event;
 use vy_runtime::{Capabilities, ClockSource, LogSource, Options, Resource, Runtime, Transport};
 
@@ -472,20 +471,10 @@ impl<T: IpcTransport> TabLoop<T> {
 }
 
 /// The `--tab` entry point: serve the parent over stdin and stdout.
-/// Stdout carries frames only; the parent reads nothing else from it.
-///
-/// Both arguments must be `None`: a tab process opens no file after its
-/// lockdown (SPEC-9.1.3), so a recording or a replay is the main
-/// process's (`crate::process::spawn_process`) and a file given here is
-/// refused. They stay only so that `vy-cli --tab` builds unchanged until
-/// its call drops them.
-pub fn main(record: Option<&Path>, replay: Option<&Path>) -> io::Result<()> {
-    if record.is_some() || replay.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "a tab process opens no file (SPEC-9.1.3); the main process records and replays",
-        ));
-    }
+/// Stdout carries frames only; the parent reads nothing else from it. A
+/// tab process opens no file after its lockdown (SPEC-9.1.3): recording
+/// and replay are the main process's (`crate::process::spawn_process`).
+pub fn main() -> io::Result<()> {
     // What the lockdown before this call applied; a process that was not
     // locked down says so.
     let report = crate::sandbox::applied()
@@ -506,6 +495,7 @@ mod tests {
     use super::*;
     use crate::ipc::ChannelTransport;
     use crate::process::{channel_sink, spawn_thread, Inbound, TabEvent};
+    use std::path::Path;
     use std::sync::mpsc;
     use std::time::Duration;
     use vy_runtime::RandomSource;

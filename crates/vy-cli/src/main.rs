@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         for w in &report.warnings {
             eprintln!("vy-cli --tab: sandbox not applied: {w}");
         }
-        return match vy_shell::tab::main(None, None) {
+        return match vy_shell::tab::main() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("vy-cli --tab: {e}");
