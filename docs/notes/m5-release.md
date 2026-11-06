@@ -103,9 +103,9 @@ SPEC-12.3.1 har två halvor, och de blev två tester i `crates/vy-cli/src/bench_
   `54ca612`, mer än dubbla taket; `crates/` ensamt är 2,3 MB (583 000 tokens), `docs/` 104 000,
   `modules/` 79 000, `conformance/` 45 000, `Cargo.lock` 27 000, `SPEC.md` 9 000. Inget urval av
   filer ger under 400 000 utan att utelämna koden. Testet är därför ignorerat med det uppmätta
-  värdet, som `spec_13_2_1_raster_budget`, och ägaren avgör spec-fråga 66.
+  värdet, som `spec_13_2_1_raster_budget`, och ägaren avgör spec-fråga 67 (66 är m5/gpu:s, GL-vägen).
 
-**Spec-fråga 66 (m5/release).** SPEC-12.3.1:s "hela kodbasen inklusive spec och tester ryms under
+**Spec-fråga 67 (m5/release).** SPEC-12.3.1:s "hela kodbasen inklusive spec och tester ryms under
 400 000 tokens" hålls inte: 858 837 tokens räknat som byte/4 över git-spårade textfiler (och fler med
 en riktig tokeniserare). Ska taket höjas (t.ex. 1 000 000), ska "kodbasen" betyda något smalare
 (utan `docs/notes`, `docs/reviews`, låsfiler och genererade `conformance/semantic/*.json`: ungefär
@@ -187,3 +187,17 @@ Text i vikt 400 läser alltså bold, och text i vikt 700 läser sans, serif och 
 packas därför upp första gången en sida (eller chromen) visar fet text eller serif/mono, inte bara
 vid serif/mono; en sida i ren sans 400, som `hello`, packar aldrig upp något. Kostnaden är ~1,7 ms en
 gång per process där det händer, mot `first-frame.text`:s 74 ms.
+
+**Mätt på main + m5/gpu + det här spåret** (`git merge --no-commit --no-ff m5/gpu` i den här
+arbetskopian, konflikten i `vy-shell/Cargo.toml` löst som `default = ["window", "gl",
+"a11y-linux"]`, bygget, sedan `git merge --abort`; inget committat):
+
+| `vy-shell`, release, Linux x86_64, strippad | Byte | Marginal mot 25 000 000 |
+| --- | --- | --- |
+| med GL och AT-SPI (standard efter sammanslagningen) | **24 524 312** | 475 688 (1,9 %) |
+| utan GL (`--no-default-features --features window,a11y-linux`) | 24 274 936 | 725 064 (2,9 %) |
+
+GL-vägen kostar här 249 376 byte (m5/gpu: 247 624). Samordnarens tal för main + m5/gpu med AT-SPI
+var 25 790 640; spårets besparing på 1 264 288 ger 24 526 352, inom 2 040 byte av det uppmätta.
+Sammanslagningen hade en konflikt (raden `default` i `vy-shell/Cargo.toml`), allt annat, också
+`vy-render/src/text.rs` (m5/gpu: `Glyph::key`), slogs ihop automatiskt.

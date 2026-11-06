@@ -421,12 +421,12 @@ fn codebase_tokens(root: &Path) -> (u64, Vec<(String, u64)>) {
 /// SPEC-12.3.1, the codebase half: under [`CODEBASE_MAX_TOKENS`] tokens as
 /// [`codebase_tokens`] counts them. Not met: the codebase was 858 837 tokens
 /// (3 435 346 text bytes) on `m5/release` (2026-11-06), more than twice the
-/// cap, with `crates/` alone at 2,3 MB; spec-fråga 66 asks the owner whether
+/// cap, with `crates/` alone at 2,3 MB; spec-fråga 67 asks the owner whether
 /// the cap, the count or the codebase should change. `cargo test -p vy-cli
 /// --lib spec_12_3_1 -- --ignored --nocapture` prints today's number and the
 /// parts.
 #[test]
-#[ignore = "SPEC-12.3.1: 858 837 tokens (bytes/4) against 400 000 on 2026-11-06; spec-fråga 66"]
+#[ignore = "SPEC-12.3.1: 858 837 tokens (bytes/4) against 400 000 on 2026-11-06; spec-fråga 67"]
 fn spec_12_3_1_codebase_tokens() {
     let root = bench::root().expect("inside the repository");
     let (tokens, parts) = codebase_tokens(&root);
