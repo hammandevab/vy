@@ -41,3 +41,50 @@ fall (SPEC-12.1.2, `spec_12_1_2_conformance_defines_client`).
 Vid avvikelse skrivs den faktiska bilden till `golden/<namn>.png.new` (ignoreras av git).
 Ett guldbyte (`cargo run -p vy-cli -- conformance --update`) är ett eget commit med `golden:` som
 prefix och en motivering i PR:en.
+
+## Running the suite against another client
+
+The suite defines a Vy client (SPEC-12.1.2), and it is published with every release as
+`vy-conformance-<version>.zip` (`tools/package_conformance.sh`): `cases.toml`, the goldens, the
+semantic trees, the manifest drafts, the built reference modules under `target/wasm/` and the image
+resources, in this repository's layout, with `SHA256SUMS`. `vy-cli conformance --root <dir>` runs
+it with this project's headless host. Another client passes when it produces, for every case, the
+same image and (where the case names one) the same semantic tree.
+
+**Input of a case.** Load `target/wasm/<module>.wasm` with its draft `conformance/manifests/<module>.json`:
+`memory_max` caps the memory (SPEC-4.2.4), `net.origins` limits `fetch_begin` (SPEC-5.2.8), and the
+case may grant only capabilities the draft requests (SPEC-8.2.2). Call `vy_init(abi_minor, width,
+height, scale)` with the case's logical size and scale, grant the case's `capabilities`, and give
+`resources[i]` as resource id `i + 1` (SPEC-4.5.1) with the size the case states (SPEC-8.1.2). Run
+the frames the module asks for (the one after `vy_init`, then those after `request_frame`, an event
+that returned 1 or a resize, SPEC-6.2.1), deliver the next event, and so on until the events are
+spent; an event's `after_frames` caps the frames run before it, and `frames` caps them all. `key_down`
+43 is Tab: it moves the host's focus through the focusable nodes and becomes `FOCUS` events
+(SPEC-10.3.1); a `pointer_down` moves focus to the node under it before the press. `fetch` lists
+canned responses for `fetch_begin`, `fetch_done` delivers the oldest pending one.
+
+**Deterministic host.** The clock is the number of completed frames × 16 ms (`now_ms`), `dt_ms` is
+16, and 0 in the first frame and the first after `VISIBILITY` visible (SPEC-5.1.2). `random` is
+xorshift64* from the seed `0x5EED5EED00000001`: per 8 bytes, `x ^= x >> 12; x ^= x << 25;
+x ^= x >> 27`, then `x × 0x2545F4914F6CDD1D` written little-endian (SPEC-5.2.11). There is no
+clipboard and no navigation: `clipboard_*` and `navigate` answer `E_DENIED`. Storage is in memory
+with the draft's quota; `reinit` starts a new instance with the old instance's storage.
+
+**Output of a case.**
+
+- One PNG per case, `<name>.png`, the last frame rasterized at the physical size
+  `round(width × scale) × round(height × scale)`, RGBA.
+- For a case with `semantic`, the tree of the last frame as JSON, byte for byte in this form: `{`,
+  `  "nodes": [`, one line per node in registration order,
+  `    {"id": 1, "parent_id": 0, "role": 2, "role_name": "heading", "x": 24, "y": 24, "w": 752, "h": 32.5, "text": "…"}`,
+  separated by `,`, then `  ]` and `}` and a final newline. Numbers are the shortest decimal that
+  reads back as the same `f32`, without exponent (`24`, `32.5`); `role_name` is the role's name in
+  appendix A; in `text`, `"` `\` and line feed, carriage return and tab are escaped as `\"` `\\`
+  `\n` `\r` `\t`, other characters below U+0020 as `\u00xx`, everything else as is (UTF-8).
+
+**Pass and fail.** A case passes when its image has the golden's size and at most 0.1 % of its
+pixels differ from `conformance/golden/<name>.png`, a pixel differing when any of its four channels
+does (SPEC-12.2.2), and, when the case names a tree, the JSON equals
+`conformance/semantic/<semantic>.json` exactly. A page whose tree has `textbox` nodes must belong to
+a draft that requests `ime` (SPEC-10.4.2). Shell cases (`shell = true`) compare the whole window
+with this client's chrome; another client skips them or supplies its own goldens for them.
