@@ -234,8 +234,9 @@ game: `read(0)`, `write(1)`, `mmap`/`mprotect`/`munmap`/`brk`, `memfd_create` + 
 `fcntl(F_ADD_SEALS)` (wasmtimes minnesavbilder), `sigaltstack`/`rt_sigaction` (wasmtimes
 fällor), `getrandom`, `getpid`/`gettid`, `exit_group`. Typsnitten är inbyggda (`include_bytes!`
 i vy-render), lagring och hämtning går över IPC: inget i fliken behöver en fil eller en socket.
-Spelinspelning (`--record`/`--replay`) öppnar en fil i loopen och låses därför inte (bara
-tester använder flaggorna). Låsningen sker i `--tab`-grenen i `vy-shell` och `vy-cli` innan
+Spelinspelning (`--record`/`--replay`) öppnade då en fil i loopen och låstes därför inte. Sedan
+m4/fix-shell (granskning 0007:1) spelar huvudprocessen in och upp ur IPC-strömmen, barnet har inga
+sådana flaggor och varje flik är låst; se notes/m4-fix-shell. Låsningen sker i `--tab`-grenen i `vy-shell` och `vy-cli` innan
 första meddelandet läses (`sandbox::lockdown`), så ingen sidkod kör med mer.
 
 | Plattform | Standard | `VY_SANDBOX=strict` | Provat |
@@ -295,7 +296,8 @@ att någon kört den på en riktig maskin (spec-fråga 62).
   (granskning 0004 fynd 2).
 - **Test som bevisar begränsningen.** `spec_9_1_3_tab_sandbox`; `sandbox::platform::tests::
   filter_layout` (filtrets hopp); alla befintliga flikprocesstester (`spec_9_1_1`, `spec_11_2_1`,
-  `spec_11_4_1` utan inspelning, `spec_13_3_1`, skalfallen i sviten) kör sandlådade.
+  `spec_11_4_1`, `spec_13_3_1`, skalfallen i sviten) kör sandlådade; inspelning och uppspelning
+  också sedan m4/fix-shell (`spec_9_1_3_recording_and_replay_are_sandboxed`).
 
 ## Steg 5 – resursgränser (SPEC-9.3.1) och isolering per origin (SPEC-9.5.1)
 

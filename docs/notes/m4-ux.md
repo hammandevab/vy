@@ -13,7 +13,7 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
 | 3 | Textmarkering (SPEC-10.2.2), värdens egen (`selection.rs`): dra från en textnod markerar (sidan får pekarhändelserna ändå), Skift+klick utökar, Ctrl+A tar alla textnoder, Escape och ett tryck utanför text tömmer. Markeringen är noderna i dokumentordning mellan ändarna, med teckengranularitet i ändnoderna; Ctrl+C (och Ctrl+X) kopierar de logiska strängarna med `\n` mellan noder. Ritas av huvudprocessen som en genomskinlig överlagring i sidytan (`compose::fill_blend`, chromens accentfärg); sidans display list rörs inte. Flikprocessen rapporterar fokus (`ToShell::Focus`) så att Ctrl+A i ett fokuserat textfält går till sidan. | `spec_10_2_2_text_selection` (un-ignorerad, document- och form-sidan), `spec_10_2_2_selected_text_is_logical`, `spec_10_2_2_glyph_granularity_in_wrapped_runs` |
 | 4 | Sök på sidan (Ctrl+F, `find.rs`): en sökruta över sidytans övre högra hörn (egen display list, komponerad efter sidan som frågan; under den är ytan skalets), söker i det semantiska trädets text skiftlägesokänsligt med enkel Unicode-vikning (`char::to_lowercase`), visar "3 av 7"/"Inga träffar", Enter/Skift+Enter bläddrar med omlopp, Escape stänger, knapparna ‹ › × fungerar med pekaren. Träffarna markeras genom överlagringen (aktuell starkare). En träff utanför vyn hämtas in med syntetiska `SCROLL`. | `spec_10_1_1_find_on_page`, `spec_10_1_1_find_in_the_tree` |
 | 5 | AccessKit (SPEC-10.2.1, `a11y.rs`): skalets ögonblicksbild (fönster, adressfält, sidans träd och fokus) blir en hel `TreeUpdate` – fönstret som rot, adressfältet (`TextInput`), sidan (`Document`, klipper sina barn till sidytan) och modulens noder med plattformsroll, text som namn eller värde och rektangel i fysiska fönsterpixlar; fokus är värdens. Fönstret skapar `accesskit_winit::Adapter` medan fönstret är osynligt och skickar en uppdatering bara när ett hjälpmedel lyssnar och sammandraget ändrats. Åtgärder: Focus flyttar värdens fokus som Tab, Click trycker och släpper i nodens mitt (och följer en registrerad länk där), SetValue stöds inte. En sida utan träd märks "otillgänglig" även i trädet; felet att markören aldrig visades (fliken skickar bara ändrade träd, så en sida utan noder skickade inget) är rättat: en första frame utan träd betyder inget träd. | `spec_10_2_1_accesskit`, `spec_10_3_1_focus_order`, `spec_10_4_1_inaccessible_marker` (alla tre un-ignorerade), `spec_10_2_1_roles_and_ids`, `spec_10_2_1_any_tree_is_well_formed` |
-| 6 | Devtools (F12, SPEC-11.4.1, `devtools.rs`): en panel till höger om sidytan (sidan får den smalare ytan och lägger om sig; panelen är chrome) med flikarna "Display list" (framens opkoder med antal och byte per opkod; ett klick på en op ramar in dess rektangel över sidan), "Semantik" (trädet med nästling, roll, id, text och fokusmarkering), "Logg" (sidans loggrader med nivå och framenummer), "Inspelning" (spela in fliken från en ny laddning med `--record` till `<data>/recordings/vy-<tid>-<flik>.vyrec`, stoppa, lista, spela upp i en ny flik med `--replay`) och "Studio" ("Live-omladdning (localhost)": var 500:e ms en villkorlig GET mot varje localhost-sidas server och omladdning vid ändring; "Öppna Studio" öppnar `vy://localhost:8081/` i en ny flik). En plain-http-förfrågan släpps bara till sidans egen loopback-origin. Dessutom rättat: efter en storleksändring fick sidan ingen frame förrän nästa inmatning (SPEC-6.2.1). | `spec_11_4_1_devtools_panel`, `spec_11_4_1_devtools_record_and_replay`, `spec_7_3_2_live_reload_localhost`, `spec_11_4_1_display_list_pane`, `spec_11_4_1_tree_log_recording_studio_panes`, i vy-proto `spec_7_3_2_revalidate_ignores_freshness`; plain-http-regeln `spec_5_2_8_plain_http_only_to_own_loopback_origin` |
+| 6 | Devtools (F12, SPEC-11.4.1, `devtools.rs`): en panel till höger om sidytan (sidan får den smalare ytan och lägger om sig; panelen är chrome) med flikarna "Display list" (framens opkoder med antal och byte per opkod; ett klick på en op ramar in dess rektangel över sidan), "Semantik" (trädet med nästling, roll, id, text och fokusmarkering), "Logg" (sidans loggrader med nivå och framenummer), "Inspelning" (spela in fliken från en ny laddning till `<data>/recordings/vy-<tid>-<flik>.vyrec`, stoppa, lista, spela upp i en ny flik; först med flikens `--record`/`--replay`, sedan m4/fix-shell av huvudprocessen, se notes/m4-fix-shell) och "Studio" ("Live-omladdning (localhost)": var 500:e ms en villkorlig GET mot varje localhost-sidas server och omladdning vid ändring; "Öppna Studio" öppnar `vy://localhost:8081/` i en ny flik). En plain-http-förfrågan släpps bara till sidans egen loopback-origin. Dessutom rättat: efter en storleksändring fick sidan ingen frame förrän nästa inmatning (SPEC-6.2.1). | `spec_11_4_1_devtools_panel`, `spec_11_4_1_devtools_record_and_replay`, `spec_7_3_2_live_reload_localhost`, `spec_11_4_1_display_list_pane`, `spec_11_4_1_tree_log_recording_studio_panes`, i vy-proto `spec_7_3_2_revalidate_ignores_freshness`; plain-http-regeln `spec_5_2_8_plain_http_only_to_own_loopback_origin` |
 
 ## Beslut
 
@@ -45,7 +45,9 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
   högst 500 ms på att processen avslutas och dödar den sedan, och den väntar in läsartråden, så svaret
   ligger i inkorgen när navigeringen fortsätter – före det laddaren svarar för nästa sida, så att en
   omladdning av samma origin läser det som just sparats. Uppdraget sade "cirka 250 ms"; 500 ms är den
-  befintliga gränsen och inte min fil att ändra. En sida som inte hinner svara (fastnat i `vy_suspend`
+  befintliga gränsen och inte min fil att ändra. *(Sedan m4/fix-shell, granskning 0006:1, väntar UI-tråden
+  inte: den släppta processen får `Shutdown` och lämnas till `process::Reaper`, som avslutar den senast
+  efter 500 ms, och en sida av samma origin parkeras tills svaret kommit; se notes/m4-fix-shell.)* En sida som inte hinner svara (fastnat i `vy_suspend`
   tills bränslet tar slut, eller en process som dödas) förlorar ändringar sedan senaste dolda läge, som
   förut. En krasch i huvudprocessen förlorar fortfarande allt sedan senaste suspend (lagring skrivs inte
   vid varje `state_put`).
@@ -101,10 +103,12 @@ agent. Ägda delar: `crates/vy-shell` (utom `process.rs`), additivt i `crates/vy
   att en storleksändring ger en frame). Panelens innehåll är en egen display list, rasteriserad bara när den
   ändrats, och sidans display list rörs aldrig – markeringen av en vald op ritas av huvudprocessen som en ram
   i överlagringen (en `TEXT`-op mäts med sidans egna stilar). Listorna kapas vid 4 000 rader; mushjulet
-  rullar panelen. **Inspelning** återanvänder `--record`/`--replay`: att börja spelar in från en ny laddning
-  av sidan (processen startas om med `--record`, så filen bär hela den inkommande strömmen från `Load`), en
-  ny ram `ToTab::StopRecording` (tagg 14) tömmer och stänger filen (ramen hamnar själv sist i filen och gör
-  inget vid uppspelning). Uppspelning startar en flikprocess med `--replay` i en ny flik; när filen är slut
+  rullar panelen. **Inspelning** återanvände först flikens `--record`/`--replay`; sedan m4/fix-shell
+  (granskning 0007:1) skriver huvudprocessen varje ram den skickar en inspelad flik till filen och matar en
+  uppspelning med filens ramar, och barnet är alltid den låsta `--tab` (notes/m4-fix-shell). Att börja
+  spelar in från en ny laddning av sidan (processen startas om, så filen bär hela den inkommande strömmen
+  från `Load`), en ny ram `ToTab::StopRecording` (tagg 14) avslutar filen (ramen hamnar själv sist i filen och
+  gör inget vid uppspelning). Uppspelning startar en ny flik; när filen är slut
   ligger sista framen kvar och fliken heter "Uppspelning klar: …". Kräver en flikprocess (inte trådläget i
   tester utan `exe`). **Live-omladdning** gäller bara sidor vars adress är localhost: `Fetcher::revalidate`
   (ny, additiv i vy-proto) gör den villkorliga GET:en med `If-None-Match` oavsett om den lagrade posten
@@ -247,6 +251,8 @@ Samma sak i CI utan display.
 - `crates/vy-shell/src/process.rs` (m4/security) är **inte** ändrad; steg 2 bygger på att
   `TabConnection::shutdown` väntar in processen och läsartråden. Ändras det (t.ex. till asynkron
   nedstängning) måste `Shell::retired_message` fortfarande få svaret före laddarens nästa svar.
+  *(Ändrat i m4/fix-shell: nedstängningen är asynkron, och en sida av samma origin parkeras tills svaret
+  kommit eller processen avslutats; se notes/m4-fix-shell, 0006:1.)*
 
 ## Kvar och öppet
 

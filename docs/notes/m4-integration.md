@@ -5,6 +5,20 @@ slogs ihop som riktiga merge-commits i ordningen m4/dev, m4/ux, m4/security, m4/
 grindarna efter varje sammanslagning och uppföljningarna som egna små commits däremellan.
 Granskningssidan skrivs av en annan agent.
 
+## Status för v0.2.0
+
+Koden på `56060af` (m4/fix-shell sammanslaget, uppföljningarna i *Efter m4/fix-shell*). **Grönt** på
+Linux x86_64: fmt, clippy `-D warnings`, `cargo test --workspace` 369 gröna, 0 röda, 4 ignorerade,
+`spec_trace.py` 140/140, tolv moduler (ABI 1.0 OK, 12/12), konformans 59/59 à 0,000 %. **Bara
+typkontrollerat** (`check-cross --workspace --all-targets`, inga varningar): allt för Windows och macOS
+– AppContainer, jobbobjekt och låg integritet, `sandbox_init`, `DnsQuery_UTF8`, AccessKit-adaptrarna,
+`taskkill`, `fake_agent.ps1` – har aldrig körts; releasejobbet och Docker-bilden är inte byggda härifrån.
+Vad en människa ska prova står i notes/m4-fix-shell (*Windows (och macOS) – att kontrollera för hand*)
+och notes/m4-security (*Vad människan ska se på Windows*). **M4:s grind är inte nådd:** hotanalyserna
+finns (spårens noteringar, `docs/reviews/`), men den externa sandlådegranskningen återstår och ska göras
+av någon utanför projektet; utkastet till checklista står i notes/m4-security (*Checklista för den
+externa sandlådegranskningen*).
+
 ## Öppna punkter
 
 Först, som uppdraget bad om när laddaren inte kunde göras klart helt:
@@ -25,7 +39,9 @@ Först, som uppdraget bad om när laddaren inte kunde göras klart helt:
    öppna någon fil efter `sandbox::lockdown` (Linux, macOS) och inte skriva på medelnivå (Windows).
    Vägar: posten skickas över IPC i `LoadRequest`, eller ett fd öppnas före låsningen och undantas
    från `close_range`. Hotbilden i notes/m4-perf (steg 3) gäller; `ReadWrite` i fliken aldrig.
-3. **Inspelning i devtools kör fliken utan OS-sandlåda.** m4/ux:s "Inspelning" startar om fliken med
+3. *(Rättat i m4/fix-shell `c62b711`, sammanslaget i `1ca9301`: huvudprocessen spelar in och upp,
+   barnet är alltid den låsta `--tab`; se notes/m4-fix-shell.)* **Inspelning i devtools kör fliken utan
+   OS-sandlåda.** m4/ux:s "Inspelning" startar om fliken med
    `--record`, och m4/security låser inte `--record`/`--replay` (filen öppnas i loopen). En sida som
    spelas in kör alltså med processens fulla rättigheter på Linux och macOS (Windows-jobbet står
    kvar). Rättning: huvudprocessen skriver inspelningen ur IPC-strömmen, eller filen öppnas före
@@ -240,6 +256,7 @@ En sida når sin klass och mer offentliga. Mot rebinding av sidans eget namn ans
 av sidans hämtning bara till en adress i sidans klass eller en mer lokal, och HTTP-cachens nyckel
 bär klassen. `Fetcher::request` och `Requester::request` tar `impl Into<NetClass>`: en `bool`
 betyder som förut "sidan ligger på loopback", och `false` blir `Public`, den klass som når minst.
+*(Sedan `6cd88ca` tar de bara en `NetClass`; `From<bool>` är borttaget.)*
 Fem agenter (en per regel) delar en connector, så TLS-konfigurationen byggs en gång; poolen är per
 agent.
 
@@ -249,7 +266,8 @@ agent.
 bedöms då som offentlig och når inte sin egen LAN-origin. Rättning: spara `fetched.net_class()` i
 `LoadedPage` och `Tab` bredvid `is_localhost` och skicka den i `Job::Request` (fältet blir
 `vy_proto::NetClass`); därefter kan `From<bool> for NetClass` tas bort, så att det bara finns ett
-sätt. Inget skaltest föll av ändringarna här (0009:3 inräknat).
+sätt. Inget skaltest föll av ändringarna här (0009:3 inräknat). *Gjort i `6cd88ca`, se Efter
+m4/fix-shell.*
 
 **Nya beroenden.** Inga nya crates. `vy-runtime` fick en kant till `libc` 0.2 för Unix (`geteuid`
 i ägarkontrollen): craten fanns i trädet via wasmtime, getrandom och `vy-shell`, med samma
@@ -268,4 +286,29 @@ target/wasm/hello.wasm` och `test_modules.sh` (12 moduler) gröna; konformans 59
 (`prlimit64`), 0007:5 (sandlådan faller öppen i det tysta), 0008:1 (kall kompilering av Studio och
 cachen av i skalet), 0008:4 (CI-baslinje för bench), 0009:1 (plattformarna okörda), 0009:2
 (seriella laddningar), 0009:4 (modulbygget beror på sökvägen). Spec-fråga 63:s andra halva
-(ska valideringen vägra en tom lista?) är ägarens.
+(ska valideringen vägra en tom lista?) är ägarens. 0007:1, 0007:4 och 0007:5 är rättade i
+m4/fix-shell, sammanslaget i `1ca9301`.
+
+## Efter m4/fix-shell
+
+`m4/fix-shell` (topp `70109d1`, sex commit på `f986c0e`) slogs ihop utan konflikter. Varje commit
+nedan passerade alla grindar, korskontrollen för Windows och macOS inräknad.
+
+| Commit | Vad | Test |
+| --- | --- | --- |
+| `1ca9301` | Slå ihop m4/fix-shell. vy-shells tester gröna med vy-protos `impl Into<NetClass>` och vy-manifests nekade tomma `net`-lista | 367 gröna / 4 ignorerade, spec 140/140, 59/59 à 0,000 % |
+| `56f508d` | vy-runtime: ägartestets modul gäller `all(test, unix)`; `use super::*` varnade i korskontrollen för Windows sedan `4e8cb52` | korskontrollen utan varningar |
+| `6cd88ca` | sidans nätklass (`Fetched::net_class`) i `LoadedPage`, `Tab` och `Job::Request` i stället för `is_localhost`; `From<bool> for NetClass` borta, `request` tar bara `NetClass`. `vy_proto::test_net::fetcher` bakom funktionen `test-net` (bara i vy-shells dev-beroenden; flyttat ur vy-protos testmodul `remote`). vy-cli har vy-proto som vanligt beroende (konformansens sida får klassen), redan i trädet via vy-shell; `Cargo.lock` oförändrad | `spec_9_5_3_page_requests_reach_by_the_page_class`: en sida laddad från `lan.example` (192.168.1.20) når sin egen origin men inte `127.0.0.1` eller ett namn som slås upp till loopback; en sida från `public.example` når ingen av dem, bara sin egen. Föll med den gamla klassen (privat sida → `E_NET` till sin egen origin) |
+| `f760904` | `tab::main()` utan parametrarna `record`/`replay`; `vy-cli --tab` och `vy-shell --tab` anropar den så | befintliga flikprocesstester |
+| `56060af` | fuzzfrön för `ToShell::Sandbox` (tagg 78): hel, delvis, av | `fuzz_ipc_corpus_has_the_sandbox_report`: fröna finns och avkodas till samma rapport, 1 000 mutationer var genom IPC-ingången; föll utan fröna |
+
+**Öppet (fråga till granskaren).** vy-protos plain-http-kontroll i `request_with` är
+`transport_allowed(page == NetClass::Loopback, …)`. Med klassen ur hämtningen har en sida vars namn
+inte är ett loopback-namn men bara slås upp till loopback (t.ex. via `/etc/hosts`) klassen `Loopback`,
+så det lagret släpper plain http till localhost för den; förut skickade skalet namnregeln
+(`is_localhost`) och lagret nekade. Skalets `request_verdict` och flikens grind
+(`vy_runtime::plain_http_allowed`, båda på sidans namn) nekar fortfarande, så beteendet är detsamma,
+men ett av tre lager har bytt innebörd. Vill man ha kvar namnregeln där får `request` ta den separat.
+
+**Byggmiljön.** `target/release` och musl-målet togs bort för diskens skull; storlekarna i *Release
+och Docker* gäller `3b1cbac`.
