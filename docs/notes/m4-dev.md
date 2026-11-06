@@ -117,7 +117,8 @@ körning (punkt 6) det andra. API:t finns inte på A
    nyckel på 32 hextecken. Varje anrop till `/_dev/` måste ha `token=<nyckel>` i frågan, annars 403;
    jämförelsen tar lika lång tid var nycklarna än skiljer sig. Nyckeln skrivs in i Studio-modulen
    som `vy-dev` signerar och serverar (steg 5) och skrivs ut i terminalen (`api:`-raden), ingen
-   annanstans. En webbsida når inte paketet (punkt 2 och 3). En Vy-sida kan inte läsa den ur Studio: `fetch_begin` kan inte sätta `Accept`, så
+   annanstans; begärandeloggen (på utan `--quiet`) skriver vägen utan frågan, så nyckeln hamnar
+   inte där (granskning 0005 fynd 2). En webbsida når inte paketet (punkt 2 och 3). En Vy-sida kan inte läsa den ur Studio: `fetch_begin` kan inte sätta `Accept`, så
    servern svarar HTML (som inte bär nyckeln) på `/` och `/index`, och modulen som blob kräver en hash
    sidan aldrig ser (den beror på nyckeln). Den okodade Studio-modulen i repot har platshållaren
    `000…` (konformansfallet), som aldrig är en körnings nyckel.

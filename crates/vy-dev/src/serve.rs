@@ -469,9 +469,18 @@ pub fn fresh(mut reply: Reply) -> Reply {
     reply
 }
 
+/// The request log's line for one request: the path without its query.
+/// Every dev API call carries this run's token in the query (`token=`),
+/// and Studio polls every second, so the query would put the token in the
+/// terminal and in any file stderr is sent to.
+pub fn log_text(method: &str, url: &str, status: u16, len: usize) -> String {
+    let path = url.split_once('?').map_or(url, |(path, _)| path);
+    format!("{method} {path} {status} {len}")
+}
+
 fn log_line(log: bool, method: &str, url: &str, status: u16, len: usize) {
     if log {
-        eprintln!("{method} {url} {status} {len}");
+        eprintln!("{}", log_text(method, url, status, len));
     }
 }
 
@@ -594,6 +603,27 @@ mod tests {
         let mut cut = STUDIO_CONFIG_MARKER.to_vec();
         cut.extend_from_slice(b"short");
         assert!(patch_studio_module(&mut cut, "http://localhost:1", "t").is_err());
+    }
+
+    /// Review 0005, finding 2: the request log names the path, never the
+    /// query with this run's token.
+    #[test]
+    fn the_request_log_leaves_out_the_token() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let line = log_text(
+            "GET",
+            &format!("/_dev/agent/events?after=3&wait=1000&token={token}"),
+            200,
+            17,
+        );
+        assert_eq!(line, "GET /_dev/agent/events 200 17");
+        assert!(!line.contains(token) && !line.contains("token="));
+        assert_eq!(
+            log_text("GET", &format!("/_dev/state?token={token}"), 403, 2),
+            "GET /_dev/state 403 2"
+        );
+        assert_eq!(log_text("GET", "/index", 200, 9), "GET /index 200 9");
+        assert_eq!(log_text("GET", "/?", 200, 0), "GET / 200 0");
     }
 
     #[test]
