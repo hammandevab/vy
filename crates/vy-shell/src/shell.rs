@@ -3534,8 +3534,9 @@ mod tests {
     /// origin in its list and `net` granted never reaches it; a page on
     /// `localhost:8080` never reaches `localhost:8081` (the dev API, which
     /// also wants its run's token); not another name for the same port, not
-    /// with userinfo, not from a local file. The main process refuses the
-    /// rest with `E_ORIGIN` before anything reaches the loader.
+    /// with userinfo, not from a local file, and nothing at all for an
+    /// empty list. The main process refuses the rest with `E_ORIGIN` before
+    /// anything reaches the loader.
     #[test]
     fn spec_5_2_8_plain_http_only_to_own_loopback_origin() {
         use vy_runtime::plain_http_allowed;
@@ -3617,5 +3618,12 @@ mod tests {
         // A local file has no origin and no plain http.
         tab.origin = None;
         assert_eq!(tab.request_verdict("http://localhost:8081/"), refused);
+
+        // A list that names nothing reaches nothing, not even the page's
+        // own loopback origin (SPEC-5.2.8; the tab's gate is the same).
+        tab.origin = Some("vy://localhost:8081".into());
+        tab.net_origins.clear();
+        assert_eq!(tab.request_verdict("http://localhost:8081/_dev/x"), refused);
+        assert_eq!(tab.request_verdict("https://api.example/x"), refused);
     }
 }
