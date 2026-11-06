@@ -4,6 +4,69 @@ Skrivna av byggagenten. Granskningssidorna skrivs av en annan agent (`docs/revie
 M3:s andra del (vy-shell) har egna noteringar i [`docs/notes/m3-shell.md`](notes/m3-shell.md).
 M2.7 (luckorna före frysen, efter granskning 0003) står först, sedan M3:s första del, M2.6, M2.5,
 M2 och M1; äldre delar är oförändrade utom där senare milstolpar ändrat läget (markerat).
+M4:s fyra spår har egna noteringar i `docs/notes/m4-*.md` och står överst.
+
+# M4 – fyra spår, sammanslagna i `m4/integration`
+
+Spåren byggdes parallellt från `3bc0bcb` och slogs ihop i ordningen m4/dev (`vy-dev` och Studio,
+[`notes/m4-dev.md`](notes/m4-dev.md)), m4/ux (urklipp, markering, sök, AccessKit, devtools,
+[`notes/m4-ux.md`](notes/m4-ux.md)), m4/security (DNS TXT, rotation, transparenslogg, sandlåda,
+fuzzning, [`notes/m4-security.md`](notes/m4-security.md)) och m4/perf (bench, rasterisering,
+kompileringscache, [`notes/m4-perf.md`](notes/m4-perf.md)). Sammanslagningen, konflikterna och
+uppföljningarna står i [`notes/m4-integration.md`](notes/m4-integration.md).
+
+## Spec-frågor (M4)
+
+Spåren numrerade sina frågor från 53 var för sig; här är de en följd, i sammanslagningsordning,
+med spåret och dess egen numrering inom parentes. Spårens noteringar använder de nya numren.
+
+53. **SPEC-7.1.3 och en sidas egna anrop** (m4/dev, öppen fråga 7). Meningen gäller `vy://`; att en
+    sidas `fetch_begin` på loopback följer samma undantag, och bara mot sidans egen loopback-origin,
+    står bara i koden (`vy_runtime::origin_of`, `plain_http_allowed`) och noteringarna. En mening i
+    §7 vore tydligare.
+54. **Vem ringer?** (m4/dev, öppen fråga 1). Ett localhost-API kan inte skilja Studio från en annan
+    Vy-sida som fått `net` mot samma origin, eller från en annan lokal process. Förslag: huvudprocessen
+    sätter ett huvud med sidans origin på varje `fetch_begin`, som `Origin` i webbläsare (en sida kan
+    inte förfalska det); då kan `vy-dev` kräva `vy://localhost:8081`. Rör SPEC-7.5.1.
+55. **SPEC-8.2.4 mot SPEC-5.2.12/5.3.1** (m4/ux, 53). Skrivning under kopieringsgesten lyckas utan
+    capability; 5.2.12 rubricerar urklippet "(capability `clipboard`)" och 5.3.1 säger att ett anrop
+    utan beviljad capability ger `E_DENIED`. Läsningen är att 8.2.4 är en policyregel om *när*
+    capabilityn anses beviljad, så §5 är orört. Bör 5.3.1 få en hänvisning i 1.1?
+56. **SPEC-12.3.1 "högst 25 MB" mot SPEC-10.2.1 på Linux** (m4/ux, 54). AccessKit med AT-SPI
+    (`accesskit_unix`, zbus) tar Linux-klienten över 25 miljoner byte (under 25 MiB); därför är
+    funktionen `a11y-linux` frivillig och Linux-klienten exponerar inget träd som standard. Avses MB
+    eller MiB? Ska taket höjas, Linux-tillgänglighet vara frivillig, eller något annat trimmas?
+    Talen efter sammanslagningen står i `notes/m4-integration.md`.
+57. **SPEC-10.1.1 "värden klipper trädet mot fönstret"** (m4/ux, 55). AccessKit klipper genom
+    `clips_children` på sidnoden med nodernas rektanglar oklippta, så plattformen vet att noder
+    utanför vyn finns. Avses att noder utanför vyn inte ska exponeras alls?
+58. **SPEC-7.4.5 – fler än en nyckel** (m4/security, 53). Första besöket pinnar alla nycklar som står
+    i både nyckelfilen och DNS, inte bara den som signerat sidan; en utgivare med två aktiva nycklar
+    behöver två TXT-poster. Avsett?
+59. **SPEC-7.4.5 – väntetid** (m4/security, 54). Ett uppslag som inte svarar tar upp till 6 s. Efter
+    sammanslagningen håller det inte längre upp någon sidas egna förfrågningar (en tråd per flik),
+    men väl andra flikars sidladdningar, som är seriella. Bör specen ge en tidsgräns, och bör sidan
+    visas i begränsat läge medan uppslaget pågår?
+60. **SPEC-7.4.5 – IP-literaler** (m4/security, 55). `vy://192.0.2.1/` frågar `_vy.192.0.2.1` och
+    faller till begränsat läge. Ska IP-adresser (utom loopback) vara otillåtna i `vy://`, eller
+    alltid begränsade?
+61. **§7.6 – split view** (m4/security, 56). En server kan visa olika loggar för olika klienter; bara
+    speglar som jämför huvuden upptäcker det. Ska 1.0 ha en andra källa för huvudet (t.ex. i DNS),
+    eller räcker det att formatet är speglingsbart?
+62. **SPEC-9.1.3 på Windows** (m4/security, 57). Standardläget hindrar skrivning och barnprocesser men
+    inte läsning och nätverk; AppContainern (`VY_SANDBOX=strict`) hindrar allt men är inte provad på
+    en riktig maskin. Bör meningen gälla strict, och standard bli strict när en människa kört det?
+63. **`net` med tom origin-lista** (m4/perf, 53). SPEC-8.2.1 sätter ett tak (≤ 16) men inget golv.
+    Efter sammanslagningen släpper varken fliken (`vy-runtime`) eller huvudprocessen igenom något för
+    en tom lista (m4/dev:s öppna fråga 5 är därmed stängd), men standardpolicyn beviljar ändå `net`
+    och adressfältet visar det. Ska valideringen kräva minst en origin, eller policyn låta bli?
+64. **SPEC-13.1.3 utan 300 KB-modul och referenslänk** (m4/perf, 54). Testet mäter den största
+    referensmodulen (31 KB) över loopback. Ska sviten ha en syntetisk 300 KB-modul och en simulerad
+    länk, eller räcker uppskattningen tills referensmaskinen finns?
+65. **SPEC-13.2.1 på vilken maskin, med vilken rasterisering** (m4/perf, 55). 2 ms för 2 000 opkoder
+    hålls inte med CPU-rasteriseringen som ger dagens guldbilder (34 ms på byggmaskinen). Gäller
+    budgeten GPU-vägen, ska ramen räknas om, eller budgeten höjas för CPU-vägen? Testet
+    `spec_13_2_1_raster_budget` är ignorerat med det uppmätta värdet.
 
 # M3 del 2 – vy-shell
 

@@ -167,7 +167,7 @@ arbetsytans crates (beroendena med profilens 1), så talen jämförs sinsemellan
 | steg 5 med `--features a11y-linux` | 25 417 136 | +3 144 944 – **över** SPEC-12.3.1:s 25 MB |
 
 Därför är AT-SPI på Linux frivilligt: med det går Linux-klienten över 25 MB (25,4 miljoner byte; under
-25 MiB, se spec-fråga 54). Windows-binärens storlek kan inte mätas här (ingen MSVC-länkare); CI:s
+25 MiB, se spec-fråga 56). Windows-binärens storlek kan inte mätas här (ingen MSVC-länkare); CI:s
 release-jobb visar den. `accesskit_windows` drar `windows`-craten med COM-funktioner: räkna med något hundratal
 kB.
 
@@ -261,7 +261,7 @@ Samma sak i CI utan display.
   finns inte (pilarna är sidans).
 - **Sök:** rullningen är en heuristik (se *Beslut*); träffar i text som inte är en enda körning markeras som
   hela noden.
-- **AccessKit på Linux** är frivilligt (`a11y-linux`, spec-fråga 54). Fönsterintegrationen (adapter,
+- **AccessKit på Linux** är frivilligt (`a11y-linux`, spec-fråga 56). Fönsterintegrationen (adapter,
   händelser, `WaitUntil` för live-omladdning) är bara typkontrollerad och manuellt beskriven, inte körd här.
 - **Devtools:** inspelning kräver flikprocess; en uppspelning ersätter inte en öppen flik; panelen saknar
   tangentbordsnavigering (pekare och mushjul).
@@ -292,18 +292,19 @@ Allt ovan är testat huvudlöst; detta går bara att se i fönstret.
 
 ## Spec-frågor
 
-Numreringen fortsätter efter notes/m3-shell (45–52).
+Numreringen fortsätter efter notes/m3-shell (45–52). Vid sammanslagningen i `m4/integration` numrerades
+spårens frågor om till en följd; de här är 55–57 i `docs/BUILD-NOTES.md` (M4).
 
-53. **SPEC-8.2.4 mot SPEC-5.2.12/5.3.1.** Den nya meningen säger att en skrivning under kopieringsgesten
+55. **SPEC-8.2.4 mot SPEC-5.2.12/5.3.1.** Den nya meningen säger att en skrivning under kopieringsgesten
     lyckas utan capability; 5.2.12 rubricerar urklippet "(capability `clipboard`)" och 5.3.1 säger att
     ett anrop utan beviljad capability ger `E_DENIED`. Läsningen här är att 8.2.4 är en policyregel om
     *när* capabilityn anses beviljad (implicit, under gesten), så §5 är orört. Bör 5.3.1 få en hänvisning
     i 1.1, eller räcker det att 8.2.4 står i §8?
-54. **SPEC-12.3.1 "högst 25 MB" mot SPEC-10.2.1 på Linux.** AccessKit med AT-SPI (`accesskit_unix`, zbus) tar
+56. **SPEC-12.3.1 "högst 25 MB" mot SPEC-10.2.1 på Linux.** AccessKit med AT-SPI (`accesskit_unix`, zbus) tar
     Linux-klienten från 22,3 till 25,4 miljoner byte – över 25 MB i decimal mening, under 25 MiB. Här är AT-SPI
     därför en frivillig funktion (`a11y-linux`) och Linux-klienten exponerar inget träd som standard; Windows och
     macOS gör det. Avses MB eller MiB? Ska taket höjas, ska Linux-tillgänglighet vara frivillig, eller ska något
     annat trimmas (typsnitten 2,2 MB, `pulley_interpreter` 0,2 MB enligt granskning 0004)?
-55. **SPEC-10.1.1 "värden klipper trädet mot fönstret".** Här klipps det genom AccessKits `clips_children` på
+57. **SPEC-10.1.1 "värden klipper trädet mot fönstret".** Här klipps det genom AccessKits `clips_children` på
     sidnoden, med nodernas rektanglar oklippta, så att plattformen vet att noder utanför vyn finns (som en
     webbläsare). Avses att noder utanför vyn inte ska exponeras alls?

@@ -192,7 +192,7 @@ tills `0c46014` lägger till fallen med guldbilderna, efter mönstret `5c3adca`/
 
 ## Öppna frågor
 
-1. **Vem ringer?** Ett localhost-API kan inte skilja Studio från en annan Vy-sida som fått `net` mot
+1. **Vem ringer?** (spec-fråga 54 i `docs/BUILD-NOTES.md`, M4) Ett localhost-API kan inte skilja Studio från en annan Vy-sida som fått `net` mot
    samma origin, eller från en annan lokal process. Förslag (m4/security): huvudprocessen sätter ett
    huvud med sidans origin på varje `fetch_begin`-anrop, som `Origin` i webbläsare; då kan `vy-dev`
    kräva `vy://localhost:8081` och den tredje punkten i hotbilden blir en positiv kontroll.
@@ -214,7 +214,7 @@ tills `0c46014` lägger till fallen med guldbilderna, efter mönstret `5c3adca`/
 6. **Konformansfallet för Studio** svarar med platshållarnyckeln och `http://localhost:8081`, eftersom
    modulen i `target/wasm/` är den okodade. Det prövar sidan, inte anpassningen; anpassningen prövas
    av `studio_end_to_end`.
-7. **SPEC-7.1.3 och en sidas egna anrop.** Meningen gäller `vy://`; att en sidas `fetch_begin` på
+7. **SPEC-7.1.3 och en sidas egna anrop.** (spec-fråga 53 i `docs/BUILD-NOTES.md`, M4) Meningen gäller `vy://`; att en sidas `fetch_begin` på
    loopback följer samma undantag (och bara mot sin egen origin) står bara i koden och den här sidan.
    En mening i §7 vore tydligare; lämnad till specägaren.
 

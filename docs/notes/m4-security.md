@@ -6,8 +6,9 @@ av en annan agent. Spåret äger `crates/vy-proto`, `crates/vy-manifest`, nyckel
 `.github/workflows/fuzz.yml` och gräns-/isoleringstesterna i `crates/vy-runtime/src/tests.rs`.
 Filer utanför det står under *Berör andra spår*.
 
-Spec-frågor numreras från 53 (BUILD-NOTES och notes/m3-shell slutar på 52); de parallella
-M4-spåren kan ha valt samma nummer, så de kan behöva numreras om vid merge.
+Spec-frågor numrerades från 53 (BUILD-NOTES och notes/m3-shell slutar på 52); vid
+sammanslagningen i `m4/integration` blev de 58–62 i `docs/BUILD-NOTES.md` (M4), och numren nedan
+är de nya.
 
 ## Läge
 
@@ -209,7 +210,7 @@ kan kringgå loggen genom att ta bort den). En logg som inte går att hämta ell
   till en egen nyckel – men måste då lägga den i loggen, där den syns för speglar och
   utgivaren; att skriva om historiken upptäcks av varje klient som sett huvudet. (2) En server
   som visar olika loggar för olika klienter (split view): upptäcks bara genom speglar som
-  jämför huvuden – utanför 1.0 (spec-fråga 56). (3) En fientlig logg mot tolken: storlek,
+  jämför huvuden – utanför 1.0 (spec-fråga 61). (3) En fientlig logg mot tolken: storlek,
   kanonisk form, injektion i förrådet.
 - **Hur begränsas det.** Kedjan kontrolleras rad för rad; huvudet sparas och måste finnas kvar;
   spärrhaken efter första loggen; 1 MB-tak före tolkning; strikt avkodning; host-tecken som
@@ -248,7 +249,7 @@ profilen tagits; annars skriver testet varför det hoppar. Testet visar också a
 **Windows standard uppfyller SPEC-9.1.3 bara till hälften:** låg integritet hindrar skrivning
 till användarens filer och register, jobbet hindrar barnprocesser, men *läsning* av filer och
 *nätverk* stoppas bara av AppContainern i strict. Att göra AppContainern till standard kräver
-att någon kört den på en riktig maskin (spec-fråga 57).
+att någon kört den på en riktig maskin (spec-fråga 62).
 
 ### Vad människan ska se på Windows
 
@@ -423,7 +424,7 @@ vad som ska försökas, hur, vad som räknas som fynd.
 8. **Förtroendekedjan.** Första besök: förfalskade UDP-svar (fel id, fel fråga, trunkerat,
    CNAME-kedjor till främmande namn), en resolver som svarar SERVFAIL eller långsamt; rotation
    utan att nyckeln står i vy-key eller loggen; en logg som skrivits om, tagits bort eller visar
-   olika innehåll för olika klienter (split view, spec-fråga 56); `next_key_id`-injektion i
+   olika innehåll för olika klienter (split view, spec-fråga 61); `next_key_id`-injektion i
    nyckelförrådet. Fynd: förtroende utan att både vy-key, DNS (och loggen när den finns) stämmer.
 9. **Uppdatering under körning.** Byt `vy-shell` på disk medan den kör och öppna en ny flik
    (Linux: ska vara den gamla avbilden; macOS: känd risk; Windows: går inte att byta).
@@ -467,12 +468,12 @@ CI bygger utan den lokala filen.
 ## Kvar
 
 - Windows strict (AppContainer) och macOS-profilen är bara typkontrollerade; Windows standard
-  stoppar inte läsning och nät (spec-fråga 57).
+  stoppar inte läsning och nät (spec-fråga 62).
 - Ingen libFuzzer-körning lokalt; nattjobbet har aldrig kört.
 - Skalet visar inte `Fetched::restriction()` (m4/ux).
 - `limit_memory` tar sidans `memory_max` vid spawn; ingen gräns på Linux/macOS utöver wasmtimes
   egen (RLIMIT_AS skulle bryta wasmtimes reserverade adressrymd).
-- Split view i loggen (spec-fråga 56) och Railway-domänen (steg 1).
+- Split view i loggen (spec-fråga 61) och Railway-domänen (steg 1).
 
 ## Byggmiljön (för den som tar över)
 
@@ -540,18 +541,18 @@ unika rader på Linux, 72 för Windows-målet; inget nytt i `Cargo.lock` utom de
 
 ## Spec-frågor
 
-53. **SPEC-7.4.5 – fler än en nyckel.** Första besöket pinnar alla nycklar som står i båda
+58. **SPEC-7.4.5 – fler än en nyckel.** Första besöket pinnar alla nycklar som står i båda
     källorna, inte bara den som signerat sidan (som M3 gjorde med nyckelfilen). En utgivare
     med två aktiva nycklar behöver alltså två TXT-poster. Avsett?
-54. **SPEC-7.4.5 – väntetid.** Ett uppslag som inte svarar tar upp till 6 s och sker i skalets
+59. **SPEC-7.4.5 – väntetid.** Ett uppslag som inte svarar tar upp till 6 s och sker i skalets
     laddartråd (som är seriell, granskning 0004 fynd 7). Bör specen ge en tidsgräns, och bör
     sidan visas i begränsat läge medan uppslaget pågår?
-55. **SPEC-7.4.5 – IP-literaler.** `vy://192.0.2.1/` frågar `_vy.192.0.2.1` och faller till
+60. **SPEC-7.4.5 – IP-literaler.** `vy://192.0.2.1/` frågar `_vy.192.0.2.1` och faller till
     begränsat läge. Det finns ingen DNS-zon för en adress; ska IP-adresser (utom loopback) vara
     otillåtna i `vy://`, eller alltid begränsade?
-56. **§7.6 – split view.** En server kan visa olika loggar för olika klienter. Bara speglar som
+61. **§7.6 – split view.** En server kan visa olika loggar för olika klienter. Bara speglar som
     jämför huvuden upptäcker det; ska 1.0 ha en mekanism (en andra källa för huvudet, t.ex. ett
     huvud i DNS bredvid TXT-posten), eller räcker det att formatet är speglingsbart?
-57. **SPEC-9.1.3 på Windows.** Standardläget hindrar skrivning och barnprocesser men inte läsning
+62. **SPEC-9.1.3 på Windows.** Standardläget hindrar skrivning och barnprocesser men inte läsning
     och nätverk; AppContainern (strict) hindrar allt men är inte provad. Bör meningen gälla
     strict, och standard bli strict när en människa kört det?

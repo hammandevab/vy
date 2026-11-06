@@ -59,7 +59,7 @@ compile-hit.chat                   -         -      0.72      0.93      1.00
 31 KB), 13.1.4 vid träff (P95 ≤ 0,83 ms) och för `hello` kallt (22 ms), 13.2.2 (7,4 ms), 13.2.3
 (2,4 ms, 97,4 % / 100 % träff), 6.2.2, 13.4.1. **Inte hållet:** 13.2.1 (P95 44–56 ms mot 2 ms för
 ramen i sidornas proportioner; fem av elva referenssidor under 2 ms) – testet är ignorerat med
-värdet (spec-fråga 55); 13.1.4 kallt för 22–31 KB-moduler under last (P95 58–84 ms) och 300 KB
+värdet (spec-fråga 65); 13.1.4 kallt för 22–31 KB-moduler under last (P95 58–84 ms) och 300 KB
 utan cache. Konformansen är 55/55 à 0,000 % efter varje commit.
 
 **Grindar och tal (efter `a04306d`).** fmt, clippy, `cargo test --workspace` 273 gröna / 11
@@ -73,7 +73,7 @@ byggskript kräver en C-korskompilator som maskinen saknar (gäller före mina �
 
 **Kvar.** (1) Skalet använder inte kompileringscachen: kopplingen i `page.rs`, `ipc.rs`/
 `process.rs` och sandlådan är andra spårs (steg 3, *Berör andra spår*). (2) SPEC-13.2.1:
-GPU-vägen eller en ändrad mening (spec-fråga 55). (3) Den kalla halvan av SPEC-13.1.4 för 300 KB
+GPU-vägen eller en ändrad mening (spec-fråga 65). (3) Den kalla halvan av SPEC-13.1.4 för 300 KB
 kräver parallell kompilering i wasmtime (avstängd sedan M1 för binärstorleken) eller en
 referensmaskin. (4) Ubuntu-baslinjen för regressionsgrinden: första CI-körningens artefakt
 `bench-ubuntu` incheckad som `conformance/bench/ubuntu.json` i ett `bench:`-commit. (5)
@@ -84,9 +84,9 @@ att återanvända skulle spara ≈ 0,2 ms per frame men kräver ändring hos anr
 `compile_cache: vy_runtime::CompileCache::Off` – krävs för att det ska kompilera. Delade filer:
 `.github/workflows/ci.yml` (bench-steget i `gates` tar `--runs` i stället för `--iterations`; nytt
 jobb `bench`), `Cargo.lock` (arbetsytecrates som nya beroenden, inga externa).
-`docs/BUILD-NOTES.md` är orörd (spec-frågorna fortsätter från 52 här). Till m4/security: flikens
+`docs/BUILD-NOTES.md` är orörd (spec-frågorna fortsatte från 52 här; vid sammanslagningen i `m4/integration` blev de 63–65 där). Till m4/security: flikens
 skrivrätt till kompileringscachen (Hotbild, steg 3) och `default_grants` för en tom `net`-lista
-(nätgrinden, spec-fråga 53).
+(nätgrinden, spec-fråga 63).
 
 **Byggmiljön.** Fyra worktrees delade `target/` fram till 22:16. Cargos artefakthash för en
 sökvägscrate bortser från worktreens sökväg och färskhetskontrollen jämför bara tidsstämplar,
@@ -332,7 +332,7 @@ värd utan schema. Ingen guldbild berörs (chat-fallen har `https://chat.example
 **Berör andra spår.** Skalets standardpolicy (`vy-manifest`, m4/security: `default_grants` med
 `all()` över tom lista) beviljar fortfarande `net` för en tom lista; det ger nu inget nät men
 visas som beviljat i adressfältet. Förslag: `net` med tom origin-lista beviljas inte (eller avvisas
-av valideringen). Spec-fråga 53 nedan.
+av valideringen). Spec-fråga 63 nedan.
 
 ## Steg 3: kompileringscache i `vy-runtime` (SPEC-13.1.4)
 
@@ -454,14 +454,14 @@ SPEC-13.1.3 talar om en 300 KB-modul över 50 Mbit/30 ms; största referensmodul
 loopback har ingen fördröjning. 300 KB över referenslänken tar ≈ 48 ms överföring och några RTT
 (manifest, modul, nyckel: ≈ 90 ms), och kompileringen av 300 KB utan cache ≈ 10 × `text`:s 19 ms
 här – ungefär 138 + 90 + 170 ≈ 400 ms, alltså på gränsen. Med kompileringscachen i skalet (steg 3,
-ej inkopplad) försvinner kompileringen vid återbesök men inte vid kall hämtning. Spec-fråga 54.
+ej inkopplad) försvinner kompileringen vid återbesök men inte vid kall hämtning. Spec-fråga 64.
 
 SPEC-13.2.1 (2 000 opkoder ≤ 2 ms) hålls inte: en CPU-rasterisering som ger guldbildernas byte
 behöver här 34 ms för ramen i sidornas proportioner, där en tredjedel är tiny-skias
 kantutjämnade banfyllning och resten glyfpixlar. Fem av elva referenssidor ligger under 2 ms
 (hello, text, form, list, chat), resten 2,3–10 ms. Vägen dit är GPU-rasteriseringen (SPEC-11.3.2,
 wgpu-vägen), som ändrar avrundningen och kräver nytt guldbyte (spec-fråga 41) – inte prestanda-
-arbete med samma byte. Spec-fråga 55.
+arbete med samma byte. Spec-fråga 65.
 
 ## Steg 5: `vy-publish build` vägrar en långsam modul utan `--allow-slow` (SPEC-13.4.1)
 
@@ -492,15 +492,15 @@ stället (princip 6). `vy-cli` fick `vy-proto`, `vy-publish` och `vy-serve` som 
 
 ## Spec-frågor
 
-53. **`net` med tom origin-lista.** SPEC-8.2.1 sätter ett tak (≤ 16) men inget golv, och
+63. **`net` med tom origin-lista.** SPEC-8.2.1 sätter ett tak (≤ 16) men inget golv, och
     SPEC-8.2.3 beviljar `net` "för egen origin" automatiskt. En tom lista namnger ingen origin;
     `vy-runtime` släpper nu ingenting igenom för den, men policyn beviljar ändå `net` och
     adressfältet visar det. Ska valideringen kräva minst en origin, eller policyn låta bli?
-54. **SPEC-13.1.3 utan 300 KB-modul och referenslänk.** Testet mäter den största referensmodulen
+64. **SPEC-13.1.3 utan 300 KB-modul och referenslänk.** Testet mäter den största referensmodulen
     (31 KB) över loopback; en uppskattning för 300 KB över 50 Mbit/30 ms står i steg 4. Ska sviten
     ha en syntetisk 300 KB-modul och en simulerad länk (fördröjning i `vy-serve`), eller räcker
     uppskattningen tills referensmaskinen finns?
-55. **SPEC-13.2.1 på vilken maskin, med vilken rasterisering.** 2 ms för 2 000 opkoder hålls inte
+65. **SPEC-13.2.1 på vilken maskin, med vilken rasterisering.** 2 ms för 2 000 opkoder hålls inte
     med CPU-rasterisering som ger dagens guldbilder (34 ms här). Antingen gäller budgeten
     GPU-vägen (och mäts när den finns), eller ramen räknas om (vilka 2 000 opkoder: de patologiska
     listorna eller sidornas proportioner, `vy_render::bench`), eller budgeten höjs för CPU-vägen.
