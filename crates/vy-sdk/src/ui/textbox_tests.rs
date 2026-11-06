@@ -525,3 +525,58 @@ fn spec_6_4_3_textbox_multiline() {
         "a scroll thumb when the text overflows"
     );
 }
+
+/// SPEC-6.4.3: paragraphs keep their wrapped lines across edits – the same
+/// text wraps the same way whether it was wrapped fresh or reused after
+/// typing, Enter, joining two paragraphs, or with repeated paragraphs.
+#[test]
+fn spec_6_4_3_textbox_rewrap_matches_fresh_wrap() {
+    let t = theme();
+    let r = Rect::new(0.0, 0.0, 24.0 + 10.0 * CW, 400.0);
+    let fresh = |text: &str| {
+        let mut tb = TextBox::multiline(-1).with_text(text);
+        drawn(|f| tb.draw(f, r, &t, ""));
+        tb.wrap.lines.clone()
+    };
+    let mut tb = TextBox::multiline(-1).with_text("aaa bbb ccc\nsame\nsame\nddd eee fff ggg");
+    send(&mut tb, focus(-1, true), r, &t);
+    drawn(|f| tb.draw(f, r, &t, ""));
+    assert_eq!(
+        tb.wrap.lines,
+        fresh("aaa bbb ccc\nsame\nsame\nddd eee fff ggg")
+    );
+    let edits: [(Event<'static>, &str); 4] = [
+        (typed("!"), "aaa bbb ccc\nsame\nsame\nddd eee fff ggg!"),
+        (
+            key(key::ENTER),
+            "aaa bbb ccc\nsame\nsame\nddd eee fff ggg!\n",
+        ),
+        (
+            typed("x y z"),
+            "aaa bbb ccc\nsame\nsame\nddd eee fff ggg!\nx y z",
+        ),
+        (
+            key_with(key::HOME, CTRL),
+            "aaa bbb ccc\nsame\nsame\nddd eee fff ggg!\nx y z",
+        ),
+    ];
+    for (e, want) in edits {
+        send(&mut tb, e, r, &t);
+        drawn(|f| tb.draw(f, r, &t, ""));
+        assert_eq!(tb.text(), want);
+        assert_eq!(tb.wrap.lines, fresh(want), "after {e:?}");
+    }
+    // End of the soft line "aaa bbb ": before its space; Delete takes the
+    // space (one paragraph shrinks), Enter splits it in two.
+    send(&mut tb, key(key::END), r, &t);
+    send(&mut tb, key(key::DELETE), r, &t);
+    drawn(|f| tb.draw(f, r, &t, ""));
+    assert_eq!(tb.wrap.lines, fresh(tb.text()));
+    send(&mut tb, key(key::ENTER), r, &t);
+    drawn(|f| tb.draw(f, r, &t, ""));
+    assert_eq!(tb.wrap.lines, fresh(tb.text()));
+    assert_eq!(
+        tb.text(),
+        "aaa bbb\nccc\nsame\nsame\nddd eee fff ggg!\nx y z"
+    );
+}

@@ -1,7 +1,7 @@
 //! A virtualised list with one selected row.
 
 use super::scroll::ScrollView;
-use super::{clip_str, ring, Input, Response, Theme, PAD};
+use super::{clip_str, ring, Input, Response, Theme, PAD, RADIUS};
 use crate::event::{button, key, Event};
 use crate::frame::Frame;
 use crate::sem::Role;
@@ -94,6 +94,7 @@ impl Rows for [String] {
 ///   selection, Page Up/Down by a page, Home/End to the ends (`Changed`,
 ///   scrolled into view), Enter activates the selected row.
 /// - The selected row's node text ends in [`super::Words::selected`].
+/// - Drawn with a 1 px border like a text field; rows are clipped inside it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct List {
     row_h: f32,
@@ -260,14 +261,16 @@ impl List {
         let content_h = self.content_h(len);
         self.scroll.clamp(r, content_h);
         if self.scroll.active() {
-            ring(f, r, 0.0, theme)?;
+            ring(f, r, RADIUS, theme)?;
         }
-        f.rect(r, 0.0, p.surface)?;
+        f.rect(r, RADIUS, p.border)?;
+        let inner = r.inset(1.0);
+        f.rect(inner, RADIUS - 1.0, p.surface)?;
         let visible = self.visible(r, len);
         let mut label = core::mem::take(&mut self.label);
         let this = &*self;
         let drawn = f.group(Role::List, r, "", |f| {
-            f.clip_push(r, 0.0)?;
+            f.clip_push(inner, RADIUS - 1.0)?;
             let rows_drawn = (|| {
                 for i in 0..len {
                     label.clear();

@@ -7,7 +7,6 @@ use crate::event::{button, key, Event, Modifiers};
 use crate::frame::Frame;
 use crate::sem::{NodeId, Role};
 use crate::{math, Rect, StyleId, VyError};
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -21,17 +20,26 @@ pub const MAX_MULTILINE_BYTES: usize = 4096;
 const NEWLINE_W: f32 = 6.0;
 
 /// Visual lines of a multi-line field, wrapped at the field's width and
-/// kept until the text, the width or the style changes. Paragraphs that did
-/// not change are not wrapped again, so typing in one paragraph costs one
-/// `text_measure` per word of that paragraph.
+/// kept until the text, the width or the style changes. A paragraph that
+/// did not change (found at its old index or one away, as after typing,
+/// Enter or joining two paragraphs) is not wrapped again, so typing in one
+/// paragraph costs one `text_measure` per word of that paragraph.
 #[derive(Clone, Debug, Default)]
 struct Wrap {
     key: Option<(u64, u32, i32)>,
     /// `[start, end)` byte ranges into the text, without line breaks.
     lines: Vec<(usize, usize)>,
-    /// Lines of each paragraph by (hash, length), relative to its start.
-    paras: BTreeMap<(u64, usize), Vec<(usize, usize)>>,
+    /// Each paragraph's (hash, length) and lines relative to its start,
+    /// in text order.
+    paras: Vec<Para>,
     paras_key: Option<(u32, i32)>,
+}
+
+/// One paragraph's wrapped lines, keyed by its hash and length.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Para {
+    key: (u64, usize),
+    lines: Vec<(usize, usize)>,
 }
 
 /// A text field with a `textbox` node of a fixed id whose text is the
@@ -362,22 +370,31 @@ impl TextBox {
             self.wrap.paras.clear();
             self.wrap.paras_key = Some((width.to_bits(), theme.text.0));
         }
-        let old = core::mem::take(&mut self.wrap.paras);
+        let mut old = core::mem::take(&mut self.wrap.paras);
         let mut start = 0;
         loop {
             let end = self.text[start..]
                 .find('\n')
                 .map_or(self.text.len(), |i| start + i);
             let para = &self.text[start..end];
-            let k = (fnv1a(para), para.len());
-            let rel = match old.get(&k).or_else(|| self.wrap.paras.get(&k)) {
-                Some(lines) => lines.clone(),
+            let key = (fnv1a(para), para.len());
+            let i = self.wrap.paras.len();
+            let near = [i, i + 1, i.wrapping_sub(1)];
+            let lines = match near
+                .iter()
+                .find(|&&j| old.get(j).is_some_and(|p| p.key == key))
+            {
+                Some(&j) => {
+                    // Used once: a repeated paragraph further on takes its own.
+                    old[j].key = (0, usize::MAX);
+                    core::mem::take(&mut old[j].lines)
+                }
                 None => wrap_paragraph(theme.text, width, para)?,
             };
             self.wrap
                 .lines
-                .extend(rel.iter().map(|&(a, b)| (start + a, start + b)));
-            self.wrap.paras.insert(k, rel);
+                .extend(lines.iter().map(|&(a, b)| (start + a, start + b)));
+            self.wrap.paras.push(Para { key, lines });
             if end == self.text.len() {
                 break;
             }
