@@ -99,6 +99,10 @@ jobs:
         run: cargo build --release -p vy-shell
       - name: Shell screenshot
         run: ./target/release/vy-shell --screenshot shell.png --size 1024x720 --manifest conformance/manifests/shop.json target/wasm/shop.wasm
+      # SPEC-13.2.1 on this platform, informational (see the bench job).
+      - name: Raster budget on this runner (informational)
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p vy-render --lib -- --ignored spec_13_2_1 --nocapture || true
       - name: Conformance diffs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -126,6 +130,11 @@ jobs:
         run: tools/build_modules.sh
       - name: Budget tests (release)
         run: cargo test --release -p vy-render -p vy-runtime -p vy-cli -- spec_13 spec_6_2_2 spec_12_2_3 --test-threads=1
+      # SPEC-13.2.1 stays ignored until a path meets it (docs/notes/m5-gpu.md,
+      # spec-fråga 66): what the window's path takes on this runner, for the
+      # notes; never fails the job.
+      - name: Raster budget on this runner (informational)
+        run: cargo test --release -p vy-render --lib -- --ignored spec_13_2_1 --nocapture || true
       - name: Regression gate (SPEC-12.2.3)
         run: |
           cargo build --release -p vy-cli
