@@ -138,7 +138,11 @@ impl CapabilityRequests {
 /// `storage` up to 1 MB and `ime` are granted automatically; `clipboard`
 /// and `persist_frame` after asking; `hires_time` is denied by default.
 /// `net` with foreign origins and `storage` over 1 MB are not covered by
-/// the sentence and are treated as "ask".
+/// the sentence and are treated as "ask". `net` with no origin at all
+/// names nothing the page could reach (neither the tab nor the main
+/// process lets a request through for it), so there is nothing to grant
+/// and nothing to ask: denied, and the address field shows no grant (spec
+/// question 63).
 ///
 /// `origin_is_own` says whether every origin in a `net` request is the
 /// page's own (SPEC-9.5.1); it is ignored for other capabilities. Crate
@@ -146,6 +150,7 @@ impl CapabilityRequests {
 /// which asks for the [`Trust`] first.
 pub(crate) fn default_grant(request: &Requested<'_>, origin_is_own: bool) -> Grant {
     match request {
+        Requested::Net(n) if n.origins.is_empty() => Grant::Denied,
         Requested::Net(_) => {
             if origin_is_own {
                 Grant::Auto

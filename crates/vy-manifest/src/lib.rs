@@ -1054,6 +1054,35 @@ mod tests {
         assert!(none.iter().next().is_none());
     }
 
+    /// Spec question 63, review 0009 finding 3: a `net` request with an
+    /// empty origin list names nothing to reach, so the default policy
+    /// does not grant it, whatever the caller's own-origin test says (an
+    /// `all` over no origins is true).
+    #[test]
+    fn spec_8_2_3_empty_net_list_is_not_granted() {
+        use crate::policy::default_grant;
+        let empty = NetRequest { origins: vec![] };
+        assert_eq!(default_grant(&Requested::Net(&empty), true), Grant::Denied);
+        assert_eq!(default_grant(&Requested::Net(&empty), false), Grant::Denied);
+        let (mut m, _) = hello();
+        m.capabilities = CapabilityRequests {
+            net: Some(empty),
+            ime: Some(Empty {}),
+            ..CapabilityRequests::default()
+        };
+        m.sign(&test_key());
+        let trust = m.verify(&test_key().public()).expect("signed by the key");
+        let own = |n: &NetRequest| n.origins.iter().all(|o| o == "https://self.example");
+        assert_eq!(
+            m.capabilities.default_grants(Some(&trust), own),
+            [("net", Grant::Denied), ("ime", Grant::Auto)]
+        );
+        assert_eq!(
+            m.capabilities.default_grants(None, own),
+            [("net", Grant::Denied), ("ime", Grant::Denied)]
+        );
+    }
+
     /// SPEC-8.2.3, SPEC-7.4.3: default grant policy per capability; the
     /// grants of a manifest's requests exist only with the `Trust` that its
     /// verification produced, and every request is `Denied` without one.

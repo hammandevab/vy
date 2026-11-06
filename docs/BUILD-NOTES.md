@@ -60,6 +60,8 @@ med spåret och dess egen numrering inom parentes. Spårens noteringar använder
     Efter sammanslagningen släpper varken fliken (`vy-runtime`) eller huvudprocessen igenom något för
     en tom lista (m4/dev:s öppna fråga 5 är därmed stängd), men standardpolicyn beviljar ändå `net`
     och adressfältet visar det. Ska valideringen kräva minst en origin, eller policyn låta bli?
+    *Policyhalvan är gjord* (granskning 0009 fynd 3): `default_grant` ger `Denied` för en tom
+    lista, så inget visas som beviljat. Kvar för ägaren: ska valideringen dessutom vägra listan?
 64. **SPEC-13.1.3 utan 300 KB-modul och referenslänk** (m4/perf, 54). Testet mäter den största
     referensmodulen (31 KB) över loopback. Ska sviten ha en syntetisk 300 KB-modul och en simulerad
     länk, eller räcker uppskattningen tills referensmaskinen finns?
