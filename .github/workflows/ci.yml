@@ -36,6 +36,14 @@ jobs:
         run: tools/build_modules.sh
       - name: Test
         run: cargo test --workspace
+      # SPEC-11.3.2: the window's GL path against the reference, on Mesa's
+      # software GL (llvmpipe) under Xvfb. `cargo test` above skips it for
+      # want of a display; here it must run (VY_GL_REQUIRED). Its timing
+      # line is not a GPU's (docs/notes/m5-gpu.md).
+      - name: Install Mesa and Xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1-mesa-dri libegl1 libegl-mesa0 xvfb
+      - name: GL path against the reference (llvmpipe)
+        run: xvfb-run -a -s "-screen 0 1600x1200x24" env VY_GL_REQUIRED=1 cargo test -p vy-shell --test gl
       - name: Backlog (informational)
         run: "cargo test --workspace -- --ignored --list 2>/dev/null | grep -c 'test$' || true"
       - name: Spec trace

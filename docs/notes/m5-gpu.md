@@ -14,17 +14,27 @@ eller Windows.
 | `19b02ca` | `vy_render::Renderer`: körningscache, torr pass, skadespårning, band på trådar; likvärdighetstester |
 | `7b64370` | skalet ritar sidor med den snabba vägen i fönstret, referensen huvudlöst; `window.rs` presenterar bara det som ändrats; `spec_13_2_1_raster_budget` mäter fönstrets väg |
 | `fd3a0d1` | `spec:` SPEC-11.3.2 förtydligad (byte för byte, konformansen alltid headless) och sidtestet i vy-cli |
-| (detta) | noteringarna kompletta; informativa SPEC-13.2.1-steg i CI |
+| `1913b05` | noteringarna för del 1; informativa SPEC-13.2.1-steg i CI |
+| `a74b90e` | del 2: GL-pipelinen i vy-render, kontexten i vy-shell, likvärdighetstestet `tests/gl.rs` |
+| `b29c815` | fönstret presenterar med GL och faller tillbaka på CPU-vägen; skalets lagerläge |
+| (följande) | GL-vägens CPU-arbete halverat två gånger och mätt; `spec:` toleransen i SPEC-11.3.2; CI-steget med Mesa under Xvfb; dessa noteringar |
 
-**Utfall.** wgpu ryms inte (+3,9–5,0 MB mot 2,63 MB kvar). Fönstret ritar nu med en CPU-väg som
-ger referensens byte i varje frame, ritar om bara det som ändrats och delar en hel ram i band:
+**Utfall, del 1.** wgpu ryms inte (+3,9–5,0 MB mot 2,63 MB kvar). Fönstret ritar med en CPU-väg
+som ger referensens byte i varje frame, ritar om bara det som ändrats och delar en hel ram i band:
 en hel ram 1,7 gånger snabbare här med två vCPU (P50 11,5 mot 19,5 ms), 3,4 gånger kortare kritisk
 väg med fyra band räknat i instruktioner (≈ 4,4 ms på fyra kärnor som den här VM:ns), en delvis
-ändrad ram ≈ 1 ms. **SPEC-13.2.1 hålls inte för en hel ram** och testet förblir ignorerat med talen;
-den enda väg dit inom taket är en GPU-väg på rå OpenGL (+0,23 MB), spec-fråga 66. Konformans 59/59
-à 0,000 % efter varje commit, inga guldbilder ändrade, `vy-shell` +63 208 byte.
+ändrad ram ≈ 1 ms; `vy-shell` +63 208 byte.
 
-**Grindar** (vid `fd3a0d1`, från worktreens rot): `cargo fmt --all --check`; `cargo clippy
+**Utfall, del 2** (spec-fråga 66 avgjord: OpenGL). GL-vägen ritar sidan på GPU:n (Linux och
+Windows; macOS stannar på CPU-vägen) inom SPEC-11.3.2:s nya tolerans – högst 3 % av en bilds
+pixlar mer än 2 nivåer från referensen; uppmätt 0,25 % i värsta referenssidan, 2,0 % i värsta
+slumplistan – och faller tillbaka på CPU-vägen vid varje fel. Per hel frame: 26 209 instanser, ett
+ritanrop, 1,3 MB, ≈ 1,6 ms CPU här. **SPEC-13.2.1 mäts på ägarens dator**; här finns bara
+llvmpipe. Storlek: GL +247 624 byte; **med `a11y-linux` är `vy-shell` 25 790 640 byte, 790 640 över
+taket**, som m5/release måste frigöra (main med `a11y-linux` är redan ≈ 480 000 över). Konformans
+59/59 à 0,000 % efter varje commit, inga guldbilder ändrade.
+
+**Grindar del 1** (vid `fd3a0d1`, från worktreens rot): `cargo fmt --all --check`; `cargo clippy
 --workspace --all-targets -- -D warnings`; `cargo test --workspace` 375 gröna, 0 röda, 4 ignorerade
 (main: 369 / 4; de fyra är desamma: `spec_13_2_1_raster_budget`, `spec_13_1_1_cold_start`,
 `spec_12_3_1_size_budget`, `spec_9_7_1_reproducible_build`); `spec_trace.py` 140/140;
@@ -33,7 +43,9 @@ den enda väg dit inom taket är en GPU-väg på rå OpenGL (+0,23 MB), spec-fr�
 release dessutom `cargo test --release -p vy-render -- spec_13 spec_11_3_2` grönt (det CI:s
 `bench` kör).
 
-## Beslut (steg 1)
+## Beslut (steg 1, del 1)
+
+*Ersatt i del 2: spec-fråga 66 är avgjord och GL-vägen byggd (se Del 2 nedan).*
 
 **(b): en snabbare CPU-väg i `vy-render`, byte för byte samma som referensen – bandparallell
 rasterisering med `std::thread` och skadespårning mellan frames.** wgpu (a) ryms inte: den minsta
@@ -314,6 +326,112 @@ Kvar under 25 000 000: 2 564 432 byte. `a11y-linux` (+3,1 MB, m4/ux) ryms fortfa
 eller utan den här grenen (main med funktionen var 25 435 064 i m4/integration). Windows och macOS
 kunde inte länkas här.
 
+## Del 2: GL-vägen (spec-fråga 66, avgjord)
+
+Koordinatorn, med ägarens mandat, avgjorde spec-fråga 66: en GPU-väg på OpenGL ovanpå CPU-vägen,
+på samma gren. Kedjan är **GL → den snabba CPU-vägen → referensen**, vald när fönstret öppnas och
+lämnad vid varje kontext- eller skuggningsfel, med raden i loggen och devtools.
+
+**Kontext.** `glutin` 0.32 + `glutin-winit` 0.5: EGL på Linux (X11 och Wayland; GLX är inte
+med), WGL på Windows; OpenGL 3.3 core, annars OpenGL ES 3.0. **macOS byggs utan GL** (glutin är
+inte ett beroende där) och ritar med CPU-vägen: OpenGL är avskrivet på macOS, kan inte prövas här,
+och glutins CGL kräver ett fönster även för testet. Mesa llvmpipe här ger OpenGL 4.5 core.
+`VY_NO_GL=1` i miljön stänger av GL-vägen.
+
+**Pipeline** (`crates/vy-render/src/gl.rs`, funktionen `gl`; beroendet `glow`). Samma upplösning
+som CPU-vägen (`Renderer::resolve`: textkörningar och den torra passen med referensens rapport och
+fotavtryck) och sedan en instans per rektangel, glyf, bild och bana, i listans ordning, ritade av
+en skuggning i ett anrop (ett till per byte av bildtextur):
+
+- rektanglar: exakt yttäckning för en rak, avstånd (SDF) för en rundad;
+- klipp: en tabell (RGBA32F-textur) över framens `CLIP_PUSH` med förälder; skuggningen
+  multiplicerar kedjans täckning som referensen multiplicerar masker – ett rakt klipp med samma
+  heltalsavrundning som referensens `exact_pixels`, ett rundat med sitt avstånd;
+- text: glyfbilderna CPU-vägen redan rasteriserat (swash genom `TextEngine`, typsnittsladdningen
+  orörd) i en R8-atlas 2048 × 2048, hämtade texel för texel på referensens heltalspositioner;
+  färgningen med referensens heltalsformel; atlasens platser sparas per körning;
+- bilder: en textur per avkodad resurs (nyckel `ImageCache::id` + resurs-id), närmaste texel med
+  referensens avbildning;
+- banor: rasteriserade av tiny-skia på CPU:n till täckning och packade i en R8-textur per frame.
+
+En frame vägen inte ritar (en färgglyf, en bild eller duk större än texturerna, en full atlas)
+ritas av CPU-vägen och laddas upp; fönstret märker inget.
+
+**Fönstret.** Skalet komponerar chrome och överlägg som förut men lämnar sidytan genomskinlig
+(`Shell::set_page_layer`); överläggen blandas premultiplicerat, vilket på opaka pixlar ger samma
+byte som förut (testat). Fönstret ritar sidan med GL i en framebuffer när listan, storleken,
+skalan eller bildcachen ändrats (`Shell::page_layer`, `PageLayer::version`), lägger den i
+sidytan och skalets bild över, och byter buffert. Budgetrapporten går till fliken som förut
+(`Shell::page_drawn`).
+
+**Var vägen syns.** stderr: `vy-shell: presentation: OpenGL; raster: OpenGL 4.5 (llvmpipe …), the
+fast software path for what it does not draw and if it fails`; samma rad i varje fliks logg
+(devtools, *Logg*), och en ny rad om vägen lämnas (`GL failed (…); raster: fast software path …`)
+eller om den snabba CPU-vägen ger upp för referensen (en panik i den: `Renderer::fell_back`).
+
+### Tolerans (SPEC-11.3.2)
+
+GL-bilden kan inte bli referensens byte: kantutjämningen är analytisk (yttäckning och avstånd)
+där tiny-skia översamplar 4 × 4, och blandningen sker i GPU:ns flyttal med drivrutinens
+avrundning. `crates/vy-shell/tests/gl.rs` jämför pixel för pixel med Mesa llvmpipe:
+
+| Indata | Frames | Pixlar med någon avvikelse | Pixlar > 2 nivåer | Värsta frame > 2 | Störst avvikelse |
+| --- | --- | --- | --- | --- | --- |
+| `frame_2000`, 1280 × 800 @ 1 och 2 | 4 | 10,3 % | 0,13 % | 0,15 % | 41 |
+| 120 slumplistor (nästlade raka och rundade klipp, text, bilder, banor), tre skalor | 120 | 7,9 % | 0,69 % | 2,03 % | 37 |
+| tolv referenssidor, 800 × 600 @ 1 och 480 × 320 @ 2, manuset av hovring, klick, rullning, tangenter | 88 | 1,8 % | 0,04 % | 0,25 % | 40 |
+
+Avvikelserna över 2 sitter i kantpixlar (rektanglar på bråkdelspositioner, rundade hörn); de små
+(±1) i blandningen. Toleransen i SPEC-11.3.2 (`spec:`-commit) är därför: **högst 3 % av en bilds
+pixlar får ha någon kanal som avviker mer än 2 nivåer från headless-bilden**, och testet hävdar den
+för varje frame. Konformanssviten använder alltid headless-vägen.
+
+### Mätt: GL-vägen
+
+llvmpipe är ingen GPU: att en frame tar 95–180 ms till `glFinish` här säger bara att Mesa
+rasteriserar i mjukvara på två belastade vCPU:er. Det som säger något är vad som skickas och vad
+CPU:n gör (release, `frame_2000` 1280 × 800, load 2–3,5, verktyget i byggkatalogen):
+
+| Mått | Värde |
+| --- | --- |
+| instanser per frame | 26 209 (en per glyf, rektangel, bild och bana) |
+| ritanrop per frame | 1 (en bildresurs) |
+| byte till GPU:n per frame | 1 294 508 (instanser à 44 byte, klipptabell, banor; glyfer bara nya) |
+| CPU: upplösning och torr pass (`resolve`) | ≈ 0,9 ms |
+| CPU: instanser, klipptabell, banor (`GlStats::build`) | P50 0,64 ms (var 2,0 ms före platserna per körning och de packade instanserna) |
+| CPU till sista GL-anropet med llvmpipe | ≈ 10–11 ms, varav ≈ 8,5 ms är llvmpipes egen hörnbearbetning inne i anropet |
+
+Vårt CPU-arbete per hel frame är alltså ≈ 1,6 ms här; på en GPU tillkommer drivrutinens kopia av
+1,3 MB och anropet. Om 2 ms hålls på referensmaskinen beror på den kärnans hastighet och GPU:ns
+tid för ≈ 26 000 små fyrhörningar – **mät på ägarens dator** (se nedan).
+`spec_13_2_1_raster_budget` (CPU-vägen) förblir ignorerat med sina tal; GL-testet skriver
+GL-vägens tal i release och hävdar 2 ms bara med `VY_GL_BUDGET` satt.
+
+### Storlek med GL
+
+| Binär (strippad, Linux x86_64) | Byte |
+| --- | --- |
+| `vy-shell`, main | 22 372 360 |
+| `vy-shell`, del 1 (CPU-vägen, `1913b05`) | 22 435 568 |
+| `vy-shell`, del 2 (GL som standard) | 22 683 192 |
+| `vy-shell --features a11y-linux`, del 2 | **25 790 640** |
+
+GL-vägen kostar 247 624 byte; hela grenen 310 832. **Med `a11y-linux` är binären 790 640 byte över
+25 000 000** – main med `a11y-linux` är redan ≈ 480 000 över (3 107 448 för funktionen), så m5/release
+måste frigöra minst 790 640 byte för att båda ska rymmas. GL-delen är mest tabeller och strängar
+(`glow`:s symboler 27 kB, glutins EGL-del 22 kB i sonden); att byta ut en crate sparar tiotals kB,
+inte det som saknas.
+
+### Nya beroenden (del 2)
+
+| Crate | Vad | Varför inte 200 rader | Drar in |
+| --- | --- | --- | --- |
+| `glow` 0.17 | OpenGL-funktionerna laddade ur kontexten, typade anrop, GL och GLES | ≈ 45 funktioner och deras konstanter går att skriva för hand, men laddningen per plattform, skillnaderna GL/GLES och versionstolkningen är det glow redan gör rätt; wgpu använder samma crate | bara `bitflags`, som fanns |
+| `glutin` 0.32 (EGL, x11, wayland, WGL) | kontexten: EGL-display och konfiguration, X11-visual som måste väljas före fönstret, Wayland-EGL-ytan, WGL med `wglCreateContextAttribsARB` (kräver en tillfällig kontext) | tusentals rader per plattform | `glutin_egl_sys` (Linux), `glutin_wgl_sys` (Windows); vid bygget `gl_generator`, `khronos_api`, `xml-rs` (genererar bindningarna, inte i binären); `libloading`, `once_cell`, `raw-window-handle`, `x11-dl`, `wayland-sys` och på Windows `windows-sys` 0.52 fanns redan |
+| `glutin-winit` 0.5 | ordningen fönster/konfiguration för winit | litet, men att göra rätt för X11 och WGL kräver glutins inre | inget nytt |
+
+Lockfilen får nio crates (`cgl` står där för glutins macOS-gren men byggs inte).
+
 ## Nya beroenden
 
 Inga. Banden går på `std::thread::scope` (ingen rayon: fyra trådar per frame, startade och
@@ -323,59 +441,64 @@ byggkatalogen, aldrig i arbetsytan.
 
 ## Vad ägaren ska kontrollera (Windows och macOS)
 
-Allt nedan är kört på Linux; Windows och macOS är bara typkontrollerade (`check-cross`), och CI:s
-`platform`-jobb kör testerna och, informativt, `spec_13_2_1_raster_budget` (`--ignored`, kan inte
-fälla jobbet).
+Allt nedan är kört på Linux (GL med Mesa llvmpipe under Xvfb); Windows och macOS är bara
+typkontrollerade (`check-cross`). CI:s `platform`-jobb kör testerna – `tests/gl.rs` försöker där
+och hoppar över med en rad på stderr om ingen GL 3.3-kontext går att få (troligt på Windows-löparna
+utan GPU; macOS har ingen GL-väg) – och skriver informativt CPU-vägens SPEC-13.2.1-tal.
 
-1. **Fönstret ritar som förut** på Windows: öppna `shop`, `dashboard` och `text`, hovra, klicka,
-   rulla och ändra fönstrets storlek; dra fönstret mellan skärmar med olika skalning (DPI). Inget
-   ska blinka, släpa efter eller lämna rester (skaderektangeln, `present_with_damage` på Win32).
-2. **Loggen**: devtools → *Logg* ska visa `[host] raster: fast software path … up to N bands`,
-   med N = min(4, logiska processorer).
-3. **Tiden**: `cargo test --release -p vy-render --lib -- --ignored spec_13_2_1 --nocapture` på
-   referensmaskinen skriver P95 och P50 för en hel ram (testet faller, 2 ms hålls inte; talet är
-   underlaget för spec-fråga 66). `cargo run --release -p vy-cli -- bench --only raster` som förut
-   för referensen.
-4. **Storleken**: CI:s Windows- och macOS-binärer mot 25 MB (den här grenen lägger till ≈ 0
-   byte, se nedan).
+1. **SPEC-13.2.1 – mät på din dator.** Med en skärm och ett GPU-drivet OpenGL:
+   `tools/build_modules.sh`, sedan
+   `VY_GL_REQUIRED=1 VY_GL_BUDGET=1 cargo test --release -p vy-shell --test gl`. Testet skriver
+   GL-vägens P50/P95 för `frame_2000` till `glFinish`, instanser, ritanrop och byte, och faller om
+   P95 är över 2 ms. Raden `GL:` säger vilken kontext det blev (OpenGL-version och GPU). Under
+   2 ms: `spec_13_2_1_raster_budget` kan göras om till att mäta GL-vägen där en kontext finns och
+   av-ignoreras (en uppföljning; det vy-render-test som finns mäter CPU-vägen).
+2. **Fönstret** på Windows: `vy-shell` ska skriva `presentation: OpenGL; raster: OpenGL …` på
+   stderr och samma rad i devtools → *Logg*. Öppna `shop`, `dashboard`, `text`, `settings`; hovra,
+   klicka, rulla, ändra fönstrets storlek, dra det mellan skärmar med olika skalning (DPI); inget
+   ska blinka eller lämna rester. `VY_NO_GL=1` ger CPU-vägen (`presentation: softbuffer`) att
+   jämföra med.
+3. **Reserven**: med en drivrutin utan OpenGL 3.3 (eller `VY_NO_GL=1`) ska fönstret öppnas och rita
+   med CPU-vägen och säga varför på stderr.
+4. **macOS**: CPU-vägen, `presentation: softbuffer, damage only`.
+5. **Storleken**: CI:s Windows- och macOS-binärer mot 25 MB.
 
 ## Berör andra spår
 
-- `crates/vy-shell/src/shell.rs` (m4/ux-filen, `Shell::compose`, `Tab`): `Tab` har
-  `raster: vy_render::Renderer` och `rendered: Option<(u32, u32, f32)>` i stället för en egen
-  bild; `Tab::new` tar vägen (`RasterPath::Reference` huvudlöst, `Fast` i fönstret, med en
-  loggrad); i `compose` anropas `tab.raster.render` och bilden blittas ur `tab.raster.image()`.
-  Ett 20-tal rader.
-- `crates/vy-cli/src/lib.rs` och `crates/vy-cli/src/raster_tests.rs` (ny): sidtestet ovan; en
-  `mod`-rad i `lib.rs`.
-- `.github/workflows/ci.yml` (m5/release:s repro- och storleksjobb rörs inte): ett informativt
-  steg i `bench` och i `platform` som skriver SPEC-13.2.1-talet för löparen.
-- `SPEC.md`: SPEC-11.3.2 förtydligad (`spec:`-commit), inget i §5, bilaga A eller C.
-- `crates/vy-render/src/text.rs`: bara `Glyph::key` (ett fält, satt i `rasterize`);
-  typsnittsladdningen, som m5/release får komprimera, är orörd. Inget i den snabba vägen beror på
-  hur typsnitten laddas.
+- `crates/vy-shell/src/shell.rs` (m4/ux-filen): del 1 – `Tab` har `raster: vy_render::Renderer`
+  och `rendered: Option<(u32, u32, f32)>`, `Tab::new` tar vägen; del 2 – lagerläget
+  (`set_page_layer`, `page_layer`, `page_drawn`, `LayerPlace`, `PageLayer`), `set_raster_path`
+  och en loggrad när den snabba vägen ger upp. Omkring 200 rader.
+- `crates/vy-shell/src/compose.rs`: `clear` och premultiplicerad blandning i `fill_blend`/`blend`
+  (samma byte på opaka pixlar; test).
+- `crates/vy-shell/Cargo.toml`: funktionen `gl` (standard), `glow`, och `glutin`/`glutin-winit`
+  utom på macOS; testet `gl` utan harness. `crates/vy-shell/src/gl.rs` är ny (kontexten).
+- `Cargo.toml` (arbetsytan): `glow`, `glutin`, `glutin-winit`; `Cargo.lock` nio crates.
+- `crates/vy-cli/src/lib.rs` och `crates/vy-cli/src/raster_tests.rs` (ny): sidtestet för CPU-vägen.
+- `.github/workflows/ci.yml` (m5/release:s repro- och storleksjobb rörs inte): i `gates` Mesa och
+  Xvfb och GL-testet med `VY_GL_REQUIRED=1`; informativa SPEC-13.2.1-steg i `bench` och `platform`.
+- `SPEC.md`: SPEC-11.3.2 två gånger (`spec:`-commits): byte för byte för CPU-vägen, toleransen för
+  GPU-vägen; inget i §5, bilaga A eller C.
+- `crates/vy-render/src/text.rs`: bara `Glyph::key`; typsnittsladdningen är orörd.
+- **Till m5/release:** `vy-shell --features a11y-linux` är 25 790 640 byte med den här grenen; 790 640
+  måste bort för att den ska rymmas (main: ≈ 480 000). GL-vägen kan stängas av med
+  `--no-default-features --features window` om det behövs medan utrymmet saknas (−247 624 byte).
 
 ## Kvar
 
-1. **SPEC-13.2.1 för en hel ram** – spec-fråga 66 (GPU-väg på rå OpenGL, eller wgpu och ett högre
-   tak, eller en ändrad mening). Den exakta CPU-vägen är reserven för vilken GPU-väg som helst.
-2. **`vy-cli bench`** har inga rader för den snabba vägen (filen är m4/perf:s); `spec_13_2_1_raster_budget`
-   och CI-stegen mäter den. Förslag: `raster.ops-2000-window` (`Renderer::render_full`) och
-   `raster.ops-2000-damage` (en knapp omfärgad).
-3. **Banden startar trådar per frame** (`std::thread::scope`, ≈ 20 µs per tråd). En pool skulle
-   spara det, men inte märkbart mot en ram på millisekunder.
-4. **Skalets egen komponering** (chrome-cachens klon av hela bilden, blittningen av sidan,
-   överläggen) görs fortfarande hel varje frame i `Shell::compose` (m4/ux); några kopior av hela
-   bilden per frame, omätt, och nästa ställe att spara på för delvisa ramar.
-5. **DPI-byte i ett riktigt fönster** och allt på Windows och macOS är oprövat (se *Vad ägaren ska
-   kontrollera*).
+1. **SPEC-13.2.1** mäts på ägarens dator (punkt 1 ovan). Den torra passen (≈ 0,6–0,8 ms här) är nu
+   GL-vägens största CPU-post; den bygger banor och flyttal som GL-vägen inte behöver och kan
+   förenklas för en frame som bara ska till GPU:n.
+2. **Färgglyfer och bilder större än GPU:ns texturer** ritas på CPU:n för den framen (ingen
+   sådan i referenssidorna; DejaVu har inga färgglyfer).
+3. **`vy-cli bench`** har inga rader för fönstrets vägar (filen är m4/perf:s).
+4. **Banden startar trådar per frame**; en pool sparar ≈ 20 µs per tråd.
+5. **Skalets komponering** görs hel varje frame i `Shell::compose`; i GL-läget laddas bara de
+   ändrade raderna upp.
+6. **DPI-byte i ett riktigt fönster** och allt på Windows och macOS är oprövat här.
 
 ## Spec-frågor
 
-66. **GPU-vägen: wgpu eller rå OpenGL, eller ett högre tak.** wgpu kostar 3,9–5,0 MB och ryms inte
-    under SPEC-12.3.1 (2,63 MB kvar på main, ≈ −0,49 MB med `a11y-linux`). SPEC-13.2.1 hålls för en
-    hel ram bara med en GPU-väg (uppskattning ovan; CPU-vägen ≈ 4,4 ms med fyra kärnor, räknat i
-    instruktioner). Alternativ: (1) en
-    GPU-väg på rå OpenGL (+0,23 MB, avskrivet på macOS); (2) wgpu och ett högre tak i SPEC-12.3.1;
-    (3) SPEC-13.2.1 gäller ramar med begränsad ändring, eller CPU-vägen med en annan siffra. Spåret
-    har byggt det som behövs i alla tre fallen (den exakta CPU-vägen och reserven) men ingen GPU-väg.
+66. *Avgjord* (koordinatorn, med ägarens mandat): GPU-vägen på OpenGL ovanpå CPU-vägen, toleransen
+    i SPEC-11.3.2 uppmätt. Kvar för ägaren: storleken med `a11y-linux` (ovan) och mätningen på
+    referensmaskinen.
