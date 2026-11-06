@@ -4,10 +4,13 @@
 //! Focus is the host's (SPEC-10.3.1): Tab, Shift+Tab and pointer presses
 //! arrive as `KIND_FOCUS` on the fixed node ids below, the page keeps no
 //! focus of its own (a failed submit shows the error and leaves focus where
-//! the host has it), and it draws the focus ring itself (SPEC-10.3.3); a
-//! focused text field opens composition with `ime_begin` over its
-//! rectangle (SPEC-5.2.6) and closes it with `ime_end` when focus leaves.
-//! Committed text arrives as `TEXT_INPUT` (SPEC-5.1.6). Interactive nodes
+//! the host has it), and every control draws its focus mark itself
+//! (SPEC-10.3.3). The text fields and the button are `vy_sdk::ui`
+//! components: a focused `ui::TextBox` opens composition with `ime_begin`
+//! over its rectangle (SPEC-5.2.6) and closes it with `ime_end` when focus
+//! leaves, and takes committed text as `TEXT_INPUT` (SPEC-5.1.6). The
+//! checkbox is drawn by the page, as before the components existed: the
+//! component's ring would change this page's pixels. Interactive nodes
 //! keep fixed semantic ids so focus events can name them. Requires
 //! capability `ime` (SPEC-10.4.2).
 #![no_std]
@@ -18,7 +21,7 @@ use alloc::format;
 use alloc::string::String;
 use vy_sdk::event::key;
 use vy_sdk::prelude::*;
-use vy_sdk::{ime_begin, ime_end, text_caret};
+use vy_sdk::ui::{Button, Input, Palette, TextBox, Theme};
 
 const PAPER: Color = Color::rgb(0xF4, 0xF5, 0xF7);
 const CARD: Color = Color::rgb(0xFF, 0xFF, 0xFF);
@@ -35,7 +38,6 @@ const MAX_CARD: f32 = 440.0;
 const MARGIN: f32 = 24.0;
 const PAD: f32 = 24.0;
 const FIELD_H: f32 = 40.0;
-const FIELD_PAD: f32 = 12.0;
 const BOX: f32 = 20.0;
 const BUTTON_H: f32 = 44.0;
 const GAP: f32 = 8.0;
@@ -50,36 +52,6 @@ const ID_EMAIL: i32 = -11;
 const ID_NEWS: i32 = -12;
 const ID_SUBMIT: i32 = -13;
 
-/// What can hold keyboard focus, in Tab order.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Focus {
-    Name,
-    Email,
-    News,
-    Submit,
-}
-
-impl Focus {
-    const ORDER: [Focus; 4] = [Focus::Name, Focus::Email, Focus::News, Focus::Submit];
-
-    fn id(self) -> i32 {
-        match self {
-            Focus::Name => ID_NAME,
-            Focus::Email => ID_EMAIL,
-            Focus::News => ID_NEWS,
-            Focus::Submit => ID_SUBMIT,
-        }
-    }
-
-    fn from_id(id: i32) -> Option<Focus> {
-        Self::ORDER.into_iter().find(|f| f.id() == id)
-    }
-
-    fn is_field(self) -> bool {
-        matches!(self, Focus::Name | Focus::Email)
-    }
-}
-
 /// Rectangles of everything that can be hit, computed from the window.
 struct Layout {
     card: Rect,
@@ -91,31 +63,24 @@ struct Layout {
 
 struct FormPage {
     window: Window,
+    /// The fields' and the button's look: this page's colours, the
+    /// placeholder in the border colour and a translucent accent ring.
+    theme: Theme,
     title: StyleId,
     help: StyleId,
     label: StyleId,
-    field: StyleId,
-    placeholder: StyleId,
-    button: StyleId,
     error: StyleId,
     ok: StyleId,
-    name: String,
-    email: String,
+    name: TextBox,
+    email: TextBox,
+    send: Button,
     news: bool,
-    focus: Option<Focus>,
+    news_focused: bool,
     submitted: bool,
     error_text: Option<&'static str>,
 }
 
 impl FormPage {
-    fn value_mut(&mut self, f: Focus) -> Option<&mut String> {
-        match f {
-            Focus::Name => Some(&mut self.name),
-            Focus::Email => Some(&mut self.email),
-            _ => None,
-        }
-    }
-
     /// Where everything sits; the same arithmetic the frame draws with.
     fn layout(&self) -> Layout {
         let w = (self.window.width - 2.0 * MARGIN).clamp(0.0, MAX_CARD);
@@ -157,8 +122,8 @@ impl FormPage {
     fn message(&self) -> String {
         format!(
             "Tack, {}! Vi hör av oss till {}.",
-            self.name.trim(),
-            self.email.trim()
+            self.name.text().trim(),
+            self.email.text().trim()
         )
     }
 
@@ -176,28 +141,13 @@ impl FormPage {
         title + GAP + help + SECTION
     }
 
-    fn set_focus(&mut self, next: Option<Focus>) -> bool {
-        if next == self.focus {
-            return false;
-        }
-        if self.focus.is_some_and(Focus::is_field) {
-            let _ = ime_end();
-        }
-        self.focus = next;
-        if let Some(f) = next.filter(|f| f.is_field()) {
-            let l = self.layout();
-            let _ = ime_begin(if f == Focus::Name { l.name } else { l.email });
-        }
-        true
-    }
-
     /// Validate and submit. Focus stays where the host has it (SPEC-10.3.1):
     /// the error text says which field needs attention.
     fn submit(&mut self) -> bool {
-        if self.name.trim().is_empty() {
+        if self.name.text().trim().is_empty() {
             self.error_text = Some("Fyll i ditt namn.");
             self.submitted = false;
-        } else if !self.email.contains('@') {
+        } else if !self.email.text().contains('@') {
             self.error_text = Some("E-postadressen behöver ett @.");
             self.submitted = false;
         } else {
@@ -207,32 +157,21 @@ impl FormPage {
         true
     }
 
-    fn draw_field(&self, f: &mut Frame, r: Rect, focus: Focus) -> Result<(), VyError> {
-        let (label, placeholder, value) = match focus {
-            Focus::Name => ("Namn", "Förnamn Efternamn", self.name.as_str()),
-            _ => ("E-post", "namn@exempel.se", self.email.as_str()),
+    /// A label above the field, then the field itself (`ui::TextBox`).
+    fn draw_field(&mut self, f: &mut Frame, r: Rect, email: bool) -> Result<(), VyError> {
+        let (label, placeholder) = if email {
+            ("E-post", "namn@exempel.se")
+        } else {
+            ("Namn", "Förnamn Efternamn")
         };
         f.text(r.x, r.y - 20.0, r.w, self.label, label)?;
-        let focused = self.focus == Some(focus);
-        let border = if focused { ACCENT } else { BORDER };
-        let line = if focused { 2.0 } else { 1.0 };
-        f.rect(r, 6.0, border)?;
-        f.rect(r.inset(line), (6.0 - line).max(0.0), CARD)?;
-        let tx = r.x + FIELD_PAD;
-        let ty = r.y + (FIELD_H - 20.0) / 2.0;
-        if value.is_empty() {
-            f.text(tx, ty, 0.0, self.placeholder, placeholder)?;
+        let theme = self.theme;
+        let field = if email {
+            &mut self.email
         } else {
-            f.clipped(r.inset(line), 0.0, |f| {
-                f.text(tx, ty, 0.0, self.field, value).map(|_| ())
-            })?;
-        }
-        if focused {
-            let (cx, _) = text_caret(self.field, value, value.len())?;
-            f.rect(Rect::new(tx + cx, ty + 1.0, 1.0, 18.0), 0.0, INK)?;
-        }
-        f.sem.node_with_id(focus.id(), Role::Textbox, r, value)?;
-        Ok(())
+            &mut self.name
+        };
+        field.draw(f, r, &theme, placeholder)
     }
 }
 
@@ -245,20 +184,30 @@ impl App for FormPage {
     fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
         let style = |font, size, weight, color| text_style(font, size, weight, color);
         let _ = log(Level::Debug, "form: init");
+        let palette = Palette {
+            surface: CARD,
+            ink: INK,
+            muted: MUTED,
+            placeholder: BORDER,
+            border: BORDER,
+            accent: ACCENT,
+            on_accent: WHITE,
+            ring: ACCENT.with_alpha(0x50),
+            ..Palette::LIGHT
+        };
         Ok(Self {
             window,
+            theme: Theme::custom(palette, Font::Sans, 16.0)?,
             title: style(Font::Sans, 26.0, 700, INK)?,
             help: style(Font::Sans, 14.0, 400, MUTED)?,
             label: style(Font::Sans, 13.0, 600, MUTED)?,
-            field: style(Font::Sans, 16.0, 400, INK)?,
-            placeholder: style(Font::Sans, 16.0, 400, BORDER)?,
-            button: style(Font::Sans, 16.0, 600, WHITE)?,
             error: style(Font::Sans, 14.0, 400, ERROR)?,
             ok: style(Font::Sans, 15.0, 400, OK_INK)?,
-            name: String::new(),
-            email: String::new(),
+            name: TextBox::new(ID_NAME).with_max_len(MAX_VALUE),
+            email: TextBox::new(ID_EMAIL).with_max_len(MAX_VALUE),
+            send: Button::new(ID_SUBMIT),
             news: false,
-            focus: None,
+            news_focused: false,
             submitted: false,
             error_text: None,
         })
@@ -283,13 +232,12 @@ impl App for FormPage {
             let h = f.text(x, y, w, self.help, HELP)?.h;
             f.sem.node(Role::Text, Rect::new(x, y, w, h), HELP)?;
 
-            self.draw_field(f, l.name, Focus::Name)?;
-            self.draw_field(f, l.email, Focus::Email)?;
+            self.draw_field(f, l.name, false)?;
+            self.draw_field(f, l.email, true)?;
 
             // Checkbox: box, tick as a stroked path, label.
             let b = Rect::new(l.news.x, l.news.y, BOX, BOX);
-            let focused = self.focus == Some(Focus::News);
-            f.rect(b, 4.0, if focused { ACCENT } else { BORDER })?;
+            f.rect(b, 4.0, if self.news_focused { ACCENT } else { BORDER })?;
             f.rect(b.inset(1.0), 3.0, if self.news { ACCENT } else { CARD })?;
             if self.news {
                 let mut tick = Path::new();
@@ -302,7 +250,7 @@ impl App for FormPage {
                 b.right() + 10.0,
                 b.y + 1.0,
                 l.news.w - BOX - 10.0,
-                self.field,
+                self.theme.text,
                 NEWS,
             )?;
             f.sem.node_with_id(
@@ -316,22 +264,9 @@ impl App for FormPage {
                 },
             )?;
 
-            // Button.
-            let focused = self.focus == Some(Focus::Submit);
-            if focused {
-                f.rect(l.submit.inset(-3.0), 9.0, ACCENT.with_alpha(0x50))?;
-            }
-            f.rect(l.submit, 6.0, ACCENT)?;
-            let tw = text_measure(self.button, 0.0, SUBMIT)?.w;
-            f.text(
-                l.submit.x + (l.submit.w - tw) / 2.0,
-                l.submit.y + (BUTTON_H - 20.0) / 2.0,
-                0.0,
-                self.button,
-                SUBMIT,
-            )?;
-            f.sem
-                .node_with_id(ID_SUBMIT, Role::Button, l.submit, SUBMIT)?;
+            // Button (`ui::Button`: ring, fill, centred label, node).
+            let theme = self.theme;
+            self.send.draw(f, l.submit, &theme, SUBMIT)?;
 
             // Outcome.
             let my = l.submit.bottom() + 16.0;
@@ -355,51 +290,38 @@ impl App for FormPage {
     }
 
     fn event(&mut self, event: Event<'_>) -> bool {
-        match event {
-            // The host has already moved focus to the control under the
-            // pointer (SPEC-10.3.1); only the press itself is handled here.
-            Event::PointerDown { x, y, .. } => {
-                let l = self.layout();
-                if l.news.contains(x, y) {
-                    self.news = !self.news;
-                    true
-                } else if l.submit.contains(x, y) {
-                    self.submit()
-                } else {
-                    false
-                }
+        let l = self.layout();
+        let theme = self.theme;
+        let mut ui = Input::new(event);
+        // The host has already moved focus to the control under the
+        // pointer (SPEC-10.3.1); the components take what is theirs.
+        let name = self.name.event(&mut ui, l.name, &theme);
+        let email = self.email.event(&mut ui, l.email, &theme);
+        let send = self.send.event(&mut ui, l.submit, &theme);
+        if name.activated() || email.activated() || send.activated() {
+            self.submit();
+        }
+        // The checkbox, and Enter anywhere else, are the page's.
+        let own = match ui.unhandled() {
+            Some(Event::PointerDown { x, y, .. }) if l.news.contains(x, y) => {
+                self.news = !self.news;
+                true
             }
-            Event::TextInput { text } => match self.focus.and_then(|f| self.value_mut(f)) {
-                Some(v) if v.len() + text.len() <= MAX_VALUE => {
-                    v.push_str(text);
-                    true
-                }
-                _ => false,
-            },
-            Event::KeyDown { code, .. } => match code {
+            Some(Event::KeyDown { code, .. }) => match code {
                 key::ENTER => self.submit(),
-                key::BACKSPACE => match self.focus.and_then(|f| self.value_mut(f)) {
-                    Some(v) => v.pop().is_some(),
-                    None => false,
-                },
-                key::SPACE if self.focus == Some(Focus::News) => {
+                key::SPACE if self.news_focused => {
                     self.news = !self.news;
                     true
                 }
-                key::SPACE if self.focus == Some(Focus::Submit) => self.submit(),
                 _ => false,
             },
-            Event::Focus { node, gained, .. } => {
-                if gained {
-                    self.set_focus(Focus::from_id(node.0))
-                } else if self.focus.map(Focus::id) == Some(node.0) {
-                    self.set_focus(None)
-                } else {
-                    false
-                }
+            Some(Event::Focus { node, gained, .. }) if node.0 == ID_NEWS => {
+                self.news_focused = gained;
+                true
             }
             _ => false,
-        }
+        };
+        ui.redraw() || own
     }
 
     fn resize(&mut self, window: Window) {
