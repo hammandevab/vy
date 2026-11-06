@@ -140,6 +140,7 @@ mod tests {
             restriction: None,
             verdicts,
             is_localhost: false,
+            net_class: vy_proto::NetClass::Public,
         }
     }
 
@@ -1053,6 +1054,7 @@ mod tests {
             restriction: None,
             verdicts: vec![("storage", vy_manifest::Grant::Auto)],
             is_localhost: false,
+            net_class: vy_proto::NetClass::Public,
         };
         let mut shell = Shell::new(
             Config {
@@ -1196,6 +1198,7 @@ mod tests {
             restriction: None,
             verdicts: Vec::new(),
             is_localhost: false,
+            net_class: vy_proto::NetClass::Public,
         };
         shell.close_tab(old);
         let tab = shell.open_tab_loaded(page);
@@ -1787,6 +1790,198 @@ mod tests {
         assert!(chrome.contains(&"begränsat läge".to_string()), "{chrome:?}");
         assert!(!chrome.iter().any(|t| t.starts_with("begränsat läge:")));
         shell.shutdown();
+    }
+
+    /// SPEC-9.5.3, SPEC-5.2.7: a page's own requests are judged by the
+    /// class of the page's own address as its fetch found it
+    /// (`Fetched::net_class`, kept in `LoadedPage` and the tab and carried
+    /// in `Job::Request` to the tab's request worker). A page loaded from a
+    /// private address reaches its own private origin and not loopback; a
+    /// page loaded from a public address reaches neither, only a public
+    /// origin. A refused request is answered `E_NET` and never connected.
+    /// Names resolve as the test says (`vy_proto::test_net`), and every
+    /// connection goes to one loopback server that answers in plain HTTP.
+    #[test]
+    fn spec_9_5_3_page_requests_reach_by_the_page_class() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::{Arc, Mutex};
+        use vy_proto::NetClass;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = |host: &str, path: &str| format!("https://{host}:{port}{path}");
+        let key = SigningKey::from_seed(&[9; 32]);
+
+        // hello, signed, asking `net` for every origin below.
+        let package = {
+            let wasm = std::fs::read(module_path("hello")).unwrap();
+            let draft_path = root().join("conformance/manifests/hello.json");
+            let draft = Draft::from_json(&std::fs::read_to_string(&draft_path).unwrap()).unwrap();
+            let inputs = draft.load_resources(draft_path.parent().unwrap()).unwrap();
+            let mut manifest = draft.finish(&wasm, &inputs);
+            manifest.capabilities.net = Some(vy_manifest::NetRequest {
+                origins: [
+                    "lan.example",
+                    "127.0.0.1",
+                    "rebind.example",
+                    "public.example",
+                ]
+                .iter()
+                .map(|h| url(h, ""))
+                .collect(),
+            });
+            manifest.sign(&key);
+            vy_manifest::Package {
+                manifest,
+                module: wasm,
+                resources: inputs.into_iter().map(|i| i.bytes).collect(),
+            }
+            .pack()
+            .unwrap()
+        };
+        // The server: the package, its key file, no key log; anything else
+        // is 200. Every request it is sent is recorded as "host path".
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let seen = seen.clone();
+            let key_file = vy_manifest::key_file(&[key.public()]);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let mut reader = BufReader::new(stream);
+                    let mut first = String::new();
+                    let _ = reader.read_line(&mut first);
+                    let mut host = String::new();
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some((k, v)) = line.split_once(':') {
+                            if k.eq_ignore_ascii_case("host") {
+                                host = v.trim().to_string();
+                            }
+                        }
+                    }
+                    let path = first.split(' ').nth(1).unwrap_or("").to_string();
+                    seen.lock().unwrap().push(format!("{host} {path}"));
+                    let (status, media, body) = match path.as_str() {
+                        "/" => ("200 OK", "application/vy-package+zstd", package.clone()),
+                        "/.well-known/vy-key" => {
+                            ("200 OK", "text/plain", key_file.clone().into_bytes())
+                        }
+                        "/.well-known/vy-log" => ("404 Not Found", "text/plain", Vec::new()),
+                        _ => ("200 OK", "text/plain", b"ok".to_vec()),
+                    };
+                    let mut out = reader.into_inner();
+                    let _ = out.write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: {media}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = out.write_all(&body);
+                }
+            });
+        }
+        /// Every `_vy.<host>` names the key (SPEC-7.4.5).
+        struct Txt(String);
+        impl vy_proto::TxtResolver for Txt {
+            fn txt(&self, _name: &str) -> Result<Vec<String>, vy_proto::DnsError> {
+                Ok(vec![self.0.clone()])
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("vy-page-class-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut fetcher = vy_proto::test_net::fetcher(
+            vy_proto::Options::new(&dir),
+            Box::new(Txt(format!("v=vy1; k={}", key.public()))),
+            port,
+            &[
+                ("lan.example", &["192.168.1.20"]),
+                ("rebind.example", &["127.0.0.1"]),
+                ("public.example", &["93.184.216.34"]),
+            ],
+        )
+        .unwrap();
+        let load = |fetcher: &mut vy_proto::Fetcher, host: &str| {
+            let source = Source::parse(&format!("vy://{host}:{port}/")).unwrap();
+            let page = crate::page::load(fetcher, &source).unwrap();
+            assert!(page.trusted, "{host}: {:?}", page.restriction);
+            page
+        };
+        let lan = load(&mut fetcher, "lan.example");
+        assert_eq!(lan.net_class, NetClass::Private);
+        let public = load(&mut fetcher, "public.example");
+        assert_eq!(public.net_class, NetClass::Public);
+
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        shell.set_requester(fetcher.requester());
+        let open = |shell: &mut crate::shell::Shell, page: LoadedPage| {
+            let tab = shell.open_tab_loaded(page);
+            settle(shell, 1, TIMEOUT).unwrap();
+            assert_eq!(shell.tab_status(tab), "running");
+            // Other origins than its own: a question; the user allows.
+            shell.toggle_capability(tab, "net");
+            assert_eq!(shell.tab_badges(tab)[0], ("net", true));
+            tab
+        };
+        let lan_tab = open(&mut shell, lan);
+        let public_tab = open(&mut shell, public);
+
+        // A request as the tab sends it, and the loader's answer.
+        let mut next_id = 0;
+        let mut request = |shell: &mut crate::shell::Shell,
+                           tab,
+                           url: String|
+         -> (i32, Vec<String>) {
+            next_id += 1;
+            let before = seen.lock().unwrap().len();
+            let generation = shell.tab_generation(tab);
+            shell.handle(Incoming::Tab(
+                tab,
+                generation,
+                Inbound::Message(ToShell::FetchRequest {
+                    id: next_id,
+                    method: vy_abi::method::GET,
+                    url: url.clone(),
+                    body: Vec::new(),
+                }),
+            ));
+            let deadline = Instant::now() + TIMEOUT;
+            let status = loop {
+                assert!(Instant::now() < deadline, "no answer for {url}");
+                match shell.inbox().recv_timeout(Duration::from_millis(20)) {
+                    Ok(Incoming::Load(crate::page::Done::Request {
+                        tab: t, id, status, ..
+                    })) if t == tab && id == next_id => break status,
+                    Ok(other) => shell.handle(other),
+                    Err(_) => {}
+                }
+            };
+            (status, seen.lock().unwrap()[before..].to_vec())
+        };
+        let e_net = vy_abi::err::E_NET;
+
+        // From the private page: its own private origin, not loopback.
+        let own = request(&mut shell, lan_tab, url("lan.example", "/own"));
+        assert_eq!(own, (200, vec![format!("lan.example:{port} /own")]));
+        for host in ["127.0.0.1", "rebind.example"] {
+            let got = request(&mut shell, lan_tab, url(host, "/loopback"));
+            assert_eq!(got, (e_net, vec![]), "private page to {host}");
+        }
+
+        // From the public page: neither the private origin nor loopback,
+        // and its own public origin.
+        for host in ["lan.example", "127.0.0.1", "rebind.example"] {
+            let got = request(&mut shell, public_tab, url(host, "/elsewhere"));
+            assert_eq!(got, (e_net, vec![]), "public page to {host}");
+        }
+        let own = request(&mut shell, public_tab, url("public.example", "/own"));
+        assert_eq!(own, (200, vec![format!("public.example:{port} /own")]));
+
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// SPEC-7.3.2, SPEC-11.4.1: live reload (devtools "Studio") asks the

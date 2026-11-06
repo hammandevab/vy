@@ -72,3 +72,6 @@ libc = "0.2"
 
 [dev-dependencies]
 wat.workspace = true
+# `vy_proto::test_net` for SPEC-9.5.3 through the shell: names that resolve
+# to private and public addresses while the server is on loopback.
+vy-proto = { workspace = true, features = ["test-net"] }

@@ -14,6 +14,8 @@ pub mod dns;
 mod fetch;
 mod keys;
 mod net;
+#[cfg(any(test, feature = "test-net"))]
+pub mod test_net;
 mod url;
 
 #[cfg(test)]

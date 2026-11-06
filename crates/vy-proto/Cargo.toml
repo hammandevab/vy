@@ -6,6 +6,12 @@ license.workspace = true
 repository.workspace = true
 description = "vy:// addresses, HTTPS fetching, content-addressed cache and publisher keys"
 
+[features]
+# `vy_proto::test_net`: a fetcher whose names resolve to addresses a test
+# chooses while every connection goes to one loopback server, for tests of
+# other crates (SPEC-9.5.3). Only dev-dependencies turn it on.
+test-net = []
+
 [dependencies]
 vy-abi.workspace = true
 vy-manifest.workspace = true

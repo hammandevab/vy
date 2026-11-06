@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::thread;
 use vy_manifest::{Draft, Grant, Manifest, Package};
 use vy_proto::{
-    Address, Error as FetchError, Fetcher, Options as FetchOptions, Requester, Restriction,
+    Address, Error as FetchError, Fetcher, NetClass, Options as FetchOptions, Requester,
+    Restriction,
 };
 
 /// What a tab is asked to show.
@@ -97,6 +98,11 @@ pub struct LoadedPage {
     pub verdicts: Vec<(&'static str, Grant)>,
     /// True when the page's own address is loopback (SPEC-7.1.3).
     pub is_localhost: bool,
+    /// The class of the page's own address as its fetch found it
+    /// (`Fetched::net_class`, SPEC-9.5.3): what the page's own requests
+    /// may reach. A local file, which makes no requests, is public, the
+    /// class that reaches the least.
+    pub net_class: NetClass,
 }
 
 /// Why a page could not be loaded; each is shown as an error view.
@@ -188,6 +194,7 @@ pub fn load(fetcher: &mut Fetcher, source: &Source) -> Result<LoadedPage, LoadEr
             let trusted = fetched.trusted();
             let restriction = fetched.restriction().cloned();
             let verdicts = fetched.grants();
+            let net_class = fetched.net_class();
             let Package {
                 manifest,
                 module,
@@ -209,6 +216,7 @@ pub fn load(fetcher: &mut Fetcher, source: &Source) -> Result<LoadedPage, LoadEr
                 restriction,
                 verdicts,
                 is_localhost: address.is_localhost(),
+                net_class,
             })
         }
         Source::File { path, draft } => load_file(path, draft.as_deref()),
@@ -257,6 +265,7 @@ fn load_file(path: &Path, draft: Option<&Path>) -> Result<LoadedPage, LoadError>
                     restriction: None,
                     verdicts,
                     is_localhost: false,
+                    net_class: NetClass::Public,
                 });
             }
         };
@@ -306,6 +315,7 @@ fn load_file(path: &Path, draft: Option<&Path>) -> Result<LoadedPage, LoadError>
         restriction: None,
         verdicts,
         is_localhost: false,
+        net_class: NetClass::Public,
     })
 }
 
@@ -338,8 +348,9 @@ pub enum Job {
         url: String,
         /// The body.
         body: Vec<u8>,
-        /// Whether the page itself is on loopback (SPEC-7.1.3).
-        page_is_localhost: bool,
+        /// The class of the page's own address (SPEC-9.5.3,
+        /// [`LoadedPage::net_class`]).
+        page: NetClass,
     },
 }
 
@@ -463,6 +474,14 @@ impl Loader {
     pub fn workers(&self) -> usize {
         self.workers.len()
     }
+
+    /// Make the page's requests with `requester` from now on (tests: one
+    /// from `vy_proto::test_net`); the tabs' workers start anew.
+    #[cfg(test)]
+    pub(crate) fn set_requester(&mut self, requester: Requester) {
+        self.requester = requester;
+        self.workers.clear();
+    }
 }
 
 /// A worker that performs one tab's requests in order with `requester`.
@@ -483,14 +502,14 @@ fn spawn_request_worker(
                     method,
                     url,
                     body,
-                    page_is_localhost,
+                    page,
                 } = job
                 {
                     let outcome = requester.request(
                         method,
                         &url,
                         &body,
-                        page_is_localhost,
+                        page,
                         u64::from(vy_abi::limits::MAX_FETCH_RESPONSE_BYTES) + 1,
                     );
                     let (status, body) = match outcome {
@@ -672,7 +691,7 @@ mod tests {
             method: "GET",
             url: format!("http://127.0.0.1:{port}{path}"),
             body: Vec::new(),
-            page_is_localhost: true,
+            page: NetClass::Loopback,
         };
         let page = |tab: u32, source: Source| Job::Page {
             tab,

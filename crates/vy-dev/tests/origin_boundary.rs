@@ -17,7 +17,7 @@ use std::time::Duration;
 use vy_dev::dev::BuildStatus;
 use vy_dev::serve::{start, ServeConfig};
 use vy_manifest::Grant;
-use vy_proto::{Address, Error, Fetcher, HttpUrl, Options};
+use vy_proto::{Address, Error, Fetcher, HttpUrl, NetClass, Options};
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -105,11 +105,17 @@ fn pages_cannot_drive_the_dev_api() {
     // Allowed anyway, the page's requests carry no token and are refused.
     let api = |path: &str| format!("{studio_origin}{path}");
     let (status, body) = fetcher
-        .request("POST", &api("/_dev/agent"), b"gor nagot", true, LIMIT)
+        .request(
+            "POST",
+            &api("/_dev/agent"),
+            b"gor nagot",
+            NetClass::Loopback,
+            LIMIT,
+        )
         .unwrap();
     assert_eq!(status, 403, "{}", String::from_utf8_lossy(&body));
     let (status, _) = fetcher
-        .request("GET", &api("/_dev/state"), b"", true, LIMIT)
+        .request("GET", &api("/_dev/state"), b"", NetClass::Loopback, LIMIT)
         .unwrap();
     assert_eq!(status, 403);
     let (status, _) = fetcher
@@ -117,7 +123,7 @@ fn pages_cannot_drive_the_dev_api() {
             "GET",
             &api("/_dev/state?token=00000000000000000000000000000000"),
             b"",
-            true,
+            NetClass::Loopback,
             LIMIT,
         )
         .unwrap();
@@ -127,7 +133,7 @@ fn pages_cannot_drive_the_dev_api() {
     // server answers HTML, and blobs need a hash the page never sees.
     for path in ["/", "/index", "/.well-known/vy-key"] {
         let (_, body) = fetcher
-            .request("GET", &api(path), b"", true, LIMIT)
+            .request("GET", &api(path), b"", NetClass::Loopback, LIMIT)
             .unwrap();
         assert!(!String::from_utf8_lossy(&body).contains(&token), "{path}");
     }
@@ -139,7 +145,7 @@ fn pages_cannot_drive_the_dev_api() {
         false,
         &HttpUrl::parse(&with_token).unwrap()
     ));
-    match fetcher.request("POST", &with_token, b"gor nagot", false, LIMIT) {
+    match fetcher.request("POST", &with_token, b"gor nagot", NetClass::Public, LIMIT) {
         Err(Error::TlsRequired { .. }) => {}
         other => panic!("a remote page reached the dev API: {other:?}"),
     }
@@ -162,7 +168,7 @@ fn pages_cannot_drive_the_dev_api() {
             "GET",
             &api(&format!("/_dev/state?token={token}")),
             b"",
-            true,
+            NetClass::Loopback,
             LIMIT,
         )
         .unwrap();

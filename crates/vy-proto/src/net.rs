@@ -83,19 +83,6 @@ impl NetClass {
     }
 }
 
-/// For a caller that knows only whether the page's own address is a
-/// loopback name (SPEC-7.1.3): loopback, or else public, the class that
-/// reaches the least.
-impl From<bool> for NetClass {
-    fn from(page_is_localhost: bool) -> Self {
-        if page_is_localhost {
-            NetClass::Loopback
-        } else {
-            NetClass::Public
-        }
-    }
-}
-
 impl fmt::Display for NetClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -378,8 +365,6 @@ mod tests {
         assert!(Private.may_reach(Private) && Private.may_reach(Public));
         assert!(!Public.may_reach(Loopback) && !Public.may_reach(Private));
         assert!(Public.may_reach(Public));
-        assert_eq!(NetClass::from(true), Loopback);
-        assert_eq!(NetClass::from(false), Public);
         assert!(Rule::Within(Private).allows(Loopback));
         assert!(Rule::Within(Private).allows(Private));
         assert!(!Rule::Within(Private).allows(Public));

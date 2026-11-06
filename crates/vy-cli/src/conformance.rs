@@ -884,6 +884,13 @@ fn load_shell_page(root: &Path, case: &Case, address: &str) -> Result<LoadedPage
         restriction: None,
         verdicts,
         is_localhost: address.is_localhost(),
+        // Nothing is looked up for a case: loopback for a loopback name,
+        // else public, as for a lookup that fails (SPEC-9.5.3).
+        net_class: if address.is_localhost() {
+            vy_proto::NetClass::Loopback
+        } else {
+            vy_proto::NetClass::Public
+        },
     })
 }
 

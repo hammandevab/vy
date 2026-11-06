@@ -504,10 +504,10 @@ impl Requester {
         method: &str,
         url: &str,
         body: &[u8],
-        page: impl Into<NetClass>,
+        page: NetClass,
         limit: u64,
     ) -> Result<(u16, Vec<u8>), Error> {
-        request_with(&self.net, method, url, body, page.into(), limit)
+        request_with(&self.net, method, url, body, page, limit)
     }
 }
 
@@ -624,7 +624,7 @@ impl Fetcher {
 
     /// The agents' configuration for test agents built around another
     /// connector.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-net"))]
     pub(crate) fn test_config(options: &Options) -> Config {
         Self::config(options)
     }
@@ -642,8 +642,7 @@ impl Fetcher {
     /// One plain request on a page's behalf (`fetch_begin`, SPEC-5.2.7),
     /// made by the main process because the tab process has no network
     /// (SPEC-9.1.1). `page` is the class of the page's own address
-    /// ([`Fetched::net_class`]); `true` and `false` stand for a page whose
-    /// address is or is not a loopback name, the latter as public.
+    /// ([`Fetched::net_class`]).
     /// `method` is `GET`, `POST`, `PUT` or `DELETE`; the URL must be
     /// `https://`, or `http://` to loopback for a page on loopback
     /// (SPEC-7.1.3), and its host must resolve to an address the page may
@@ -658,10 +657,10 @@ impl Fetcher {
         method: &str,
         url: &str,
         body: &[u8],
-        page: impl Into<NetClass>,
+        page: NetClass,
         limit: u64,
     ) -> Result<(u16, Vec<u8>), Error> {
-        request_with(&self.net, method, url, body, page.into(), limit)
+        request_with(&self.net, method, url, body, page, limit)
     }
 
     /// A handle that makes the same requests as [`Fetcher::request`] with

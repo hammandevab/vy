@@ -15,7 +15,7 @@ use vy_abi::event as kind;
 use vy_dev::dev::BuildStatus;
 use vy_dev::serve::{start, ServeConfig};
 use vy_manifest::{Draft, Grant, SigningKey};
-use vy_proto::{Address, Fetcher, Options};
+use vy_proto::{Address, Fetcher, NetClass, Options};
 use vy_runtime::{Capabilities, Runtime, Transport};
 
 fn root() -> PathBuf {
@@ -51,10 +51,11 @@ fn run_until(
                 "{origin} from {authority}"
             );
             let method = vy_abi::method::name(req.method).unwrap();
-            let (status, body) = match fetcher.request(method, &req.url, &req.body, true, 1 << 26) {
-                Ok((s, b)) => (i32::from(s), b),
-                Err(e) => panic!("{}: {e}", req.url),
-            };
+            let (status, body) =
+                match fetcher.request(method, &req.url, &req.body, NetClass::Loopback, 1 << 26) {
+                    Ok((s, b)) => (i32::from(s), b),
+                    Err(e) => panic!("{}: {e}", req.url),
+                };
             rt.fetch_complete(req.id, status, body).unwrap();
         }
     }

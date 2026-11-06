@@ -220,18 +220,18 @@ impl TxtResolver for FakeResolver {
 /// every host resolves to the server's port on 127.0.0.1, and the plain
 /// TCP connection reports itself as TLS so an `https://` request goes
 /// through. Only tests build agents this way; the product's agent uses
-/// ureq's resolver and rustls.
+/// ureq's resolver and rustls. Names that resolve as a test says are
+/// [`crate::test_net`]'s.
 mod remote {
     use crate::net::Net;
-    use std::collections::HashMap;
-    use std::net::{IpAddr, SocketAddr};
-    use std::sync::Mutex;
+    use crate::test_net::PretendTls;
+    use std::net::SocketAddr;
     use ureq::config::Config;
     use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
-    use ureq::unversioned::transport::{
-        Buffers, ConnectionDetails, Connector, NextTimeout, TcpConnector, Transport,
-    };
+    use ureq::unversioned::transport::{Connector, NextTimeout, TcpConnector};
     use ureq::{http, Error};
+
+    pub(crate) use crate::test_net::net_with_hosts;
 
     #[derive(Debug)]
     struct Loopback(u16);
@@ -249,41 +249,6 @@ mod remote {
         }
     }
 
-    #[derive(Debug)]
-    struct PlainAsTls<T: Transport>(T);
-
-    impl<T: Transport> Transport for PlainAsTls<T> {
-        fn buffers(&mut self) -> &mut dyn Buffers {
-            self.0.buffers()
-        }
-        fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
-            self.0.transmit_output(amount, timeout)
-        }
-        fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
-            self.0.await_input(timeout)
-        }
-        fn is_open(&mut self) -> bool {
-            self.0.is_open()
-        }
-        fn is_tls(&self) -> bool {
-            true
-        }
-    }
-
-    #[derive(Debug)]
-    struct PretendTls;
-
-    impl<In: Transport> Connector<In> for PretendTls {
-        type Out = PlainAsTls<In>;
-        fn connect(
-            &self,
-            _details: &ConnectionDetails,
-            chained: Option<In>,
-        ) -> Result<Option<Self::Out>, Error> {
-            Ok(chained.map(PlainAsTls))
-        }
-    }
-
     /// Agents with `config` whose every connection goes to `port` on
     /// loopback, in plain HTTP, whatever the URL says: every name resolves
     /// to 127.0.0.1, so every page is on loopback (SPEC-9.5.3).
@@ -292,95 +257,6 @@ mod remote {
             config,
             TcpConnector::default().chain(PretendTls),
             Loopback(port),
-        )
-    }
-
-    /// Names resolve as a test says, each lookup of a name taking the next
-    /// address of its list (the last one again when the list runs out), an
-    /// IP literal to itself; every address on `port`.
-    #[derive(Debug)]
-    struct Hosts {
-        names: HashMap<String, Vec<IpAddr>>,
-        lookups: Mutex<HashMap<String, usize>>,
-        port: u16,
-    }
-
-    impl Resolver for Hosts {
-        fn resolve(
-            &self,
-            uri: &http::Uri,
-            _config: &Config,
-            _timeout: NextTimeout,
-        ) -> Result<ResolvedSocketAddrs, Error> {
-            let host = uri.host().unwrap_or("");
-            let host = host.trim_start_matches('[').trim_end_matches(']');
-            let ip = match host.parse::<IpAddr>() {
-                Ok(ip) => ip,
-                Err(_) => {
-                    let list = self.names.get(host).ok_or(Error::HostNotFound)?;
-                    let mut lookups = self.lookups.lock().unwrap();
-                    let n = lookups.entry(host.to_string()).or_insert(0);
-                    let ip = list[(*n).min(list.len() - 1)];
-                    *n += 1;
-                    ip
-                }
-            };
-            let mut addrs = self.empty();
-            addrs.push(SocketAddr::new(ip, self.port));
-            Ok(addrs)
-        }
-    }
-
-    /// Connects to `port` on loopback whatever address the resolver gave:
-    /// the private-network rule has judged that address before this runs.
-    #[derive(Debug)]
-    struct ToServer(u16);
-
-    impl Connector for ToServer {
-        type Out = <TcpConnector as Connector>::Out;
-
-        fn connect(
-            &self,
-            details: &ConnectionDetails,
-            chained: Option<()>,
-        ) -> Result<Option<Self::Out>, Error> {
-            let mut addrs = details.resolver.empty();
-            addrs.push(SocketAddr::from(([127, 0, 0, 1], self.0)));
-            let to_server = ConnectionDetails {
-                uri: details.uri,
-                addrs,
-                config: details.config,
-                request_level: details.request_level,
-                resolver: details.resolver,
-                now: details.now,
-                timeout: details.timeout,
-                current_time: details.current_time.clone(),
-                run_connector: details.run_connector.clone(),
-                register_shutdown: details.register_shutdown.clone(),
-            };
-            TcpConnector::default().connect(&to_server, chained)
-        }
-    }
-
-    /// Agents with `config` whose names resolve as `names` says, while
-    /// every connection goes to `port` on loopback in plain HTTP: the
-    /// private-network rule sees the addresses a test chose.
-    pub fn net_with_hosts(config: Config, port: u16, names: &[(&str, &[&str])]) -> Net {
-        let names = names
-            .iter()
-            .map(|(n, ips)| {
-                let ips = ips.iter().map(|ip| ip.parse().unwrap()).collect();
-                (n.to_string(), ips)
-            })
-            .collect();
-        Net::with_parts(
-            config,
-            ToServer(port).chain(PretendTls),
-            Hosts {
-                names,
-                lookups: Mutex::new(HashMap::new()),
-                port,
-            },
         )
     }
 }
@@ -1399,7 +1275,13 @@ fn spec_5_2_7_page_requests_through_the_main_process() {
     let (f, dir) = fetcher("request");
     let base = format!("http://localhost:{}", server.port());
     let (status, body) = f
-        .request("GET", &format!("{base}/api/items"), b"", true, 1 << 20)
+        .request(
+            "GET",
+            &format!("{base}/api/items"),
+            b"",
+            NetClass::Loopback,
+            1 << 20,
+        )
         .unwrap();
     assert_eq!((status, body.as_slice()), (200, &b"[1,2,3]"[..]));
     let (status, body) = f
@@ -1407,13 +1289,19 @@ fn spec_5_2_7_page_requests_through_the_main_process() {
             "POST",
             &format!("{base}/api/messages"),
             br#"{"text":"hej"}"#,
-            true,
+            NetClass::Loopback,
             1 << 20,
         )
         .unwrap();
     assert_eq!((status, body.as_slice()), (201, &b"got 14 bytes"[..]));
     let (status, body) = f
-        .request("GET", &format!("{base}/missing"), b"", true, 1 << 20)
+        .request(
+            "GET",
+            &format!("{base}/missing"),
+            b"",
+            NetClass::Loopback,
+            1 << 20,
+        )
         .unwrap();
     assert_eq!(
         (status, body.as_slice()),
@@ -1421,19 +1309,43 @@ fn spec_5_2_7_page_requests_through_the_main_process() {
         "a status, not an error"
     );
     let (status, _) = f
-        .request("GET", &format!("{base}/api/moved"), b"", true, 1 << 20)
+        .request(
+            "GET",
+            &format!("{base}/api/moved"),
+            b"",
+            NetClass::Loopback,
+            1 << 20,
+        )
         .unwrap();
     assert_eq!(status, 302, "redirects are the page's to handle");
-    match f.request("GET", &format!("{base}/api/big"), b"", true, 9_999) {
+    match f.request(
+        "GET",
+        &format!("{base}/api/big"),
+        b"",
+        NetClass::Loopback,
+        9_999,
+    ) {
         Err(Error::TooLarge { limit, .. }) => assert_eq!(limit, 9_999),
         other => panic!("expected TooLarge, got {other:?}"),
     }
-    match f.request("GET", &format!("{base}/api/items"), b"", false, 1 << 20) {
+    match f.request(
+        "GET",
+        &format!("{base}/api/items"),
+        b"",
+        NetClass::Public,
+        1 << 20,
+    ) {
         Err(Error::TlsRequired { .. }) => {}
         other => panic!("http:// for a remote page: expected TlsRequired, got {other:?}"),
     }
     assert!(f
-        .request("PATCH", &format!("{base}/api/items"), b"", true, 1 << 20)
+        .request(
+            "PATCH",
+            &format!("{base}/api/items"),
+            b"",
+            NetClass::Loopback,
+            1 << 20
+        )
         .is_err());
     for r in server.requests() {
         assert!(r.header("referer").is_none(), "{r:?}");
@@ -1444,18 +1356,32 @@ fn spec_5_2_7_page_requests_through_the_main_process() {
     // requests under the same rules from another thread.
     for requester in [f.requester(), Requester::new(&Options::new(&dir))] {
         let url = format!("{base}/api/items");
-        let got = std::thread::spawn(move || requester.request("GET", &url, b"", true, 1 << 20))
-            .join()
-            .unwrap()
-            .unwrap();
+        let got = std::thread::spawn(move || {
+            requester.request("GET", &url, b"", NetClass::Loopback, 1 << 20)
+        })
+        .join()
+        .unwrap()
+        .unwrap();
         assert_eq!((got.0, got.1.as_slice()), (200, &b"[1,2,3]"[..]));
     }
     let requester = f.requester();
-    match requester.request("GET", &format!("{base}/api/items"), b"", false, 1 << 20) {
+    match requester.request(
+        "GET",
+        &format!("{base}/api/items"),
+        b"",
+        NetClass::Public,
+        1 << 20,
+    ) {
         Err(Error::TlsRequired { .. }) => {}
         other => panic!("http:// for a remote page: expected TlsRequired, got {other:?}"),
     }
-    match requester.request("GET", &format!("{base}/api/big"), b"", true, 9_999) {
+    match requester.request(
+        "GET",
+        &format!("{base}/api/big"),
+        b"",
+        NetClass::Loopback,
+        9_999,
+    ) {
         Err(Error::TooLarge { limit, .. }) => assert_eq!(limit, 9_999),
         other => panic!("expected TooLarge, got {other:?}"),
     }
@@ -1687,12 +1613,7 @@ fn spec_9_5_3_private_network_rule() {
             class,
         );
         assert_eq!(page, NetClass::Public, "{host}");
-        // The shell's bool for a page off loopback is the same rule, and
-        // so is a requester on another thread.
-        refused(
-            f.request("GET", &https(host, "/hello"), b"", false, LIMIT),
-            class,
-        );
+        // A requester on another thread has the same rule.
         refused(
             f.requester()
                 .request("GET", &https(host, "/hello"), b"", own, LIMIT),
@@ -1782,10 +1703,6 @@ fn spec_9_5_3_private_network_rule() {
         .request("GET", &own_origin, b"", local.net_class(), LIMIT)
         .unwrap();
     assert_eq!(status, 200);
-    assert_eq!(
-        f.request("GET", &own_origin, b"", true, LIMIT).unwrap().0,
-        200
-    );
     for host in ["127.0.0.1", "lan.example", "public.example"] {
         let (status, _) = f
             .request(

@@ -146,6 +146,9 @@ struct Tab {
     caps: Vec<Resolved>,
     asks: VecDeque<&'static str>,
     is_localhost: bool,
+    /// The class of the page's own address (SPEC-9.5.3), from its fetch:
+    /// what its requests may reach.
+    net_class: vy_proto::NetClass,
     /// The manifest's `net` origins as `vy_runtime::origin_of` writes
     /// them (SPEC-5.2.8): the only origins a request may go to. Decided
     /// here, in the main process; the tab process is not trusted to.
@@ -232,6 +235,7 @@ impl Tab {
             caps: Vec::new(),
             asks: VecDeque::new(),
             is_localhost: false,
+            net_class: vy_proto::NetClass::Public,
             net_origins: Vec::new(),
             storage_quota_bytes: 0,
             text: TextEngine::new(),
@@ -1321,6 +1325,7 @@ impl Shell {
             tab.log(format!("[host info] restricted mode: {why}"));
         }
         tab.is_localhost = page.is_localhost;
+        tab.net_class = page.net_class;
         tab.net_origins = net_origins
             .iter()
             .filter_map(|o| vy_runtime::origin_of(o))
@@ -1706,6 +1711,13 @@ impl Shell {
         self.reaper.pending()
     }
 
+    /// Make the pages' own requests with `requester` (tests: one from
+    /// `vy_proto::test_net`, whose names resolve as the test says).
+    #[cfg(test)]
+    pub(crate) fn set_requester(&mut self, requester: vy_proto::Requester) {
+        self.loader.set_requester(requester);
+    }
+
     /// A page's own request (SPEC-5.2.7): with `net` granted, to an origin
     /// the manifest named (SPEC-5.2.8) and within the per-minute budget
     /// (SPEC-9.3.1) it goes to the loader; otherwise the request is
@@ -1747,7 +1759,7 @@ impl Shell {
             method,
             url,
             body,
-            page_is_localhost: tab.is_localhost,
+            page: tab.net_class,
         });
     }
 
