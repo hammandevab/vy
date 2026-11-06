@@ -1,12 +1,20 @@
-# Release: en tagg v* (eller en manuell körning med version) bygger vy-cli,
-# vy-dev, vy-publish och vy-serve (och vy-shell så snart den har en binär) i
-# release-läge för Linux x86_64, macOS arm64 och Windows x86_64, packar Studio
-# (tools/build_studio.sh), publicerar referenssidan med tools/publish_site.sh
-# och fäster allt vid en GitHub Release med genererade noteringar:
+# Release: en tagg v* (eller en manuell körning med version) bygger vy-cli, vy-dev, vy-publish,
+# vy-serve och vy-shell i release-läge för Linux x86_64, macOS arm64 och Windows x86_64 med
+# tools/build_release.sh, packar Studio, publicerar referenssidan med tools/publish_site.sh och
+# fäster allt vid en GitHub Release med genererade noteringar:
 #
 #   vy-<version>-<target>.zip   binärerna, studio.vyp bredvid vy-dev + LICENSE
 #   vy-site-<version>.zip       de elva paketen, dev.key.pub och previews/
 #                               (utan Studio, som bara körs lokalt av vy-dev)
+#   SHA256SUMS                  SHA-256 för varje zip och varje fil i dem (SPEC-9.7.1)
+#   BUILD.md                    byggreceptet: commit, SOURCE_DATE_EPOCH, maskiner,
+#                               verktygskedja, kommandon (ur tools/BUILD.md.in)
+#
+# Bygget är reproducerbart (SPEC-9.7.1): samma commit på samma klass av maskin ger samma
+# binärer, oavsett katalog, användare och tid (tools/repro_env.sh), och zip-filerna skrivs
+# med fasta tider och rättigheter (tools/release_files.py). CI:s jobb `repro` bygger två
+# gånger och jämför. Actions är pinnade på commit; taggen står bredvid. docs/RELEASING.md
+# beskriver allt, och vad ägaren behöver.
 #
 # Signeringsnyckeln för paketen är repots secret VY_KEY (64 hextecken, se
 # tools/publish_site.sh); saknas den signeras de med en tillfällig nyckel.
@@ -60,63 +68,80 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # No build cache: a release is built from a clean checkout, as BUILD.md says.
+      - uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
         with:
           targets: wasm32-unknown-unknown, ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p vy-cli -p vy-dev -p vy-publish -p vy-serve
-      # vy-shell is a library until M3; the job must not fail before then.
-      - name: Build vy-shell when it has a binary
-        shell: bash
+      - name: Environment
         run: |
-          if cargo metadata --no-deps --format-version 1 \
-              | jq -e '.packages[] | select(.name == "vy-shell") | .targets[] | select(.kind | index("bin"))' > /dev/null; then
-            cargo build --release --locked --target ${{ matrix.target }} -p vy-shell
-          else
-            echo "vy-shell has no binary target yet; skipped"
-          fi
-      - name: Zip
-        shell: bash
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-          TARGET: ${{ matrix.target }}
+          ext=""; py=python3
+          if [ "$RUNNER_OS" = Windows ]; then ext=.exe; py=python; fi
+          echo "EXT=$ext" >> "$GITHUB_ENV"
+          echo "PY=$py" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "NAME=vy-$VERSION-$TARGET" >> "$GITHUB_ENV"
+      # tools/repro_env.sh (sourced by the script) sets the path remapping and CFLAGS.
+      - name: Build (SPEC-9.7.1)
+        run: tools/build_release.sh "$TARGET" stage
+      - name: Hash the build
         run: |
-          ext=""
-          if [ "$RUNNER_OS" = Windows ]; then ext=.exe; fi
-          stage=$(mktemp -d)
-          for bin in vy-cli vy-dev vy-publish vy-serve vy-shell; do
-            f="target/$TARGET/release/$bin$ext"
-            if [ -f "$f" ]; then cp "$f" "$stage/"; fi
-          done
-          # Studio next to vy-dev, which looks for studio.vyp beside its own
-          # binary; signed with a throwaway key, since vy-dev patches in the
-          # run's origin and token and re-signs at every start (docs/DEVELOPING.md).
-          VY_PUBLISH="target/$TARGET/release/vy-publish$ext" tools/build_studio.sh "$stage/studio.vyp"
-          cp LICENSE "$stage/"
-          ls -l "$stage"
-          zip="$PWD/vy-$VERSION-$TARGET.zip"
-          cd "$stage"
-          if [ "$RUNNER_OS" = Windows ]; then 7z a -tzip "$zip" ./*; else zip -j "$zip" ./*; fi
-      - uses: actions/upload-artifact@v4
+          "$PY" tools/release_files.py sums "$NAME.unsigned" stage/* > unsigned.sha256
+          cat unsigned.sha256
+          identity=$("stage/vy-publish$EXT" inspect stage/studio.vyp | sed -n 's/^identity: *//p')
+          [ -n "$identity" ] || { echo "error: no identity for studio.vyp" >&2; exit 1; }
+          echo "STUDIO_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNED=nej" >> "$GITHUB_ENV"
+      - name: Zip and hash
+        run: |
+          "$PY" tools/release_files.py zip stage "$NAME.zip"
+          {
+            "$PY" tools/release_files.py sums "$NAME" stage/*
+            # A signed binary differs from the build only by its signature:
+            # its unsigned hash is what a rebuild is compared with.
+            if [ "$SIGNED" != nej ]; then cat unsigned.sha256; fi
+            "$PY" tools/release_files.py sums "" "$NAME.zip"
+          } > "$NAME.sha256"
+          cat "$NAME.sha256"
+          {
+            echo "target=$TARGET"
+            echo "tag=$TAG"
+            echo "commit=$GITHUB_SHA"
+            echo "epoch=$SOURCE_DATE_EPOCH"
+            echo "runner=$RUNNER_OS $RUNNER_ARCH"
+            echo "image=${ImageOS:-?} ${ImageVersion:-?}"
+            echo "rustc=$(rustc -V)"
+            echo "cargo=$(cargo -V)"
+            echo "signed=$SIGNED"
+            echo "studio_identity=$STUDIO_IDENTITY"
+          } > "$NAME.build"
+          cat "$NAME.build"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vy-${{ matrix.target }}
-          path: vy-*.zip
+          path: |
+            vy-*.zip
+            vy-*.sha256
+            vy-*.build
           if-no-files-found: error
 
   site:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Publish the reference site
         env:
           VY_KEY: ${{ secrets.VY_KEY }}
@@ -129,11 +154,15 @@ jobs:
           fi
           tools/publish_site.sh deploy $key
           rm -f "$RUNNER_TEMP/dev.key"
+      # Ed25519 signatures are deterministic, so with VY_KEY the packages and
+      # this zip are the same bytes for the same commit.
       - name: Zip
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        run: cd deploy && zip -r "../vy-site-$VERSION.zip" .
-      - uses: actions/upload-artifact@v4
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          python3 tools/release_files.py zip deploy "vy-site-$VERSION.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vy-site
           path: vy-site-*.zip
@@ -143,16 +172,29 @@ jobs:
     needs: [version, binaries, site]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
-      - run: ls -l dist
-      - uses: softprops/action-gh-release@v2
+      - name: SHA256SUMS and BUILD.md (SPEC-9.7.1)
+        run: |
+          cd dist
+          {
+            cat vy-*.sha256
+            python3 ../tools/release_files.py sums "" vy-site-*.zip
+          } > SHA256SUMS
+          python3 ../tools/release_files.py build-md ../tools/BUILD.md.in vy-*.build > BUILD.md
+          cat SHA256SUMS BUILD.md
+          ls -l
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: Vy ${{ needs.version.outputs.tag }}
           generate_release_notes: true
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/BUILD.md
           fail_on_unmatched_files: true

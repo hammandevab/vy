@@ -143,3 +143,61 @@ jobs:
           name: bench-ubuntu
           path: bench-ubuntu.json
           if-no-files-found: ignore
+
+  # SPEC-9.7.1: this commit's release, built twice by tools/build_release.sh (what
+  # release.yml runs) in two worktrees at different paths, with two CARGO_HOMEs (two
+  # registry paths, as two users have), in two time zones and minutes apart: every binary
+  # and LICENSE has the same SHA-256, and studio.vyp, signed with a throwaway key each
+  # time, the same package identity. Too slow for `cargo test`, which checks the modules
+  # the same way (spec_9_7_1_reproducible_build). Linux is the gate; macOS and Windows
+  # report until a first green run there (docs/notes/m5-release.md).
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # As release.yml: no -D warnings in the flags of the build that is compared.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown, ${{ matrix.target }}
+      - name: Build the release twice
+        run: |
+          tmp=$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")
+          native() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
+          git worktree add --detach "$tmp/a/vy" HEAD
+          git worktree add --detach "$tmp/b/somewhere/else/vy" HEAD
+          (cd "$tmp/a/vy" && TZ=UTC tools/build_release.sh ${{ matrix.target }} "$tmp/stage-a")
+          mkdir -p "$tmp/cargo-b"
+          (cd "$tmp/b/somewhere/else/vy" && CARGO_HOME=$(native "$tmp/cargo-b") TZ=Asia/Tokyo \
+            tools/build_release.sh ${{ matrix.target }} "$tmp/stage-b")
+      - name: Compare
+        run: |
+          tmp=$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")
+          py=python3; ext=""
+          if [ "$RUNNER_OS" = Windows ]; then py=python; ext=.exe; fi
+          for s in stage-a stage-b; do
+            {
+              "$py" tools/release_files.py sums "" "$tmp/$s"/vy-* "$tmp/$s/LICENSE"
+              "$tmp/$s/vy-publish$ext" inspect "$tmp/$s/studio.vyp" | grep '^identity:'
+            } > "$tmp/$s.sums"
+          done
+          cat "$tmp/stage-a.sums"
+          if ! diff "$tmp/stage-a.sums" "$tmp/stage-b.sums"; then
+            echo "::error::the two release builds differ (SPEC-9.7.1)"
+            exit 1
+          fi

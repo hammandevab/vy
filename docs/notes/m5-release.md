@@ -7,7 +7,7 @@ en annan agent. Sessionen kan startas om: läget står här och i `git log`.
 
 | Steg | Vad | Läge |
 | --- | --- | --- |
-| 1 | SPEC-9.7.1 reproducerbara byggen | pågår |
+| 1 | SPEC-9.7.1 reproducerbara byggen | moduler och releasejobb klara; spec-förtydligande kvar |
 | 2 | SPEC-12.3.1 storleksbudget som test | – |
 | 3 | `a11y-linux` under taket, på som standard på Linux | – |
 | 4 | kodsignering i `release.yml`, `docs/RELEASING.md` | – |
@@ -48,3 +48,38 @@ upp till den identiteten. 32 s i debug. **Föll** med `["form", "chat", "studio"
 **Paket.** Definitionen: ett paket är reproducerbart när dess osignerade manifest är det, alltså
 paketidentiteten (SPEC-4.1.2, SHA-256 över manifestet utan `sig`), som namnger modulens och varje
 resurs hash. `vy-publish inspect` skriver den (`identity:`).
+
+**Releasebinärerna.** Ett skript för releasen, `tools/build_release.sh <mål> <katalog>`, som
+`release.yml`, CI:s `repro` och `BUILD.md` alla kör: `vy-cli vy-dev vy-publish vy-serve` i ett
+cargo-anrop och `vy-shell` i ett annat (som förut), `--release --locked --target`, sedan
+`studio.vyp` och `LICENSE` i katalogen. Miljön sätts av `tools/repro_env.sh` (läses in av både
+`build_release.sh` och `build_modules.sh`):
+
+- `CARGO_ENCODED_RUSTFLAGS` = befintliga flaggor + `--remap-path-prefix` för `CARGO_HOME` (`/cargo`),
+  `CARGO_TARGET_DIR` om satt (`/target`) och arbetskopian (`/vy`), i den ordningen (rustc tar den
+  sista som passar). Den kodade formen håller sökvägar med mellanslag hela.
+- `CFLAGS` = `-ffile-prefix-map` för samma sökvägar (ring, zstd-sys), inte under MSVC; där länkar
+  `build_release.sh` med `-Clink-arg=/Brepro` (PE-huvudets tidsstämpel blir en hash).
+- `SOURCE_DATE_EPOCH` = commitens tid om den inte är satt (zip-posternas tid).
+
+Uppmätt på `vy-shell` (release, `--target x86_64-unknown-linux-gnu`, miljön ovan): `strings` hittar
+**inga** absoluta sökvägar till arbetskopian eller `/root/.cargo`; 749 rader börjar med `/cargo/…`
+(registrets källor i panikplatser) eller `/vy/target/…/out/…` (cranelifts genererade kod). Utan
+omskrivningen hade varje sådan rad burit användarens hem och arbetskopians sökväg.
+
+**Zip, summor, recept.** `tools/release_files.py` (standardbiblioteket): `zip` skriver posterna
+sorterade, rekursivt, med tiden `SOURCE_DATE_EPOCH`, läge 0755 för `vy-*` och 0644 annars, utan
+katalogposter och extra fält (provat: samma byte med olika mtime, umask och tidszon); `sums` skriver
+`sha256sum`-rader; `build-md` fyller `tools/BUILD.md.in` med en tabell per mål ur fragment som
+jobben skriver (avbild `ImageOS`/`ImageVersion`, `rustc -V`, `cargo -V`, signerad, `studio.vyp`:s
+identitet). `release.yml` publicerar nu `SHA256SUMS` (varje zip, varje fil i dem som
+`vy-<v>-<mål>/<fil>`, och för ett signerat mål de osignerade under `vy-<v>-<mål>.unsigned/`) och
+`BUILD.md`. Referenssidans zip skrivs samma väg; med `VY_KEY` är den reproducerbar (Ed25519 är
+deterministiskt). Binärjobben har ingen byggcache längre (en release byggs ur en ren utcheckning,
+som receptet säger), och alla actions i `release.yml` är pinnade på commit (`git ls-remote`, taggen
+i en kommentar; granskning 0004 punkt 11).
+
+**CI `repro`.** Matris över Linux, macOS och Windows: två `git worktree` på olika sökvägar, andra
+bygget med eget `CARGO_HOME` (nytt registerträd) och `TZ=Asia/Tokyo`, båda med `build_release.sh`;
+SHA-256 för `vy-*` och `LICENSE` plus `studio.vyp`:s identitet jämförs. Linux är grind; macOS och
+Windows har `continue-on-error` tills en körning visat att de håller (inget av det är kört här).

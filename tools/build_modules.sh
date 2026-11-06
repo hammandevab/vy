@@ -9,14 +9,11 @@
 #   cargo's `-C metadata` for crates/vy-sdk and crates/vy-abi (path dependencies outside each
 #   module's own workspace) hashes their absolute path and so orders the functions in the
 #   module; the wrapper gives it a value without the path.
-# - --remap-path-prefix turns the checkout's path into /vy in anything rustc writes.
-# RUSTFLAGS from the environment (CI's -D warnings) are kept.
+# - tools/repro_env.sh: --remap-path-prefix turns the checkout's path into /vy in anything
+#   rustc writes; RUSTFLAGS from the environment (CI's -D warnings) are kept.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# The path as rustc sees it: a Windows path under Git Bash (pwd -W), else the physical one.
-root=$(pwd -W 2>/dev/null || pwd -P)
-exe=""
-case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) exe=.exe ;; esac
+. tools/repro_env.sh
 
 mkdir -p target/wasm target/tools
 wrapper=target/tools/repro-rustc$exe
@@ -25,7 +22,6 @@ if [ ! -f "$wrapper" ] || [ tools/repro_rustc.rs -nt "$wrapper" ]; then
   mv -f "$wrapper.$$$exe" "$wrapper"
 fi
 export RUSTC_WRAPPER="$root/$wrapper"
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$root=/vy"
 
 if [ $# -eq 0 ]; then
   set -- $(for dir in modules/*/; do basename "$dir"; done)
