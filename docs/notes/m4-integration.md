@@ -30,13 +30,15 @@ Först, som uppdraget bad om när laddaren inte kunde göras klart helt:
    spelas in kör alltså med processens fulla rättigheter på Linux och macOS (Windows-jobbet står
    kvar). Rättning: huvudprocessen skriver inspelningen ur IPC-strömmen, eller filen öppnas före
    låsningen och fd:t behålls; uppspelning kan läsa hela filen före låsningen.
-4. **`vy-dev build` kör inte m4/perf:s 8 ms-kontroll** (`vy_publish::check_frames`, SPEC-13.4.1):
+4. *(Rättat i `51a66be`, se Granskningsfixar.)* **`vy-dev build` kör inte m4/perf:s 8
+   ms-kontroll** (`vy_publish::check_frames`, SPEC-13.4.1):
    kedjan anropar biblioteksfunktionen `vy_publish::build`, inte kommandoradens `build`. Sidan under
    utveckling serveras bara på loopback, så det är inte en publicering, men agenten i Studio får ingen
    varning om en långsam frame. Förslag: `vy-dev build` kör `check_frames` och skriver en varning i
    byggloggen.
-5. **`net` med tom origin-lista visas som beviljad** (spec-fråga 63). Fliken och huvudprocessen
-   släpper inget igenom, men `default_grants` beviljar `net` och adressfältet visar plupp.
+5. *(Rättat i `d199cab`, se Granskningsfixar.)* **`net` med tom origin-lista visas som
+   beviljad** (spec-fråga 63). Fliken och huvudprocessen släpper inget igenom, men
+   `default_grants` beviljar `net` och adressfältet visar plupp.
 6. **Plattformar.** Windows- och macOS-vägarna (AppContainer, `sandbox_init`, `DnsQuery_UTF8`,
    AccessKit-adaptrarna, `taskkill`, `fake_agent.ps1`) är typkontrollerade här, inte körda.
    Releasejobbet och Docker-bygget är inte körda härifrån (ingen CI, ingen Docker-demon); deras
@@ -206,3 +208,64 @@ under arbetet för diskens skull; cargo bygger om det som behövs. Den ospårade
 `.cargo/config.toml` (samordnarens, `strip = "debuginfo"` för debug) är inte incheckad; den rör
 inte release-profilen, och storlekarna ovan är byggda med `--config 'profile.release.strip=true'`.
 Sessionen startades om en gång under release-bygget; bygget som redan kört fick gå klart.
+
+## Granskningsfixar
+
+Fynd ur granskningssidorna 0005, 0007, 0008 och 0009 (numrerade per sida), rättade på
+`m4/integration` efter `f986c0e`, ett commit per fynd med ett test som föll före rättningen och
+går igenom efter den (prövat genom att backa rättningen lokalt). `crates/vy-shell` är inte rört
+(m4/fix-shell rättar skalets fynd parallellt).
+
+| Fynd | Commit | Vad | Test |
+| --- | --- | --- | --- |
+| 0005:1 | `6ecbd6b` | Studios origin nekar fel `Host` och webbläsarhuvuden (`Origin`, `Referer`, `Sec-Fetch-*`) på *varje* väg, inte bara `/_dev/` (`Access::refuse_foreign`); sidans origin (8080) får `Host`-kontrollen för sin egen port men släpper webbläsare | `serve_builds_and_serves_two_origins`, nu med ett Studio-paket: 403 på `/`, `/index`, `/_vy/<hash>`, nyckelfilen och `/_dev/state?token=…` under `rebind.example:<port>`, `rebind.example`, fel port och med vart och ett av webbläsarhuvudena; 200 under `127.0.0.1:<port>`; modulen bär nyckeln, inget 403-svar gör det; sidans origin 403 under främmande namn och under Studios namn, 200 för en webbläsare |
+| 0005:2 | `1350a7e` | begärandeloggen skriver vägen utan frågan (`serve::log_text`) | `serve::tests::the_request_log_leaves_out_the_token` |
+| 0005:3, 0008:3 | `51a66be` | `vy-dev build` kör `vy_publish::check_frames` (SPEC-13.4.1) efter bygget; en frame över budgeten eller en modul som inte går att köra ger `warning:` i byggloggen, paketet skrivs ändå | `build_pipeline_signs_a_valid_package_and_reports_failures`: kontrollens rad för mallen utan varning; en sida som snurrar i varje frame ger varningen med frame, SPEC-13.4.1 och `--allow-slow`, och paketet finns |
+| 0007:2 | `dda0103` | en tidsgräns för hela DNS-uppslaget, UDP-försöken och TCP tillsammans (`SystemResolver::deadline`, 6 s); varje utbyte högst 2 s; TCP-svaret högst 16 384 byte (`MAX_TCP_ANSWER`), längre nekas på längdprefixet | `dns::tests::system_resolver_has_one_deadline`: TC över UDP, sedan längd 512 och en byte per 1,5 s → `Timeout` inom 6,5 s; längd 0xFFFF → nekad inom 2 s; uppslaget körs i en tråd så att testet faller i stället för att hänga |
+| 0007:3 | `e6f1df4` (`spec:`), `df7810e` | ny SPEC-9.5.3; regeln för privata nät i resolvern för varje ureq-agent (`vy-proto/src/net.rs`), se notes/m4-security, *Privata nät efter namnuppslag*, och checklistans punkt 7 | `tests::spec_9_5_3_private_network_rule` (ignorerat i `spec:`-commitet, där det föll mot dagens kod: klienten anslöt till 127.0.0.1) och `net::tests::spec_9_5_3_address_classes` |
+| 0007:6 | `4e8cb52` | `dir_is_private` kräver också att katalogen ägs av processens effektiva uid (Unix); på Windows prövas bara att katalogen finns, och dokumentationen säger varför | `compile_cache::tests::private_dirs_are_owned_by_this_user` (som root: 0700 ägd av uid 65534; annars `/`) |
+| 0008:2 | `c012c19` | skälet för `spec_13_2_1_raster_budget` har båda mätningarna och lasten; samma tal i notes/m4-perf och spec-fråga 65 | inget: bara attributets text |
+| 0009:3 | `d199cab` | `default_grant` ger `Denied` för `net` med tom origin-lista (spec-fråga 63, policyhalvan) | `tests::spec_8_2_3_empty_net_list_is_not_granted` (vy-manifest) |
+
+Öppen punkt 4 och 5 ovan är därmed stängda.
+
+**Sidans origin (8080).** Den bär ingen nyckel och gör inget, men utan `Host`-kontroll kunde en
+webbsida genom DNS-rebinding läsa sidan under utveckling (opublicerat arbete). Den har nu samma
+`Host`-kontroll som Studio för sin egen port. Webbläsarhuvudena nekas inte där, eftersom
+HTML-reserven är till för webbläsare och inget på origin A handlar eller bär nyckeln.
+
+**SPEC-9.5.3 i detalj.** Sidans klass är `Loopback` för loopback-namnen (SPEC-7.1.3), annars den
+mest offentliga klass värden slås upp till (`Fetched::net_class`; uppslaget misslyckas → offentlig).
+En sida når sin klass och mer offentliga. Mot rebinding av sidans eget namn ansluter första hoppet
+av sidans hämtning bara till en adress i sidans klass eller en mer lokal, och HTTP-cachens nyckel
+bär klassen. `Fetcher::request` och `Requester::request` tar `impl Into<NetClass>`: en `bool`
+betyder som förut "sidan ligger på loopback", och `false` blir `Public`, den klass som når minst.
+Fem agenter (en per regel) delar en connector, så TLS-konfigurationen byggs en gång; poolen är per
+agent.
+
+**Uppföljning i `vy-shell` (koordinatorn, efter m4/fix-shell).** Skalet skickar i dag
+`page_is_localhost: tab.is_localhost` för sidans egna anrop (`shell.rs`, `Job::Request`;
+`page.rs`, `spawn_request_worker`). Det kompilerar och är stängt, men en sida på ett privat nät
+bedöms då som offentlig och når inte sin egen LAN-origin. Rättning: spara `fetched.net_class()` i
+`LoadedPage` och `Tab` bredvid `is_localhost` och skicka den i `Job::Request` (fältet blir
+`vy_proto::NetClass`); därefter kan `From<bool> for NetClass` tas bort, så att det bara finns ett
+sätt. Inget skaltest föll av ändringarna här (0009:3 inräknat).
+
+**Nya beroenden.** Inga nya crates. `vy-runtime` fick en kant till `libc` 0.2 för Unix (`geteuid`
+i ägarkontrollen): craten fanns i trädet via wasmtime, getrandom och `vy-shell`, med samma
+version; `Cargo.lock` får en rad.
+
+**Grindar** före varje commit, från arbetskopians rot, i den egna målkatalogen med
+`CARGO_INCREMENTAL=0`: `cargo fmt --all --check` rent; clippy `-D warnings` rent; `cargo test
+--workspace` grönt (efter sista kodcommit `d199cab`: 358 gröna, 0 röda, 4 ignorerade; före
+fixarna 352 / 4); `spec_trace.py` 139 → 140 id, alla spårade; `build_modules.sh`, `check-abi
+target/wasm/hello.wasm` och `test_modules.sh` (12 moduler) gröna; konformans 59/59 à 0,000 %;
+`check-cross -p vy-proto --all-targets` (DNS, SPEC-9.5.3) och `check-cross -p vy-runtime
+--all-targets` (ägarkontrollen) rena för `x86_64-pc-windows-msvc` och `aarch64-apple-darwin`. ABI
+1.0 orört: `crates/vy-abi`, `docs/ABI-1.0.md` och SPEC §5, bilaga A och C har ingen ändring.
+
+**Inte rättat här** (utanför uppdraget): 0007:1 (inspelning utan sandlåda, i `vy-shell`), 0007:4
+(`prlimit64`), 0007:5 (sandlådan faller öppen i det tysta), 0008:1 (kall kompilering av Studio och
+cachen av i skalet), 0008:4 (CI-baslinje för bench), 0009:1 (plattformarna okörda), 0009:2
+(seriella laddningar), 0009:4 (modulbygget beror på sökvägen). Spec-fråga 63:s andra halva
+(ska valideringen vägra en tom lista?) är ägarens.
