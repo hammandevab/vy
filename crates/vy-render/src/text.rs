@@ -74,11 +74,14 @@ const WEIGHTS_SINGLE: [i32; 1] = [weight::NORMAL];
 ///
 /// Serif and mono are `fonts/<face>.ttf` compressed with zstd at level 19
 /// (369 072 bytes for 723 800, so 354 728 fewer, for SPEC-12.3.1's 25 MB
-/// with AT-SPI on Linux) and decompressed at their first use, once
-/// per process (about 0.9 ms each in release); a page that never asks for
-/// them never decompresses them. Sans and sans bold stay uncompressed: the
-/// font system reads both in [`TextEngine::new`], so every process would pay
-/// for them (3–5 ms of a tab's 15 ms cold start). `bundled_faces_are_the_ttf_files`
+/// with AT-SPI on Linux) and decompressed when the font system first reads
+/// them, once per process (about 0.9 ms each in release): for serif or mono
+/// text, or the first time text in weight 700 is matched, since cosmic-text
+/// then reads every face of another weight to look for a variable `wght`
+/// axis. A page in weight 400 sans never decompresses them. Sans and sans
+/// bold stay uncompressed: matching weight 400 reads bold the same way,
+/// already in [`TextEngine::new`], so every process would pay for them (3–5
+/// ms of a tab's 15 ms cold start). `bundled_faces_are_the_ttf_files`
 /// checks bytes and metadata against the `.ttf`; after changing one,
 /// `zstd -19 --no-check -f fonts/<face>.ttf` writes its `.ttf.zst`.
 struct BundledFace {

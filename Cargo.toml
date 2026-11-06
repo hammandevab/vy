@@ -92,11 +92,13 @@ codegen-units = 1
 # 25 MB (SPEC-12.3.1) and release.yml zips what this profile produces.
 strip = true
 
-# The AT-SPI stack that vy-shell's `a11y-linux` adds on Linux (SPEC-10.2.1;
-# the crates no other binary and no other platform builds) is optimized for
-# size: it answers a screen reader over D-Bus, outside every frame, and at
-# opt-level 3 it took the client past SPEC-12.3.1's 25 MB. 733 952 bytes
-# smaller this way (docs/notes/m5-release.md).
+# Optimized for size, to keep the client under SPEC-12.3.1's 25 MB: two
+# stacks only vy-shell on Linux builds (no other binary, no other platform),
+# neither of them in a frame's work. First the AT-SPI stack that
+# `a11y-linux` adds (SPEC-10.2.1), which answers a screen reader over D-Bus:
+# 733 952 bytes. Then the X11 and Wayland protocol crates under winit, which
+# decode window-system events and encode requests: 152 576 bytes. Measured in
+# docs/notes/m5-release.md; softbuffer and winit itself stay at opt-level 3.
 [profile.release.package]
 accesskit_atspi_common = { opt-level = "s" }
 accesskit_unix = { opt-level = "s" }
@@ -132,3 +134,20 @@ zbus = { opt-level = "s" }
 zbus_names = { opt-level = "s" }
 zbus_xml = { opt-level = "s" }
 zvariant = { opt-level = "s" }
+as-raw-xcb-connection = { opt-level = "s" }
+calloop = { opt-level = "s" }
+calloop-wayland-source = { opt-level = "s" }
+smithay-client-toolkit = { opt-level = "s" }
+tiny-xlib = { opt-level = "s" }
+wayland-backend = { opt-level = "s" }
+wayland-client = { opt-level = "s" }
+wayland-cursor = { opt-level = "s" }
+wayland-protocols = { opt-level = "s" }
+wayland-protocols-plasma = { opt-level = "s" }
+wayland-protocols-wlr = { opt-level = "s" }
+wayland-sys = { opt-level = "s" }
+x11-dl = { opt-level = "s" }
+x11rb = { opt-level = "s" }
+x11rb-protocol = { opt-level = "s" }
+xkbcommon-dl = { opt-level = "s" }
+xkeysym = { opt-level = "s" }

@@ -163,9 +163,27 @@ inget på Windows och macOS: `accesskit_unix` är ett målberoende i `accesskit_
 | `0fc0453`, utan `a11y-linux` | 22 364 840 | −2 635 160 |
 | `0fc0453`, `--features a11y-linux` | 25 476 976 | **+476 976** |
 | + serif och mono komprimerade | 25 099 216 | **+99 216** |
-| + AT-SPI-stacken `opt-level = "s"`, `a11y-linux` som standard | **24 365 264** | −634 736 (2,5 %) |
+| + AT-SPI-stacken `opt-level = "s"`, `a11y-linux` som standard | 24 365 264 | −634 736 (2,5 %) |
+| + X11- och Wayland-protokollcraten `opt-level = "s"` | **24 212 688** | −787 312 (3,1 %) |
 
 `spec_12_3_1_size_budget` i release mot den sista: "24365264 bytes, cap 25000000, margin 634736",
 grönt. `vy-cli` blev 20 428 856 → 19 215 400 med alla fyra snitt komprimerade (förkastat, ovan);
 med bara serif och mono räknas ungefär 355 000 mindre än förut. Konformans 59/59 à 0,000 % efter
 varje steg (snitten är samma byte efter uppackning).
+
+**Mer marginal för GL-vägen.** Samordnaren: m5/gpu lägger till en OpenGL-väg på som standard för
+247 624 byte (`vy-shell` med `a11y-linux` 25 790 640 på main + m5/gpu), och spåret här bör frigöra
+minst 0,8 MB, helst 1,2. Därför också de 17 X11/Wayland-crates under winit som bara Linux-skalet
+bygger (x11rb, x11rb-protocol, wayland-client, wayland-backend, wayland-protocols(-plasma, -wlr),
+wayland-sys, wayland-cursor, smithay-client-toolkit, calloop(-wayland-source), xkbcommon-dl,
+xkeysym, as-raw-xcb-connection, x11-dl, tiny-xlib) på `opt-level = "s"`: 152 576 byte till. De
+avkodar fönstersystemets händelser och kodar förfrågningar, mikrosekunder per händelse; softbuffer
+(som kopierar bilden till fönstret) och winit själv står kvar på 3. Totalt **1 264 288 byte**
+mindre än `0fc0453` med `a11y-linux`.
+
+**Typsnitten i detalj.** cosmic-text:s `FontMatchKey::new` läser *varje* snitt vars vikt skiljer sig
+från den begärda (`with_face_data`, för att leta efter en variabel `wght`-axel), för alla familjer.
+Text i vikt 400 läser alltså bold, och text i vikt 700 läser sans, serif och mono. Serif och mono
+packas därför upp första gången en sida (eller chromen) visar fet text eller serif/mono, inte bara
+vid serif/mono; en sida i ren sans 400, som `hello`, packar aldrig upp något. Kostnaden är ~1,7 ms en
+gång per process där det händer, mot `first-frame.text`:s 74 ms.
