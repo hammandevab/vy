@@ -937,6 +937,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SPEC-8.2.4, SPEC-5.1.6, SPEC-5.2.12 (granskning 0006:2): pasting
+    /// with Ctrl+V is the user's input and reaches the page as `TEXT_INPUT`
+    /// even in restricted mode, with no capability at all; the page still
+    /// cannot read the clipboard itself without `clipboard`, not even right
+    /// after the paste, with a key press as its gesture.
+    #[test]
+    fn spec_8_2_4_paste_is_user_input_even_restricted() {
+        use crate::shell::hid;
+        use vy_abi::modifier::CTRL;
+        // Logs the text of every TEXT_INPUT; tries `clipboard_read` on
+        // every KEY_DOWN.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "log" (func $log (param i32 i32 i32) (result i32)))
+                (import "vy" "clipboard_read" (func $read (param i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 7))
+                        (then (drop (call $log (i32.const 1) (local.get 1) (local.get 2)))))
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then (drop (call $read (i32.const 8192) (i32.const 4096)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 4096))"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("vy-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("paste.wasm");
+        std::fs::write(&path, &wasm).unwrap();
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(Source::File { path, draft: None }));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert!(texts(&shell.chrome_display_list()).contains(&"begränsat läge".to_string()));
+        assert_eq!(shell.tab_badges(tab), vec![], "no capabilities at all");
+        shell.set_clipboard_text("klistrat in");
+        assert!(
+            shell.key(hid::V, true, CTRL, false),
+            "consumed by the shell"
+        );
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        let logs = shell.tab_logs(tab);
+        assert!(
+            logs.contains(&"[module info] klistrat in".to_string()),
+            "{logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.contains("clipboard_read")),
+            "Ctrl+V itself never reaches the page as a key: {logs:?}"
+        );
+        shell.key(0x04, true, 0, false);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        shell.drain();
+        assert!(
+            shell
+                .tab_logs(tab)
+                .iter()
+                .any(|l| l.contains("clipboard_read: E_DENIED")),
+            "{:?}",
+            shell.tab_logs(tab)
+        );
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// SPEC-5.2.9, SPEC-5.1.5, SPEC-9.5.1: what a page put in its storage
     /// is saved when the tab's process is let go of, not only when the tab
     /// is hidden: on a reload (F5) and a navigation in the same tab, whose
