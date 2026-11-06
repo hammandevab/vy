@@ -159,7 +159,7 @@ Loggen gör varje nyckel en utgivare tagit i bruk synlig i efterhand; den är en
 - **[SPEC-9.5.2]** Ingen mekanism låter en origin läsa en annan origins lagring eller tillstånd.
 - **[SPEC-9.5.3]** Varje anslutning klienten gör för en sida – sidans egen hämtning med varje omdirigering, moduler och resurser, nyckelfil och logg, och sidans egna anrop – prövas mot adressen som värden slås upp till: en loopback-adress (`127.0.0.0/8`, `::1`, `0.0.0.0/8`, `::`) nås bara från en sida vars egen adress är loopback, och en privat eller länklokal adress (`10.0.0.0/8`, `100.64.0.0/10`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `fc00::/7`, `fe80::/10`) bara från en sida vars egen adress är loopback, privat eller länklokal; en IPv4-adress i IPv6-form (`::ffff:a.b.c.d`) bedöms som IPv4-adressen. Sidans egen adress har klassen loopback för namnen i SPEC-7.1.3 och annars den mest offentliga klass dess värd slås upp till; sidans egen hämtning ansluter bara till en adress i den klassen eller en mer lokal, och en vägrad anslutning görs aldrig.
 - **[SPEC-9.6.1]** Adressfältet ritas alltid av klienten; en modul kan inte rita utanför sin yta.
-- **[SPEC-9.7.1]** Klienten byggs reproducerbart; varje release publicerar hash och byggrecept.
+- **[SPEC-9.7.1]** Klienten byggs reproducerbart: samma commit byggd för samma mål med samma verktygskedja på samma slags maskin ger samma byte för varje binär och modul, oavsett arbetskopians sökväg, användare och tid; en signerad binär jämförs utan sin signatur, och ett paket, vars signatur beror på nyckeln, genom sin paketidentitet (SPEC-4.1.2). Varje release publicerar SHA-256 för varje fil den består av och ett byggrecept med commit, verktygskedja, maskin och kommandon.
 
 ## 10. Tillgänglighet och semantik
 

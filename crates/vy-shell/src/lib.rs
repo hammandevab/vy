@@ -2327,8 +2327,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// SPEC-9.7.1: the same commit builds to the same bytes in any checkout.
-    /// The working tree (what `git ls-files --cached --others
+    /// SPEC-9.7.1: the same commit, target, toolchain and kind of machine
+    /// give the same bytes for every module whatever the checkout's path,
+    /// user and time, and the same identity for every package. The working
+    /// tree (what `git ls-files --cached --others
     /// --exclude-standard` lists) is copied to two directories at different
     /// depths, and `tools/build_modules.sh` runs in each with its own module
     /// target directories and another time zone: every `.wasm` is byte for
