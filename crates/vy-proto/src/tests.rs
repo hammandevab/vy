@@ -222,13 +222,16 @@ impl TxtResolver for FakeResolver {
 /// through. Only tests build agents this way; the product's agent uses
 /// ureq's resolver and rustls.
 mod remote {
-    use std::net::SocketAddr;
+    use crate::net::Net;
+    use std::collections::HashMap;
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Mutex;
     use ureq::config::Config;
     use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
     use ureq::unversioned::transport::{
         Buffers, ConnectionDetails, Connector, NextTimeout, TcpConnector, Transport,
     };
-    use ureq::{http, Agent, Error};
+    use ureq::{http, Error};
 
     #[derive(Debug)]
     struct Loopback(u16);
@@ -281,13 +284,103 @@ mod remote {
         }
     }
 
-    /// An agent with `config` whose every connection goes to `port` on
-    /// loopback, in plain HTTP, whatever the URL says.
-    pub fn agent(config: Config, port: u16) -> Agent {
-        Agent::with_parts(
+    /// Agents with `config` whose every connection goes to `port` on
+    /// loopback, in plain HTTP, whatever the URL says: every name resolves
+    /// to 127.0.0.1, so every page is on loopback (SPEC-9.5.3).
+    pub fn net(config: Config, port: u16) -> Net {
+        Net::with_parts(
             config,
             TcpConnector::default().chain(PretendTls),
             Loopback(port),
+        )
+    }
+
+    /// Names resolve as a test says, each lookup of a name taking the next
+    /// address of its list (the last one again when the list runs out), an
+    /// IP literal to itself; every address on `port`.
+    #[derive(Debug)]
+    struct Hosts {
+        names: HashMap<String, Vec<IpAddr>>,
+        lookups: Mutex<HashMap<String, usize>>,
+        port: u16,
+    }
+
+    impl Resolver for Hosts {
+        fn resolve(
+            &self,
+            uri: &http::Uri,
+            _config: &Config,
+            _timeout: NextTimeout,
+        ) -> Result<ResolvedSocketAddrs, Error> {
+            let host = uri.host().unwrap_or("");
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            let ip = match host.parse::<IpAddr>() {
+                Ok(ip) => ip,
+                Err(_) => {
+                    let list = self.names.get(host).ok_or(Error::HostNotFound)?;
+                    let mut lookups = self.lookups.lock().unwrap();
+                    let n = lookups.entry(host.to_string()).or_insert(0);
+                    let ip = list[(*n).min(list.len() - 1)];
+                    *n += 1;
+                    ip
+                }
+            };
+            let mut addrs = self.empty();
+            addrs.push(SocketAddr::new(ip, self.port));
+            Ok(addrs)
+        }
+    }
+
+    /// Connects to `port` on loopback whatever address the resolver gave:
+    /// the private-network rule has judged that address before this runs.
+    #[derive(Debug)]
+    struct ToServer(u16);
+
+    impl Connector for ToServer {
+        type Out = <TcpConnector as Connector>::Out;
+
+        fn connect(
+            &self,
+            details: &ConnectionDetails,
+            chained: Option<()>,
+        ) -> Result<Option<Self::Out>, Error> {
+            let mut addrs = details.resolver.empty();
+            addrs.push(SocketAddr::from(([127, 0, 0, 1], self.0)));
+            let to_server = ConnectionDetails {
+                uri: details.uri,
+                addrs,
+                config: details.config,
+                request_level: details.request_level,
+                resolver: details.resolver,
+                now: details.now,
+                timeout: details.timeout,
+                current_time: details.current_time.clone(),
+                run_connector: details.run_connector.clone(),
+                register_shutdown: details.register_shutdown.clone(),
+            };
+            TcpConnector::default().connect(&to_server, chained)
+        }
+    }
+
+    /// Agents with `config` whose names resolve as `names` says, while
+    /// every connection goes to `port` on loopback in plain HTTP: the
+    /// private-network rule sees the addresses a test chose.
+    pub fn net_with_hosts(config: Config, port: u16, names: &[(&str, &[&str])]) -> Net {
+        let names = names
+            .iter()
+            .map(|(n, ips)| {
+                let ips = ips.iter().map(|ip| ip.parse().unwrap()).collect();
+                (n.to_string(), ips)
+            })
+            .collect();
+        Net::with_parts(
+            config,
+            ToServer(port).chain(PretendTls),
+            Hosts {
+                names,
+                lookups: Mutex::new(HashMap::new()),
+                port,
+            },
         )
     }
 }
@@ -297,9 +390,9 @@ mod remote {
 fn remote_fetcher(name: &str, server: &TestServer, resolver: &FakeResolver) -> (Fetcher, PathBuf) {
     let dir = temp_dir(name);
     let options = Options::new(&dir);
-    let agent = remote::agent(Fetcher::test_config(&options), server.port());
+    let net = remote::net(Fetcher::test_config(&options), server.port());
     (
-        Fetcher::with_parts(options, Box::new(resolver.clone()), agent).unwrap(),
+        Fetcher::with_parts(options, Box::new(resolver.clone()), net).unwrap(),
         dir,
     )
 }
@@ -1512,16 +1605,212 @@ fn spec_7_6_2_7_6_3_key_log_checked_at_key_decisions() {
     }
 }
 
-/// SPEC-9.5.3: a page whose own address is not loopback never reaches the
-/// user's machine, over https either (review 0007, finding 3).
+/// SPEC-9.5.3, review 0007 finding 3: after the host is resolved, a page
+/// on a public address reaches only public addresses, one on a private
+/// address private and public ones, one on loopback everything; every hop
+/// of a redirect is checked, IPv4 in IPv6 form is classed as IPv4, a name
+/// is classed by what it resolves to, and the page's own first request
+/// cannot be served from further out than its name resolved to when it
+/// was classed (DNS rebinding). A refused connection is never made.
 #[test]
-#[ignore = "SPEC-9.5.3: the private-network rule lands in the next commit"]
 fn spec_9_5_3_private_network_rule() {
-    let (f, dir) = fetcher("private-network");
-    let r = f.request("GET", "https://127.0.0.1:9/", b"", false, 1 << 20);
-    assert!(
-        matches!(&r, Err(e) if e.to_string().contains("SPEC-9.5.3")),
-        "{r:?}"
+    let p = package(&key(0), None);
+    let site = Site::new(p, Form::Package, &[key(0)]);
+    let server = serve(&site);
+    let port = server.port();
+    {
+        let mut s = site.lock().unwrap();
+        s.redirects.insert(
+            "/to-loopback".into(),
+            format!("https://127.0.0.1:{port}/hello"),
+        );
+        s.redirects.insert(
+            "/to-mapped".into(),
+            format!("https://[::ffff:127.0.0.1]:{port}/hello"),
+        );
+        s.redirects.insert(
+            "/to-lan".into(),
+            format!("https://lan.example:{port}/hello"),
+        );
+        s.redirects.insert(
+            "/to-public".into(),
+            format!("https://public.example:{port}/hello"),
+        );
+    }
+    let names: &[(&str, &[&str])] = &[
+        ("localhost", &["127.0.0.1"]),
+        ("public.example", &["93.184.216.34"]),
+        ("other.example", &["8.8.8.8"]),
+        ("lan.example", &["192.168.1.20"]),
+        ("nas.example", &["10.1.2.3"]),
+        ("metadata.example", &["169.254.169.254"]),
+        ("rebind.example", &["127.0.0.1"]),
+        ("mapped.example", &["::ffff:127.0.0.1"]),
+        ("v6-lan.example", &["fd00::7"]),
+        // Private when classed, public when connected to.
+        ("flip.example", &["192.168.1.30", "93.184.216.34"]),
+    ];
+    let dir = temp_dir("private-network");
+    let options = Options::new(&dir);
+    let net = remote::net_with_hosts(Fetcher::test_config(&options), port, names);
+    let mut f = Fetcher::with_parts(options, Box::new(FakeResolver::default()), net).unwrap();
+    let at = |host: &str, path: &str| Address::parse(&format!("vy://{host}:{port}{path}")).unwrap();
+    let https = |host: &str, path: &str| format!("https://{host}:{port}{path}");
+    const LIMIT: u64 = 1 << 20;
+    let refused = |r: Result<(u16, Vec<u8>), Error>, class: NetClass| match r {
+        Err(Error::PrivateNetwork { class: c, page, .. }) => {
+            assert_eq!(c, class);
+            page
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+
+    // A page on a public address: only public addresses, over every path.
+    let public = f.fetch(&at("public.example", "/hello")).unwrap();
+    assert_eq!(public.net_class(), NetClass::Public);
+    let own = public.net_class();
+    let before = server.requests().len();
+    for (host, class) in [
+        ("127.0.0.1", NetClass::Loopback),
+        ("[::1]", NetClass::Loopback),
+        ("[::ffff:127.0.0.1]", NetClass::Loopback),
+        ("0.0.0.0", NetClass::Loopback),
+        ("rebind.example", NetClass::Loopback),
+        ("mapped.example", NetClass::Loopback),
+        ("lan.example", NetClass::Private),
+        ("nas.example", NetClass::Private),
+        ("metadata.example", NetClass::Private),
+        ("v6-lan.example", NetClass::Private),
+    ] {
+        let page = refused(
+            f.request("GET", &https(host, "/hello"), b"", own, LIMIT),
+            class,
+        );
+        assert_eq!(page, NetClass::Public, "{host}");
+        // The shell's bool for a page off loopback is the same rule, and
+        // so is a requester on another thread.
+        refused(
+            f.request("GET", &https(host, "/hello"), b"", false, LIMIT),
+            class,
+        );
+        refused(
+            f.requester()
+                .request("GET", &https(host, "/hello"), b"", own, LIMIT),
+            class,
+        );
+    }
+    assert_eq!(
+        server.requests().len(),
+        before,
+        "nothing refused was connected"
     );
+    let message = f
+        .request("GET", &https("127.0.0.1", "/hello"), b"", own, LIMIT)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("SPEC-9.5.3") && message.contains("127.0.0.1"),
+        "{message}"
+    );
+    let (status, _) = f
+        .request("GET", &https("other.example", "/hello"), b"", own, LIMIT)
+        .unwrap();
+    assert_eq!(status, 200, "public to public");
+
+    // Every hop of a redirect: a public page's own address sending the
+    // client to loopback, to loopback in IPv6 form, or to the LAN.
+    for (path, class) in [
+        ("/to-loopback", NetClass::Loopback),
+        ("/to-mapped", NetClass::Loopback),
+        ("/to-lan", NetClass::Private),
+    ] {
+        let before = server.requests().len();
+        match f.fetch(&at("public.example", path)) {
+            Err(Error::PrivateNetwork {
+                class: c,
+                page: NetClass::Public,
+                ..
+            }) => assert_eq!(c, class, "{path}"),
+            other => panic!("{path}: expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            server.requests().len(),
+            before + 1,
+            "{path}: only the redirecting request was made"
+        );
+    }
+    assert!(f.fetch(&at("public.example", "/to-public")).is_ok());
+
+    // A page on a private address: private and public, never loopback.
+    let lan = f.fetch(&at("lan.example", "/hello")).unwrap();
+    assert_eq!(lan.net_class(), NetClass::Private);
+    for host in [
+        "nas.example",
+        "metadata.example",
+        "v6-lan.example",
+        "other.example",
+    ] {
+        let (status, _) = f
+            .request("GET", &https(host, "/hello"), b"", lan.net_class(), LIMIT)
+            .unwrap();
+        assert_eq!(status, 200, "{host}");
+    }
+    for host in ["127.0.0.1", "rebind.example", "mapped.example"] {
+        refused(
+            f.request("GET", &https(host, "/hello"), b"", lan.net_class(), LIMIT),
+            NetClass::Loopback,
+        );
+    }
+    match f.fetch(&at("lan.example", "/to-loopback")) {
+        Err(Error::PrivateNetwork {
+            page: NetClass::Private,
+            ..
+        }) => {}
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(
+        f.fetch(&at("lan.example", "/to-lan")).unwrap().net_class(),
+        NetClass::Private
+    );
+
+    // A page on loopback reaches its own loopback, and everything else.
+    let local = f.fetch(&at("localhost", "/hello")).unwrap();
+    assert_eq!(local.net_class(), NetClass::Loopback);
+    assert!(local.trusted());
+    let own_origin = format!("http://localhost:{port}/hello");
+    let (status, _) = f
+        .request("GET", &own_origin, b"", local.net_class(), LIMIT)
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(
+        f.request("GET", &own_origin, b"", true, LIMIT).unwrap().0,
+        200
+    );
+    for host in ["127.0.0.1", "lan.example", "public.example"] {
+        let (status, _) = f
+            .request(
+                "GET",
+                &https(host, "/hello"),
+                b"",
+                NetClass::Loopback,
+                LIMIT,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "{host}");
+    }
+
+    // DNS rebinding of the page's own name: classed private, then served
+    // from a public address. The first hop is held to the private class,
+    // so the page is not loaded with private reach from out there.
+    let before = server.requests().len();
+    match f.fetch(&at("flip.example", "/hello")) {
+        Err(Error::PrivateNetwork {
+            class: NetClass::Public,
+            page: NetClass::Private,
+            ..
+        }) => {}
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(server.requests().len(), before);
     let _ = std::fs::remove_dir_all(dir);
 }

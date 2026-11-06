@@ -13,6 +13,7 @@ mod cache;
 pub mod dns;
 mod fetch;
 mod keys;
+mod net;
 mod url;
 
 #[cfg(test)]
@@ -31,5 +32,6 @@ pub use fetch::{
     WELL_KNOWN_LOG_PATH,
 };
 pub use keys::{KeyStore, LogHead, OriginKeys};
+pub use net::NetClass;
 pub use url::{accepts, cache_control, media_type, resolve, CacheControl, HttpUrl};
 pub use vy_manifest::{MEDIA_MANIFEST, MEDIA_PACKAGE};

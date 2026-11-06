@@ -9,12 +9,13 @@ use crate::cache::{
 };
 use crate::dns::{DnsError, SystemResolver, TxtResolver};
 use crate::keys::{KeyStore, LogHead};
+use crate::net::{Net, NetClass, Refused, Rule};
 use crate::url::{cache_control, media_type, resolve, CacheControl, HttpUrl};
 use std::fmt;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use ureq::config::Config;
-use ureq::Agent;
 use vy_manifest::{
     dns_txt_name, parse_dns_txt, parse_key_file, Grant, Hash, KeyLog, Manifest, Package,
     PackageError, Problem, PublicKey, Trust, MAX_LOG_BYTES, MAX_MANIFEST_BYTES, MEDIA_MANIFEST,
@@ -90,6 +91,18 @@ pub enum Error {
         /// What went wrong.
         message: String,
     },
+    /// The private-network rule refused the connection (SPEC-9.5.3):
+    /// nothing was connected.
+    PrivateNetwork {
+        /// The URL.
+        url: String,
+        /// The address its host resolved to.
+        address: IpAddr,
+        /// That address's class.
+        class: NetClass,
+        /// The class of the page's own address.
+        page: NetClass,
+    },
     /// The manifest does not decode (SPEC-4.1.3, SPEC-8.1.*).
     Manifest(vy_manifest::Error),
     /// The package does not unpack (SPEC-4.4.1).
@@ -121,6 +134,15 @@ impl fmt::Display for Error {
             }
             Self::TooLarge { url, limit } => write!(f, "{url}: body over {limit} bytes"),
             Self::Transport { url, message } => write!(f, "{url}: {message}"),
+            Self::PrivateNetwork {
+                url,
+                address,
+                class,
+                page,
+            } => write!(
+                f,
+                "{url}: {address} is a {class} address, which a page on a {page} address may not reach (SPEC-9.5.3)"
+            ),
             Self::Manifest(e) => write!(f, "manifest: {e}"),
             Self::Package(e) => write!(f, "package: {e}"),
             Self::HashMismatch { url, expected } => {
@@ -316,6 +338,8 @@ pub struct Fetched {
     pub form: Form,
     /// Network requests made, 0 when everything came from the caches.
     pub requests: u32,
+    /// The class of the page's own address (SPEC-9.5.3).
+    net_class: NetClass,
 }
 
 impl Fetched {
@@ -334,6 +358,13 @@ impl Fetched {
     /// (SPEC-7.4.5); `None` when it is trusted.
     pub fn restriction(&self) -> Option<&Restriction> {
         self.restriction.as_ref()
+    }
+
+    /// The class of the page's own address (SPEC-9.5.3), what its own
+    /// requests are checked against: pass it to [`Fetcher::request`] or
+    /// [`Requester::request`].
+    pub fn net_class(&self) -> NetClass {
+        self.net_class
     }
 
     /// Default grant per requested capability (SPEC-8.2.3); every one is
@@ -376,9 +407,66 @@ struct Response {
 /// loopback host, and only for a page whose own address is loopback. The
 /// exception is for developing against a local server, not a way for a
 /// remote page to steer the client at services on the user's machine
-/// through a redirect or a blob URL.
+/// through a redirect or a blob URL. Where an `https://` URL may lead is
+/// the private-network rule's (SPEC-9.5.3), decided after the host is
+/// resolved.
 pub fn transport_allowed(page_is_localhost: bool, url: &HttpUrl) -> bool {
     url.scheme == "https" || (page_is_localhost && url.is_localhost())
+}
+
+/// A ureq error as the fetcher reports it: a refusal by the private-network
+/// rule (SPEC-9.5.3) as [`Error::PrivateNetwork`], anything else as
+/// [`Error::Transport`].
+fn transport_error(url: &str, e: ureq::Error) -> Error {
+    match Refused::find(&e) {
+        Some(r) => Error::PrivateNetwork {
+            url: url.to_string(),
+            address: r.address,
+            class: r.class,
+            page: match r.rule {
+                Rule::From(page) | Rule::Within(page) => page,
+            },
+        },
+        None => Error::Transport {
+            url: url.to_string(),
+            message: e.to_string(),
+        },
+    }
+}
+
+/// Who one GET is made for (SPEC-7.1.3, SPEC-9.5.3).
+#[derive(Clone, Copy, Debug)]
+struct Reach {
+    /// The page's own address is a loopback name: plain `http://` to
+    /// loopback is allowed (SPEC-7.1.3).
+    local: bool,
+    /// The class of the page's own address.
+    page: NetClass,
+    /// The first hop is the page's own address: it connects only to an
+    /// address of the page's class or a more local one.
+    own: bool,
+}
+
+impl Reach {
+    /// The rule for hop `hop` of the GET.
+    fn rule(self, hop: u32) -> Rule {
+        if self.own && hop == 0 {
+            Rule::Within(self.page)
+        } else {
+            Rule::From(self.page)
+        }
+    }
+}
+
+/// The HTTP cache's key for `url` fetched for a page of class `page`: a
+/// response is reused only under the class it was fetched with, so a page
+/// whose name now resolves to a more local address is fetched again, held
+/// to [`Rule::Within`], instead of running from the cache with more reach.
+fn http_key(url: &str, page: NetClass) -> String {
+    match page {
+        NetClass::Public => url.to_string(),
+        class => format!("{url} ({class})"),
+    }
 }
 
 /// Body limit per media type of the page response: a manifest is at most
@@ -398,15 +486,15 @@ fn page_limit(media_type: &str) -> u64 {
 /// rules apply as in [`Fetcher::request`].
 #[derive(Clone, Debug)]
 pub struct Requester {
-    agent: Agent,
+    net: Net,
 }
 
 impl Requester {
-    /// A requester with the agent [`Fetcher::new`] would build for
+    /// A requester with the agents [`Fetcher::new`] would build for
     /// `options`.
     pub fn new(options: &Options) -> Self {
         Self {
-            agent: Agent::new_with_config(Fetcher::config(options)),
+            net: Net::new(Fetcher::config(options)),
         }
     }
 
@@ -416,34 +504,32 @@ impl Requester {
         method: &str,
         url: &str,
         body: &[u8],
-        page_is_localhost: bool,
+        page: impl Into<NetClass>,
         limit: u64,
     ) -> Result<(u16, Vec<u8>), Error> {
-        request_with(&self.agent, method, url, body, page_is_localhost, limit)
+        request_with(&self.net, method, url, body, page.into(), limit)
     }
 }
 
-/// [`Fetcher::request`] with `agent`.
+/// [`Fetcher::request`] through `net`.
 fn request_with(
-    agent: &Agent,
+    net: &Net,
     method: &str,
     url: &str,
     body: &[u8],
-    page_is_localhost: bool,
+    page: NetClass,
     limit: u64,
 ) -> Result<(u16, Vec<u8>), Error> {
     let parsed = HttpUrl::parse(url).ok_or_else(|| Error::BadRedirect {
         url: url.to_string(),
     })?;
-    if !transport_allowed(page_is_localhost, &parsed) {
+    if !transport_allowed(page == NetClass::Loopback, &parsed) {
         return Err(Error::TlsRequired {
             url: url.to_string(),
         });
     }
-    let transport = |e: ureq::Error| Error::Transport {
-        url: url.to_string(),
-        message: e.to_string(),
-    };
+    let agent = net.agent(Rule::From(page));
+    let transport = |e: ureq::Error| transport_error(url, e);
     let mut resp = match method {
         "GET" => agent.get(url).call(),
         "DELETE" => agent.delete(url).call(),
@@ -482,7 +568,7 @@ fn request_with(
 /// Fetches pages with a content-addressed cache, an HTTP cache for
 /// manifests and a per-origin key store.
 pub struct Fetcher {
-    agent: Agent,
+    net: Net,
     blobs: BlobCache,
     http: HttpCache,
     keys: KeyStore,
@@ -498,8 +584,8 @@ impl Fetcher {
 
     /// As [`Fetcher::new`], with `resolver` answering the TXT lookups.
     pub fn with_resolver(options: Options, resolver: Box<dyn TxtResolver>) -> Result<Self, Error> {
-        let agent = Agent::new_with_config(Self::config(&options));
-        Self::with_parts(options, resolver, agent)
+        let net = Net::new(Self::config(&options));
+        Self::with_parts(options, resolver, net)
     }
 
     /// The HTTP configuration: no automatic redirects (they are followed
@@ -518,17 +604,17 @@ impl Fetcher {
             .build()
     }
 
-    /// Open the caches under `options.cache_dir` around a ready `agent`.
-    /// Tests build the agent with a connector that reaches a loopback
-    /// server under a remote name; the product uses [`Fetcher::new`].
+    /// Open the caches under `options.cache_dir` around ready agents.
+    /// Tests build them with a connector that reaches a loopback server
+    /// under a remote name; the product uses [`Fetcher::new`].
     pub(crate) fn with_parts(
         options: Options,
         resolver: Box<dyn TxtResolver>,
-        agent: Agent,
+        net: Net,
     ) -> Result<Self, Error> {
         let io = |e: std::io::Error| Error::Io(e.to_string());
         Ok(Fetcher {
-            agent,
+            net,
             blobs: BlobCache::open(&options.cache_dir, options.cache_cap_bytes).map_err(io)?,
             http: HttpCache::open(&options.cache_dir, options.http_cache_cap_bytes).map_err(io)?,
             keys: KeyStore::open(&options.cache_dir).map_err(io)?,
@@ -536,7 +622,7 @@ impl Fetcher {
         })
     }
 
-    /// The agent's configuration for a test agent built around another
+    /// The agents' configuration for test agents built around another
     /// connector.
     #[cfg(test)]
     pub(crate) fn test_config(options: &Options) -> Config {
@@ -555,31 +641,35 @@ impl Fetcher {
 
     /// One plain request on a page's behalf (`fetch_begin`, SPEC-5.2.7),
     /// made by the main process because the tab process has no network
-    /// (SPEC-9.1.1). `method` is `GET`, `POST`, `PUT` or `DELETE`; the
-    /// URL must be `https://`, or `http://` to loopback for a page whose
-    /// own address is loopback (`page_is_localhost`, SPEC-7.1.3);
-    /// redirects are not followed, no `Referer` is sent (SPEC-7.5.1), and
-    /// the body is read up to `limit` bytes, beyond which the result is
-    /// [`Error::TooLarge`]. Returns the status and the body; a status
-    /// other than 2xx is still a response, not an error. Nothing is cached:
-    /// the page's own requests are its own business.
+    /// (SPEC-9.1.1). `page` is the class of the page's own address
+    /// ([`Fetched::net_class`]); `true` and `false` stand for a page whose
+    /// address is or is not a loopback name, the latter as public.
+    /// `method` is `GET`, `POST`, `PUT` or `DELETE`; the URL must be
+    /// `https://`, or `http://` to loopback for a page on loopback
+    /// (SPEC-7.1.3), and its host must resolve to an address the page may
+    /// reach (SPEC-9.5.3), else [`Error::PrivateNetwork`] and nothing is
+    /// connected; redirects are not followed, no `Referer` is sent
+    /// (SPEC-7.5.1), and the body is read up to `limit` bytes, beyond
+    /// which the result is [`Error::TooLarge`]. Returns the status and the
+    /// body; a status other than 2xx is still a response, not an error.
+    /// Nothing is cached: the page's own requests are its own business.
     pub fn request(
         &self,
         method: &str,
         url: &str,
         body: &[u8],
-        page_is_localhost: bool,
+        page: impl Into<NetClass>,
         limit: u64,
     ) -> Result<(u16, Vec<u8>), Error> {
-        request_with(&self.agent, method, url, body, page_is_localhost, limit)
+        request_with(&self.net, method, url, body, page.into(), limit)
     }
 
     /// A handle that makes the same requests as [`Fetcher::request`] with
-    /// this fetcher's agent, for another thread: the page's own requests
+    /// this fetcher's agents, for another thread: the page's own requests
     /// need no cache or key store, so they need not wait for a page load.
     pub fn requester(&self) -> Requester {
         Requester {
-            agent: self.agent.clone(),
+            net: self.net.clone(),
         }
     }
 
@@ -593,20 +683,38 @@ impl Fetcher {
     /// page (vy-shell devtools).
     pub fn revalidate(&mut self, address: &Address) -> Result<Hash, Error> {
         let url = address.fetch_url();
-        if let Some(mut rec) = self.http.get(&url) {
+        let reach = self.page_reach(address);
+        let key = http_key(&url, reach.page);
+        if let Some(mut rec) = self.http.get(&key) {
             rec.max_age = 0;
-            let _ = self.http.put(&url, &rec);
+            let _ = self.http.put(&key, &rec);
         }
         let mut requests = 0;
-        let resp = self.get_with_http_cache(&url, address.is_localhost(), &mut requests)?;
+        let resp = self.get_with_http_cache(&url, reach, &mut requests)?;
         Ok(Hash::of(&resp.body))
+    }
+
+    /// How the page at `address` is fetched: its address classed
+    /// (SPEC-9.5.3), its own URL the first hop.
+    fn page_reach(&self, address: &Address) -> Reach {
+        let local = address.is_localhost();
+        Reach {
+            local,
+            page: self.net.classify(&address.fetch_url(), local),
+            own: true,
+        }
     }
 
     /// Fetch a page.
     pub fn fetch(&mut self, address: &Address) -> Result<Fetched, Error> {
         let mut requests = 0;
-        let local = address.is_localhost();
-        let primary = self.get_with_http_cache(&address.fetch_url(), local, &mut requests)?;
+        let reach = self.page_reach(address);
+        // Everything after the page's own URL: blobs, key file, log.
+        let fetched_for = Reach {
+            own: false,
+            ..reach
+        };
+        let primary = self.get_with_http_cache(&address.fetch_url(), reach, &mut requests)?;
         let (package, form) = match primary.media_type.as_str() {
             MEDIA_PACKAGE => {
                 let package = Package::unpack(&primary.body)?;
@@ -633,7 +741,7 @@ impl Fetcher {
                     manifest.module.size,
                     manifest.module.url.as_deref(),
                     &primary.url,
-                    local,
+                    fetched_for,
                     &mut requests,
                 )?;
                 let mut resources = Vec::with_capacity(manifest.resources.len());
@@ -643,7 +751,7 @@ impl Fetcher {
                         r.size,
                         r.url.as_deref(),
                         &primary.url,
-                        local,
+                        fetched_for,
                         &mut requests,
                     )?);
                 }
@@ -671,10 +779,11 @@ impl Fetcher {
             .as_ref()
             .map(|s| s.key_id.clone())
             .unwrap_or_default();
-        let (trust, restriction) = match self.trust(address, &package.manifest, &mut requests) {
-            Ok(trust) => (Some(trust), None),
-            Err(why) => (None, Some(why)),
-        };
+        let (trust, restriction) =
+            match self.trust(address, fetched_for, &package.manifest, &mut requests) {
+                Ok(trust) => (Some(trust), None),
+                Err(why) => (None, Some(why)),
+            };
         Ok(Fetched {
             address: address.clone(),
             identity: package.identity(),
@@ -684,6 +793,7 @@ impl Fetcher {
             key_id,
             form,
             requests,
+            net_class: reach.page,
         })
     }
 
@@ -704,7 +814,7 @@ impl Fetcher {
         size: u64,
         url: Option<&str>,
         base: &str,
-        local: bool,
+        reach: Reach,
         requests: &mut u32,
     ) -> Result<Vec<u8>, Error> {
         if let Some(bytes) = self.blobs.get(hash) {
@@ -720,7 +830,7 @@ impl Fetcher {
         // `size` is the manifest's claim, already bounded by
         // `declared_size_problems`; the cap here is the last line of defence.
         let limit = size.min(MAX_BLOB_BYTES);
-        let resp = self.get(&url, "*/*", &|_| limit, None, local, requests)?;
+        let resp = self.get(&url, "*/*", &|_| limit, None, reach, requests)?;
         if resp.status != 200 {
             return Err(Error::Status {
                 url: resp.url,
@@ -741,14 +851,16 @@ impl Fetcher {
 
     /// GET through the HTTP cache (SPEC-7.3.2): a fresh record is used
     /// without a request; a stale one is revalidated with `If-None-Match`.
+    /// Records are kept per class of the page ([`http_key`]).
     fn get_with_http_cache(
         &mut self,
         url: &str,
-        local: bool,
+        reach: Reach,
         requests: &mut u32,
     ) -> Result<Response, Error> {
         let now = now_secs();
-        let cached = self.http.get(url);
+        let key = http_key(url, reach.page);
+        let cached = self.http.get(&key);
         if let Some(rec) = &cached {
             if rec.is_fresh(now) {
                 return Ok(Response {
@@ -765,7 +877,7 @@ impl Fetcher {
             }
         }
         let etag = cached.as_ref().and_then(|r| r.etag.clone());
-        let resp = self.get(url, ACCEPT, &page_limit, etag.as_deref(), local, requests)?;
+        let resp = self.get(url, ACCEPT, &page_limit, etag.as_deref(), reach, requests)?;
         if resp.status == 304 {
             if let Some(mut rec) = cached {
                 rec.fetched_at = now;
@@ -775,7 +887,7 @@ impl Fetcher {
                 if resp.etag.is_some() {
                     rec.etag = resp.etag.clone();
                 }
-                let _ = self.http.put(url, &rec);
+                let _ = self.http.put(&key, &rec);
                 return Ok(Response {
                     url: rec.url,
                     status: 200,
@@ -793,7 +905,7 @@ impl Fetcher {
             });
         }
         if resp.cache.no_store {
-            self.http.remove(url);
+            self.http.remove(&key);
         } else {
             let rec = HttpRecord {
                 url: resp.url.clone(),
@@ -803,41 +915,39 @@ impl Fetcher {
                 media_type: resp.media_type.clone(),
                 body: resp.body.clone(),
             };
-            let _ = self.http.put(url, &rec);
+            let _ = self.http.put(&key, &rec);
         }
         Ok(resp)
     }
 
     /// One GET with up to [`MAX_REDIRECTS`] hops, each checked with
-    /// [`transport_allowed`] before it is connected (SPEC-7.1.3); `local`
-    /// says whether the page's own address is loopback. Never sends
-    /// `Referer` (SPEC-7.5.1). `limit` gives the body cap for the media
-    /// type received; 0 means the body is not read.
+    /// [`transport_allowed`] before it is connected (SPEC-7.1.3) and by
+    /// the private-network rule once its host is resolved (SPEC-9.5.3), as
+    /// `reach` says. Never sends `Referer` (SPEC-7.5.1). `limit` gives the
+    /// body cap for the media type received; 0 means the body is not read.
     fn get(
         &self,
         url: &str,
         accept: &str,
         limit: &dyn Fn(&str) -> u64,
         if_none_match: Option<&str>,
-        local: bool,
+        reach: Reach,
         requests: &mut u32,
     ) -> Result<Response, Error> {
         let mut url = url.to_string();
         for hop in 0..=MAX_REDIRECTS {
             let parsed =
                 HttpUrl::parse(&url).ok_or_else(|| Error::BadRedirect { url: url.clone() })?;
-            if !transport_allowed(local, &parsed) {
+            if !transport_allowed(reach.local, &parsed) {
                 return Err(Error::TlsRequired { url });
             }
-            let mut req = self.agent.get(&url).header("Accept", accept);
+            let agent = self.net.agent(reach.rule(hop));
+            let mut req = agent.get(&url).header("Accept", accept);
             if let Some(etag) = if_none_match {
                 req = req.header("If-None-Match", etag);
             }
             *requests += 1;
-            let mut resp = req.call().map_err(|e| Error::Transport {
-                url: url.clone(),
-                message: e.to_string(),
-            })?;
+            let mut resp = req.call().map_err(|e| transport_error(&url, e))?;
             let status = resp.status().as_u16();
             let header = |name: &str| -> Option<String> {
                 resp.headers()
@@ -908,6 +1018,7 @@ impl Fetcher {
     fn trust(
         &mut self,
         address: &Address,
+        reach: Reach,
         manifest: &Manifest,
         requests: &mut u32,
     ) -> Result<Trust, Restriction> {
@@ -921,9 +1032,9 @@ impl Fetcher {
                 // First visit: pin what both sources publish (SPEC-7.4.5)
                 // and, when the origin serves a log, the log lists
                 // (SPEC-7.6.2).
-                let agreed = self.first_visit_keys(address, requests)?;
+                let agreed = self.first_visit_keys(address, reach, requests)?;
                 let published = agreed.iter().any(|k| k.key_id() == sig.key_id);
-                let (logged, head) = self.logged_keys(address, agreed, requests)?;
+                let (logged, head) = self.logged_keys(address, reach, agreed, requests)?;
                 for k in &logged {
                     let _ = self.keys.pin(&origin, *k);
                 }
@@ -941,7 +1052,7 @@ impl Fetcher {
                 // Rotation (SPEC-7.4.4): the announced key comes from the
                 // key file alone; DNS is not asked again.
                 let published = self
-                    .discover_keys(address, requests)
+                    .discover_keys(address, reach, requests)
                     .map_err(|e| Restriction::KeyFileUnavailable(e.to_string()))?;
                 let key = published
                     .into_iter()
@@ -950,7 +1061,7 @@ impl Fetcher {
                         key_id: sig.key_id.clone(),
                     })?;
                 // A served log must list the new key (SPEC-7.6.2).
-                let (logged, head) = self.logged_keys(address, vec![key], requests)?;
+                let (logged, head) = self.logged_keys(address, reach, vec![key], requests)?;
                 if logged.is_empty() {
                     return Err(Restriction::NotInLog {
                         key_id: sig.key_id.clone(),
@@ -989,10 +1100,11 @@ impl Fetcher {
     fn first_visit_keys(
         &mut self,
         address: &Address,
+        reach: Reach,
         requests: &mut u32,
     ) -> Result<Vec<PublicKey>, Restriction> {
         let published = self
-            .discover_keys(address, requests)
+            .discover_keys(address, reach, requests)
             .map_err(|e| Restriction::KeyFileUnavailable(e.to_string()))?;
         if address.is_localhost() {
             return Ok(published);
@@ -1027,12 +1139,13 @@ impl Fetcher {
     fn logged_keys(
         &mut self,
         address: &Address,
+        reach: Reach,
         candidates: Vec<PublicKey>,
         requests: &mut u32,
     ) -> Result<(Vec<PublicKey>, Option<LogHead>), Restriction> {
         let origin = address.origin();
         let seen = self.keys.log_head(&origin);
-        let log = match self.fetch_log(address, requests) {
+        let log = match self.fetch_log(address, reach, requests) {
             Err(e) => return Err(Restriction::LogInvalid(e)),
             Ok(None) if seen.is_some() => return Err(Restriction::LogWithdrawn),
             Ok(None) => return Ok((candidates, None)),
@@ -1054,7 +1167,12 @@ impl Fetcher {
 
     /// `GET /.well-known/vy-log` (SPEC-7.6.1): `None` for a 404, the
     /// chain-checked log for a 200, the reason otherwise.
-    fn fetch_log(&self, address: &Address, requests: &mut u32) -> Result<Option<KeyLog>, String> {
+    fn fetch_log(
+        &self,
+        address: &Address,
+        reach: Reach,
+        requests: &mut u32,
+    ) -> Result<Option<KeyLog>, String> {
         let base = address.fetch_url();
         let url = resolve(&base, WELL_KNOWN_LOG_PATH).ok_or_else(|| format!("bad base {base}"))?;
         let resp = self
@@ -1063,7 +1181,7 @@ impl Fetcher {
                 "text/plain",
                 &|_| MAX_LOG_BYTES as u64,
                 None,
-                address.is_localhost(),
+                reach,
                 requests,
             )
             .map_err(|e| e.to_string())?;
@@ -1080,6 +1198,7 @@ impl Fetcher {
     fn discover_keys(
         &self,
         address: &Address,
+        reach: Reach,
         requests: &mut u32,
     ) -> Result<Vec<vy_manifest::PublicKey>, Error> {
         let base = address.fetch_url();
@@ -1090,7 +1209,7 @@ impl Fetcher {
             "text/plain",
             &|_| MAX_KEY_FILE_BYTES,
             None,
-            address.is_localhost(),
+            reach,
             requests,
         )?;
         if resp.status != 200 {

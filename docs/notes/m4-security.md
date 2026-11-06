@@ -420,13 +420,25 @@ vad som ska försökas, hur, vad som räknas som fynd.
    (IPC-avkodaren är fuzzad, `ipc`-målet): `FetchRequest` utan `net`, till främmande origin, fler
    än 64 i luften, över 256 MB/min; `Storage` över kvoten; `Navigate` till `file:`, `http:`,
    en lokal sökväg. Fynd: något som når nätet eller disken utan att huvudprocessen beslutat det.
-7. **Loopback-regeln (m4/dev).** En sida från en *icke*-loopback-origin får aldrig nå en
-   loopback-origin: varken via `fetch_begin` (`net`-origins som `https://127.0.0.1:…`,
-   `localhost`, `[::1]`, `0.0.0.0`, `127.1`, decimala och oktala IP-former, DNS-namn som pekar på
-   127.0.0.1 – DNS-rebinding), via omdirigeringar, via `module.url`/`resources[].url` i
-   manifestet, eller via `navigate`. Bara en sida vars *egen* adress är loopback får tala http mot
-   sin egen loopback-origin (SPEC-7.1.3, granskning 0003 fynd 5). Fynd: varje väg dit från en
-   fjärrsida.
+7. **Loopback och privata nät (SPEC-9.5.3, m4/dev, granskning 0007 fynd 3).** Regeln prövas
+   efter namnuppslaget på varje anslutning för en sida: en sida vars egen adress är offentlig når
+   bara offentliga adresser; en sida på en privat eller länklokal adress (`10/8`, `100.64/10`,
+   `172.16/12`, `192.168/16`, `169.254/16`, `fc00::/7`, `fe80::/10`) når privata och offentliga
+   men aldrig loopback (`127/8`, `::1`, `0.0.0.0/8`, `::`); bara en sida på loopback når allt.
+   Försök från en offentlig sida att nå loopback och det lokala nätet, också över `https://`:
+   via `fetch_begin` (`net`-origins som `https://127.0.0.1:…`, `localhost`, `[::1]`, `0.0.0.0`,
+   `[::]`, `127.1`, decimala och oktala IP-former, `::ffff:127.0.0.1` och andra IPv6-former av
+   IPv4, `169.254.169.254`, DNS-namn som pekar på 127.0.0.1 eller 10.x – DNS-rebinding, också ett
+   namn som byter adress mellan klassningen och anslutningen, och ett namn med både en offentlig
+   och en lokal adress), via omdirigeringar (alla tre hoppen), via
+   `module.url`/`resources[].url` i manifestet, och samma sak från en sida på ett privat nät mot
+   loopback. Plain http: bara en sida vars *egen* adress är ett loopback-namn får tala http, och
+   bara mot sin egen loopback-origin (SPEC-7.1.3, granskning 0003 fynd 5). `navigate` laddar målet
+   som en ny sida med målets egen klass (som en adress användaren skrivit); det är avsett. Fynd: en
+   anslutning (en SYN räcker, se med `ss`/`tcpdump`) till en adress som regeln nekar.
+   **Läge i skalet:** skalet skickar i dag bara `is_localhost` för sidans egna anrop, alltså
+   bedöms en sida på ett privat nät som offentlig där (stängt, men en LAN-sida når inte sin egen
+   origin) tills skalet skickar `Fetched::net_class()`.
 8. **Förtroendekedjan.** Första besök: förfalskade UDP-svar (fel id, fel fråga, trunkerat,
    CNAME-kedjor till främmande namn), en resolver som svarar SERVFAIL eller långsamt; rotation
    utan att nyckeln står i vy-key eller loggen; en logg som skrivits om, tagits bort eller visar
@@ -437,6 +449,36 @@ vad som ska försökas, hur, vad som räknas som fynd.
 10. **Resurser.** En sida som allokerar till `memory_max`, bränner bränsle, öppnar 64 anrop,
     fyller minuten, skriver till kvoten – och samtidigt i tio flikar: skalet ska förbli
     responsivt och huvudprocessens minne begränsat.
+
+## Privata nät efter namnuppslag (SPEC-9.5.3, granskning 0007 fynd 3)
+
+Före: `transport_allowed` släppte `https://` till vilken värd som helst, så en fjärrsida som fått
+`net` mot `https://127.0.0.1:<port>` (eller ett namn som pekar dit) fick klienten att ansluta till
+användarens maskin; TLS skyddade innehållet men inte anslutningen. Nu (`vy-proto/src/net.rs`)
+sitter regeln i resolvern för varje ureq-agent: adresserna som uppslaget ger filtreras på sidans
+klass, och blir inget kvar är svaret `Error::PrivateNetwork` utan att något ansluts. En agent per
+regel (fem, över en delad connector), så omdirigeringar, blobbar, nyckelfil, logg och sidans egna
+anrop prövas likadant. Sidans klass är `Loopback` för loopback-namnen (SPEC-7.1.3) och annars den
+mest offentliga klass dess värd slås upp till (`Fetched::net_class`).
+
+- **Vad.** Ingen ny yta; en ny gräns för en befintlig: vart klienten ansluter för en sida.
+- **Vem kan missbruka.** En fjärrsida som vill nå tjänster på användarens maskin eller LAN
+  (routrar, skrivare, molnets metadata på 169.254.169.254) genom `net`, en omdirigering eller en
+  blob-URL; en angripare som styr DNS för sitt eget namn (rebinding).
+- **Hur begränsas det.** Klassen prövas på adressen efter uppslaget, inte på namnet; IPv4 i
+  IPv6-form bedöms som IPv4; ett namn med flera adresser behåller bara de tillåtna. Mot rebinding
+  av sidans *eget* namn: första hoppet av sidans hämtning ansluter bara till en adress i den klass
+  sidan fått eller en mer lokal (en sida som klassats privat kan inte serveras från en offentlig
+  adress), och HTTP-cachens nyckel bär klassen, så ett svar hämtat under en klass återanvänds inte
+  under en annan. Kvar: en anslutning som redan ligger i ureq:s pool återanvänds utan ny
+  anslutning, men resolvern prövas vid varje anrop och poolen är per regel.
+- **Test som bevisar begränsningen.** `tests::spec_9_5_3_private_network_rule` (offentlig sida mot
+  loopback, `[::1]`, `::ffff:127.0.0.1`, `0.0.0.0`, namn som pekar på loopback, LAN, länklokalt
+  och `fd00::/8` nekas utan att något når servern; omdirigering från en offentlig adress till
+  127.0.0.1, till `[::ffff:127.0.0.1]` och till LAN nekas; privat sida når privat och offentligt
+  men inte loopback; sida på localhost når sin egen loopback och allt annat; ett namn som klassas
+  privat och sedan pekar ut nekas på första hoppet), `net::tests::spec_9_5_3_address_classes`
+  (intervallens gränser).
 
 ## Tester, backlogg och spec
 

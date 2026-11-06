@@ -111,7 +111,8 @@ körning (punkt 6) det andra. API:t finns inte på A
    "no-cors"})` från en webbsida når aldrig agenten. Inga CORS-huvuden skickas, så svaren går inte
    att läsa från en webbsida heller.
 4. *Fjärrsidor i Vy* kan inte nå `http://localhost` alls: `vy_proto::transport_allowed` släpper bara
-   igenom `http://` till loopback för en sida som själv ligger på loopback.
+   igenom `http://` till loopback för en sida som själv ligger på loopback. Sedan SPEC-9.5.3
+   (granskning 0007 fynd 3) når de inte loopback över `https://` heller.
 5. *En agent i taget*, och uppdraget är högst 64 KB.
 6. *En nyckel per körning.* `vy-dev serve` drar 16 byte ur OS:ets entropi (`getrandom`) till en
    nyckel på 32 hextecken. Varje anrop till `/_dev/` måste ha `token=<nyckel>` i frågan, annars 403;
