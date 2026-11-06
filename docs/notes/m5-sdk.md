@@ -16,9 +16,9 @@ Pågår. Uppdateras efter varje commit; `git log` är facit.
 
 | Steg | Vad | Läge |
 | --- | --- | --- |
-| 1 | `vy_sdk::ui`: tema, `Input`/`Response`, `Column`/`Row`, `Button`, `Checkbox`, `RadioGroup`, `Slider`, `TextBox`, `ScrollView`, `List`; galleriet `modules/widgets` med fall och guldbilder | påbörjat |
-| 2 | Portning av `form` (textfält, knapp) och `settings` om guldbilderna står på 0,000 % | – |
-| 3 | README per komponent, `docs/SDK.md`, `cargo doc` utan varningar, `tools/build_docs.sh` | – |
+| 1 | `vy_sdk::ui`: tema, `Input`/`Response`, `Column`/`Row`, `Button`, `Checkbox`, `RadioGroup`, `Slider`, `TextBox`, `ScrollView`, `List`; galleriet `modules/widgets` med fall och guldbilder | klart (7cd8fdb, 0eca12c, f2f03f9, 1fd44a2, d0309fc, f5b354a) |
+| 2 | Portning av `form` (textfält, knapp) och `settings` om guldbilderna står på 0,000 % | pågår |
+| 3 | README per komponent, `docs/SDK.md`, `cargo doc` utan varningar, `tools/build_docs.sh` | påbörjat |
 | 4 | Scaffoldens `CLAUDE.md` och startsida med `ui::TextBox` och `ui::Button` | – |
 | 5 | `tools/package_conformance.sh`, engelskt avsnitt i `conformance/README.md`, steg i `release.yml` | – |
 | 6 | Slutnoteringar | – |
