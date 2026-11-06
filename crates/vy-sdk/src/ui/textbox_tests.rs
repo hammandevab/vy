@@ -110,8 +110,14 @@ fn spec_5_1_6_textbox_typing_and_editing() {
         "S: text follows"
     );
 
-    tb.set_text("a\tb\nc\u{7}d\r");
-    assert_eq!(tb.text(), "a b cd");
+    tb.set_text("a\tb\nc\u{7}d\r\ne\rf");
+    assert_eq!(
+        tb.text(),
+        "a b cd e f",
+        "line breaks are spaces on one line"
+    );
+    let lines = TextBox::multiline(-9).with_text("a\r\nb\rc\n\u{7}d");
+    assert_eq!(lines.text(), "a\nb\nc\nd", "CRLF and CR are one break");
     let mut short = TextBox::new(-2).with_max_len(5).with_text("åäöå");
     assert_eq!(short.text(), "åä", "cut at a character boundary");
     send(&mut short, focus(-2, true), r, &t);
@@ -399,8 +405,8 @@ fn spec_5_2_6_textbox_ime() {
     send(&mut tb, focus(-1, false), moved, &t);
     mock::with(|h| assert_eq!(h.ime_rect, None));
 
-    // Without `ime` the refusal is the host's to log, once, and no
-    // `ime_end` follows a composition that never began.
+    // Without `ime` the host refuses both calls and logs them; the field
+    // goes on working.
     mock::with(|h| {
         h.caps.ime = false;
         h.refusals.clear();
@@ -408,7 +414,7 @@ fn spec_5_2_6_textbox_ime() {
     send(&mut tb, focus(-1, true), r, &t);
     send(&mut tb, typed("!"), r, &t);
     send(&mut tb, focus(-1, false), r, &t);
-    mock::with(|h| assert_eq!(h.refusals, ["ime_begin: E_DENIED"]));
+    mock::with(|h| assert_eq!(h.refusals, ["ime_begin: E_DENIED", "ime_end: E_DENIED"]));
     assert_eq!(tb.text(), "Hejかな!");
 }
 

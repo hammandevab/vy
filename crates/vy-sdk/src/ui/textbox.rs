@@ -261,19 +261,22 @@ impl<L: Lines> TextBox<L> {
         self.preferred_x = None;
     }
 
-    /// Insert `s` at the caret, replacing the selection; control characters
-    /// are dropped, a line break becomes a space in a one-line field, and
-    /// what does not fit `max_len` is cut. False when nothing changed.
+    /// Insert `s` at the caret, replacing the selection; `\r\n` and a lone
+    /// `\r` are one line break, a line break becomes a space in a one-line
+    /// field, other control characters are dropped, and what does not fit
+    /// `max_len` is cut. False when nothing changed.
     fn insert(&mut self, s: &str) -> bool {
         let sel = self.selection();
         let room = self
             .max_len
             .saturating_sub(self.text.len() - (sel.end - sel.start));
         let mut clean = String::new();
-        for c in s.chars() {
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
             let c = match c {
-                '\n' if L::MULTI => '\n',
-                '\n' | '\t' => ' ',
+                '\r' if chars.peek() == Some(&'\n') => continue,
+                '\n' | '\r' if L::MULTI => '\n',
+                '\n' | '\r' | '\t' => ' ',
                 c if c.is_control() => continue,
                 c => c,
             };
@@ -533,9 +536,10 @@ impl<L: Lines> TextBox<L> {
         } else {
             self.dragging = false;
             self.compose.clear();
-            if self.ime.take().is_some() {
-                let _ = ime_end();
-            }
+            // Always paired with the `ime_begin` of the focus: without
+            // `ime` the host refuses both and logs it (SPEC-5.3.1).
+            self.ime = None;
+            let _ = ime_end();
         }
         Response::Redraw
     }
