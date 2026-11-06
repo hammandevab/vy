@@ -194,8 +194,8 @@ struct Tab {
     /// The selection's highlight in page coordinates, for the frame count
     /// and selection it was computed for.
     selection_rects: Option<(u64, Selection, Vec<Rect>)>,
-    /// The file the tab's process records its session to (devtools,
-    /// SPEC-11.4.1); the next process of the tab is started with it.
+    /// The file the tab's session is recorded to (devtools, SPEC-11.4.1):
+    /// the frames the main process sends the tab's next process.
     record: Option<PathBuf>,
     /// The recording this tab replays; its last frame stays when the
     /// replay ends.
@@ -2963,8 +2963,9 @@ impl Shell {
     }
 
     /// Record the active tab's session (SPEC-11.4.1): the page is loaded
-    /// again in a process started with `--record`, so the file holds the
-    /// whole inbound stream from the load on.
+    /// again in a new process whose every inbound frame the main process
+    /// also writes to the file, so it holds the whole stream from the load
+    /// on. The tab process is locked down as always (SPEC-9.1.3).
     fn start_recording(&mut self) {
         let dir = self.recordings_dir();
         let Some(id) = self.active_tab() else {
@@ -3003,7 +3004,9 @@ impl Shell {
         let Some(path) = tab.record.take() else {
             return;
         };
-        tab.send(&ToTab::StopRecording);
+        if let Some(conn) = &tab.conn {
+            conn.stop_recording();
+        }
         self.set_devtools_status(format!("Sparad: {}", path.display()));
     }
 
@@ -3012,9 +3015,10 @@ impl Shell {
         self.tabs.get(self.active).and_then(|t| t.record.clone())
     }
 
-    /// Replay a recording in a new tab (SPEC-11.4.1): a tab process started
-    /// with `--replay` reads its whole inbound stream from the file and
-    /// produces the session's frames again; the last one stays.
+    /// Replay a recording in a new tab (SPEC-11.4.1): the main process
+    /// reads the file and sends its frames, as the whole inbound stream,
+    /// to a new locked-down tab process, which produces the session's
+    /// frames again; the last one stays.
     pub fn open_replay(&mut self, path: PathBuf) -> Option<TabId> {
         let Some(exe) = self.config.exe.clone() else {
             self.set_devtools_status("Uppspelning kräver en flikprocess.".into());

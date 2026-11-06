@@ -486,8 +486,9 @@ pub enum ToTab {
     /// succeeds without the `clipboard` capability (SPEC-8.2.4). One-shot:
     /// it arms exactly the event that follows it.
     CopyGesture,
-    /// Stop writing the `--record` file (SPEC-11.4.1, devtools): the file
-    /// is complete up to and including this frame, which a replay ignores.
+    /// The end of a recording the user stopped (SPEC-11.4.1, devtools):
+    /// the main process writes it last to the file instead of sending it,
+    /// and a tab that reads it in a replay does nothing.
     StopRecording,
 }
 

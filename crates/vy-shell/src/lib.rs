@@ -1304,10 +1304,11 @@ mod tests {
     }
 
     /// SPEC-11.4.1, SPEC-2.1.5: "Inspelning" records the active tab's
-    /// session from a fresh load (`--record`), stops on request with the
-    /// file complete, lists it, and replays it in a new tab (`--replay`):
-    /// the replayed session ends on the same display list, byte for byte,
-    /// as the recorded one when it was stopped.
+    /// session from a fresh load (the main process writes what it sends the
+    /// tab), stops on request with the file complete, lists it, and replays
+    /// it in a new tab (the main process sends the file's frames): the
+    /// replayed session ends on the same display list, byte for byte, as
+    /// the recorded one when it was stopped.
     #[test]
     fn spec_11_4_1_devtools_record_and_replay() {
         use crate::devtools::{Command, Pane};
@@ -1332,9 +1333,8 @@ mod tests {
         let last = shell.tab_display_list(game);
         shell.devtools_run(Command::StopRecording);
         assert!(shell.recording().is_none());
-        // The tab handles its messages in order: once it has answered a
-        // tick sent after the stop (a key makes one due), the file is
-        // flushed and complete.
+        // The writer sends in order: once the tab has answered a tick sent
+        // after the stop (a key makes one due), the file is complete.
         shell.key(0x04, true, 0, false);
         shell.key(0x04, false, 0, false);
         settle(&mut shell, 1, TIMEOUT).unwrap();
@@ -1767,9 +1767,9 @@ mod tests {
         out
     }
 
-    /// SPEC-11.4.1, SPEC-2.1.5: a tab process started with `--record`
-    /// writes every inbound frame; started with `--replay` of that file
-    /// it reproduces the session exactly: the same display lists, byte
+    /// SPEC-11.4.1, SPEC-2.1.5: a recorded tab process has every inbound
+    /// frame written to the file by the main process; a tab process fed
+    /// that file reproduces the session exactly: the same display lists, byte
     /// for byte, from a page that uses `random` and `now_ms` (the game),
     /// since the random key and every clock reading are part of the
     /// inbound stream.

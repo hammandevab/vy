@@ -12,9 +12,17 @@
 //! For tests and the headless driver the same loop can run on a thread in
 //! this process over an in-memory channel ([`spawn_thread`]); the shell
 //! code is the same either way.
+//!
+//! Recording and replay (SPEC-11.4.1) are this side's too, so a tab
+//! process never opens a file and is locked down like every other
+//! (SPEC-9.1.3): the writer thread of a recorded tab writes each frame it
+//! sends the tab to the recording as well, and the writer thread of a
+//! replaying tab feeds it the frames of a recording instead of the
+//! shell's. The file holds exactly the frames the tab was sent.
 
 use crate::ipc::{read_frame, write_frame, ChannelTransport, ToShell, ToTab};
 use crate::tab::TabLoop;
+use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -115,10 +123,28 @@ impl Proc {
     }
 }
 
+/// What a process-backed tab's writer thread is told.
+enum Out {
+    /// A frame for the tab.
+    Frame(Vec<u8>),
+    /// Stop recording: the file ends with [`ToTab::StopRecording`].
+    StopRecording,
+}
+
+/// Where [`TabConnection::send`] puts a message.
+enum Feed {
+    /// The writer thread of a process-backed tab.
+    Writer(Sender<Out>),
+    /// The tab loop's channel, for a thread-backed tab.
+    Channel(Sender<Vec<u8>>),
+    /// Nowhere: a replaying tab's inbound stream is its recording.
+    Replay,
+}
+
 /// The main process's end of one tab.
 pub struct TabConnection {
     id: TabId,
-    tx: Option<Sender<Vec<u8>>>,
+    feed: Option<Feed>,
     kind: Kind,
     writer: Option<JoinHandle<()>>,
     reader: Option<JoinHandle<()>>,
@@ -152,12 +178,17 @@ pub fn self_exe() -> io::Result<PathBuf> {
 }
 
 /// Start a tab process from `exe` (`exe --tab`), delivering its messages
-/// to `sink` as `(id, ..)`. `record` and `replay` are passed on as the
-/// child's `--record`/`--replay` files (SPEC-11.4.1). The child locks
-/// itself down before it reads anything (SPEC-9.1.3, [`crate::sandbox`]);
-/// on Windows the shell also puts it in a job object, or with
-/// `VY_SANDBOX=strict` starts it in an AppContainer, falling back to the
-/// default with a message when that cannot be done.
+/// to `sink` as `(id, ..)`. The child locks itself down before it reads
+/// anything (SPEC-9.1.3, [`crate::sandbox`]); on Windows the shell also
+/// puts it in a job object, or with `VY_SANDBOX=strict` starts it in an
+/// AppContainer, falling back to the default with a message when that
+/// cannot be done.
+///
+/// With `record`, every frame sent to the tab is also written to that
+/// file, which is created here (SPEC-11.4.1). With `replay`, the tab is
+/// fed the frames of that recording, read here, and then its input ends;
+/// what the shell sends it is dropped. Either way the child is the same
+/// locked-down `exe --tab`: it never sees the file.
 pub fn spawn_process(
     exe: &Path,
     id: TabId,
@@ -165,25 +196,22 @@ pub fn spawn_process(
     record: Option<&Path>,
     replay: Option<&Path>,
 ) -> io::Result<TabConnection> {
-    let mut args = vec![std::ffi::OsString::from("--tab")];
-    if let Some(r) = record {
-        args.push("--record".into());
-        args.push(r.into());
-    }
-    if let Some(r) = replay {
-        args.push("--replay".into());
-        args.push(r.into());
-    }
-    let (process, stdin, stdout) = start(exe, &args, record.is_none() && replay.is_none())?;
-    connect(id, sink, process, stdin, stdout)
+    let source = match (record, replay) {
+        (_, Some(path)) => Source::Replay(BufReader::new(File::open(path)?)),
+        (Some(path), None) => Source::Shell(Some(BufWriter::new(File::create(path)?))),
+        (None, None) => Source::Shell(None),
+    };
+    let (process, stdin, stdout) = start(exe, &["--tab".into()])?;
+    connect(id, sink, process, stdin, stdout, source)
 }
 
 /// Start `exe --tab --sandbox-probe` exactly as a tab is started (job
 /// object, strict mode) and return what the probe reports (SPEC-9.1.3).
+/// A recorded or replayed tab is started the same way ([`spawn_process`]).
 pub fn probe_process(exe: &Path) -> io::Result<String> {
     use std::io::Read;
     let args = ["--tab".into(), "--sandbox-probe".into()];
-    let (mut process, stdin, mut stdout) = start(exe, &args, true)?;
+    let (mut process, stdin, mut stdout) = start(exe, &args)?;
     drop(stdin);
     let mut text = String::new();
     stdout.read_to_string(&mut text)?;
@@ -193,12 +221,12 @@ pub fn probe_process(exe: &Path) -> io::Result<String> {
 
 type Pipes = (Proc, Box<dyn Write + Send>, Box<dyn io::Read + Send>);
 
-/// Start a tab child with `args`: on Windows with `VY_SANDBOX=strict`
-/// (when `strict_ok`) in an AppContainer, falling back with a message;
-/// otherwise through std and, on Windows, into a job object.
-fn start(exe: &Path, args: &[std::ffi::OsString], strict_ok: bool) -> io::Result<Pipes> {
+/// Start a tab child with `args`: on Windows with `VY_SANDBOX=strict` in
+/// an AppContainer, falling back with a message; otherwise through std
+/// and, on Windows, into a job object.
+fn start(exe: &Path, args: &[std::ffi::OsString]) -> io::Result<Pipes> {
     #[cfg(windows)]
-    if strict_ok && crate::sandbox::Mode::from_env() == crate::sandbox::Mode::Strict {
+    if crate::sandbox::Mode::from_env() == crate::sandbox::Mode::Strict {
         let tail: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -212,7 +240,6 @@ fn start(exe: &Path, args: &[std::ffi::OsString], strict_ok: bool) -> io::Result
             ),
         }
     }
-    let _ = strict_ok;
     let mut cmd = Command::new(exe);
     cmd.args(args);
     // The child's stderr (panics) goes where the shell's goes; a Windows
@@ -242,6 +269,48 @@ fn start(exe: &Path, args: &[std::ffi::OsString], strict_ok: bool) -> io::Result
     Ok((Proc::Std(child, job), Box::new(stdin), Box::new(stdout)))
 }
 
+/// What a process-backed tab's writer thread feeds it.
+enum Source {
+    /// What the shell sends, also written to the recording when there is one.
+    Shell(Option<BufWriter<File>>),
+    /// The frames of a recording, then the end of the input.
+    Replay(BufReader<File>),
+}
+
+/// The writer thread's loop for [`Source::Shell`]: each frame to the tab
+/// and, once it is written there, to the recording. The tab loop ends at
+/// `Shutdown`, so the recording does too: it holds what the tab read.
+fn write_from_shell(
+    w: &mut impl Write,
+    rx: &Receiver<Out>,
+    mut record: Option<BufWriter<File>>,
+) -> io::Result<()> {
+    let shutdown = ToTab::Shutdown.encode();
+    while let Ok(out) = rx.recv() {
+        match out {
+            Out::Frame(body) => {
+                write_frame(w, &body)?;
+                if let Some(rec) = &mut record {
+                    if let Err(e) = write_frame(rec, &body) {
+                        eprintln!("vy-shell: recording stopped: {e}");
+                        record = None;
+                    } else if body == shutdown {
+                        record = None;
+                    }
+                }
+            }
+            Out::StopRecording => {
+                if let Some(mut rec) = record.take() {
+                    if let Err(e) = write_frame(&mut rec, &ToTab::StopRecording.encode()) {
+                        eprintln!("vy-shell: recording not completed: {e}");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The writer and reader threads of a process-backed tab.
 fn connect(
     id: TabId,
@@ -249,17 +318,39 @@ fn connect(
     process: Proc,
     stdin: impl Write + Send + 'static,
     stdout: impl io::Read + Send + 'static,
+    source: Source,
 ) -> io::Result<TabConnection> {
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::channel::<Out>();
+    let feed = match &source {
+        Source::Shell(_) => Feed::Writer(tx),
+        Source::Replay(_) => Feed::Replay,
+    };
     let writer = thread::Builder::new()
         .name(format!("tab-{id}-writer"))
         .spawn(move || {
             let mut w = BufWriter::new(stdin);
-            while let Ok(body) = rx.recv() {
-                if write_frame(&mut w, &body).is_err() {
-                    break;
+            let _ = match source {
+                Source::Shell(record) => write_from_shell(&mut w, &rx, record),
+                // The whole recording, frame by frame; a frame that does
+                // not read ends the input there, as the end of the file does.
+                Source::Replay(mut file) => {
+                    loop {
+                        match read_frame(&mut file) {
+                            Ok(Some(body)) => {
+                                if write_frame(&mut w, &body).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                eprintln!("vy-shell: replay ends early: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    Ok(())
                 }
-            }
+            };
             let _ = w.flush();
         })?;
     let reader = thread::Builder::new()
@@ -284,7 +375,7 @@ fn connect(
         })?;
     Ok(TabConnection {
         id,
-        tx: Some(tx),
+        feed: Some(feed),
         kind: Kind::Process(process),
         writer: Some(writer),
         reader: Some(reader),
@@ -303,9 +394,7 @@ pub fn spawn_thread(id: TabId, sink: impl Sink) -> io::Result<TabConnection> {
     let worker = thread::Builder::new()
         .name(format!("tab-{id}"))
         .spawn(move || {
-            if let Ok(mut l) = TabLoop::new(transport, None) {
-                let _ = l.run();
-            }
+            let _ = TabLoop::new(transport).run();
         })?;
     let reader = thread::Builder::new()
         .name(format!("tab-{id}-reader"))
@@ -327,7 +416,7 @@ pub fn spawn_thread(id: TabId, sink: impl Sink) -> io::Result<TabConnection> {
         })?;
     Ok(TabConnection {
         id,
-        tx: Some(tx),
+        feed: Some(Feed::Channel(tx)),
         kind: Kind::Thread(Some(worker)),
         writer: None,
         reader: Some(reader),
@@ -340,11 +429,23 @@ impl TabConnection {
         self.id
     }
 
-    /// Queue a message for the tab; false once the tab is gone.
+    /// Queue a message for the tab; false once the tab is gone, and for a
+    /// replaying tab, whose input is its recording.
     pub fn send(&self, msg: &ToTab) -> bool {
-        self.tx
-            .as_ref()
-            .is_some_and(|tx| tx.send(msg.encode()).is_ok())
+        match &self.feed {
+            Some(Feed::Writer(tx)) => tx.send(Out::Frame(msg.encode())).is_ok(),
+            Some(Feed::Channel(tx)) => tx.send(msg.encode()).is_ok(),
+            Some(Feed::Replay) | None => false,
+        }
+    }
+
+    /// Stop the recording `spawn_process` was given, after every frame
+    /// sent before this call: the file is then complete and ends with
+    /// [`ToTab::StopRecording`]. Nothing for a tab that does not record.
+    pub fn stop_recording(&self) {
+        if let Some(Feed::Writer(tx)) = &self.feed {
+            let _ = tx.send(Out::StopRecording);
+        }
     }
 
     /// Bound the tab process's memory to `memory_max_pages` of linear
@@ -404,7 +505,7 @@ impl TabConnection {
     /// Ask the tab to leave, wait briefly, then make sure it has.
     pub fn shutdown(mut self) {
         let _ = self.send(&ToTab::Shutdown);
-        self.tx = None;
+        self.feed = None;
         match &mut self.kind {
             Kind::Process(c) => {
                 let start = Instant::now();

@@ -5,8 +5,9 @@
 //! over the page), "Semantik" (the tree with roles, ids, text and the focus
 //! mark), "Logg" (the page's log with level and frame number),
 //! "Inspelning" (record the session of a tab process to a file and replay
-//! one, with the `--record`/`--replay` machinery) and "Studio" (live reload
-//! of localhost pages and a link to Studio).
+//! one; the main process writes and reads the file, the tab process stays
+//! locked down) and "Studio" (live reload of localhost pages and a link to
+//! Studio).
 //!
 //! Everything here turns what the shell has into lines of text; the shell
 //! does what a line's [`Command`] says, and `chrome::draw_devtools` draws

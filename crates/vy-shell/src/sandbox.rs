@@ -34,6 +34,8 @@
 //! - **macOS:** `sandbox_init` with a deny-default profile; if the call
 //!   fails the tab runs unsandboxed and says so.
 //!
+//! Every tab process is locked down, a recorded or replayed one included:
+//! the main process writes and reads recordings (`crate::process`).
 //! `VY_SANDBOX=off` turns the child-side lockdown off for debugging; the
 //! job object on Windows stays. `vy-shell --tab --sandbox-probe` locks
 //! down and then tries to read a file, write one, open a socket and start

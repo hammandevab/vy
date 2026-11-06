@@ -7,15 +7,15 @@
 //! The loop is one message at a time, in order, and every call into the
 //! module happens here. Nothing in it reads a clock or the operating
 //! system's entropy: the clock comes with each message and the random
-//! key with the load, so the inbound stream is the whole session. A
-//! `--record` writes that stream to a file frame by frame and a
-//! `--replay` reads it back in place of the transport, which reproduces
-//! the session exactly (SPEC-11.4.1, SPEC-2.1.5).
+//! key with the load, so the inbound stream is the whole session. The
+//! main process records that stream from the frames it sends and replays
+//! it by sending them again, which reproduces the session exactly
+//! (SPEC-11.4.1, SPEC-2.1.5); the tab process itself never opens a file
+//! (SPEC-9.1.3, `crate::process::spawn_process`).
 
-use crate::ipc::{write_frame, IpcTransport, LoadRequest, StyleSpec, ToShell, ToTab};
+use crate::ipc::{IpcTransport, LoadRequest, StyleSpec, ToShell, ToTab};
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter};
+use std::io;
 use std::path::Path;
 use vy_abi::event;
 use vy_runtime::{Capabilities, ClockSource, LogSource, Options, Resource, Runtime, Transport};
@@ -23,7 +23,6 @@ use vy_runtime::{Capabilities, ClockSource, LogSource, Options, Resource, Runtim
 /// The tab loop's state around the runtime.
 pub struct TabLoop<T: IpcTransport> {
     transport: T,
-    record: Option<BufWriter<File>>,
     rt: Option<Runtime>,
     /// Set once the page is dead (trap, exit, hard limit, forced suspend).
     stopped: bool,
@@ -58,16 +57,10 @@ pub fn unpack_capabilities(bits: u8) -> Capabilities {
 }
 
 impl<T: IpcTransport> TabLoop<T> {
-    /// A loop over `transport`, recording every inbound frame to
-    /// `record` when given.
-    pub fn new(transport: T, record: Option<&Path>) -> io::Result<Self> {
-        let record = match record {
-            Some(p) => Some(BufWriter::new(File::create(p)?)),
-            None => None,
-        };
-        Ok(Self {
+    /// A loop over `transport`.
+    pub fn new(transport: T) -> Self {
+        Self {
             transport,
-            record,
             rt: None,
             stopped: false,
             styles_sent: 0,
@@ -78,16 +71,13 @@ impl<T: IpcTransport> TabLoop<T> {
             last_ime: None,
             last_focus: None,
             copy_gesture_armed: false,
-        })
+        }
     }
 
     /// Serve messages until the other side is gone or says
     /// [`ToTab::Shutdown`].
     pub fn run(&mut self) -> io::Result<()> {
         while let Some(body) = self.transport.recv()? {
-            if let Some(rec) = &mut self.record {
-                write_frame(rec, &body)?;
-            }
             let msg = match ToTab::decode(&body) {
                 Ok(m) => m,
                 Err(e) => {
@@ -100,10 +90,6 @@ impl<T: IpcTransport> TabLoop<T> {
             if !self.handle(msg)? {
                 break;
             }
-        }
-        if let Some(rec) = &mut self.record {
-            use std::io::Write;
-            rec.flush()?;
         }
         Ok(())
     }
@@ -139,14 +125,9 @@ impl<T: IpcTransport> TabLoop<T> {
                 }
             }
             ToTab::CopyGesture => self.copy_gesture_armed = true,
-            ToTab::StopRecording => {
-                // The frame itself is already in the file (see `run`); a
-                // replay reads it and does nothing.
-                if let Some(mut rec) = self.record.take() {
-                    use std::io::Write;
-                    rec.flush()?;
-                }
-            }
+            // The end of a recording the main process wrote; a replay
+            // reads it and does nothing.
+            ToTab::StopRecording => {}
             ToTab::TextInput { text, clock_ms } => {
                 if let Some(rt) = self.alive() {
                     rt.set_clock_ms(clock_ms);
@@ -475,43 +456,24 @@ impl<T: IpcTransport> TabLoop<T> {
     }
 }
 
-/// A transport whose inbound frames come from a recording instead of the
-/// other side; outbound frames still go to `inner` (SPEC-11.4.1).
-pub struct ReplayTransport<T: IpcTransport> {
-    file: BufReader<File>,
-    inner: T,
-}
-
-impl<T: IpcTransport> ReplayTransport<T> {
-    /// Replay the frames of `path` over `inner`.
-    pub fn open(path: &Path, inner: T) -> io::Result<Self> {
-        Ok(Self {
-            file: BufReader::new(File::open(path)?),
-            inner,
-        })
-    }
-}
-
-impl<T: IpcTransport> IpcTransport for ReplayTransport<T> {
-    fn send(&mut self, body: &[u8]) -> io::Result<()> {
-        self.inner.send(body)
-    }
-    fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
-        crate::ipc::read_frame(&mut self.file)
-    }
-}
-
-/// The `--tab` entry point: serve the parent over stdin and stdout, with
-/// an optional record or replay file. Stdout carries frames only; the
-/// parent reads nothing else from it.
+/// The `--tab` entry point: serve the parent over stdin and stdout.
+/// Stdout carries frames only; the parent reads nothing else from it.
+///
+/// Both arguments must be `None`: a tab process opens no file after its
+/// lockdown (SPEC-9.1.3), so a recording or a replay is the main
+/// process's (`crate::process::spawn_process`) and a file given here is
+/// refused. They stay only so that `vy-cli --tab` builds unchanged until
+/// its call drops them.
 pub fn main(record: Option<&Path>, replay: Option<&Path>) -> io::Result<()> {
+    if record.is_some() || replay.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a tab process opens no file (SPEC-9.1.3); the main process records and replays",
+        ));
+    }
     let stdin = io::stdin().lock();
     let stdout = io::stdout().lock();
-    let pipe = crate::ipc::PipeTransport::new(stdin, stdout);
-    match replay {
-        Some(path) => TabLoop::new(ReplayTransport::open(path, pipe)?, record)?.run(),
-        None => TabLoop::new(pipe, record)?.run(),
-    }
+    TabLoop::new(crate::ipc::PipeTransport::new(stdin, stdout)).run()
 }
 
 #[cfg(test)]
@@ -566,14 +528,10 @@ mod tests {
         let (to_tab, tab_rx) = mpsc::channel();
         let (tab_tx, from_tab) = mpsc::channel();
         let h = std::thread::spawn(move || {
-            TabLoop::new(
-                ChannelTransport {
-                    tx: tab_tx,
-                    rx: tab_rx,
-                },
-                None,
-            )
-            .unwrap()
+            TabLoop::new(ChannelTransport {
+                tx: tab_tx,
+                rx: tab_rx,
+            })
             .run()
             .unwrap();
         });
