@@ -78,7 +78,7 @@ impl Dispatch {
         Self(())
     }
 
-    /// The bytes behind a handle from [`alloc`] and a length, or `None` when
+    /// The bytes behind a handle from [`alloc()`] and a length, or `None` when
     /// the range is not inside the arena.
     pub fn bytes(&self, handle: i32, len: i32) -> Option<&[u8]> {
         let (Ok(handle), Ok(len)) = (usize::try_from(handle), usize::try_from(len)) else {
