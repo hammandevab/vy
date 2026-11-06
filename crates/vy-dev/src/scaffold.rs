@@ -267,109 +267,119 @@ const LIB_RS: &str = r#"//! {name}: a Vy page built on vy-sdk.
 //! The page is a `struct` that implements `App`; `vy_sdk::export!` turns it
 //! into the six exports the client calls. Layout and state live here:
 //! `layout()` computes every rectangle from the window, and both `frame`
-//! (drawing) and `event` (hit-testing) use the same rectangles.
+//! (drawing) and `event` (hit-testing) use the same rectangles. The text
+//! field and the button are `vy_sdk::ui` components: they draw themselves,
+//! register their semantic nodes and handle their own events.
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
-use vy_sdk::event::key;
 use vy_sdk::prelude::*;
+use vy_sdk::ui::{self, Button, Column, Input, Row, TextBox, Theme};
 
 const BG: Color = Color::rgb(0xF2, 0xF3, 0xF5);
 const CARD: Color = Color::rgb(0xFF, 0xFF, 0xFF);
-const INK: Color = Color::rgb(0x1C, 0x1E, 0x26);
-const MUTED: Color = Color::rgb(0x6B, 0x70, 0x7C);
-const ACCENT: Color = Color::rgb(0x2F, 0x5B, 0xD6);
-const WHITE: Color = Color::rgb(0xFF, 0xFF, 0xFF);
-const RING: Color = Color::rgb(0xF2, 0x9F, 0x05);
 
 const TITLE: &str = "Hej från Vy";
-const BODY: &str =
-    "Den här sidan är en WebAssembly-modul. Ändra texten, lägg till kontroller och bygg om.";
-const BUTTON: &str = "Räkna";
+const BODY: &str = "Den här sidan är en WebAssembly-modul. Skriv ditt namn och tryck Enter eller Hälsa – och ändra sedan koden.";
+const LABEL: &str = "Ditt namn";
 
 const MARGIN: f32 = 24.0;
 const PAD: f32 = 20.0;
 const BUTTON_W: f32 = 120.0;
-const BUTTON_H: f32 = 40.0;
 
-/// Fixed semantic id of the button: `Event::Focus` names it. Ids a page
-/// chooses are negative; automatic ones are positive.
-const ID_BUTTON: i32 = -1;
+/// Fixed semantic ids of the controls, in Tab order: `Event::Focus` names
+/// them. Ids a page chooses are negative; automatic ones are positive.
+const ID_NAME: i32 = -1;
+const ID_GREET: i32 = -2;
 
 /// Every rectangle of the page, computed from the window.
 struct Layout {
     card: Rect,
-    text_w: f32,
-    title_y: f32,
-    body_y: f32,
-    count_y: f32,
-    button: Rect,
+    title: Rect,
+    body: Rect,
+    label: Rect,
+    name: Rect,
+    greet: Rect,
+    greeting: Rect,
 }
 
 struct Page {
     window: Window,
+    theme: Theme,
     title: StyleId,
     body: StyleId,
     label: StyleId,
-    clicks: u32,
-    /// The host moved keyboard focus to the button (the page draws the ring).
-    focused: bool,
+    name: TextBox,
+    greet: Button,
+    greeting: String,
 }
 
 impl Page {
     fn layout(&self) -> Result<Layout, VyError> {
-        let card_w = (self.window.width - 2.0 * MARGIN).max(0.0);
-        let text_w = (card_w - 2.0 * PAD).max(0.0);
+        let area = Rect::new(
+            MARGIN,
+            MARGIN,
+            (self.window.width - 2.0 * MARGIN).clamp(0.0, 640.0),
+            0.0,
+        );
+        let mut c = Column::new(area, PAD, 12.0);
+        let w = c.width();
         // Measure first, so the card wraps its content at this width.
-        let title_h = text_measure(self.title, text_w, TITLE)?.h;
-        let body_h = text_measure(self.body, text_w, BODY)?.h;
-        let title_y = MARGIN + PAD;
-        let body_y = title_y + title_h + 12.0;
-        let count_y = body_y + body_h + 16.0;
-        let button = Rect::new(MARGIN + PAD, count_y + 24.0 + 12.0, BUTTON_W, BUTTON_H);
-        let card_h = button.bottom() + PAD - MARGIN;
+        let title = c.next(text_measure(self.title, w, TITLE)?.h);
+        let body = c.next(text_measure(self.body, w, BODY)?.h);
+        c.space(8.0);
+        let label = c.next(text_measure(self.label, w, LABEL)?.h);
+        let mut row = Row::new(c.next(ui::CONTROL_H), 0.0, 12.0);
+        let name = row.next((w - BUTTON_W - 12.0).max(0.0));
+        let greet = row.next(BUTTON_W);
+        let greeting = c.next(self.theme.line_h);
+        let card = Rect::new(area.x, area.y, area.w, c.height());
         Ok(Layout {
-            card: Rect::new(MARGIN, MARGIN, card_w, card_h),
-            text_w,
-            title_y,
-            body_y,
-            count_y,
-            button,
+            card,
+            title,
+            body,
+            label,
+            name,
+            greet,
+            greeting,
         })
     }
 
-    fn count_text(&self) -> String {
-        match self.clicks {
-            0 => String::from("Inga klick än."),
-            1 => String::from("Ett klick."),
-            n => format!("{n} klick."),
-        }
-    }
-
-    fn press(&mut self) -> bool {
-        self.clicks += 1;
-        true
+    /// The button was pressed, or Enter typed in the field.
+    fn press(&mut self) {
+        let who = self.name.text().trim();
+        self.greeting = if who.is_empty() {
+            String::from("Skriv ett namn först.")
+        } else {
+            format!("Hej, {who}!")
+        };
     }
 }
 
 impl App for Page {
     fn init(window: Window, _abi_minor: i32) -> Result<Self, VyError> {
+        // The theme registers the components' text styles once.
+        let theme = Theme::new()?;
+        let p = theme.palette;
         Ok(Self {
             window,
-            title: text_style(Font::Sans, 28.0, 600, INK)?,
-            body: text_style(Font::Sans, 16.0, 400, MUTED)?,
-            label: text_style(Font::Sans, 15.0, 600, WHITE)?,
-            clicks: 0,
-            focused: false,
+            title: text_style(Font::Sans, 28.0, 600, p.ink)?,
+            body: text_style(Font::Sans, 16.0, 400, p.muted)?,
+            label: text_style(Font::Sans, 13.0, 600, p.muted)?,
+            theme,
+            name: TextBox::new(ID_NAME).with_max_len(100),
+            greet: Button::new(ID_GREET),
+            greeting: String::from("Ingen hälsning än."),
         })
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
         let l = self.layout()?;
         let x = l.card.x + PAD;
+        let t = self.theme;
         f.rect(
             Rect::new(0.0, 0.0, self.window.width, self.window.height),
             0.0,
@@ -378,49 +388,34 @@ impl App for Page {
         f.rect(l.card, 12.0, CARD)?;
         // Every visible text and control gets a semantic node, in paint order.
         f.group(Role::Main, l.card, "", |f| {
-            let h = f.text(x, l.title_y, l.text_w, self.title, TITLE)?.h;
-            f.sem
-                .node(Role::Heading, Rect::new(x, l.title_y, l.text_w, h), TITLE)?;
-            let h = f.text(x, l.body_y, l.text_w, self.body, BODY)?.h;
-            f.sem
-                .node(Role::Text, Rect::new(x, l.body_y, l.text_w, h), BODY)?;
-            let count = self.count_text();
-            let h = f.text(x, l.count_y, l.text_w, self.body, &count)?.h;
-            f.sem
-                .node(Role::Text, Rect::new(x, l.count_y, l.text_w, h), &count)?;
-            if self.focused {
-                f.rect(l.button.inset(-3.0), 9.0, RING)?;
-            }
-            f.rect(l.button, 6.0, ACCENT)?;
-            let tw = text_measure(self.label, 0.0, BUTTON)?.w;
-            f.text(
-                l.button.x + (l.button.w - tw) / 2.0,
-                l.button.y + 10.0,
-                0.0,
-                self.label,
-                BUTTON,
-            )?;
-            f.sem
-                .node_with_id(ID_BUTTON, Role::Button, l.button, BUTTON)?;
+            f.text(x, l.title.y, l.title.w, self.title, TITLE)?;
+            f.sem.node(Role::Heading, l.title, TITLE)?;
+            f.text(x, l.body.y, l.body.w, self.body, BODY)?;
+            f.sem.node(Role::Text, l.body, BODY)?;
+            // A field's label is a node of its own, just before the field.
+            f.text(x, l.label.y, l.label.w, self.label, LABEL)?;
+            f.sem.node(Role::Text, l.label, LABEL)?;
+            self.name.draw(f, l.name, &t, "Förnamn")?;
+            self.greet.draw(f, l.greet, &t, "Hälsa")?;
+            f.text(x, l.greeting.y, l.greeting.w, t.text, &self.greeting)?;
+            f.sem.node(Role::Text, l.greeting, &self.greeting)?;
             Ok(())
         })
     }
 
     fn event(&mut self, event: Event<'_>) -> bool {
-        match event {
-            Event::PointerDown { x, y, .. } => {
-                self.layout().is_ok_and(|l| l.button.contains(x, y)) && self.press()
-            }
-            Event::KeyDown {
-                code: key::ENTER | key::SPACE,
-                ..
-            } if self.focused => self.press(),
-            Event::Focus { node, gained, .. } if node == NodeId(ID_BUTTON) => {
-                self.focused = gained;
-                true
-            }
-            _ => false,
+        let Ok(l) = self.layout() else {
+            return false;
+        };
+        let t = self.theme;
+        // Every component gets the event; the one that uses it takes it.
+        let mut ui = Input::new(event);
+        let enter = self.name.event(&mut ui, l.name, &t).activated();
+        let pressed = self.greet.event(&mut ui, l.greet, &t).activated();
+        if enter || pressed {
+            self.press();
         }
+        ui.redraw()
     }
 
     fn resize(&mut self, window: Window) {
@@ -433,28 +428,69 @@ vy_sdk::export!(Page);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vy_sdk::event::key;
     use vy_sdk::mock;
 
-    /// One frame registers the whole tree; a press on the button counts.
-    #[test]
-    fn first_frame_registers_the_tree() {
+    fn page() -> Page {
         mock::reset();
         let window = Window {
             width: 800.0,
             height: 600.0,
             scale: 1.0,
         };
-        let mut page = Page::init(window, 0).unwrap();
+        Page::init(window, 0).unwrap()
+    }
+
+    /// One frame registers the whole tree, the controls with their fixed ids.
+    #[test]
+    fn first_frame_registers_the_tree() {
+        let mut page = page();
         assert!(mock::run_frame(&mut page, 0).unwrap() > 0);
-        mock::with(|h| assert_eq!(h.sem.len(), 5, "main, heading, two texts, button"));
-        let button = page.layout().unwrap().button;
+        mock::with(|h| {
+            let roles: Vec<i32> = h.sem.iter().map(|n| n.role).collect();
+            assert_eq!(
+                roles.len(),
+                7,
+                "main, heading, two texts, textbox, button, text"
+            );
+            assert!(h
+                .sem
+                .iter()
+                .any(|n| n.id == ID_NAME && n.role == Role::Textbox as i32));
+            assert!(h
+                .sem
+                .iter()
+                .any(|n| n.id == ID_GREET && n.role == Role::Button as i32));
+        });
+    }
+
+    /// Typed text lands in the focused field; Enter and the button greet.
+    #[test]
+    fn type_and_greet() {
+        let mut page = page();
+        let focus = Event::Focus {
+            node: NodeId(ID_NAME),
+            gained: true,
+            keyboard: true,
+        };
+        assert!(page.event(focus));
+        assert!(page.event(Event::TextInput { text: "Anna" }));
+        let enter = Event::KeyDown {
+            code: key::ENTER,
+            modifiers: Modifiers(0),
+            repeat: false,
+        };
+        assert!(page.event(enter));
+        assert_eq!(page.greeting, "Hej, Anna!");
+        page.name.set_text("");
+        let button = page.layout().unwrap().greet;
         assert!(page.event(Event::PointerDown {
             x: button.x + 1.0,
             y: button.y + 1.0,
             button: 1,
             modifiers: Modifiers(0),
         }));
-        assert_eq!(page.clicks, 1);
+        assert_eq!(page.greeting, "Skriv ett namn först.");
     }
 }
 "#;
@@ -466,6 +502,7 @@ const MANIFEST_JSON: &str = r##"{
   "lang": "sv",
   "memory_max": 32,
   "published": "{date}",
+  "capabilities": {"ime": {}},
   "fallback": "# {display}\n\nSidan kräver en Vy-klient."
 }
 "##;
@@ -484,8 +521,8 @@ Allt du behöver står i den här filen: du behöver inget från nätet och ska 
 1. Ändra `src/lib.rs` (och `manifest.json` om sidan behöver capabilities eller resurser).
 2. `cargo build --release --target wasm32-unknown-unknown`
 3. `vy-cli check-abi target/wasm32-unknown-unknown/release/{lib}.wasm`
-4. `vy-cli render target/wasm32-unknown-unknown/release/{lib}.wasm --out preview.png --size 800x600 --dump-semantic semantic.json`
-   – lägg till `--grant ime,net,storage` (de capabilities manifestet begär) och en
+4. `vy-cli render target/wasm32-unknown-unknown/release/{lib}.wasm --out preview.png --size 800x600 --grant ime --dump-semantic semantic.json`
+   – `--grant` med de capabilities manifestet begär (`ime,net,storage`, …) och en
    `--resource <fil>` per resurs i manifestets ordning. `--size 400x700 --out preview-smal.png`
    prövar en smal vy.
 5. Titta på `preview.png` (läs bilden) och `semantic.json`. Rätta och börja om från 1.
@@ -507,7 +544,10 @@ filverktygen når bara den här katalogen. Avsluta med två meningar om vad du �
   bara via `now_ms` och `random`; inga egna klockor, inga statiska räknare som överlever en frame
   utan att vara tillstånd i sidan.
 - Layout och tillstånd lever i modulen: en `layout()`-funktion räknar rektanglarna ur fönstret;
-  `frame` ritar dem och `event` träfftestar mot samma rektanglar. Det finns ingen layoutmotor.
+  `frame` ritar dem och `event` träfftestar mot samma rektanglar. Det finns ingen layoutmotor;
+  `ui::Column`, `ui::Row` och `ui::split` staplar rektanglar.
+- Använd komponenterna i `vy_sdk::ui` (textfält, knappar, kryssrutor, radioknappar, slider, lista,
+  rullning) i stället för att rita egna kontroller; se *Komponenter* nedan.
 - En semantisk nod (`f.sem.node`) för varje synlig text och kontroll, registrerad varje frame i
   ritordning, även utanför fönstret. Fokus ägs av värden: Tab når aldrig sidan, `Event::Focus`
   säger vilken nod som har fokus och sidan ritar ringen själv. Ett nod-id sidan väljer är negativt
@@ -516,8 +556,8 @@ filverktygen når bara den här katalogen. Avsluta med två meningar om vad du �
   ["https://api.example"]}, "storage": {"quota_kb": 64}}`. Ett anrop utan beviljad capability ger
   `Err(VyError::Denied)` och sidan ska fortsätta fungera (visa det, krascha inte). `vy-cli render`
   nekar `fetch_begin` och lagring om du inte ger `--grant`, och även då svarar inget nät.
-- `ime` i manifestet så snart sidan har ett textfält (`Role::Textbox`): `ime_begin(rect)` när
-  fältet får fokus, `ime_end()` när det tappar det; texten kommer som `Event::TextInput`.
+- `ime` i manifestet så snart sidan har ett textfält (`ui::TextBox`, `Role::Textbox`); startsidan
+  begär det redan. Fältet sköter `ime_begin`/`ime_end` och `Event::TextInput` själv.
 - Mät text med `text_measure` före ritning så att block följer på varandra; `max_w <= 0` betyder
   ingen radbrytning. `f.text` returnerar storleken på det som ritades.
 - En panik stoppar sidan. Returnera `Err` och hantera `Err` från SDK:t i stället.
@@ -532,6 +572,63 @@ filverktygen når bara den här katalogen. Avsluta med två meningar om vad du �
 - `semantic.json` har en nod för varje synlig text och kontroll.
 - `vy-dev build` går igenom: manifestet beskriver modulen (`memory_max`, resurser, capabilities).
 - `cargo test` är grönt.
+
+## Komponenter (`vy_sdk::ui`)
+
+Allt finns i `vy_sdk::ui`; importera det sidan använder, t.ex. `use vy_sdk::ui::{self, Button, Input, TextBox, Theme};`
+(en import som inte används är en varning, och bygget ska gå utan varningar).
+
+| Komponent | Nod | Gör |
+| --- | --- | --- |
+| `TextBox::new(id)`, `TextBox::multiline(id)` (typ `TextBox<Multiline>`) | `textbox` | markör, markering (Skift, pekaren), Ctrl+A/C/X, inklistring, IME, radbrytning; `.text()`, `.set_text()`, `.with_max_len(n)` |
+| `Button::new(id)`, `Button::secondary(id)` | `button` | tryck, Enter, mellanslag |
+| `Checkbox::new(id, checked)` | `checkbox` | tryck, mellanslag; `.checked` |
+| `RadioGroup::new(first_id, n, selected)` | `radio` × n (id `first`, `first − 1`, …) | tryck, mellanslag; `.selected` |
+| `Slider::new(id, min, max, value)` | `slider` ("Volym: 40") | dra, pilar, Page Up/Down, Home/End; `.value()` |
+| `List::new(row_h)` | `list` + `listitem` per rad | ritar bara raderna i bild; pilar, Enter; `.selected()` |
+| `ScrollView::new()` | – | klipper, hjul, tangenter, dragbar list; `.offset()`, `.reveal(r, vy, höjd)` |
+| `Column::new(område, marginal, mellanrum)`, `Row::new(…)`, `ui::split::<N>(område, mellanrum)` | – | `next(h)`/`next(w)` ger nästa rektangel, `height()` vad ett kort behöver |
+
+- Ett tema, byggt i `init`: `Theme::new()?` (ljust, svenska tillståndsord, 16 px). Andra färger:
+  `Theme::custom(Palette { accent: …, ..Palette::LIGHT }, Font::Sans, 16.0)?`; `theme.words = Words::EN`.
+- Samma form för alla: `x.draw(f, rektangel, &theme, …)` i `frame`,
+  `x.event(&mut ui, rektangel, &theme, …) -> Response` i `event`, med samma rektangel.
+  `List` tar raderna (`&items[..]` eller en egen `impl Rows`), `ScrollView` innehållets höjd.
+- I `App::event`: `let mut ui = Input::new(event);`, ge `&mut ui` till varje komponent – inre före
+  yttre (en lista eller ett fält i en `ScrollView` före den) – och returnera `ui.redraw()`. En
+  komponent som använder en pekar-, tangent- eller texthändelse tar den; fokus tas aldrig. Sidans
+  egna tangenter: `ui.unhandled()`.
+- `Response`: `.activated()` (knapp, Enter i ett enradsfält, öppnad rad), `.changed()`, `.redraw()`.
+- Fasta negativa id för allt fokuserbart (`-1`, `-2`, …) i den ordning Tab ska gå. Komponenten
+  ritar sin fokusring själv.
+- `List` och `ScrollView` har ingen fokuserbar roll: de tar tangenter efter ett tryck i dem, eller
+  efter `set_active(true)`. När Tab flyttar fokus till en kontroll utanför bild i en `ScrollView`:
+  `scroll.reveal(rektangel, vy, höjd)`.
+- Rita ett fälts etikett själv ovanför med `f.text` och registrera den som `Role::Text`, före fältet.
+- `ScrollView::draw` tar en closure; eftersom den är `Copy`: `let mut s = self.scroll;
+  s.draw(f, vy, &t, höjd, |f| self.draw_content(f, &l))?; self.scroll = s;`.
+
+## Determinism och budget
+
+- Samma modul, indata och fönster ger samma display list, byte för byte. Tid bara via `now_ms()`
+  och `dt_ms`, slump bara via `random()`; ingen `HashMap`, inga globala räknare.
+- `frame` har 8 ms logisk tid, och värdens textformning räknas in; rasteriseringen av listan har
+  samma budget räknad i pixlar. Rita bara det som syns, mät inte samma text många gånger per frame,
+  sätt tak på listor och fält. `vy-dev build` varnar för en sida över budgeten.
+
+## Vanliga misstag
+
+| Misstag | Följd | Rätt |
+| --- | --- | --- |
+| Textfält utan `"ime": {}` i manifestet | sidan avvisas av konformanssviten; IME nekas | begär `ime` |
+| Bild utan `w`/`h` i manifestet, eller fel storlek | manifestet valideras inte, bilden avvisas (`E_RESOURCE`) | bildens verkliga storlek i pixlar |
+| Glömd semantisk nod | texten finns inte för skärmläsare, sök och markering | `f.sem.node(…)` för varje text; komponenterna för kontroller |
+| Automatiskt id på en kontroll | fokus hamnar fel när en nod läggs till före | fasta negativa id |
+| Obegränsad allokering per frame | minnet tar slut, budgeten spricker | tak på data, rita bara det som syns |
+| `event` returnerar `false` efter en ändring | ingen ny bild | `ui.redraw()`, eller `true` när sidan ändrat något |
+| `request_frame()` utan animation | sidan bränner CPU | bara medan något rör sig |
+| `unwrap` och panik | fliken stoppas | returnera och hantera `Err` |
+| Layout räknad på två ställen | träffytor och ritning glider isär | en `layout()` |
 
 ## API i korthet
 
@@ -581,9 +678,14 @@ med namn: `use vy_sdk::{fetch_begin, fetch_poll, fetch_read, Method, state_get, 
 - Navigering: `navigate(url, replace)` (`vy://` eller `https://`), `link_register(id, rect, url)`
   varje frame för en klickbar länk.
 - Urklipp (`clipboard`): `clipboard_read(&mut buf)`, `clipboard_write(text)`.
+- Komponenter: `vy_sdk::ui` (se *Komponenter* ovan) – `Theme`, `Palette`, `Words`, `Input`,
+  `Response`, `TextBox` (radläget `Lines`: `OneLine` som standard, `Multiline`), `Button`
+  (`ButtonKind`), `Checkbox`, `RadioGroup`, `Slider`, `List`, `Rows`, `ScrollView`, `Column`, `Row`,
+  `split`, `CONTROL_H` (40, höjden på ett fält eller en knapp).
 - Nativa tester: `vy_sdk::mock::reset()`, `mock::run_frame(&mut sida, dt) -> Result<u32, _>`
   (antal opkoder), `mock::with(|h| h.sem …)` för trädet; `h.caps.storage = true` med flera
-  beviljar capabilities i mocken.
+  beviljar capabilities i mocken; `mock::as_copy_gesture(|| …)` kör en händelse under
+  kopieringsgesten (Ctrl+C).
 
 ## vy-sdk
 
@@ -721,6 +823,20 @@ mod tests {
                 .map(str::trim)
                 .filter_map(|l| l.split_once(" = role::").map(|(n, _)| n.to_string())),
         );
+        // The components: every type and function `vy_sdk::ui` re-exports
+        // (constants aside).
+        let ui = std::fs::read_to_string(sdk.join("ui/mod.rs")).unwrap();
+        for line in ui.lines().filter_map(|l| l.strip_prefix("pub use ")) {
+            let list = line.split_once("::").map_or(line, |(_, rest)| rest);
+            names.extend(
+                list.trim_matches(|c| c == '{' || c == '}' || c == ';')
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|n| n.chars().any(|c| c.is_ascii_lowercase()))
+                    .map(str::to_string),
+            );
+        }
+        assert!(names.iter().any(|n| n == "TextBox"), "{names:?}");
         for name in &names {
             assert!(
                 CLAUDE_MD.contains(&format!("`{name}"))
