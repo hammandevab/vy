@@ -14,5 +14,10 @@ wasmparser.workspace = true
 wasmtime.workspace = true
 sha2.workspace = true
 
+# `geteuid` for the compilation cache's owner check (Unix): the libc crate the
+# tree already has (wasmtime, getrandom, vy-shell), no new crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 wat.workspace = true

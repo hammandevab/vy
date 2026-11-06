@@ -3270,6 +3270,7 @@ dependencies = [
 name = "vy-runtime"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sha2 0.11.1",
  "vy-abi",
  "vy-dl",

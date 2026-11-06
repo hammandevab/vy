@@ -14,7 +14,8 @@
 //! `docs/notes/m4-perf.md` under "Hotbild": only the client writes
 //! ([`CompileCache::ReadWrite`]; a tab process gets [`CompileCache::ReadOnly`]
 //! or nothing), the directory is the user's own (created 0700 on Unix and
-//! refused when group or others may write it), entries are written to a
+//! refused when another user owns it or group or others may write it),
+//! entries are written to a
 //! temporary file and renamed, read whole into memory (never mapped from
 //! the file, which could change under the module), and checked against
 //! the payload hash, which catches a torn or truncated file but not an
@@ -93,8 +94,16 @@ fn entry_name(engine: &Engine, module_sha256: &[u8; 32]) -> String {
     format!("{}.code", crate::hex(&key.finalize()))
 }
 
-/// True when `dir` may hold entries: it exists, is a directory and, on
-/// Unix, no one but its owner may write it.
+/// True when `dir` may hold entries: it exists and is a directory and, on
+/// Unix, the user this process runs as (the effective uid) owns it and no
+/// one else may write it. Mode alone is not enough: a 0700 directory that
+/// another user made, and put where the cache is looked for, is theirs to
+/// fill.
+///
+/// On Windows only existence and kind are checked; the ACL is not read.
+/// The cache lives in the user's profile (`%LOCALAPPDATA%`), which only
+/// the user, SYSTEM and administrators may write, and a tab process runs
+/// at low integrity and cannot write there (SPEC-9.1.3).
 fn dir_is_private(dir: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(dir) else {
         return false;
@@ -104,8 +113,13 @@ fn dir_is_private(dir: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if meta.permissions().mode() & 0o022 != 0 {
+            return false;
+        }
+        // SAFETY: `geteuid` takes nothing, always succeeds and touches no
+        // memory of ours.
+        if meta.uid() != unsafe { libc::geteuid() } {
             return false;
         }
     }
@@ -247,4 +261,43 @@ pub(crate) fn module(
             written,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review 0007, finding 6: a directory holds entries only when this
+    /// process's user owns it and no one else may write it. As root the
+    /// directory is given to uid 65534; as anyone else `/`, which root
+    /// owns and others cannot write, stands for a directory of another
+    /// user.
+    #[cfg(unix)]
+    #[test]
+    fn private_dirs_are_owned_by_this_user() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = |m: u32| std::fs::Permissions::from_mode(m);
+        let dir = std::env::temp_dir().join(format!("vy-cc-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, mode(0o700)).unwrap();
+        assert!(dir_is_private(&dir));
+        std::fs::set_permissions(&dir, mode(0o777)).unwrap();
+        assert!(!dir_is_private(&dir), "writable by others");
+        std::fs::set_permissions(&dir, mode(0o700)).unwrap();
+        assert!(!dir_is_private(&dir.join("missing")));
+        // SAFETY: as in `dir_is_private`.
+        let me = unsafe { libc::geteuid() };
+        if me == 0 {
+            std::os::unix::fs::chown(&dir, Some(65534), Some(65534)).unwrap();
+            assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+            assert!(!dir_is_private(&dir), "0700, owned by uid 65534");
+        } else {
+            let root = std::fs::metadata("/").unwrap();
+            assert_ne!(root.uid(), me);
+            assert_eq!(root.mode() & 0o022, 0);
+            assert!(!dir_is_private(Path::new("/")), "owned by root");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
