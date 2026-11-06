@@ -92,6 +92,19 @@ jobs:
       # tools/repro_env.sh (sourced by the script) sets the path remapping and CFLAGS.
       - name: Build (SPEC-9.7.1)
         run: tools/build_release.sh "$TARGET" stage
+      # The client is at most 25 000 000 bytes on every platform (SPEC-12.3.1,
+      # decimal MB); every file's size is in the log and the client's in the
+      # run summary.
+      - name: Size (SPEC-12.3.1)
+        run: |
+          for f in stage/*; do printf '%10s  %s\n' "$(wc -c < "$f" | tr -d ' ')" "${f#stage/}"; done
+          size=$(wc -c < "stage/vy-shell$EXT" | tr -d ' ')
+          echo "::notice title=SPEC-12.3.1 $TARGET::vy-shell$EXT is $size bytes (cap 25000000)"
+          echo "| \`$TARGET\` | vy-shell$EXT | $size bytes | cap 25 000 000 |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt 25000000 ]; then
+            echo "::error::vy-shell$EXT is $size bytes, over SPEC-12.3.1's 25000000"
+            exit 1
+          fi
       - name: Hash the build
         run: |
           "$PY" tools/release_files.py sums "$NAME.unsigned" stage/* > unsigned.sha256

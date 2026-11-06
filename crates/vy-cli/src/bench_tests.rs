@@ -341,9 +341,105 @@ fn spec_12_2_3_perf_regression_gate() {
     assert!(found >= 1, "at least one committed baseline");
 }
 
-/// SPEC-12.3.1: client binary <= 25 MB; whole codebase < 400 000 tokens.
+/// The client's size cap, SPEC-12.3.1: "högst 25 MB", read decimally
+/// (spec-fråga 56): 25 000 000 bytes, the stricter of MB and MiB.
+const CLIENT_MAX_BYTES: u64 = 25_000_000;
+
+/// The codebase's cap, SPEC-12.3.1, in tokens as [`codebase_tokens`] counts them.
+const CODEBASE_MAX_TOKENS: u64 = 400_000;
+
+/// SPEC-12.3.1, the client half: the client binary is at most
+/// [`CLIENT_MAX_BYTES`]. Measured on the `vy-shell` beside this test binary's
+/// profile directory (`target[/<target>]/release/`), built by `cargo build
+/// --release -p vy-shell` with the release profile's `strip = true`, so it is
+/// what release.yml ships (which also prints every platform's size and stops
+/// at the cap). A debug run has no release client to measure: it says so and
+/// returns. CI's `size` job builds the client and then runs this in release.
 #[test]
-#[ignore = "M5: release"]
 fn spec_12_3_1_size_budget() {
-    todo!()
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "SPEC-12.3.1 measures the release client: cargo build --release -p vy-shell && \
+             cargo test --release -p vy-cli --lib spec_12_3_1"
+        );
+        return;
+    }
+    let mut dir = std::env::current_exe().unwrap();
+    dir.pop();
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    let exe = dir.join(format!("vy-shell{}", std::env::consts::EXE_SUFFIX));
+    let size = std::fs::metadata(&exe)
+        .unwrap_or_else(|e| panic!("{}: {e}; cargo build --release -p vy-shell", exe.display()))
+        .len();
+    eprintln!(
+        "SPEC-12.3.1: {} is {size} bytes, cap {CLIENT_MAX_BYTES}, margin {}",
+        exe.display(),
+        CLIENT_MAX_BYTES as i64 - size as i64
+    );
+    assert!(
+        size <= CLIENT_MAX_BYTES,
+        "the client is {size} bytes, over SPEC-12.3.1's {CLIENT_MAX_BYTES}"
+    );
+}
+
+/// The codebase's size in tokens, as SPEC-12.3.1 counts it: every file git
+/// tracks (`git ls-files`) whose bytes are UTF-8 without a NUL is text, and
+/// the count is the text bytes divided by four, rounded up. Binary files
+/// (images, fonts, `.wasm`) are not counted. Four bytes per token is the
+/// usual estimate for English and code; a model's tokenizer gives more for
+/// Swedish and for Rust's punctuation, so this undercounts rather than
+/// over. Returns the total and the text bytes per top-level path (`crates`,
+/// `docs`, `SPEC.md`, …), largest first.
+fn codebase_tokens(root: &Path) -> (u64, Vec<(String, u64)>) {
+    let listed = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .expect("git: the codebase is what git tracks");
+    assert!(listed.status.success(), "git ls-files");
+    let mut bytes = 0u64;
+    let mut parts = std::collections::BTreeMap::<String, u64>::new();
+    for name in listed.stdout.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        let name = std::str::from_utf8(name).expect("UTF-8 path");
+        let Ok(data) = std::fs::read(root.join(name)) else {
+            continue; // deleted in the working tree
+        };
+        if data.contains(&0) || std::str::from_utf8(&data).is_err() {
+            continue;
+        }
+        bytes += data.len() as u64;
+        let top = name.split('/').next().unwrap_or(name).to_string();
+        *parts.entry(top).or_default() += data.len() as u64;
+    }
+    let mut parts: Vec<(String, u64)> = parts.into_iter().collect();
+    parts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    (bytes.div_ceil(4), parts)
+}
+
+/// SPEC-12.3.1, the codebase half: under [`CODEBASE_MAX_TOKENS`] tokens as
+/// [`codebase_tokens`] counts them. Not met: the codebase was 858 837 tokens
+/// (3 435 346 text bytes) on `m5/release` (2026-11-06), more than twice the
+/// cap, with `crates/` alone at 2,3 MB; spec-fråga 66 asks the owner whether
+/// the cap, the count or the codebase should change. `cargo test -p vy-cli
+/// --lib spec_12_3_1 -- --ignored --nocapture` prints today's number and the
+/// parts.
+#[test]
+#[ignore = "SPEC-12.3.1: 858 837 tokens (bytes/4) against 400 000 on 2026-11-06; spec-fråga 66"]
+fn spec_12_3_1_codebase_tokens() {
+    let root = bench::root().expect("inside the repository");
+    let (tokens, parts) = codebase_tokens(&root);
+    for (part, bytes) in &parts {
+        eprintln!(
+            "{part:>24} {bytes:>9} bytes {:>8} tokens",
+            bytes.div_ceil(4)
+        );
+    }
+    eprintln!("SPEC-12.3.1: the codebase is {tokens} tokens, cap {CODEBASE_MAX_TOKENS}");
+    assert!(tokens > 100_000, "the count sees the codebase: {tokens}");
+    assert!(
+        tokens < CODEBASE_MAX_TOKENS,
+        "the codebase is {tokens} tokens, over SPEC-12.3.1's {CODEBASE_MAX_TOKENS}"
+    );
 }

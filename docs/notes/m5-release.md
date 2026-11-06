@@ -83,3 +83,31 @@ i en kommentar; granskning 0004 punkt 11).
 bygget med eget `CARGO_HOME` (nytt registerträd) och `TZ=Asia/Tokyo`, båda med `build_release.sh`;
 SHA-256 för `vy-*` och `LICENSE` plus `studio.vyp`:s identitet jämförs. Linux är grind; macOS och
 Windows har `continue-on-error` tills en körning visat att de håller (inget av det är kört här).
+
+## Steg 2 – storleksbudgeten som test (SPEC-12.3.1)
+
+SPEC-12.3.1 har två halvor, och de blev två tester i `crates/vy-cli/src/bench_tests.rs`:
+
+- **`spec_12_3_1_size_budget`** (un-ignorerat): `vy-shell` bredvid testbinärens profilkatalog
+  (`target[/<mål>]/release/`) är högst `CLIENT_MAX_BYTES` = 25 000 000 byte (decimalt, det
+  strängare; spec-fråga 56). I debug skriver testet hur det körs och återvänder. CI:s nya jobb
+  `size` bygger `vy-shell` i release och kör testet i release; `release.yml` skriver varje fils
+  storlek i loggen, klientens i en `::notice` och i körningens sammanfattning, och stoppar över
+  taket. **Prövat i release** mot dagens `vy-shell --features a11y-linux` (25 476 976 byte): faller
+  med "the client is 25476976 bytes, over SPEC-12.3.1's 25000000".
+- **`spec_12_3_1_codebase_tokens`** (ignorerat, med talet): kodbasen under 400 000 tokens. Räkningen,
+  i testets dokumentation och `codebase_tokens`: varje fil `git ls-files` listar och som är UTF-8
+  utan NUL är text; tokens = textens byte / 4, uppåt avrundat. Fyra byte per token är den vanliga
+  uppskattningen för engelska och kod; en modells tokeniserare ger fler för svenska och Rusts
+  skiljetecken, så talet är snarare för lågt. **Hålls inte:** 858 837 tokens (3 435 346 byte) på
+  `54ca612`, mer än dubbla taket; `crates/` ensamt är 2,3 MB (583 000 tokens), `docs/` 104 000,
+  `modules/` 79 000, `conformance/` 45 000, `Cargo.lock` 27 000, `SPEC.md` 9 000. Inget urval av
+  filer ger under 400 000 utan att utelämna koden. Testet är därför ignorerat med det uppmätta
+  värdet, som `spec_13_2_1_raster_budget`, och ägaren avgör spec-fråga 66.
+
+**Spec-fråga 66 (m5/release).** SPEC-12.3.1:s "hela kodbasen inklusive spec och tester ryms under
+400 000 tokens" hålls inte: 858 837 tokens räknat som byte/4 över git-spårade textfiler (och fler med
+en riktig tokeniserare). Ska taket höjas (t.ex. 1 000 000), ska "kodbasen" betyda något smalare
+(utan `docs/notes`, `docs/reviews`, låsfiler och genererade `conformance/semantic/*.json`: ungefär
+720 000), eller ska meningen bli ett mål snarare än en grind? Räkningen i testet är ett förslag; en
+annan definition är ett `spec:`-commit med testet.

@@ -201,3 +201,21 @@ jobs:
             echo "::error::the two release builds differ (SPEC-9.7.1)"
             exit 1
           fi
+
+  # SPEC-12.3.1: the client binary in release, stripped by the release
+  # profile, against 25 000 000 bytes (spec_12_3_1_size_budget, which only
+  # reports in a debug build). release.yml prints every platform's size.
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the client (release)
+        run: cargo build --release --locked -p vy-shell
+      - name: Size budget (SPEC-12.3.1)
+        run: |
+          wc -c target/release/vy-shell
+          cargo test --release --locked -p vy-cli --lib spec_12_3_1 -- --nocapture
