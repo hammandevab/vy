@@ -62,8 +62,12 @@ annars väntar klienten vidare till tidsgränsen. TC ger samma fråga över TCP.
 och tomt svar är "inga poster"; övriga RCODE är fel. Bara svarsavsnittets TXT-poster för det
 frågade namnet, eller för ett namn som en CNAME i samma svar pekar ut (högst åtta), läses; ett
 TXT för något annat namn i svaret tas inte. Namnkomprimering följs bara bakåt, och namnlängden är
-begränsad, så en pekarslinga avslutas. 2 s per försök, tre försök över servrarna i tur och
-ordning: ett uppslag som misslyckas tar högst 6 s, en gång per origin och besök tills det lyckas.
+begränsad, så en pekarslinga avslutas. 2 s per utbyte, tre försök över servrarna i tur och
+ordning, och en gemensam tidsgräns för hela uppslaget (`SystemResolver::deadline`, 6 s), UDP och
+TCP inräknade: ett uppslag som misslyckas tar högst 6 s, en gång per origin och besök tills det
+lyckas. Före granskning 0007 fynd 2 gällde TCP-vägens 2 s varje enskild läsning, så en resolver som
+skickade en byte i taget kunde hålla uppslaget i timmar; TCP-svaret är nu också högst 16 384 byte
+(`MAX_TCP_ANSWER`), och ett längre nekas på sitt längdprefix innan något läses.
 Windows: `DnsQuery_UTF8` med `DNS_TYPE_TEXT`, namnet med avslutande punkt (inget söksuffix),
 bara poster i svarsavsnittet; systemets resolver sköter tidsgränser, försök och CNAME.
 Söksuffix (`search`/`ndots`) används aldrig: `_vy.<värd>` frågas som det står.
@@ -91,7 +95,8 @@ loopback.
 - **Hur begränsas det.** Snittet av två oberoende källor; stängt vid varje fel; ingen pin vid
   fel; uppkopplad UDP-socket med slumpat 16-bitars id och OS-slumpad källport; svaret måste
   upprepa frågan; tolken är säker Rust (`unsafe` bara i Windows-anropet), läser högst
-  4 096 byte UDP / 65 535 byte TCP, högst 64 poster, bara bakåtpekare, namn ≤ 255 byte.
+  4 096 byte UDP / 16 384 byte TCP, högst 64 poster, bara bakåtpekare, namn ≤ 255 byte; hela
+  uppslaget har en tidsgräns på 6 s.
   Pinnade origins frågar aldrig, så en senare DNS-kapning påverkar inte en origin man redan
   besökt.
 - **Test som bevisar begränsningen.** `spec_7_4_2_dns_txt_must_agree` (stämmer, avviker, saknas,
@@ -99,7 +104,8 @@ loopback.
   `dns::tests::spec_7_4_2_txt_wire_format` (fel id, fel fråga, inte ett svar, trunkerad rdata,
   framåtpekare, självpekare, 64-bytes etikett, CNAME-kedja, främmande ägarnamn);
   `dns::tests::system_resolver_udp_then_tcp` (datagram med fel id ignoreras, TC → TCP, tyst
-  server → timeout); fuzzmålet för svarstolken (steg 6).
+  server → timeout); `dns::tests::system_resolver_has_one_deadline` (TCP-svar som droppar en byte
+  per 1,5 s → timeout inom 6 s; längd 0xFFFF → nekad direkt); fuzzmålet för svarstolken (steg 6).
 
 ### Railway-sajten visas i begränsat läge vid första besök
 

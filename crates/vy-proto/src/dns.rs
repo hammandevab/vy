@@ -26,8 +26,10 @@ pub const CLASS_IN: u16 = 1;
 /// Largest UDP answer read; without EDNS a resolver sends at most 512
 /// bytes and sets TC beyond that, after which TCP is used.
 pub const MAX_UDP_ANSWER: usize = 4096;
-/// Largest TCP answer accepted (the two-byte length prefix's range).
-pub const MAX_TCP_ANSWER: usize = 65535;
+/// Largest TCP answer accepted: room for [`MAX_RECORDS`] key records and
+/// [`MAX_CNAMES`] aliases with margin to spare. A longer answer is refused
+/// as announced by its length prefix, before any of it is read.
+pub const MAX_TCP_ANSWER: usize = 16 * 1024;
 /// Longest name sent (RFC 1035 §2.3.4, presentation form).
 pub const MAX_NAME_LEN: usize = 253;
 /// Most TXT records taken from one answer; a key file is 16 KB
@@ -308,10 +310,13 @@ pub fn parse_answer(id: u16, name: &str, packet: &[u8]) -> Result<Answer, DnsErr
     Ok(Answer::Records(records))
 }
 
-/// The resolver of the machine the client runs on.
+/// The resolver of the machine the client runs on. On Unix the fields
+/// below bound the lookup; on Windows `DnsQuery_UTF8` keeps the system's
+/// own timeouts and retries and the fields are not used.
 #[derive(Clone, Debug)]
 pub struct SystemResolver {
-    /// Wait per attempt.
+    /// Longest wait of one exchange: a UDP query, or the TCP query after a
+    /// truncated answer.
     pub timeout: std::time::Duration,
     /// Attempts in all (the first try and the retries), spread over the
     /// configured nameservers in turn.
@@ -319,13 +324,24 @@ pub struct SystemResolver {
 }
 
 impl Default for SystemResolver {
-    /// Two seconds per attempt, three attempts: a lookup that fails takes
-    /// at most six seconds, once per origin ever (SPEC-7.4.5).
+    /// Two seconds per exchange, three attempts: a lookup that fails takes
+    /// at most six seconds ([`SystemResolver::deadline`]), once per origin
+    /// ever (SPEC-7.4.5).
     fn default() -> Self {
         Self {
             timeout: std::time::Duration::from_secs(2),
             attempts: 3,
         }
+    }
+}
+
+impl SystemResolver {
+    /// The bound on one whole lookup, every attempt over UDP and the TCP
+    /// exchange after a truncated answer together: `timeout` × `attempts`.
+    /// A server that answers slowly, a byte at a time, cannot hold the
+    /// loader past it.
+    pub fn deadline(&self) -> std::time::Duration {
+        self.timeout.saturating_mul(self.attempts.max(1))
     }
 }
 
@@ -385,14 +401,34 @@ mod system {
         DnsError::Io(e.to_string())
     }
 
+    /// A socket error, or [`DnsError::Timeout`] for the kinds a socket
+    /// gives when its timeout runs out.
+    fn io_or_timeout(e: std::io::Error) -> DnsError {
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => DnsError::Timeout,
+            _ => io(e),
+        }
+    }
+
+    /// The time left until `deadline`, or [`DnsError::Timeout`] once it
+    /// has passed.
+    fn left(deadline: Instant) -> Result<Duration, DnsError> {
+        let now = Instant::now();
+        if now >= deadline {
+            Err(DnsError::Timeout)
+        } else {
+            Ok(deadline - now)
+        }
+    }
+
     /// One UDP exchange: send the query, take the first matching answer
-    /// before the deadline.
+    /// before `deadline`.
     pub(crate) fn udp(
         server: SocketAddr,
         query: &[u8],
         id: u16,
         name: &str,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<Answer, DnsError> {
         let bind: SocketAddr = if server.is_ipv4() {
             "0.0.0.0:0".parse().expect("literal")
@@ -402,26 +438,10 @@ mod system {
         let socket = UdpSocket::bind(bind).map_err(io)?;
         socket.connect(server).map_err(io)?;
         socket.send(query).map_err(io)?;
-        let deadline = Instant::now() + timeout;
         let mut buf = vec![0u8; MAX_UDP_ANSWER];
         loop {
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(DnsError::Timeout);
-            }
-            socket.set_read_timeout(Some(deadline - now)).map_err(io)?;
-            let n = match socket.recv(&mut buf) {
-                Ok(n) => n,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    return Err(DnsError::Timeout)
-                }
-                Err(e) => return Err(io(e)),
-            };
+            socket.set_read_timeout(Some(left(deadline)?)).map_err(io)?;
+            let n = socket.recv(&mut buf).map_err(io_or_timeout)?;
             match parse_answer(id, name, &buf[..n]) {
                 // Someone else's datagram, or a damaged one: keep waiting.
                 Err(DnsError::Malformed(_)) => continue,
@@ -430,26 +450,54 @@ mod system {
         }
     }
 
-    /// The same query over TCP, for a truncated UDP answer.
+    /// Fill `buf` from `stream` before `deadline`. The bound holds for all
+    /// the reads together, so a server that sends one byte just inside
+    /// each read's timeout cannot hold the lookup past it.
+    fn read_full(
+        stream: &mut TcpStream,
+        buf: &mut [u8],
+        deadline: Instant,
+    ) -> Result<(), DnsError> {
+        let mut at = 0;
+        while at < buf.len() {
+            stream.set_read_timeout(Some(left(deadline)?)).map_err(io)?;
+            match stream.read(&mut buf[at..]) {
+                Ok(0) => return Err(DnsError::Malformed("TCP answer cut short")),
+                Ok(n) => at += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(io_or_timeout(e)),
+            }
+        }
+        Ok(())
+    }
+
+    /// The same query over TCP, for a truncated UDP answer: connect, send
+    /// and read all before `deadline`. An answer whose length prefix
+    /// announces more than [`MAX_TCP_ANSWER`] bytes is refused unread.
     pub(crate) fn tcp(
         server: SocketAddr,
         query: &[u8],
         id: u16,
         name: &str,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<Answer, DnsError> {
-        let mut stream = TcpStream::connect_timeout(&server, timeout).map_err(io)?;
-        stream.set_read_timeout(Some(timeout)).map_err(io)?;
-        stream.set_write_timeout(Some(timeout)).map_err(io)?;
+        let mut stream =
+            TcpStream::connect_timeout(&server, left(deadline)?).map_err(io_or_timeout)?;
+        stream
+            .set_write_timeout(Some(left(deadline)?))
+            .map_err(io)?;
         let mut msg = Vec::with_capacity(query.len() + 2);
         msg.extend_from_slice(&(query.len() as u16).to_be_bytes());
         msg.extend_from_slice(query);
-        stream.write_all(&msg).map_err(io)?;
+        stream.write_all(&msg).map_err(io_or_timeout)?;
         let mut len = [0u8; 2];
-        stream.read_exact(&mut len).map_err(io)?;
-        let len = usize::from(u16::from_be_bytes(len)).min(MAX_TCP_ANSWER);
+        read_full(&mut stream, &mut len, deadline)?;
+        let len = usize::from(u16::from_be_bytes(len));
+        if len > MAX_TCP_ANSWER {
+            return Err(DnsError::Malformed("TCP answer over the size cap"));
+        }
         let mut buf = vec![0u8; len];
-        stream.read_exact(&mut buf).map_err(io)?;
+        read_full(&mut stream, &mut buf, deadline)?;
         match parse_answer(id, name, &buf)? {
             Answer::Truncated => Err(DnsError::Malformed("truncated over TCP")),
             records => Ok(records),
@@ -458,16 +506,33 @@ mod system {
 
     pub fn txt(resolver: &SystemResolver, name: &str) -> Result<Vec<String>, DnsError> {
         let servers = nameservers(&std::fs::read_to_string(RESOLV_CONF).unwrap_or_default());
+        lookup(resolver, &servers, name)
+    }
+
+    /// [`txt`] against `servers`. The attempts go to the servers in turn;
+    /// each exchange (UDP, and TCP after a truncated answer) gets at most
+    /// `resolver.timeout`, and the whole lookup ends at
+    /// [`SystemResolver::deadline`] whatever the servers do.
+    pub(crate) fn lookup(
+        resolver: &SystemResolver,
+        servers: &[SocketAddr],
+        name: &str,
+    ) -> Result<Vec<String>, DnsError> {
         if servers.is_empty() {
             return Err(DnsError::NoResolver);
         }
+        let deadline = Instant::now() + resolver.deadline();
+        let exchange = || deadline.min(Instant::now() + resolver.timeout);
         let mut last = DnsError::Timeout;
         for attempt in 0..resolver.attempts.max(1) {
+            if Instant::now() >= deadline {
+                break;
+            }
             let server = servers[attempt as usize % servers.len()];
             let id = random_id();
             let query = build_query(id, name).ok_or(DnsError::BadName)?;
-            let outcome = match udp(server, &query, id, name, resolver.timeout) {
-                Ok(Answer::Truncated) => tcp(server, &query, id, name, resolver.timeout),
+            let outcome = match udp(server, &query, id, name, exchange()) {
+                Ok(Answer::Truncated) => tcp(server, &query, id, name, exchange()),
                 other => other,
             };
             match outcome {
@@ -796,7 +861,7 @@ mod tests {
             &query,
             id,
             "_vy.test.example",
-            resolver.timeout,
+            std::time::Instant::now() + resolver.timeout,
         );
         assert_eq!(first, Ok(Answer::Truncated));
         let second = system_test::tcp(
@@ -804,7 +869,7 @@ mod tests {
             &query,
             id,
             "_vy.test.example",
-            resolver.timeout,
+            std::time::Instant::now() + resolver.timeout,
         );
         assert_eq!(second, Ok(Answer::Records(vec![key])));
         server.join().unwrap();
@@ -820,14 +885,114 @@ mod tests {
             &query,
             id,
             "_vy.test.example",
-            quick.timeout,
+            std::time::Instant::now() + quick.timeout,
         );
         assert_eq!(r, Err(DnsError::Timeout));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
+    /// A nameserver on loopback that answers every UDP query truncated
+    /// and its TCP answers with the length `announced`, then one byte every
+    /// 1.5 s: each read alone well inside a 2 s timeout. Runs until `stop`.
+    #[cfg(unix)]
+    fn dripping_nameserver(
+        announced: u16,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, UdpSocket};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = udp.local_addr().unwrap();
+        let tcp = TcpListener::bind(addr).unwrap();
+        udp.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        tcp.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            while !s.load(Ordering::Relaxed) {
+                if let Ok((n, from)) = udp.recv_from(&mut buf) {
+                    let _ = udp.send_to(&answer(&buf[..n], 0, true, &[]), from);
+                }
+            }
+        });
+        let s = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                let Ok((mut conn, _)) = tcp.accept() else {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                };
+                let s = Arc::clone(&s);
+                std::thread::spawn(move || {
+                    let _ = conn.set_nonblocking(false);
+                    let mut len = [0u8; 2];
+                    if conn.read_exact(&mut len).is_err() {
+                        return;
+                    }
+                    let mut query = vec![0u8; usize::from(u16::from_be_bytes(len))];
+                    if conn.read_exact(&mut query).is_err()
+                        || conn.write_all(&announced.to_be_bytes()).is_err()
+                    {
+                        return;
+                    }
+                    while !s.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        if conn.write_all(&[0]).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, stop)
+    }
+
+    /// Review 0007, finding 2: one deadline for the whole lookup, UDP
+    /// attempts and TCP together. A resolver whose TCP answer drips a byte
+    /// every 1.5 s is given up on at the documented six seconds, not after
+    /// the announced length has trickled in; one that announces 0xFFFF
+    /// bytes is refused by the cap before anything is read. Both run on a
+    /// thread, so the test fails instead of hanging without the deadline.
+    #[cfg(unix)]
+    #[test]
+    fn system_resolver_has_one_deadline() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+        let resolver = SystemResolver::default();
+        assert_eq!(resolver.deadline(), Duration::from_secs(6));
+        for (announced, expected, within) in [
+            (512u16, DnsError::Timeout, Duration::from_millis(6500)),
+            (
+                0xFFFF,
+                DnsError::Malformed("TCP answer over the size cap"),
+                Duration::from_secs(2),
+            ),
+        ] {
+            let (server, stop) = dripping_nameserver(announced);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let r = resolver.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let outcome = system_test::lookup(&r, &[server], "_vy.slow.example");
+                let _ = tx.send((outcome, started.elapsed()));
+            });
+            let got = rx.recv_timeout(Duration::from_secs(20));
+            stop.store(true, Ordering::Relaxed);
+            let (outcome, took) = got.expect("the lookup outlived its deadline");
+            assert_eq!(outcome, Err(expected), "length {announced}");
+            assert!(took <= within, "length {announced}: {took:?}");
+        }
+    }
+
     #[cfg(unix)]
     pub(crate) mod system_test {
-        pub(crate) use super::super::system::{tcp, udp};
+        pub(crate) use super::super::system::{lookup, tcp, udp};
     }
 }
