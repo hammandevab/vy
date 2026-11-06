@@ -1099,7 +1099,14 @@ mod tests {
             assert_eq!(hit.as_millis(), 0, "{}: cache hit {hit:?}", path.display());
             checked += 1;
         }
-        assert!(checked >= 11, "every reference module");
+        let modules = std::fs::read_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules"),
+        )
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().join("Cargo.toml").is_file())
+        .count();
+        assert!(checked >= modules, "every module under modules/");
     }
 
     /// SPEC-11.3.1: `--size` parsing.

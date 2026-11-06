@@ -1422,8 +1422,15 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         let mut modules: Vec<String> = cases.iter().map(|c| c.module.clone()).collect();
         modules.sort();
         modules.dedup();
-        // Eleven reference pages and Studio (modules/studio).
-        assert_eq!(modules.len(), 12);
+        // Every module under modules/ (Studio among them), by its Cargo.toml.
+        let mut module_dirs: Vec<String> = std::fs::read_dir(root().join("modules"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().join("Cargo.toml").is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        module_dirs.sort();
+        assert_eq!(modules, module_dirs, "every module has a case");
         for m in &modules {
             let first = cases.iter().find(|c| &c.module == m).unwrap();
             let package =

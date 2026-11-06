@@ -1402,8 +1402,15 @@ mod tests {
             })
             .collect();
         names.sort();
-        // Eleven reference pages and Studio (modules/studio).
-        assert_eq!(names.len(), 12, "{names:?}");
+        // Every module under modules/ (Studio among them), by its Cargo.toml.
+        let mut module_dirs: Vec<String> = std::fs::read_dir(root().join("modules"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().join("Cargo.toml").is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        module_dirs.sort();
+        assert_eq!(names, module_dirs, "one draft per module, no other");
         for n in &names {
             let (draft, dir) = conformance_draft(n);
             assert!(
