@@ -392,6 +392,93 @@ fn page_limit(media_type: &str) -> u64 {
     }
 }
 
+/// A page's own requests (`fetch_begin`, SPEC-5.2.7) without the rest of
+/// a [`Fetcher`]: the same agent configuration, cheap to clone, usable
+/// from any thread. Nothing is cached and no key is consulted; the same
+/// rules apply as in [`Fetcher::request`].
+#[derive(Clone, Debug)]
+pub struct Requester {
+    agent: Agent,
+}
+
+impl Requester {
+    /// A requester with the agent [`Fetcher::new`] would build for
+    /// `options`.
+    pub fn new(options: &Options) -> Self {
+        Self {
+            agent: Agent::new_with_config(Fetcher::config(options)),
+        }
+    }
+
+    /// As [`Fetcher::request`].
+    pub fn request(
+        &self,
+        method: &str,
+        url: &str,
+        body: &[u8],
+        page_is_localhost: bool,
+        limit: u64,
+    ) -> Result<(u16, Vec<u8>), Error> {
+        request_with(&self.agent, method, url, body, page_is_localhost, limit)
+    }
+}
+
+/// [`Fetcher::request`] with `agent`.
+fn request_with(
+    agent: &Agent,
+    method: &str,
+    url: &str,
+    body: &[u8],
+    page_is_localhost: bool,
+    limit: u64,
+) -> Result<(u16, Vec<u8>), Error> {
+    let parsed = HttpUrl::parse(url).ok_or_else(|| Error::BadRedirect {
+        url: url.to_string(),
+    })?;
+    if !transport_allowed(page_is_localhost, &parsed) {
+        return Err(Error::TlsRequired {
+            url: url.to_string(),
+        });
+    }
+    let transport = |e: ureq::Error| Error::Transport {
+        url: url.to_string(),
+        message: e.to_string(),
+    };
+    let mut resp = match method {
+        "GET" => agent.get(url).call(),
+        "DELETE" => agent.delete(url).call(),
+        "POST" => agent.post(url).send(body),
+        "PUT" => agent.put(url).send(body),
+        other => {
+            return Err(Error::Transport {
+                url: url.to_string(),
+                message: format!("method {other} is not GET, POST, PUT or DELETE"),
+            })
+        }
+    }
+    .map_err(transport)?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .body_mut()
+        .with_config()
+        .limit(limit.saturating_add(1))
+        .read_to_vec()
+        .map_err(|e| match e {
+            ureq::Error::BodyExceedsLimit(_) => Error::TooLarge {
+                url: url.to_string(),
+                limit,
+            },
+            e => transport(e),
+        })?;
+    if body.len() as u64 > limit {
+        return Err(Error::TooLarge {
+            url: url.to_string(),
+            limit,
+        });
+    }
+    Ok((status, body))
+}
+
 /// Fetches pages with a content-addressed cache, an HTTP cache for
 /// manifests and a per-origin key store.
 pub struct Fetcher {
@@ -484,51 +571,16 @@ impl Fetcher {
         page_is_localhost: bool,
         limit: u64,
     ) -> Result<(u16, Vec<u8>), Error> {
-        let parsed = HttpUrl::parse(url).ok_or_else(|| Error::BadRedirect {
-            url: url.to_string(),
-        })?;
-        if !transport_allowed(page_is_localhost, &parsed) {
-            return Err(Error::TlsRequired {
-                url: url.to_string(),
-            });
+        request_with(&self.agent, method, url, body, page_is_localhost, limit)
+    }
+
+    /// A handle that makes the same requests as [`Fetcher::request`] with
+    /// this fetcher's agent, for another thread: the page's own requests
+    /// need no cache or key store, so they need not wait for a page load.
+    pub fn requester(&self) -> Requester {
+        Requester {
+            agent: self.agent.clone(),
         }
-        let transport = |e: ureq::Error| Error::Transport {
-            url: url.to_string(),
-            message: e.to_string(),
-        };
-        let mut resp = match method {
-            "GET" => self.agent.get(url).call(),
-            "DELETE" => self.agent.delete(url).call(),
-            "POST" => self.agent.post(url).send(body),
-            "PUT" => self.agent.put(url).send(body),
-            other => {
-                return Err(Error::Transport {
-                    url: url.to_string(),
-                    message: format!("method {other} is not GET, POST, PUT or DELETE"),
-                })
-            }
-        }
-        .map_err(transport)?;
-        let status = resp.status().as_u16();
-        let body = resp
-            .body_mut()
-            .with_config()
-            .limit(limit.saturating_add(1))
-            .read_to_vec()
-            .map_err(|e| match e {
-                ureq::Error::BodyExceedsLimit(_) => Error::TooLarge {
-                    url: url.to_string(),
-                    limit,
-                },
-                e => transport(e),
-            })?;
-        if body.len() as u64 > limit {
-            return Err(Error::TooLarge {
-                url: url.to_string(),
-                limit,
-            });
-        }
-        Ok((status, body))
     }
 
     /// Ask the server whether a page changed, whatever the HTTP cache's

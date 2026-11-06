@@ -26,7 +26,7 @@ pub use cache::{
 };
 pub use dns::{DnsError, SystemResolver, TxtResolver};
 pub use fetch::{
-    transport_allowed, Error, Fetched, Fetcher, Form, Options, Restriction, ACCEPT,
+    transport_allowed, Error, Fetched, Fetcher, Form, Options, Requester, Restriction, ACCEPT,
     BLOB_PATH_PREFIX, MAX_BLOB_BYTES, MAX_KEY_FILE_BYTES, MAX_REDIRECTS, WELL_KNOWN_KEY_PATH,
     WELL_KNOWN_LOG_PATH,
 };

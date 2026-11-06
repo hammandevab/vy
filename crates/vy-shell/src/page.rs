@@ -1,15 +1,19 @@
 //! Getting a page: from a `vy://` address through `vy-proto` (SPEC §7),
 //! or from a local `.vyp` package or bare `.wasm` for development; the
 //! trust decision and the default capability verdicts (SPEC-7.4.3,
-//! SPEC-8.2.3). Runs on the loader thread, never on the UI thread, since
-//! a fetch can take seconds.
+//! SPEC-8.2.3). Runs off the UI thread, since a fetch can take seconds:
+//! pages on the loader thread, a page's own requests on its tab's worker.
 
 use crate::ipc::ResourceBytes;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::thread;
 use vy_manifest::{Draft, Grant, Manifest, Package};
-use vy_proto::{Address, Error as FetchError, Fetcher, Options as FetchOptions, Restriction};
+use vy_proto::{
+    Address, Error as FetchError, Fetcher, Options as FetchOptions, Requester, Restriction,
+};
 
 /// What a tab is asked to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,7 +309,8 @@ fn load_file(path: &Path, draft: Option<&Path>) -> Result<LoadedPage, LoadError>
     })
 }
 
-/// A job for the loader thread.
+/// A job for the loader ([`Loader::send`]): a page's request goes to its
+/// tab's worker, everything else to the loader thread.
 #[derive(Debug)]
 pub enum Job {
     /// Load a page for a tab.
@@ -351,7 +356,7 @@ pub struct Check {
     pub address: Address,
 }
 
-/// What the loader thread reports back.
+/// What the loader reports back, from the thread that did the job.
 #[derive(Debug)]
 pub enum Done {
     /// A live-reload check finished: the SHA-256 of what the server answers
@@ -389,16 +394,140 @@ pub enum Done {
     },
 }
 
-/// Start the loader thread over the caches under `cache_dir`, reporting
-/// through `report` (which also wakes the UI). Returns the job sender.
-pub fn start_loader(
-    cache_dir: PathBuf,
-    report: impl Fn(Done) + Send + 'static,
+/// The loader (SPEC-5.2.7, SPEC-7.4.5): page loads and live-reload checks
+/// run in order on one thread, which owns the [`Fetcher`] with its caches
+/// and key store; a page's own requests run on a worker thread per tab,
+/// in the order the tab made them, so a slow request (a long poll, a slow
+/// server) holds up neither another tab's requests nor any page load, and a
+/// page load (a first visit's DNS lookup can take seconds) holds up no
+/// page's requests.
+pub struct Loader {
+    pages: Sender<Job>,
+    requester: Requester,
+    report: Report,
+    workers: HashMap<u32, Sender<Job>>,
+}
+
+type Report = Arc<dyn Fn(Done) + Send + Sync>;
+
+impl Loader {
+    /// Hand `job` to the thread that does it: a request to its tab's
+    /// worker (started at the tab's first request), anything else to the
+    /// loader thread.
+    pub fn send(&mut self, job: Job) {
+        let Job::Request { tab, .. } = &job else {
+            let _ = self.pages.send(job);
+            return;
+        };
+        let tab = *tab;
+        // A worker whose thread has ended hands the job back; start anew.
+        let job = match self.workers.get(&tab) {
+            None => job,
+            Some(worker) => match worker.send(job) {
+                Ok(()) => return,
+                Err(std::sync::mpsc::SendError(job)) => job,
+            },
+        };
+        match spawn_request_worker(tab, self.requester.clone(), self.report.clone()) {
+            Ok(worker) => {
+                let _ = worker.send(job);
+                self.workers.insert(tab, worker);
+            }
+            // No thread: the request fails as a transport failure would.
+            Err(_) => {
+                if let Job::Request {
+                    tab,
+                    generation,
+                    id,
+                    ..
+                } = job
+                {
+                    (self.report)(Done::Request {
+                        tab,
+                        generation,
+                        id,
+                        status: vy_abi::err::E_NET,
+                        body: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// The tab is gone: its worker ends once its queued requests are done.
+    pub fn close_tab(&mut self, tab: u32) {
+        self.workers.remove(&tab);
+    }
+
+    /// Tabs with a request worker, for tests.
+    pub fn workers(&self) -> usize {
+        self.workers.len()
+    }
+}
+
+/// A worker that performs one tab's requests in order with `requester`.
+fn spawn_request_worker(
+    tab: u32,
+    requester: Requester,
+    report: Report,
 ) -> std::io::Result<Sender<Job>> {
     let (tx, rx) = std::sync::mpsc::channel::<Job>();
     thread::Builder::new()
+        .name(format!("vy-requests-{tab}"))
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                if let Job::Request {
+                    tab,
+                    generation,
+                    id,
+                    method,
+                    url,
+                    body,
+                    page_is_localhost,
+                } = job
+                {
+                    let outcome = requester.request(
+                        method,
+                        &url,
+                        &body,
+                        page_is_localhost,
+                        u64::from(vy_abi::limits::MAX_FETCH_RESPONSE_BYTES) + 1,
+                    );
+                    let (status, body) = match outcome {
+                        Ok((status, body)) => (i32::from(status), body),
+                        Err(FetchError::TooLarge { .. }) => (
+                            vy_abi::err::E_TOO_LARGE,
+                            vec![0; vy_abi::limits::MAX_FETCH_RESPONSE_BYTES as usize + 1],
+                        ),
+                        Err(_) => (vy_abi::err::E_NET, Vec::new()),
+                    };
+                    report(Done::Request {
+                        tab,
+                        generation,
+                        id,
+                        status,
+                        body,
+                    });
+                }
+            }
+        })?;
+    Ok(tx)
+}
+
+/// Start the loader over the caches under `cache_dir`, reporting through
+/// `report` (which also wakes the UI), from whichever thread did the job.
+pub fn start_loader(
+    cache_dir: PathBuf,
+    report: impl Fn(Done) + Send + Sync + 'static,
+) -> std::io::Result<Loader> {
+    let report: Report = Arc::new(report);
+    let requester = Requester::new(&FetchOptions::new(&cache_dir));
+    let (tx, rx) = std::sync::mpsc::channel::<Job>();
+    let pages_report = report.clone();
+    thread::Builder::new()
         .name("vy-loader".into())
         .spawn(move || {
+            let report = pages_report;
             let mut fetcher: Option<Fetcher> = None;
             let open = |fetcher: &mut Option<Fetcher>| -> Result<(), String> {
                 if fetcher.is_none() {
@@ -449,45 +578,17 @@ pub fn start_loader(
                             result,
                         });
                     }
-                    Job::Request {
-                        tab,
-                        generation,
-                        id,
-                        method,
-                        url,
-                        body,
-                        page_is_localhost,
-                    } => {
-                        let outcome = match open(&mut fetcher) {
-                            Ok(()) => fetcher.as_ref().expect("opened").request(
-                                method,
-                                &url,
-                                &body,
-                                page_is_localhost,
-                                u64::from(vy_abi::limits::MAX_FETCH_RESPONSE_BYTES) + 1,
-                            ),
-                            Err(e) => Err(FetchError::Io(e)),
-                        };
-                        let (status, body) = match outcome {
-                            Ok((status, body)) => (i32::from(status), body),
-                            Err(FetchError::TooLarge { .. }) => (
-                                vy_abi::err::E_TOO_LARGE,
-                                vec![0; vy_abi::limits::MAX_FETCH_RESPONSE_BYTES as usize + 1],
-                            ),
-                            Err(_) => (vy_abi::err::E_NET, Vec::new()),
-                        };
-                        report(Done::Request {
-                            tab,
-                            generation,
-                            id,
-                            status,
-                            body,
-                        });
-                    }
+                    // Requests go to their tab's worker (`Loader::send`).
+                    Job::Request { .. } => {}
                 }
             }
         })?;
-    Ok(tx)
+    Ok(Loader {
+        pages: tx,
+        requester,
+        report,
+        workers: HashMap::new(),
+    })
 }
 
 fn load_file_source(source: &Source) -> Result<LoadedPage, LoadError> {
@@ -506,6 +607,145 @@ mod tests {
             .join("../..")
             .canonicalize()
             .unwrap()
+    }
+
+    /// A loopback server that answers every path with its own name, and
+    /// holds a path starting with `/slow` until the test releases it.
+    fn held_server() -> (u16, std::sync::mpsc::Sender<()>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Arc::new(std::sync::Mutex::new(held));
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let held = held.clone();
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut first = String::new();
+                    let _ = reader.read_line(&mut first);
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let path = first.split(' ').nth(1).unwrap_or("").to_string();
+                    if path.starts_with("/slow") {
+                        let _ = held
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(30));
+                    }
+                    let _ = reader.into_inner().write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{path}",
+                            path.len()
+                        )
+                        .as_bytes(),
+                    );
+                });
+            }
+        });
+        (port, release)
+    }
+
+    /// SPEC-5.2.7, SPEC-7.4.5: a page's requests run on its tab's own
+    /// worker, in the order it made them: a request the server holds (a
+    /// long poll) delays neither another tab's request nor a page load, and
+    /// a page load the server holds (as a first visit's DNS lookup can,
+    /// for up to 6 s) delays no tab's request. Closing a tab ends its worker.
+    #[test]
+    fn spec_5_2_7_requests_do_not_wait_for_other_tabs() {
+        let (port, release) = held_server();
+        let (tx, rx) = std::sync::mpsc::channel::<Done>();
+        let tx = std::sync::Mutex::new(tx);
+        let dir = std::env::temp_dir().join(format!("vy-loader-{}", std::process::id()));
+        let mut loader = start_loader(dir.clone(), move |d| {
+            let _ = tx.lock().unwrap().send(d);
+        })
+        .unwrap();
+        let request = |tab: u32, id: i32, path: &str| Job::Request {
+            tab,
+            generation: 1,
+            id,
+            method: "GET",
+            url: format!("http://127.0.0.1:{port}{path}"),
+            body: Vec::new(),
+            page_is_localhost: true,
+        };
+        let page = |tab: u32, source: Source| Job::Page {
+            tab,
+            generation: 1,
+            source,
+        };
+        // Tab 1: a held request, then one behind it; meanwhile tab 2's
+        // request and tab 3's local page.
+        loader.send(request(1, 1, "/slow-poll"));
+        loader.send(request(1, 2, "/after"));
+        loader.send(request(2, 1, "/other-tab"));
+        let hello = root().join("target/wasm/hello.wasm");
+        assert!(hello.is_file(), "run tools/build_modules.sh");
+        loader.send(page(
+            3,
+            Source::File {
+                path: hello,
+                draft: None,
+            },
+        ));
+        let wait = std::time::Duration::from_secs(20);
+        let mut early = Vec::new();
+        for _ in 0..2 {
+            early.push(rx.recv_timeout(wait).expect("not held up by tab 1"));
+        }
+        // Tab 5's load is held; a tab whose first request comes meanwhile
+        // gets its answer.
+        let held_page = Source::parse(&format!("vy://127.0.0.1:{port}/slow-page")).unwrap();
+        loader.send(page(5, held_page));
+        loader.send(request(4, 1, "/during-load"));
+        early.push(rx.recv_timeout(wait).expect("not held up by the load"));
+        let tag = |d: &Done| match d {
+            Done::Request { tab, id, body, .. } => {
+                format!("request {tab}.{id} {}", String::from_utf8_lossy(body))
+            }
+            Done::Page { tab, result, .. } => format!("page {tab} {}", result.is_ok()),
+            Done::Check { tab, .. } => format!("check {tab}"),
+        };
+        let mut early: Vec<String> = early.iter().map(tag).collect();
+        early.sort();
+        assert_eq!(
+            early,
+            [
+                "page 3 true",
+                "request 2.1 /other-tab",
+                "request 4.1 /during-load"
+            ]
+        );
+        assert!(rx.try_recv().is_err(), "tab 1 and tab 5 are still held");
+        assert_eq!(loader.workers(), 3);
+
+        // Released: tab 1's requests in the order it made them.
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        let late: Vec<String> = (0..3)
+            .map(|_| tag(&rx.recv_timeout(wait).unwrap()))
+            .collect();
+        let tab1: Vec<&String> = late
+            .iter()
+            .filter(|t| t.starts_with("request 1."))
+            .collect();
+        assert_eq!(
+            tab1,
+            ["request 1.1 /slow-poll", "request 1.2 /after"],
+            "per-tab order"
+        );
+        assert!(
+            late.contains(&"page 5 false".to_string()),
+            "not a Vy page, but answered: {late:?}"
+        );
+        loader.close_tab(1);
+        assert_eq!(loader.workers(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// SPEC-7.4.3, SPEC-7.4.5, SPEC-7.6.2: every reason `vy-proto` gives

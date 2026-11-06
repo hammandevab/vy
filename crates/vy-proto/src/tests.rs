@@ -1346,6 +1346,27 @@ fn spec_5_2_7_page_requests_through_the_main_process() {
         assert!(r.header("referer").is_none(), "{r:?}");
     }
     assert_eq!(server.requests().len(), 5);
+
+    // A `Requester`, from the fetcher or on its own, makes the same
+    // requests under the same rules from another thread.
+    for requester in [f.requester(), Requester::new(&Options::new(&dir))] {
+        let url = format!("{base}/api/items");
+        let got = std::thread::spawn(move || requester.request("GET", &url, b"", true, 1 << 20))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!((got.0, got.1.as_slice()), (200, &b"[1,2,3]"[..]));
+    }
+    let requester = f.requester();
+    match requester.request("GET", &format!("{base}/api/items"), b"", false, 1 << 20) {
+        Err(Error::TlsRequired { .. }) => {}
+        other => panic!("http:// for a remote page: expected TlsRequired, got {other:?}"),
+    }
+    match requester.request("GET", &format!("{base}/api/big"), b"", true, 9_999) {
+        Err(Error::TooLarge { limit, .. }) => assert_eq!(limit, 9_999),
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+    assert_eq!(server.requests().len(), 8);
     let _ = std::fs::remove_dir_all(dir);
 }
 

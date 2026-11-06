@@ -5,7 +5,8 @@
 //! drive the same object.
 //!
 //! Threads: the UI thread owns the [`Shell`]; every tab has a reader
-//! thread and the loader thread does the fetching; all of them report
+//! thread; the loader thread loads pages and a worker per tab performs
+//! the page's own requests ([`page::Loader`]); all of them report
 //! into one inbox ([`Incoming`]) and call the [`Waker`], which the window
 //! turns into a wake-up of its event loop.
 
@@ -424,7 +425,7 @@ pub struct Shell {
     config: Config,
     inbox_rx: Receiver<Incoming>,
     inbox_tx: Sender<Incoming>,
-    loader: Sender<Job>,
+    loader: page::Loader,
     grants: GrantStore,
     tabs: Vec<Tab>,
     active: usize,
@@ -808,6 +809,7 @@ impl Shell {
         };
         let mut tab = self.tabs.remove(index);
         retire_process(&mut tab, &mut self.retired);
+        self.loader.close_tab(id);
         if self.tabs.is_empty() {
             self.quit = true;
             self.frame_dirty = true;
@@ -996,7 +998,7 @@ impl Shell {
             self.address.set_committed(&display);
             self.hover = None;
         }
-        let _ = self.loader.send(Job::Page {
+        self.loader.send(Job::Page {
             tab: id,
             generation,
             source,
@@ -1623,7 +1625,7 @@ impl Shell {
             refuse(tab, code);
             return;
         }
-        let _ = self.loader.send(Job::Request {
+        self.loader.send(Job::Request {
             tab: id,
             generation: tab.generation,
             id: req,
@@ -3081,7 +3083,7 @@ impl Shell {
             };
             if tab.running() && tab.is_localhost && address.is_localhost() && !tab.check_pending {
                 tab.check_pending = true;
-                let _ = self.loader.send(Job::Check(Check {
+                self.loader.send(Job::Check(Check {
                     tab: tab.id,
                     generation: tab.generation,
                     address: address.clone(),
