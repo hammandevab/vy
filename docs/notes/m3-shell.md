@@ -239,7 +239,7 @@ ingen OS-sandbox (granskning 0004, fynd 8).
 
 ## Bench (release, byggmaskinen, 10 iterationer)
 
-`cargo run --release -p vy-cli -- bench --iterations 10` på byggmaskinen (en delad VM, inte
+`cargo run --release -p vy-cli -- bench --iterations 10` (flaggan heter `--runs` sedan m4/perf) på byggmaskinen (en delad VM, inte
 referensmaskinen i §13; P95 är brusigt). CI skriver tabellen i varje körning.
 
 ```
