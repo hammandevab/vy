@@ -175,6 +175,7 @@ mod tests {
             can_forward: false,
             restricted: true,
             restriction: None,
+            sandbox: None,
             inaccessible: true,
             loading: false,
             badges: &[],
@@ -1359,6 +1360,116 @@ mod tests {
         assert_eq!(shell.tab_display_list(replay), last, "the same session");
         shell.shutdown();
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// SPEC-9.1.3, SPEC-9.6.1 (granskning 0007:5): a tab process reports
+    /// its sandbox to the shell before its load is answered, and the chrome
+    /// shows a sandbox that is not whole. A real tab process here reports
+    /// the probe's lockdown, with a marker only if that is not whole. A
+    /// report that a layer failed, the first the shell handles for its
+    /// process, puts "sandlåda: delvis" in the chrome and the detail in the
+    /// tab's log; the tab's own report after it, and a whole one claimed
+    /// after the load, are ignored and logged: only the first report before
+    /// any page code ran counts. A thread-backed tab has no process to
+    /// report and no marker.
+    #[test]
+    fn spec_9_1_3_sandbox_state_in_the_chrome() {
+        use crate::sandbox::{Report, MARKER_PARTIAL};
+        let exe = shell_exe();
+        let mut shell = headless_shell(Some(exe.clone()), 800.0, 600.0, 1.0).unwrap();
+        let real = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(real), "running");
+        let report = shell.tab_sandbox(real).expect("the process reported");
+        if cfg!(target_os = "linux") {
+            let probe = crate::process::probe_process(&exe).unwrap();
+            assert!(
+                probe.starts_with(&format!("sandbox: {report}\n")),
+                "{probe}"
+            );
+        }
+        let marked = |shell: &mut crate::shell::Shell| -> Vec<String> {
+            texts(&shell.chrome_display_list())
+                .into_iter()
+                .filter(|t| t.starts_with("sandlåda"))
+                .collect()
+        };
+        assert_eq!(
+            marked(&mut shell),
+            report
+                .marker()
+                .map(String::from)
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+
+        // Another tab: once the loader has answered, its process is started
+        // and loading; a report that a layer failed is handled first.
+        let tab = shell.open_tab(Some(local("hello")));
+        loop {
+            let m = shell
+                .inbox()
+                .recv_timeout(TIMEOUT)
+                .expect("the loader answers");
+            let page =
+                matches!(&m, Incoming::Load(crate::page::Done::Page { tab: t, .. }) if *t == tab);
+            shell.handle(m);
+            if page {
+                break;
+            }
+        }
+        assert_eq!(shell.tab_status(tab), "loading");
+        let partial = Report {
+            layers: vec!["seccomp allowlist".into()],
+            warnings: vec!["landlock: Operation not supported (os error 95)".into()],
+        };
+        let generation = shell.tab_generation(tab);
+        let report_of = |shell: &mut crate::shell::Shell, r: &Report| {
+            shell.handle(Incoming::Tab(
+                tab,
+                generation,
+                Inbound::Message(ToShell::Sandbox(r.clone())),
+            ));
+        };
+        report_of(&mut shell, &partial);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        let shown = shell.tab_sandbox(tab).unwrap();
+        assert_eq!(shown.warnings, partial.warnings, "the tab's own came later");
+        assert_eq!(shown.marker(), Some(MARKER_PARTIAL));
+        assert_eq!(marked(&mut shell), [MARKER_PARTIAL]);
+        let logs = shell.tab_logs(tab);
+        assert!(
+            logs.contains(&format!("[host warn] sandbox: {shown}")),
+            "{logs:?}"
+        );
+        let ignored = |shell: &crate::shell::Shell| {
+            shell
+                .tab_logs(tab)
+                .iter()
+                .filter(|l| l.starts_with("[host] sandbox report ignored"))
+                .count()
+        };
+        assert_eq!(ignored(&shell), 1, "the tab's own report");
+        // After the load, a whole sandbox claimed changes nothing.
+        report_of(
+            &mut shell,
+            &Report {
+                layers: vec!["seccomp allowlist".into()],
+                warnings: vec![],
+            },
+        );
+        assert_eq!(shell.tab_sandbox(tab), Some(shown));
+        assert_eq!(marked(&mut shell), [MARKER_PARTIAL]);
+        assert_eq!(ignored(&shell), 2);
+        shell.shutdown();
+
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        let thread = shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_sandbox(thread), None);
+        assert!(marked(&mut shell).is_empty());
+        shell.shutdown();
     }
 
     /// A one-path HTTP server for live reload: `/` answers with the

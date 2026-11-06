@@ -36,12 +36,27 @@
 //!
 //! Every tab process is locked down, a recorded or replayed one included:
 //! the main process writes and reads recordings (`crate::process`).
+//! Every layer fails open, so the tab reports what applied and what did
+//! not to the main process before any page code runs in it
+//! (`ToShell::Sandbox`, [`applied`]); the shell adds what it put around
+//! the process itself (the Windows job object or AppContainer), logs the
+//! detail in the tab's log and shows [`MARKER_PARTIAL`] or [`MARKER_OFF`]
+//! in the chrome when the sandbox is not whole ([`Report::marker`]).
 //! `VY_SANDBOX=off` turns the child-side lockdown off for debugging; the
 //! job object on Windows stays. `vy-shell --tab --sandbox-probe` locks
 //! down and then tries to read a file, write one, open a socket and start
 //! a process, and reports what was refused ([`probe`]).
 
 use std::fmt;
+use std::sync::OnceLock;
+
+/// The chrome's marker when some layer of a tab's sandbox did not apply.
+pub const MARKER_PARTIAL: &str = "sandlåda: delvis";
+/// The chrome's marker when none did.
+pub const MARKER_OFF: &str = "sandlåda: av";
+
+/// What this process's [`lockdown`] put in place.
+static APPLIED: OnceLock<Report> = OnceLock::new();
 
 /// How strictly to sandbox, from `VY_SANDBOX`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +90,28 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
+impl Report {
+    /// The chrome's marker for this sandbox when it is not whole:
+    /// [`MARKER_OFF`] when no layer applied, [`MARKER_PARTIAL`] when some
+    /// did not; `None` when every layer did.
+    pub fn marker(&self) -> Option<&'static str> {
+        if self.warnings.is_empty() {
+            None
+        } else if self.layers.is_empty() {
+            Some(MARKER_OFF)
+        } else {
+            Some(MARKER_PARTIAL)
+        }
+    }
+
+    /// This report followed by `more`'s layers and warnings.
+    pub fn and(mut self, more: &Report) -> Report {
+        self.layers.extend(more.layers.iter().cloned());
+        self.warnings.extend(more.warnings.iter().cloned());
+        self
+    }
+}
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.layers.is_empty() {
@@ -91,15 +128,22 @@ impl fmt::Display for Report {
 
 /// Lock the current process down as a tab process (SPEC-9.1.3). Call once,
 /// after startup and before anything from the shell is read; there is no
-/// way back.
+/// way back. The report is also kept for [`applied`].
 pub fn lockdown(mode: Mode) -> Report {
     let mut report = Report::default();
     if mode == Mode::Off {
         report.warnings.push("VY_SANDBOX=off".into());
-        return report;
+    } else {
+        platform::lockdown(mode, &mut report);
     }
-    platform::lockdown(mode, &mut report);
+    let _ = APPLIED.set(report.clone());
     report
+}
+
+/// What [`lockdown`] put in place in this process, once it has run: what
+/// a tab process reports to the main process (`ToShell::Sandbox`).
+pub fn applied() -> Option<&'static Report> {
+    APPLIED.get()
 }
 
 /// One attempt of the probe.
@@ -1229,5 +1273,35 @@ mod tests {
             "sandbox: a, b; not applied: c: no\nfile-read: refused (denied)\nsocket: allowed\n"
         );
         assert_eq!(lockdown(Mode::Off).warnings, ["VY_SANDBOX=off"]);
+        assert_eq!(applied().unwrap().warnings, ["VY_SANDBOX=off"]);
+    }
+
+    /// SPEC-9.1.3: the chrome's marker says whether every layer applied;
+    /// the shell's own layers and the tab's add up.
+    #[test]
+    fn report_marker() {
+        let line = |s: &str| vec![s.to_string()];
+        let whole = Report {
+            layers: line("seccomp allowlist"),
+            warnings: vec![],
+        };
+        assert_eq!(whole.marker(), None);
+        let partial = Report {
+            layers: line("seccomp allowlist"),
+            warnings: line("landlock: not supported"),
+        };
+        assert_eq!(partial.marker(), Some(MARKER_PARTIAL));
+        let off = Report {
+            layers: vec![],
+            warnings: line("VY_SANDBOX=off"),
+        };
+        assert_eq!(off.marker(), Some(MARKER_OFF));
+        let host = Report {
+            layers: line("job object"),
+            warnings: vec![],
+        };
+        let both = host.and(&off);
+        assert_eq!(both.marker(), Some(MARKER_PARTIAL), "the job still stands");
+        assert_eq!(both.to_string(), "job object; not applied: VY_SANDBOX=off");
     }
 }

@@ -204,6 +204,11 @@ struct Tab {
     /// and whether a check is under way.
     live_version: Option<[u8; 32]>,
     check_pending: bool,
+    /// The OS sandbox of the tab's process (SPEC-9.1.3): what the main
+    /// process put around it and what the process reported of its own
+    /// lockdown before any page code ran in it. `None` until then, and
+    /// always for a thread-backed tab, which has no process of its own.
+    sandbox: Option<crate::sandbox::Report>,
 }
 
 impl Tab {
@@ -257,6 +262,7 @@ impl Tab {
             replay: None,
             live_version: None,
             check_pending: false,
+            sandbox: None,
         }
     }
 
@@ -606,6 +612,13 @@ impl Shell {
         if let Some(c) = self.tab_mut(id).and_then(|t| t.conn.as_mut()) {
             c.kill();
         }
+    }
+
+    /// The OS sandbox of a tab's process as the shell knows it
+    /// (SPEC-9.1.3): `None` before the process reported and for a
+    /// thread-backed tab.
+    pub fn tab_sandbox(&self, id: TabId) -> Option<crate::sandbox::Report> {
+        self.tab(id).and_then(|t| t.sandbox.clone())
     }
 
     /// A tab's state, for tests and the status line.
@@ -992,6 +1005,7 @@ impl Shell {
             tab.replay = None;
             tab.live_version = None;
             tab.check_pending = false;
+            tab.sandbox = None;
         }
         if Some(id) == self.active_tab() {
             let display = self.tab(id).map(|t| t.display.clone()).unwrap_or_default();
@@ -1350,7 +1364,10 @@ impl Shell {
     fn tab_message(&mut self, id: TabId, m: ToShell) {
         let active = Some(id) == self.active_tab();
         match m {
+            ToShell::Sandbox(report) => self.sandbox_reported(id, Some(report)),
             ToShell::Loaded { ok, error, .. } => {
+                // A load answered without a report leaves none to come.
+                self.sandbox_reported(id, None);
                 if let Some(tab) = self.tab_mut(id) {
                     if ok {
                         tab.loaded = true;
@@ -1530,6 +1547,43 @@ impl Shell {
                 }
                 self.frame_dirty = true;
             }
+        }
+    }
+
+    /// The sandbox report of tab `id`'s process (SPEC-9.1.3), or `None` when
+    /// its load was answered without one. A report counts only before the
+    /// load is answered, while no page code has run in the process, and
+    /// only once: one after that could come from the page and is ignored.
+    /// No report counts as no sandbox. A sandbox that is not whole goes to
+    /// the tab's log in detail and to the chrome as its marker.
+    fn sandbox_reported(&mut self, id: TabId, report: Option<crate::sandbox::Report>) {
+        let active = Some(id) == self.active_tab();
+        let Some(tab) = find_tab(&mut self.tabs, id) else {
+            return;
+        };
+        let Some(conn) = tab.conn.as_ref().filter(|c| c.is_process()) else {
+            return;
+        };
+        if tab.sandbox.is_some() || tab.state != State::Loading {
+            if report.is_some() {
+                tab.log(
+                    "[host] sandbox report ignored: it counts only before the load is answered"
+                        .into(),
+                );
+            }
+            return;
+        }
+        let own = report.unwrap_or_else(|| crate::sandbox::Report {
+            layers: Vec::new(),
+            warnings: vec!["the tab process sent no sandbox report".into()],
+        });
+        let sandbox = conn.host_sandbox().clone().and(&own);
+        if sandbox.marker().is_some() {
+            tab.log(format!("[host warn] sandbox: {sandbox}"));
+        }
+        tab.sandbox = Some(sandbox);
+        if active {
+            self.frame_dirty = true;
         }
     }
 
@@ -1811,6 +1865,10 @@ impl Shell {
             restricted: tab
                 .is_some_and(|t| !t.trusted && matches!(t.state, State::Running | State::Loading)),
             restriction: tab.and_then(|t| t.restriction),
+            sandbox: tab
+                .filter(|t| matches!(t.state, State::Running | State::Loading))
+                .and_then(|t| t.sandbox.as_ref())
+                .and_then(crate::sandbox::Report::marker),
             inaccessible: tab
                 .is_some_and(|t| t.state == State::Running && t.has_tree == Some(false)),
             loading: tab.is_some_and(|t| t.state == State::Loading),

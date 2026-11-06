@@ -144,6 +144,8 @@ enum Feed {
 /// The main process's end of one tab.
 pub struct TabConnection {
     id: TabId,
+    /// What the main process put around the tab's process (SPEC-9.1.3).
+    host_sandbox: crate::sandbox::Report,
     feed: Option<Feed>,
     kind: Kind,
     writer: Option<JoinHandle<()>>,
@@ -201,8 +203,8 @@ pub fn spawn_process(
         (Some(path), None) => Source::Shell(Some(BufWriter::new(File::create(path)?))),
         (None, None) => Source::Shell(None),
     };
-    let (process, stdin, stdout) = start(exe, &["--tab".into()])?;
-    connect(id, sink, process, stdin, stdout, source)
+    let (process, stdin, stdout, host) = start(exe, &["--tab".into()])?;
+    connect(id, sink, (process, stdin, stdout, host), source)
 }
 
 /// Start `exe --tab --sandbox-probe` exactly as a tab is started (job
@@ -211,7 +213,7 @@ pub fn spawn_process(
 pub fn probe_process(exe: &Path) -> io::Result<String> {
     use std::io::Read;
     let args = ["--tab".into(), "--sandbox-probe".into()];
-    let (mut process, stdin, mut stdout) = start(exe, &args)?;
+    let (mut process, stdin, mut stdout, _) = start(exe, &args)?;
     drop(stdin);
     let mut text = String::new();
     stdout.read_to_string(&mut text)?;
@@ -219,12 +221,22 @@ pub fn probe_process(exe: &Path) -> io::Result<String> {
     Ok(text)
 }
 
-type Pipes = (Proc, Box<dyn Write + Send>, Box<dyn io::Read + Send>);
+/// The child, the shell's ends of its pipes, and what the shell itself put
+/// around the child (SPEC-9.1.3).
+type Pipes = (
+    Proc,
+    Box<dyn Write + Send>,
+    Box<dyn io::Read + Send>,
+    crate::sandbox::Report,
+);
 
 /// Start a tab child with `args`: on Windows with `VY_SANDBOX=strict` in
 /// an AppContainer, falling back with a message; otherwise through std
-/// and, on Windows, into a job object.
+/// and, on Windows, into a job object. The report names those layers and
+/// any that failed (nothing outside Windows).
 fn start(exe: &Path, args: &[std::ffi::OsString]) -> io::Result<Pipes> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut host = crate::sandbox::Report::default();
     #[cfg(windows)]
     if crate::sandbox::Mode::from_env() == crate::sandbox::Mode::Strict {
         let tail: Vec<String> = args
@@ -233,11 +245,16 @@ fn start(exe: &Path, args: &[std::ffi::OsString]) -> io::Result<Pipes> {
             .collect();
         match crate::sandbox::spawn_strict(exe, &tail.join(" ")) {
             Ok((child, stdin, stdout)) => {
-                return Ok((Proc::Strict(child), Box::new(stdin), Box::new(stdout)))
+                host.layers.push("AppContainer".into());
+                host.layers.push("job object".into());
+                return Ok((Proc::Strict(child), Box::new(stdin), Box::new(stdout), host));
             }
-            Err(e) => eprintln!(
-                "vy-shell: VY_SANDBOX=strict: {e}; this tab starts with the default sandbox"
-            ),
+            Err(e) => {
+                eprintln!(
+                    "vy-shell: VY_SANDBOX=strict: {e}; this tab starts with the default sandbox"
+                );
+                host.warnings.push(format!("AppContainer: {e}"));
+            }
         }
     }
     let mut cmd = Command::new(exe);
@@ -258,15 +275,24 @@ fn start(exe: &Path, args: &[std::ffi::OsString]) -> io::Result<Pipes> {
     let stdout = child.stdout.take().expect("piped stdout");
     #[cfg(windows)]
     let job = match crate::sandbox::contain(&child) {
-        Ok(job) => Some(job),
+        Ok(job) => {
+            host.layers.push("job object".into());
+            Some(job)
+        }
         Err(e) => {
             eprintln!("vy-shell: a tab runs without a job object: {e}");
+            host.warnings.push(format!("job object: {e}"));
             None
         }
     };
     #[cfg(not(windows))]
     let job = None;
-    Ok((Proc::Std(child, job), Box::new(stdin), Box::new(stdout)))
+    Ok((
+        Proc::Std(child, job),
+        Box::new(stdin),
+        Box::new(stdout),
+        host,
+    ))
 }
 
 /// What a process-backed tab's writer thread feeds it.
@@ -312,14 +338,8 @@ fn write_from_shell(
 }
 
 /// The writer and reader threads of a process-backed tab.
-fn connect(
-    id: TabId,
-    sink: impl Sink,
-    process: Proc,
-    stdin: impl Write + Send + 'static,
-    stdout: impl io::Read + Send + 'static,
-    source: Source,
-) -> io::Result<TabConnection> {
+fn connect(id: TabId, sink: impl Sink, pipes: Pipes, source: Source) -> io::Result<TabConnection> {
+    let (process, stdin, stdout, host_sandbox) = pipes;
     let (tx, rx) = mpsc::channel::<Out>();
     let feed = match &source {
         Source::Shell(_) => Feed::Writer(tx),
@@ -375,6 +395,7 @@ fn connect(
         })?;
     Ok(TabConnection {
         id,
+        host_sandbox,
         feed: Some(feed),
         kind: Kind::Process(process),
         writer: Some(writer),
@@ -416,6 +437,7 @@ pub fn spawn_thread(id: TabId, sink: impl Sink) -> io::Result<TabConnection> {
         })?;
     Ok(TabConnection {
         id,
+        host_sandbox: crate::sandbox::Report::default(),
         feed: Some(Feed::Channel(tx)),
         kind: Kind::Thread(Some(worker)),
         writer: None,
@@ -474,6 +496,14 @@ impl TabConnection {
     /// True when the tab runs in its own process.
     pub fn is_process(&self) -> bool {
         matches!(self.kind, Kind::Process(_))
+    }
+
+    /// What the main process put around the tab's process and what of it
+    /// failed (SPEC-9.1.3): on Windows the job object, or the AppContainer
+    /// in strict mode; nothing elsewhere, and nothing for a thread. The
+    /// process reports its own lockdown itself (`ToShell::Sandbox`).
+    pub fn host_sandbox(&self) -> &crate::sandbox::Report {
+        &self.host_sandbox
     }
 
     /// Kill the tab outright (a test of crash containment, or a tab that

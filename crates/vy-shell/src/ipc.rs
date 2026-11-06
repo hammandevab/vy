@@ -40,6 +40,11 @@ pub const MAX_MESSAGE_TEXT_BYTES: usize = 64 << 10;
 /// Largest storage a tab may hand back: the quota's ceiling (SPEC-5.2.9,
 /// SPEC-8.2.1: `quota_kb` ≤ 16 384).
 pub const MAX_STORAGE_BYTES: usize = 16 << 20;
+/// Most lines in each list of a [`ToShell::Sandbox`] report: a lockdown
+/// has a handful of layers.
+pub const MAX_SANDBOX_LINES: usize = 32;
+/// Largest line in a sandbox report: a layer's name or why it failed.
+pub const MAX_SANDBOX_LINE_BYTES: usize = 1024;
 
 /// Why a frame or a message could not be read.
 #[derive(Debug, PartialEq, Eq)]
@@ -559,6 +564,10 @@ pub enum ToShell {
     },
     /// The page's storage (SPEC-5.2.9), after a suspend or at shutdown.
     Storage(Vec<Entry>),
+    /// What the tab process's lockdown applied and what it could not
+    /// (SPEC-9.1.3), sent once, just before its first [`ToTab::Load`] is
+    /// handled: before any page code has run in the process.
+    Sandbox(crate::sandbox::Report),
     /// The module wrote the clipboard (SPEC-5.2.12).
     Clipboard(Vec<u8>),
     /// The IME composition rectangle changed (`ime_begin`/`ime_end`, SPEC-5.2.6).
@@ -605,6 +614,7 @@ const S_CLIPBOARD: u8 = 74;
 const S_IME: u8 = 75;
 const S_STOPPED: u8 = 76;
 const S_FOCUS: u8 = 77;
+const S_SANDBOX: u8 = 78;
 
 fn put_random(w: &mut Writer, r: RandomSource) {
     match r {
@@ -630,6 +640,25 @@ fn get_random(r: &mut Reader<'_>) -> Result<RandomSource, DecodeError> {
         }
         _ => Err(DecodeError::Value("random source")),
     }
+}
+
+fn put_lines(w: &mut Writer, lines: &[String]) {
+    w.u32(lines.len() as u32);
+    for l in lines {
+        w.str(l);
+    }
+}
+
+/// A sandbox report's list: at most [`MAX_SANDBOX_LINES`] lines of at
+/// most [`MAX_SANDBOX_LINE_BYTES`].
+fn get_lines(r: &mut Reader<'_>, what: &'static str) -> Result<Vec<String>, DecodeError> {
+    let n = r.count(what)?;
+    if n > MAX_SANDBOX_LINES {
+        return Err(DecodeError::Value(what));
+    }
+    (0..n)
+        .map(|_| Ok(r.str_max(MAX_SANDBOX_LINE_BYTES, what)?.to_string()))
+        .collect()
 }
 
 fn put_entries(w: &mut Writer, entries: &[Entry]) {
@@ -983,6 +1012,12 @@ impl ToShell {
                 put_entries(&mut w, entries);
                 w.finish()
             }
+            Self::Sandbox(report) => {
+                let mut w = Writer::new(S_SANDBOX);
+                put_lines(&mut w, &report.layers);
+                put_lines(&mut w, &report.warnings);
+                w.finish()
+            }
             Self::Clipboard(bytes) => {
                 let mut w = Writer::new(S_CLIPBOARD);
                 w.bytes(bytes);
@@ -1147,6 +1182,10 @@ impl ToShell {
                     .to_vec(),
             },
             S_STORAGE => Self::Storage(get_entries(&mut r)?),
+            S_SANDBOX => Self::Sandbox(crate::sandbox::Report {
+                layers: get_lines(&mut r, "sandbox layers")?,
+                warnings: get_lines(&mut r, "sandbox warnings")?,
+            }),
             S_CLIPBOARD => Self::Clipboard(
                 r.bytes_max(limits::MAX_CLIPBOARD_BYTES as usize, "clipboard")?
                     .to_vec(),
@@ -1316,6 +1355,11 @@ mod tests {
             ToShell::Stopped {
                 reason: "module trapped: unreachable".into(),
             },
+            ToShell::Sandbox(crate::sandbox::Report {
+                layers: vec!["no_new_privs".into(), "seccomp allowlist".into()],
+                warnings: vec!["landlock: Operation not supported (os error 95)".into()],
+            }),
+            ToShell::Sandbox(crate::sandbox::Report::default()),
         ]
     }
 
@@ -1339,7 +1383,7 @@ mod tests {
             shell_tags.insert(body[0]);
         }
         assert_eq!(tab_tags.len(), 14, "every ToTab variant is covered");
-        assert_eq!(shell_tags.len(), 14, "every ToShell variant is covered");
+        assert_eq!(shell_tags.len(), 15, "every ToShell variant is covered");
         assert!(tab_tags.is_disjoint(&shell_tags));
         // Over a byte stream: lengths first, little-endian.
         let mut pipe = Vec::new();
@@ -1443,9 +1487,10 @@ mod tests {
 
     /// SPEC-9.3.2, SPEC-9.3.1: the main process holds a tab's messages to
     /// the runtime's caps before keeping anything: more links, nodes,
-    /// text, body, clipboard or storage than a page may produce is a
-    /// refused frame, not a bigger allocation. The caps are the same
-    /// constants the runtime applies, so a conforming tab never hits them.
+    /// text, body, clipboard or storage than a page may produce, or a
+    /// longer sandbox report than a lockdown makes, is a refused frame,
+    /// not a bigger allocation. The caps are the same constants the
+    /// runtime applies, so a conforming tab never hits them.
     #[test]
     fn spec_9_3_2_main_process_holds_tab_messages_to_the_caps() {
         use vy_abi::limits;
@@ -1501,6 +1546,10 @@ mod tests {
                 id: 1,
                 image: RgbaImage::new(limits::MAX_IMAGE_SIDE_PX, 1),
             },
+            ToShell::Sandbox(crate::sandbox::Report {
+                layers: vec!["l".repeat(MAX_SANDBOX_LINE_BYTES); MAX_SANDBOX_LINES],
+                warnings: vec!["w".repeat(MAX_SANDBOX_LINE_BYTES); MAX_SANDBOX_LINES],
+            }),
         ];
         for m in &ok {
             assert_eq!(&ToShell::decode(&m.encode()).unwrap(), m);
@@ -1620,6 +1669,20 @@ mod tests {
                     image: RgbaImage::new(limits::MAX_IMAGE_SIDE_PX + 1, 1),
                 },
                 "image side",
+            ),
+            (
+                ToShell::Sandbox(crate::sandbox::Report {
+                    layers: vec!["l".into(); MAX_SANDBOX_LINES + 1],
+                    warnings: vec![],
+                }),
+                "sandbox layers",
+            ),
+            (
+                ToShell::Sandbox(crate::sandbox::Report {
+                    layers: vec![],
+                    warnings: vec!["w".repeat(MAX_SANDBOX_LINE_BYTES + 1)],
+                }),
+                "sandbox warnings",
             ),
         ];
         for (m, what) in &over {

@@ -162,6 +162,10 @@ pub struct View<'a> {
     /// the marker as "begränsat läge: <why>" while the address keeps
     /// [`MIN_ADDRESS_ROOM`]; `None` shows the marker alone.
     pub restriction: Option<&'a str>,
+    /// The OS sandbox of the tab's process is not whole (SPEC-9.1.3): its
+    /// marker ("sandlåda: delvis", "sandlåda: av"); the detail is in the
+    /// tab's log.
+    pub sandbox: Option<&'a str>,
     /// The page has no semantic tree (SPEC-10.4.1).
     pub inaccessible: bool,
     /// The page is loading (the bar under the address row).
@@ -463,6 +467,9 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
             let zoom = format!("{} %", (view.zoom * 100.0).round() as i32);
             others += pill_w(text, styles.small_muted, &zoom);
         }
+        if let Some(sandbox) = view.sandbox {
+            others += pill_w(text, styles.small_restricted, sandbox);
+        }
         if view.inaccessible {
             others += pill_w(text, styles.small_muted, "otillgänglig");
         }
@@ -508,6 +515,9 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
         );
     }
     if let Some(label) = &restricted_label {
+        mark(&mut dl, text, styles.small_restricted, RESTRICTED_BG, label);
+    }
+    if let Some(label) = view.sandbox {
         mark(&mut dl, text, styles.small_restricted, RESTRICTED_BG, label);
     }
     if view.inaccessible {
@@ -978,6 +988,7 @@ mod tests {
             can_forward: false,
             restricted: false,
             restriction: None,
+            sandbox: None,
             inaccessible: false,
             loading: false,
             badges: &[],
@@ -1186,5 +1197,54 @@ mod tests {
         assert!(!texts(&v, &mut text)
             .iter()
             .any(|t| t.starts_with("begränsat")));
+    }
+
+    /// SPEC-9.1.3: a sandbox that is not whole has its marker in the
+    /// address field, beside the restricted one, and takes its room from
+    /// the address like the other pills: the reason gives way first.
+    #[test]
+    fn spec_9_1_3_sandbox_marker_in_the_chrome() {
+        let mut text = TextEngine::new();
+        let styles = Styles::register(&mut text);
+        let tabs = vec![TabInfo {
+            id: 1,
+            title: "Sida".into(),
+            loading: false,
+        }];
+        let mut address = AddressField::new();
+        address.set_committed("vy://exempel.se/");
+        let texts = |v: &View<'_>, text: &mut TextEngine| -> Vec<String> {
+            vy_dl::decode(&draw(v, text, &styles).0)
+                .unwrap()
+                .iter()
+                .filter_map(|op| match op {
+                    vy_dl::Op::Text { text, .. } => {
+                        Some(String::from_utf8_lossy(text).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut v = view(&tabs, &address);
+        assert!(!texts(&v, &mut text)
+            .iter()
+            .any(|t| t.starts_with("sandlåda")));
+        v.sandbox = Some(crate::sandbox::MARKER_PARTIAL);
+        assert!(texts(&v, &mut text).contains(&"sandlåda: delvis".to_string()));
+        v.restricted = true;
+        v.restriction = Some("nyckeln saknas i DNS");
+        v.width = 800.0;
+        let both = texts(&v, &mut text);
+        assert!(both.contains(&"sandlåda: delvis".to_string()), "{both:?}");
+        assert!(both.contains(&"begränsat läge: nyckeln saknas i DNS".to_string()));
+        v.width = 560.0;
+        let narrow = texts(&v, &mut text);
+        assert!(
+            narrow.contains(&"sandlåda: delvis".to_string()),
+            "{narrow:?}"
+        );
+        assert!(narrow.contains(&"begränsat läge".to_string()), "{narrow:?}");
+        v.sandbox = Some(crate::sandbox::MARKER_OFF);
+        assert!(texts(&v, &mut text).contains(&"sandlåda: av".to_string()));
     }
 }

@@ -36,6 +36,9 @@ pub struct TabLoop<T: IpcTransport> {
     /// Set by [`ToTab::CopyGesture`] and spent by the next event: that
     /// event is delivered as a copy gesture (SPEC-8.2.4).
     copy_gesture_armed: bool,
+    /// The process's sandbox, sent as [`ToShell::Sandbox`] just before the
+    /// first load is handled (SPEC-9.1.3).
+    sandbox_report: Option<crate::sandbox::Report>,
 }
 
 /// Capability ids packed as bits for [`LoadRequest::capabilities`].
@@ -71,7 +74,16 @@ impl<T: IpcTransport> TabLoop<T> {
             last_ime: None,
             last_focus: None,
             copy_gesture_armed: false,
+            sandbox_report: None,
         }
+    }
+
+    /// Report `report` to the shell just before the first [`ToTab::Load`]
+    /// is handled: the first thing the process says once it is asked to
+    /// run page code, and said before any has run (SPEC-9.1.3).
+    pub fn with_sandbox_report(mut self, report: crate::sandbox::Report) -> Self {
+        self.sandbox_report = Some(report);
+        self
     }
 
     /// Serve messages until the other side is gone or says
@@ -224,6 +236,9 @@ impl<T: IpcTransport> TabLoop<T> {
     }
 
     fn load(&mut self, req: LoadRequest) -> io::Result<()> {
+        if let Some(report) = self.sandbox_report.take() {
+            self.send(&ToShell::Sandbox(report))?;
+        }
         self.rt = None;
         self.stopped = false;
         self.styles_sent = 0;
@@ -471,9 +486,19 @@ pub fn main(record: Option<&Path>, replay: Option<&Path>) -> io::Result<()> {
             "a tab process opens no file (SPEC-9.1.3); the main process records and replays",
         ));
     }
+    // What the lockdown before this call applied; a process that was not
+    // locked down says so.
+    let report = crate::sandbox::applied()
+        .cloned()
+        .unwrap_or_else(|| crate::sandbox::Report {
+            layers: Vec::new(),
+            warnings: vec!["the tab process was not locked down".into()],
+        });
     let stdin = io::stdin().lock();
     let stdout = io::stdout().lock();
-    TabLoop::new(crate::ipc::PipeTransport::new(stdin, stdout)).run()
+    TabLoop::new(crate::ipc::PipeTransport::new(stdin, stdout))
+        .with_sandbox_report(report)
+        .run()
 }
 
 #[cfg(test)]
@@ -904,6 +929,48 @@ mod tests {
             ToShell::Log { message, .. } if message.starts_with("clipboard_write: E_DENIED")
         )));
         tx.send(ToTab::Shutdown.encode()).unwrap();
+        recv_until(&rx, |m| matches!(m, ToShell::Storage(_)));
+        h.join().unwrap();
+    }
+
+    /// SPEC-9.1.3: a loop given its process's sandbox report sends it just
+    /// before it handles the first load, before anything `vy_init` says,
+    /// and never again; a tick before that is answered as usual.
+    #[test]
+    fn spec_9_1_3_sandbox_reported_before_the_first_load() {
+        let (to_tab, tab_rx) = mpsc::channel();
+        let (tab_tx, rx) = mpsc::channel();
+        let report = crate::sandbox::Report {
+            layers: vec!["seccomp allowlist".into()],
+            warnings: vec!["landlock: not supported".into()],
+        };
+        let sent = report.clone();
+        let h = std::thread::spawn(move || {
+            TabLoop::new(ChannelTransport {
+                tx: tab_tx,
+                rx: tab_rx,
+            })
+            .with_sandbox_report(sent)
+            .run()
+            .unwrap();
+        });
+        to_tab.send(ToTab::Tick { clock_ms: 0 }.encode()).unwrap();
+        assert_eq!(recv(&rx), ToShell::Idle);
+        for expected in [1, 0] {
+            to_tab
+                .send(ToTab::Load(Box::new(load_request(module("hello"), 0))).encode())
+                .unwrap();
+            let msgs = recv_until(&rx, |m| matches!(m, ToShell::Loaded { .. }));
+            let reports = msgs
+                .iter()
+                .filter(|m| matches!(m, ToShell::Sandbox(_)))
+                .count();
+            assert_eq!(reports, expected, "{msgs:?}");
+            if expected == 1 {
+                assert_eq!(msgs[0], ToShell::Sandbox(report.clone()), "first");
+            }
+        }
+        to_tab.send(ToTab::Shutdown.encode()).unwrap();
         recv_until(&rx, |m| matches!(m, ToShell::Storage(_)));
         h.join().unwrap();
     }
