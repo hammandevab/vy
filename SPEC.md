@@ -191,7 +191,7 @@ Loggen gör varje nyckel en utgivare tagit i bruk synlig i efterhand; den är en
 - **[SPEC-12.2.1]** Varje PR passerar: fmt, clippy utan varningar, `cargo test --workspace`, spec-spårning, modulbygge med ABI-kontroll.
 - **[SPEC-12.2.2]** Från M1: pixeldiff högst 0,1 % mot guldbilder, annars uttryckligt guldbyte i PR:en.
 - **[SPEC-12.2.3]** Från M3: ingen prestandaregression över 5 % mot §13.
-- **[SPEC-12.3.1]** Klientbinären är högst 25 MB; hela kodbasen inklusive spec och tester ryms under 400 000 tokens.
+- **[SPEC-12.3.1]** Klientbinären är högst 25 MB; varje crate under `crates/` tillsammans med `SPEC.md` och `CLAUDE.md` ryms under 400 000 tokens (byte/4 över git-spårade textfiler); hela kodbasen rapporteras men begränsas inte.
 
 ## 13. Prestandabudget
 

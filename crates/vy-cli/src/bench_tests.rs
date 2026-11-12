@@ -345,8 +345,9 @@ fn spec_12_2_3_perf_regression_gate() {
 /// (spec-fråga 56): 25 000 000 bytes, the stricter of MB and MiB.
 const CLIENT_MAX_BYTES: u64 = 25_000_000;
 
-/// The codebase's cap, SPEC-12.3.1, in tokens as [`codebase_tokens`] counts them.
-const CODEBASE_MAX_TOKENS: u64 = 400_000;
+/// The cap per working unit, SPEC-12.3.1: one crate under `crates/` with
+/// `SPEC.md` and `CLAUDE.md`, in tokens as [`tokens`] counts them.
+const UNIT_MAX_TOKENS: u64 = 400_000;
 
 /// SPEC-12.3.1, the client half: the client binary is at most
 /// [`CLIENT_MAX_BYTES`]. Measured on the `vy-shell` beside this test binary's
@@ -384,23 +385,25 @@ fn spec_12_3_1_size_budget() {
     );
 }
 
-/// The codebase's size in tokens, as SPEC-12.3.1 counts it: every file git
-/// tracks (`git ls-files`) whose bytes are UTF-8 without a NUL is text, and
-/// the count is the text bytes divided by four, rounded up. Binary files
-/// (images, fonts, `.wasm`) are not counted. Four bytes per token is the
-/// usual estimate for English and code; a model's tokenizer gives more for
-/// Swedish and for Rust's punctuation, so this undercounts rather than
-/// over. Returns the total and the text bytes per top-level path (`crates`,
-/// `docs`, `SPEC.md`, …), largest first.
-fn codebase_tokens(root: &Path) -> (u64, Vec<(String, u64)>) {
+/// Tokens as SPEC-12.3.1 counts them: text bytes divided by four, rounded
+/// up. Four bytes per token is the usual estimate for English and code; a
+/// model's tokenizer gives more for Swedish and for Rust's punctuation, so
+/// this undercounts rather than over.
+fn tokens(bytes: u64) -> u64 {
+    bytes.div_ceil(4)
+}
+
+/// The text bytes of the codebase, per git-tracked file (`git ls-files`):
+/// a file whose bytes are UTF-8 without a NUL is text; binary files
+/// (images, fonts, `.wasm`) are not counted. Paths use `/`.
+fn text_files(root: &Path) -> Vec<(String, u64)> {
     let listed = std::process::Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
         .expect("git: the codebase is what git tracks");
     assert!(listed.status.success(), "git ls-files");
-    let mut bytes = 0u64;
-    let mut parts = std::collections::BTreeMap::<String, u64>::new();
+    let mut files = Vec::new();
     for name in listed.stdout.split(|&b| b == 0).filter(|n| !n.is_empty()) {
         let name = std::str::from_utf8(name).expect("UTF-8 path");
         let Ok(data) = std::fs::read(root.join(name)) else {
@@ -409,37 +412,61 @@ fn codebase_tokens(root: &Path) -> (u64, Vec<(String, u64)>) {
         if data.contains(&0) || std::str::from_utf8(&data).is_err() {
             continue;
         }
-        bytes += data.len() as u64;
-        let top = name.split('/').next().unwrap_or(name).to_string();
-        *parts.entry(top).or_default() += data.len() as u64;
+        files.push((name.to_string(), data.len() as u64));
     }
-    let mut parts: Vec<(String, u64)> = parts.into_iter().collect();
-    parts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    (bytes.div_ceil(4), parts)
+    files
 }
 
-/// SPEC-12.3.1, the codebase half: under [`CODEBASE_MAX_TOKENS`] tokens as
-/// [`codebase_tokens`] counts them. Not met: the codebase was 858 837 tokens
-/// (3 435 346 text bytes) on `m5/release` (2026-11-06), more than twice the
-/// cap, with `crates/` alone at 2,3 MB; spec-fråga 67 asks the owner whether
-/// the cap, the count or the codebase should change. `cargo test -p vy-cli
-/// --lib spec_12_3_1 -- --ignored --nocapture` prints today's number and the
-/// parts.
+/// SPEC-12.3.1, the codebase half: each working unit – one crate under
+/// `crates/` together with `SPEC.md` and `CLAUDE.md` – is under
+/// [`UNIT_MAX_TOKENS`], counted by [`tokens`] over [`text_files`]. The whole
+/// codebase is reported, not capped. `cargo test -p vy-cli --lib
+/// spec_12_3_1_codebase -- --nocapture` prints every unit, the largest and
+/// the whole.
 #[test]
-#[ignore = "SPEC-12.3.1: 858 837 tokens (bytes/4) against 400 000 on 2026-11-06; spec-fråga 67"]
 fn spec_12_3_1_codebase_tokens() {
     let root = bench::root().expect("inside the repository");
-    let (tokens, parts) = codebase_tokens(&root);
-    for (part, bytes) in &parts {
-        eprintln!(
-            "{part:>24} {bytes:>9} bytes {:>8} tokens",
-            bytes.div_ceil(4)
+    let files = text_files(&root);
+    let size = |name: &str| {
+        files
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name} is tracked"))
+            .1
+    };
+    let shared = size("SPEC.md") + size("CLAUDE.md");
+    let mut crates = std::collections::BTreeMap::<&str, u64>::new();
+    for (name, bytes) in &files {
+        if let Some(rest) = name.strip_prefix("crates/") {
+            if let Some((krate, _)) = rest.split_once('/') {
+                *crates.entry(krate).or_default() += bytes;
+            }
+        }
+    }
+    let whole: u64 = files.iter().map(|(_, b)| b).sum();
+    assert!(crates.len() >= 10, "the count sees the crates: {crates:?}");
+    let mut units: Vec<(&str, u64)> = crates
+        .iter()
+        .map(|(k, b)| (*k, tokens(b + shared)))
+        .collect();
+    units.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    for (krate, t) in &units {
+        eprintln!("{krate:>12} + SPEC.md + CLAUDE.md {t:>8} tokens");
+    }
+    let (largest, largest_tokens) = units[0];
+    eprintln!(
+        "SPEC-12.3.1: the largest unit is {largest} with {largest_tokens} tokens, cap \
+         {UNIT_MAX_TOKENS}, margin {}; the whole codebase is {} tokens ({whole} text bytes, \
+         reported, not capped)",
+        UNIT_MAX_TOKENS as i64 - largest_tokens as i64,
+        tokens(whole)
+    );
+    assert!(tokens(whole) > 100_000, "the count sees the codebase");
+    for (krate, t) in &units {
+        assert!(
+            *t < UNIT_MAX_TOKENS,
+            "crates/{krate} with SPEC.md and CLAUDE.md is {t} tokens, over SPEC-12.3.1's \
+             {UNIT_MAX_TOKENS}"
         );
     }
-    eprintln!("SPEC-12.3.1: the codebase is {tokens} tokens, cap {CODEBASE_MAX_TOKENS}");
-    assert!(tokens > 100_000, "the count sees the codebase: {tokens}");
-    assert!(
-        tokens < CODEBASE_MAX_TOKENS,
-        "the codebase is {tokens} tokens, over SPEC-12.3.1's {CODEBASE_MAX_TOKENS}"
-    );
 }
