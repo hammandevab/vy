@@ -1312,6 +1312,115 @@ events = [
   {kind = "pointer_down", x = 300, y = 70},        # fliken Läs
 ]
 
+# block: exempelsidan Block (modules/block) – ett pusselspel med fallande block i fasta steg om
+# 16 ms (SPEC-5.1.2). Medan spelet pågår begär varje frame nästa (SPEC-5.2.2), så varje händelse
+# efter starten har after_frames och fallen anger `frames`: 1 + summan + de frames som körs efter
+# sista händelsen. Bitarnas ordning kommer ur värdens random (SPEC-5.2.11), som huvudlöst ger
+# O J Z L S I T i första påsen. Manifestet begär storage (bästa poäng, SPEC-5.2.9).
+
+[[case]]
+name = "block-1280x800@1"
+module = "block"
+width = 1280
+height = 800
+scale = 1
+semantic = "block"
+capabilities = ["storage"]
+
+[[case]]
+name = "block-800x600@1-clearing"                  # sex bitar lagda med tangenterna; nedersta raden är full och blinkar
+module = "block"
+width = 800
+height = 600
+scale = 1
+frames = 38
+semantic = "block-clearing"
+capabilities = ["storage"]
+events = [
+  {kind = "key_down", code = 40},  # Enter: spelet startar, O faller
+  {kind = "key_down", code = 6, after_frames = 2},  # C: O läggs i håll, J faller
+  {kind = "key_down", code = 79, after_frames = 2},  # J ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 5–7
+  {kind = "key_down", code = 79, after_frames = 2},  # Z ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå J
+  {kind = "key_down", code = 79, after_frames = 2},  # L fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 8–10
+  {kind = "key_down", code = 79, after_frames = 2},  # S fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå L
+  {kind = "key_down", code = 80, after_frames = 2},  # I tre steg vänster ...
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: nedersta raden är full och blinkar
+]
+
+[[case]]
+name = "block-800x600@1-paused"                    # samma spel vidare: raden försvinner, nästa bit roteras och släpps mjukt, fliken göms
+module = "block"
+width = 800
+height = 600
+scale = 1
+frames = 85
+semantic = "block-paused"
+capabilities = ["storage"]
+events = [
+  {kind = "key_down", code = 40},  # Enter: spelet startar, O faller
+  {kind = "key_down", code = 6, after_frames = 2},  # C: O läggs i håll, J faller
+  {kind = "key_down", code = 79, after_frames = 2},  # J ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 5–7
+  {kind = "key_down", code = 79, after_frames = 2},  # Z ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå J
+  {kind = "key_down", code = 79, after_frames = 2},  # L fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 8–10
+  {kind = "key_down", code = 79, after_frames = 2},  # S fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå L
+  {kind = "key_down", code = 80, after_frames = 2},  # I tre steg vänster ...
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: nedersta raden är full och blinkar
+  {kind = "key_down", code = 80, after_frames = 30},  # raden är borta (18 steg), T faller: ett steg vänster
+  {kind = "key_down", code = 82, after_frames = 2},  # pil upp: T roteras
+  {kind = "key_down", code = 81, after_frames = 2},  # pil ned hålls: mjukt släpp ...
+  {kind = "key_up", code = 81, after_frames = 12},  # ... i tolv steg
+  {kind = "visibility", visible = false, after_frames = 3},  # fliken göms: spelet pausar
+  {kind = "visibility", visible = true},  # och visas igen: pausat tills spelaren fortsätter
+]
+
+[[case]]
+name = "block-400x700@2-buttons"                   # smalt: knapparna i en rad under brunnen, spelat med pekaren
+module = "block"
+width = 400
+height = 700
+scale = 2
+frames = 55
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 345, y = 568},  # Starta
+  {kind = "pointer_up", x = 345, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 33, y = 568, after_frames = 4},  # vänsterknappen hålls: ett steg, sedan upprepning
+  {kind = "pointer_up", x = 33, y = 568, after_frames = 20},  # släpps efter tjugo frames: två steg till
+  {kind = "pointer_down", x = 207, y = 568, after_frames = 2},  # Släpp: O längst till vänster
+  {kind = "pointer_up", x = 207, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 115, y = 568, after_frames = 3},  # Rotera: J står upp
+  {kind = "pointer_up", x = 115, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 74, y = 568, after_frames = 2},  # höger
+  {kind = "pointer_up", x = 74, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 268, y = 568, after_frames = 2},  # Håll: J läggs undan, Z faller
+  {kind = "pointer_up", x = 268, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 156, y = 568, after_frames = 2},  # nedknappen hålls: mjukt släpp
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i
