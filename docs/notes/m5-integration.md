@@ -18,7 +18,7 @@ Sessionen kan startas om: läget står här och i `git log`.
 | --- | --- | --- | --- |
 | `843bce2` Slå ihop m5/sdk | `1de409e`, 15 commits | inga | 390 gröna / 4 ignorerade, spec 140/140, 13 moduler, 64/64 à 0,000 % |
 | `dc40f39` Slå ihop m5/gpu | `bcd26f8`, 10 commits | inga | 397 / 4, spec 140/140, 13 moduler, 64/64 à 0,000 %; GL-testet under Xvfb med llvmpipe grönt (sidorna nu 99 frames med `widgets`, värsta 0,254 %) |
-| (denna) Slå ihop m5/release | `877c774`, 11 commits | två, se nedan | 401 / 3 (`spec_9_7_1_reproducible_build` och `spec_12_3_1_size_budget` av-ignorerade av spåret), spec 140/140, 13 moduler, 64/64 à 0,000 %, GL grönt |
+| `a69efe4` Slå ihop m5/release | `877c774`, 11 commits | två, se nedan | 401 / 3 (`spec_9_7_1_reproducible_build` och `spec_12_3_1_size_budget` av-ignorerade av spåret), spec 140/140, 13 moduler, 64/64 à 0,000 %, GL grönt |
 
 ### Konflikter och hur de löstes
 
@@ -38,3 +38,9 @@ Sessionen kan startas om: läget står här och i `git log`.
   m5/release:s jobb `repro` och `size`; `crates/vy-render/src/text.rs` har m5/release:s
   typsnittsladdning och m5/gpu:s `Glyph::key`; spec-frågorna 66 (m5/gpu) och 67 (m5/release) krockar
   inte, och m5/sdk numrerade inga.
+
+## Uppföljningar
+
+| Commit | Vad | Grindar efteråt |
+| --- | --- | --- |
+| (denna) version 0.3.0 | `[workspace.package]` 0.2.0 → 0.3.0; `Cargo.lock` och de tretton `modules/*/Cargo.lock` (`cargo update --workspace --offline`). `scaffold::SDK_TAG` är `concat!("v", env!("CARGO_PKG_VERSION"))`, så `vy-dev new` pinnar nu `tag = "v0.3.0"`, som ska innehålla `vy_sdk::ui`; `sdk_tag_is_the_release_version` läser versionen ur rotens `Cargo.toml` och behövde ingen ändring. `release.yml`:s versionskontroll provkörd lokalt med steget ur YAML:en: `v0.3.0` går igenom (`tag=v0.3.0`, `version=0.3.0`), `v0.2.0` stoppar | 401 / 3, spec 140/140, 13 moduler, 64/64 à 0,000 % |
