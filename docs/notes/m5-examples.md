@@ -15,8 +15,8 @@ den publika sajten (`tools/publish_site.sh` tar varje utkast i `conformance/mani
 | --- | --- | --- | --- | --- |
 | 1 | Tavlan | `kanban` | klar: 54 267 byte, 0,11 M bränsle per frame (1,1 M med 60 kort), 5 fall | 2188796, 94e6aa2 |
 | 2 | Kalkylark | `kalkyl` | klar: 61 149 byte, 0,33 M bränsle per frame (1,6 M med 1 040 celler vid 1600 × 1000), 4 fall | c252b0f, 01c49db |
-| 3 | Ritbord | `rita` | pågår | – |
-| 4 | Anteckningar | `skriv` | ej påbörjad | – |
+| 3 | Ritbord | `rita` | klar: 37 376 byte, 0,08 M bränsle per frame tom (3,0 M full, 4,1 M när banorna byggs om), 5 fall | dae13cb, 121a185 |
+| 4 | Anteckningar | `skriv` | pågår | – |
 | 5 | Block | `block` | ej påbörjad | – |
 | 6 | Rymd | `rymd` | ej påbörjad | – |
 | 7 | `docs/EXEMPEL.md` | – | ej påbörjad | – |
@@ -84,6 +84,27 @@ Från `kalkyl`:
   fältet för att låta pilarna bekräfta och flytta markeringen.
 - **`core::fmt` kostar runt 4 KB i en modul.** `kalkyl` bygger sina strängar för hand och gick från
   65,2 till 61,0 KB. En `push_int` i SDK:t vore nog för de flesta sidor som bara skriver heltal.
+
+Från `rita`:
+
+- **`dl_path` debiteras två gånger per byte** (kopian ur modulminnet och kodningen i listan, 64
+  bränsle per byte), och varje frame måste skicka hela ritningen igen: det finns inget lager eller
+  någon bild en sida kan rita i och behålla. En kurva kostar 18 byte per punkt, så en ritning får
+  plats med omkring 2 500 punkter innan en frame når halva budgeten. Inget för SDK:t att lösa; en
+  1.x-fråga om ett behållet lager (eller en lägre taxa för banor).
+- **`dl_path` har ingen ändstil eller hörnstil.** Runda ändar ritas som en prick i var ände (två
+  opkoder till per streck); hörn blir värdens gering.
+- **`Path` kan inte återanvändas** (ingen `clear`, ingen `with_capacity`) och kostar runt 470
+  instruktioner per punkt att bygga; sidan behåller därför varje strecks `Path` mellan frames.
+  Förslag: `Path::clear` och `Path::with_capacity`.
+- **Ingen kvadratrot, sinus eller cosinus** i `vy_sdk::math` (`core` har inga). `rita` klarar sig med
+  en uppskattning av avståndet; `rymd` skriver egna. Förslag: `math::{sqrt, sin, cos}`.
+- **Ingen växlingsknapp.** `ui::Button` har inget "vald"-läge och kan inte byta utseende efter
+  `new`/`secondary`, så verktygsraden (färger, pennor, sudd) är sidans egna knappar. Förslag:
+  `Button::draw_toggled(…, on)` eller en `ToggleButton`.
+- **Ingen dialog.** Skymning, kort och att hålla Tab inne i dialogen (verktygen lämnar trädet medan
+  den är öppen) skrivs för hand. Förslag: `ui::Dialog` som ritar skymningen och säger vilka noder
+  som får registreras.
 
 ## Berör andra spår
 
