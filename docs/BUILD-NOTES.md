@@ -6,6 +6,30 @@ M2.7 (luckorna före frysen, efter granskning 0003) står först, sedan M3:s fö
 M2 och M1; äldre delar är oförändrade utom där senare milstolpar ändrat läget (markerat).
 M4:s fyra spår har egna noteringar i `docs/notes/m4-*.md` och står överst.
 
+# M5 – tre spår, sammanslagna i `m5/integration`
+
+Spåren m5/sdk (`vy_sdk::ui`, `widgets`, SDK-guiden, den paketerade sviten,
+[`notes/m5-sdk.md`](notes/m5-sdk.md)), m5/gpu (snabba CPU-vägen och GL-vägen,
+[`notes/m5-gpu.md`](notes/m5-gpu.md)) och m5/release (reproducerbara byggen, storleken, signering,
+[`notes/m5-release.md`](notes/m5-release.md)) slogs ihop i den ordningen; sammanslagningen,
+konflikterna, uppföljningarna och storlekarna står i [`notes/m5-integration.md`](notes/m5-integration.md).
+
+## Spec-frågor (M5)
+
+66. **GPU-vägen** (m5/gpu). *Avgjord* (koordinatorn, med ägarens mandat): OpenGL ovanpå CPU-vägen,
+    toleransen i SPEC-11.3.2. Kvar: mätningen av SPEC-13.2.1 på referensmaskinen.
+67. **Kodbasens 400 000 tokens** (m5/release). *Avgjord* (koordinatorn, med ägarens mandat):
+    SPEC-12.3.1 gäller per arbetsenhet, varje crate med `SPEC.md` och `CLAUDE.md`; hela kodbasen
+    rapporteras. Största enheten vy-shell ≈ 203 000 tokens, hela kodbasen ≈ 996 000.
+68. **Fokus för en lista med markering** (m5/sdk, 1). Ingen fokuserbar roll i 1.0 passar en lista där
+    piltangenterna flyttar markeringen; Tab når inte `ui::List`. Förslag för 1.1: en fokuserbar roll
+    för en markeringsbar lista.
+69. **Hela trädet för långa listor** (m5/sdk, 2). SPEC-10.1.1 kräver noder även utanför fönstret, så
+    10 000 rader kostar 10 000 `sem_node` per frame. Ska en lista få registrera raderna i bild och sin
+    längd?
+70. **Tillstånd i nodtexten** (m5/sdk, 3). "markerad", "vald" och sliderns värde står i nodens text;
+    ett tillståndsfält vore en 1.1-utökning med eget nummer.
+
 # M4 – fyra spår, sammanslagna i `m4/integration`
 
 Spåren byggdes parallellt från `3bc0bcb` och slogs ihop i ordningen m4/dev (`vy-dev` och Studio,
