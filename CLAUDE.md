@@ -69,8 +69,8 @@ aldrig koden. Skriv den för en läsare som har fem minuter.
 | M0 ✓ | numrerad spec, testskal, CI, `hello` bygger till wasm | spec granskad av ägaren |
 | M1 ✓ | `vy-runtime`, `vy-dl`, `vy-render`, `vy-cli render` till PNG | 20 guldbilder gröna på Linux + macOS |
 | M2 ✓ | Rust-SDK, tio referenssidor | ABI 1.0 fryst, inga öppna frågor i SPEC §15 |
-| M3 | `vy-shell`, `vy-proto`, processisolering | prestandabudget SPEC §13 hållen |
-| M4 | signering, semantiskt träd, devtools, fuzz, macOS + Windows | hotanalys klar, extern sandbox-granskning |
+| M3 ✓ | `vy-shell`, `vy-proto`, processisolering | prestandabudget SPEC §13 hållen (SPEC-13.2.1 mäts på GPU (GL-vägen), CPU-vägen över budget) |
+| M4 ✓ | signering, semantiskt träd, devtools, fuzz, macOS + Windows | hotanalys klar, extern sandbox-granskning (extern sandlådegranskning kvar) |
 | M5 | reproducerbara byggen, publicerad svit, SDK-docs | utomstående agent publicerar en sida på < 1 h |
 
 ## Struktur
@@ -87,9 +87,12 @@ crates/vy-shell      fönster, flikar, adressfält (rörs ej före M3)
 crates/vy-cli        headless: render, check-abi, conformance, bench
 crates/vy-publish    keygen, build, inspect – utkast + modul + resurser till signerat paket
 crates/vy-serve      statisk server: paket, nycklar, index, HTML-reserv
+crates/vy-dev        new, build, serve – projektmallen och utvecklingsservern för Studio
 modules/hello        referensmodul 0 – text och en rektangel
+modules/studio       Studio – sidan som kör en agent mot ett projekt, lokalt genom vy-dev
 conformance/         guldbilder, förväntade semantiska träd och manifestutkast per modul
 tools/               spec_trace.py, build_modules.sh, test_modules.sh
+docs/SDK.md          guiden till vy-sdk och vy_sdk::ui, med en hel exempelsida
 docs/reviews/        granskningssidor, en per PR
 docs/notes/          byggagentens noteringar per gren
 ```

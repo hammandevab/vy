@@ -17,7 +17,7 @@ Vy medan den byggs. Båda börjar med `vy-dev new`.
 ## För hand
 
 ```sh
-vy-dev new min-sida                  # --sdk <vy-checkout> för vy-sdk från disk i stället för git
+vy-dev new min-sida                  # vy-sdk ur git på releasens tagg; --sdk <vy-checkout> tar den från disk
 cd min-sida
 cargo build --release --target wasm32-unknown-unknown
 vy-cli check-abi target/wasm32-unknown-unknown/release/min_sida.wasm
@@ -25,8 +25,12 @@ vy-cli render target/wasm32-unknown-unknown/release/min_sida.wasm --out preview.
 vy-dev build                         # utkastet mot modulen och ett signerat paket
 ```
 
-Titta på `preview.png`, ändra `src/lib.rs`, börja om. Projektets `CLAUDE.md` har hela loopen,
-reglerna och ett sammandrag av SDK:t; den gäller för människor också.
+`vy-dev new` pinnar `vy-sdk` på taggen för sin egen version (`tag = "v0.3.0"` för vy-dev 0.3.0),
+så att projektet bygger mot samma SDK som releasen det kom ur; med `--sdk` blir det en sökväg till
+`crates/vy-sdk` i en checkout i stället. Titta på `preview.png`, ändra `src/lib.rs`, börja om.
+Projektets `CLAUDE.md` har hela loopen, reglerna och ett sammandrag av SDK:t; den gäller för
+människor också. Hela guiden till SDK:t och dess komponenter (`vy_sdk::ui`) står i
+[`docs/SDK.md`](SDK.md).
 
 ## Med Studio
 
