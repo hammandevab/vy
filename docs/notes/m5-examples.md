@@ -13,8 +13,8 @@ den publika sajten (`tools/publish_site.sh` tar varje utkast i `conformance/mani
 
 | # | Sida | Modul | Läge | Commits |
 | --- | --- | --- | --- | --- |
-| 1 | Tavlan | `kanban` | pågår | – |
-| 2 | Kalkylark | `kalkyl` | ej påbörjad | – |
+| 1 | Tavlan | `kanban` | klar: 54 267 byte, 0,11 M bränsle per frame (1,1 M med 60 kort), 5 fall | 2188796, 94e6aa2 |
+| 2 | Kalkylark | `kalkyl` | pågår | – |
 | 3 | Ritbord | `rita` | ej påbörjad | – |
 | 4 | Anteckningar | `skriv` | ej påbörjad | – |
 | 5 | Block | `block` | ej påbörjad | – |
@@ -45,6 +45,23 @@ och `golden: …` (fall, guldbilder, träd).
   ritar ringen själva (SPEC-10.3.3).
 
 ## SDK-luckor (fylls på per sida)
+
+Från `kanban`:
+
+- **Knapp med annat namn än sin etikett.** `ui::Button::draw` registrerar etiketten som nodens text, så
+  en ikonknapp ("+", "×") får noden "+". Sidan ritar därför sina egna små knappar med noden "Lägg till
+  kort i Pågår". Förslag: `Button::draw_named(f, r, &theme, etikett, namn)` eller en `IconButton`.
+- **Fokusringen är inte publik.** `ui::ring` är `pub(crate)`; varje sida som ritar en egen kontroll
+  skriver om den (3 px utanför, `palette.ring`). Förslag: `ui::focus_ring(f, r, radie, &theme)`.
+- **Säga till en komponent att den har fokus.** Ett kort blir ett textfält på samma nod-id (fokus följer
+  id:t, SPEC-10.3.2), men `TextBox` lär sig fokus bara ur en `FOCUS`-händelse, så sidan räcker den en
+  egen `Event::Focus` genom `Input::new`. Förslag: `TextBox::adopt_focus(r)` för en nod som redan har
+  värdens fokus.
+- **Ingen hjälp för dragning.** Tröskeln innan ett tryck blir ett drag, dubbelklick (händelserna bär
+  inget klickantal; sidan jämför `now_ms`) och "släppt utanför fönstret" (`POINTER_MOVE` utan knapp)
+  skrivs för hand. Förslag: en liten `ui::Drag` som ger `Started/Moved/Dropped/Clicked/DoubleClicked`.
+- **Centrerad text.** `text_measure` + `f.text` med halva skillnaden skrivs om i varje sida;
+  `Frame::text_centred(r, style, text)` vore en rad.
 
 ## Berör andra spår
 
