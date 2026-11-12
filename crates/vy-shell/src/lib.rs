@@ -13,6 +13,7 @@ pub mod a11y;
 pub mod address;
 pub mod chrome;
 pub mod clipboard;
+pub mod code_cache;
 pub mod compose;
 pub mod devtools;
 pub mod external;
