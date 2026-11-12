@@ -933,6 +933,9 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         fetch: &case.fetch,
         net_origins: &net_origins,
         storage_quota_bytes,
+        // An empty in-memory clipboard (conformance/README.md): a copy
+        // gesture's or a granted `clipboard_write` lands in it.
+        clipboard: Some(&[]),
     };
     let out = render(&req)?;
     if let Some(problem) = ime_requirement(&out.semantic, &manifest.capabilities) {
@@ -1524,5 +1527,69 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
             "{denied:?}"
         );
         assert!(denied.iter().any(|m| m.starts_with("ime_end: E_DENIED")));
+    }
+
+    /// SPEC-8.2.4, SPEC-5.2.12: the runner's host has an empty in-memory
+    /// clipboard, and a scripted `key_down` Ctrl+C or Ctrl+X is a copy
+    /// gesture: the widgets page's `clipboard_write` of the selection
+    /// succeeds even without the `clipboard` capability, which a plain C,
+    /// Ctrl+Alt+C (AltGr) or a write outside the gesture does not get.
+    #[test]
+    fn spec_8_2_4_scripted_copy_gesture() {
+        use crate::is_copy_gesture;
+        use vy_abi::modifier::{ALT, CTRL, META, SHIFT};
+        let (c, x, v) = (0x06, 0x1B, 0x19);
+        assert!(is_copy_gesture(c, CTRL) && is_copy_gesture(x, CTRL));
+        assert!(is_copy_gesture(c, META) && is_copy_gesture(c, CTRL | SHIFT));
+        assert!(!is_copy_gesture(c, 0) && !is_copy_gesture(c, CTRL | ALT));
+        assert!(!is_copy_gesture(v, CTRL) && !is_copy_gesture(c, SHIFT));
+
+        let cases = load_cases(&root()).unwrap();
+        let typed = cases
+            .iter()
+            .find(|c| c.name == "widgets-800x600@1-typed")
+            .expect("the widgets typed case");
+        let wasm = fs::read(root().join("target/wasm/widgets.wasm")).unwrap();
+        let status = |out: &crate::RenderOutput| {
+            out.semantic
+                .iter()
+                .find(|n| n.text.starts_with("Ctrl+C"))
+                .map(|n| n.text.clone())
+                .unwrap_or_default()
+        };
+        let run = |caps: Capabilities, events: &[Step], clipboard: Option<&[u8]>| {
+            let req = RenderRequest {
+                capabilities: Capabilities { ime: true, ..caps },
+                frames: typed.frames,
+                events,
+                clipboard,
+                scale: typed.scale,
+                ..RenderRequest::new(&wasm, typed.width, typed.height)
+            };
+            render(&req).unwrap()
+        };
+        // As the case runs it: granted, and the selection "Lind" copied.
+        let out = run(typed.capabilities, &typed.events, Some(&[]));
+        assert_eq!(out.clipboard.as_deref(), Some(&b"Lind"[..]));
+        assert_eq!(status(&out), "Ctrl+C: markeringen är kopierad.");
+        // Without the capability the gesture alone lets the write through.
+        let out = run(Capabilities::default(), &typed.events, Some(&[]));
+        assert_eq!(out.clipboard.as_deref(), Some(&b"Lind"[..]));
+        // Ctrl+Alt+C is not a gesture: denied, the clipboard untouched.
+        let mut altgr = typed.events.clone();
+        let Some(Step {
+            event: ScriptedEvent::KeyDown { modifiers, .. },
+            ..
+        }) = altgr.last_mut()
+        else {
+            panic!("the case ends with Ctrl+C");
+        };
+        *modifiers |= ALT;
+        let out = run(Capabilities::default(), &altgr, Some(&[]));
+        assert_eq!(out.clipboard.as_deref(), Some(&b""[..]));
+        // No clipboard at all (`vy-cli render`): the host denies the write.
+        let out = run(typed.capabilities, &typed.events, None);
+        assert_eq!(out.clipboard, None);
+        assert_eq!(status(&out), "Ctrl+C: urklippet nekades (E_DENIED).");
     }
 }

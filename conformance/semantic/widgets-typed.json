@@ -18,7 +18,7 @@
     {"id": -16, "parent_id": 4, "role": 23, "role_name": "slider", "x": 44, "y": 596.25, "w": 328, "h": 32, "text": "Volym: 40"},
     {"id": -17, "parent_id": 4, "role": 4, "role_name": "button", "x": 44, "y": 648.25, "w": 110, "h": 40, "text": "Spara"},
     {"id": -18, "parent_id": 4, "role": 4, "role_name": "button", "x": 166, "y": 648.25, "w": 170, "h": 40, "text": "Kopiera namnet"},
-    {"id": 10, "parent_id": 4, "role": 1, "role_name": "text", "x": 44, "y": 700.25, "w": 328, "h": 17.5, "text": "Ctrl+C: urklippet nekades (E_DENIED)."},
+    {"id": 10, "parent_id": 4, "role": 1, "role_name": "text", "x": 44, "y": 700.25, "w": 328, "h": 17.5, "text": "Ctrl+C: markeringen är kopierad."},
     {"id": 11, "parent_id": 1, "role": 16, "role_name": "region", "x": 408, "y": 117.5, "w": 368, "h": 318.75, "text": "Lista"},
     {"id": 12, "parent_id": 11, "role": 2, "role_name": "heading", "x": 428, "y": 137.5, "w": 328, "h": 18.75, "text": "Lista"},
     {"id": 13, "parent_id": 11, "role": 8, "role_name": "list", "x": 428, "y": 168.25, "w": 328, "h": 216, "text": ""},

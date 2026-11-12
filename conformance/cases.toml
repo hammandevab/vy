@@ -801,8 +801,8 @@ events = [
 # widgets: alla kontroller i vy_sdk::ui (modules/widgets) – textfält på en och flera rader,
 # kryssruta, radiogrupp, slider, knappar, en virtualiserad lista och en rullruta i en rullande
 # huvudyta. Manifestet begär ime (textfälten, SPEC-10.4.2) och clipboard (Kopiera namnet).
-# Huvudlöst finns inget urklipp: Ctrl+C skriver under kopieringsgesten (SPEC-8.2.4) men värden
-# svarar E_DENIED, och statusraden visar det. Listan och rutan har ingen fokuserbar roll
+# Den huvudlösa värden har ett tomt urklipp i minnet, och Ctrl+C skriver markeringen dit under
+# kopieringsgesten (SPEC-8.2.4); statusraden visar kopieringen. Listan och rutan har ingen fokuserbar roll
 # (SPEC-10.3.2): de tar tangenter efter ett tryck i dem.
 
 [[case]]
@@ -835,7 +835,7 @@ events = [
   {kind = "key_down", code = 80, modifiers = 1},
   {kind = "key_down", code = 80, modifiers = 1},
   {kind = "key_down", code = 80, modifiers = 1},
-  {kind = "key_down", code = 6, modifiers = 2},                # Ctrl+C: E_DENIED headless
+  {kind = "key_down", code = 6, modifiers = 2},                # Ctrl+C: "Lind" till urklippet
 ]
 
 [[case]]

@@ -66,8 +66,11 @@ canned responses for `fetch_begin`, `fetch_done` delivers the oldest pending one
 **Deterministic host.** The clock is the number of completed frames × 16 ms (`now_ms`), `dt_ms` is
 16, and 0 in the first frame and the first after `VISIBILITY` visible (SPEC-5.1.2). `random` is
 xorshift64* from the seed `0x5EED5EED00000001`: per 8 bytes, `x ^= x >> 12; x ^= x << 25;
-x ^= x >> 27`, then `x × 0x2545F4914F6CDD1D` written little-endian (SPEC-5.2.11). There is no
-clipboard and no navigation: `clipboard_*` and `navigate` answer `E_DENIED`. Storage is in memory
+x ^= x >> 27`, then `x × 0x2545F4914F6CDD1D` written little-endian (SPEC-5.2.11). The clipboard
+is in memory and starts empty: `clipboard_read` and `clipboard_write` serve it under SPEC-5.2.12,
+and a `key_down` of C (6) or X (27) with Ctrl and without Alt, or with Meta, is a copy gesture: a
+`clipboard_write` while the module handles that event succeeds without the `clipboard` capability
+(SPEC-8.2.4). There is no navigation: `navigate` answers `E_DENIED`. Storage is in memory
 with the draft's quota; `reinit` starts a new instance with the old instance's storage.
 
 **Output of a case.**

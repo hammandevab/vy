@@ -190,6 +190,13 @@ impl ScriptedEvent {
                 code,
                 modifiers,
                 repeat,
+            } if is_copy_gesture(*code, *modifiers) => {
+                rt.event_as_copy_gesture(kind::KEY_DOWN, *code, *modifiers, i32::from(*repeat), 0)
+            }
+            Self::KeyDown {
+                code,
+                modifiers,
+                repeat,
             } => rt.event(kind::KEY_DOWN, *code, *modifiers, i32::from(*repeat), 0),
             Self::KeyUp { code, modifiers } => rt.event(kind::KEY_UP, *code, *modifiers, 0, 0),
             Self::TextInput(text) => rt.text_input(text),
@@ -221,6 +228,20 @@ impl ScriptedEvent {
             }
         }
     }
+}
+
+/// Ctrl+C or Ctrl+X as the shell reads them (SPEC-8.2.4): the C or X key
+/// with the shortcut modifier, Ctrl without Alt (Ctrl+Alt is AltGr) or
+/// Meta. The headless host has no selection of its own, so such a
+/// `key_down` is always the page's copy gesture.
+pub fn is_copy_gesture(code: i32, modifiers: i32) -> bool {
+    use vy_abi::modifier;
+    let shortcut = modifiers & modifier::CTRL != 0 && modifiers & modifier::ALT == 0
+        || modifiers & modifier::META != 0;
+    // USB HID usage ids, as the shell's `hid::C` and `hid::X`.
+    const C: i32 = 0x06;
+    const X: i32 = 0x1B;
+    shortcut && matches!(code, C | X)
 }
 
 /// Validate a module file against the Vy ABI.
@@ -274,6 +295,12 @@ pub struct RenderRequest<'a> {
     pub net_origins: &'a [String],
     /// Storage quota in bytes (SPEC-9.3.1): the manifest's `quota_kb` × 1024.
     pub storage_quota_bytes: u64,
+    /// The headless host's clipboard (SPEC-5.2.12): `None` has none, so
+    /// `clipboard_*` are denied; `Some(bytes)` is an in-memory clipboard
+    /// that starts with `bytes` and that `clipboard_write` replaces, with
+    /// the `clipboard` capability or during a copy gesture (SPEC-8.2.4).
+    /// The conformance runner gives an empty one.
+    pub clipboard: Option<&'a [u8]>,
 }
 
 impl<'a> RenderRequest<'a> {
@@ -293,6 +320,7 @@ impl<'a> RenderRequest<'a> {
             fetch: &[],
             net_origins: &[],
             storage_quota_bytes: vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES,
+            clipboard: None,
         }
     }
 }
@@ -314,6 +342,9 @@ pub struct RenderOutput {
     pub frames_run: u32,
     /// True when the module was force-suspended by the budget (SPEC-5.3.3).
     pub suspended: bool,
+    /// The host's clipboard after the last step, when it has one
+    /// (`RenderRequest::clipboard`, SPEC-5.2.12).
+    pub clipboard: Option<Vec<u8>>,
     /// What rasterizing the last frame cost, and whether the budget cut it
     /// short (SPEC-5.3.3).
     pub raster: vy_render::RasterReport,
@@ -387,6 +418,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         logs: earlier_logs,
         frames_run,
         suspended: rt.is_suspended(),
+        clipboard: rt.clipboard().map(<[u8]>::to_vec),
     })
 }
 
@@ -413,6 +445,7 @@ pub(crate) fn drive(req: &RenderRequest<'_>) -> Result<Driven> {
             storage_quota_bytes: req.storage_quota_bytes,
             fetch: req.fetch.to_vec(),
             net_origins: req.net_origins.to_vec(),
+            clipboard: req.clipboard.map(<[u8]>::to_vec),
             ..Options::default()
         };
         Runtime::load(req.wasm, &hash, options).map_err(|e| anyhow!("{e}"))
@@ -467,7 +500,10 @@ pub(crate) fn drive(req: &RenderRequest<'_>) -> Result<Driven> {
             ScriptedEvent::Reinit => {
                 earlier_logs.extend(rt.logs().iter().cloned());
                 let storage = rt.take_storage();
+                // The clipboard is the host's, not the instance's.
+                let clipboard = rt.clipboard().map(<[u8]>::to_vec);
                 rt = load(storage)?;
+                rt.set_clipboard(clipboard);
                 rt.init(width, height, scale)
                     .map_err(|e| anyhow!("event {}: reinit: {e}", i + 1))?;
             }

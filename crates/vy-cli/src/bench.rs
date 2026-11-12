@@ -428,6 +428,9 @@ fn drive_case(root: &Path, case: &conformance::Case) -> Result<Driven> {
         fetch: &case.fetch,
         net_origins: &net_origins,
         storage_quota_bytes,
+        // An empty in-memory clipboard (conformance/README.md): a copy
+        // gesture's or a granted `clipboard_write` lands in it.
+        clipboard: Some(&[]),
     };
     drive(&req).with_context(|| format!("case {}", case.name))
 }
