@@ -17,8 +17,8 @@ den publika sajten (`tools/publish_site.sh` tar varje utkast i `conformance/mani
 | 2 | Kalkylark | `kalkyl` | klar: 61 149 byte, 0,33 M bränsle per frame (1,6 M med 1 040 celler vid 1600 × 1000), 4 fall | c252b0f, 01c49db |
 | 3 | Ritbord | `rita` | klar: 37 376 byte, 0,08 M bränsle per frame tom (3,0 M full, 4,1 M när banorna byggs om), 5 fall | dae13cb, 121a185 |
 | 4 | Anteckningar | `skriv` | klar: 60 895 byte, 0,45 M bränsle per frame (1,6 M med 6 000 byte där varje ord byter stil, 3,9 M när den bryts om), 4 fall | 8742960, 686aefd |
-| 5 | Block | `block` | pågår | – |
-| 6 | Rymd | `rymd` | ej påbörjad | – |
+| 5 | Block | `block` | klar: 21 746 byte, 0,10–0,15 M bränsle per frame i spel, 4 fall | 4df6c82, 79f213d |
+| 6 | Rymd | `rymd` | pågår | – |
 | 7 | `docs/EXEMPEL.md` | – | ej påbörjad | – |
 
 Ordningen är uppdragets. Varje sida är två commits: `modules/<namn>: …` (modul, utkast, tester; röd
@@ -122,6 +122,19 @@ Från `skriv`:
 - **`TextBox` säger inte när texten ändrats annat än genom svaret** (ingen revisionsräknare att
   jämföra), och det går inte att fråga var markören står i bild. Sidan räknar själv revisioner och
   följer markörens byteposition.
+
+Från `block`:
+
+- **Inga fasta steg.** Varje sida som animerar skriver om saldot av `dt_ms` som betalar steg, taket
+  för hur många steg en frame hinner ikapp, och regeln att första framen efter en vila inte räknas
+  (dess `dt_ms` är tiden sidan stod still; `kanban` har samma regel för sin glidning). Förslag:
+  `vy_sdk::time::Steps::new(16)` med `advance(dt_ms) -> antal` och `rest()`.
+- **Mellanslag hör till knappen.** `ui::Button` aktiveras av mellanslag med fokus, men i ett spel är
+  mellanslag en speltangent vad som än har fokus (ett pekartryck på en knapp ger den fokus), så
+  spelets knappar är sidans egna och tar bara Enter. De upprepar också medan pekaren håller dem,
+  vilket `Button` inte kan. Förslag: `Button::event_with(…, keys)` eller en flagga för upprepning.
+- **Få tangentnamn.** `event::key` har A, C, V och X; sidorna definierar själva Z, Y, P, H och F2.
+  Förslag: hela alfabetet och F-tangenterna.
 
 ## Berör andra spår
 
