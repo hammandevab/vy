@@ -897,6 +897,98 @@ events = [                                                      # enbart tangent
   {kind = "key_down", code = 40},                               # Enter: sparat
 ]
 
+# kanban: exempelsidan Tavlan (modules/kanban) – tre kolumner med kort som dras med pekaren
+# eller flyttas med piltangenterna. Ett kort är en button-nod med ett id som följer kortet, så
+# värdens fokus sitter kvar när det flyttas (SPEC-10.3.2); Enter eller dubbelklick gör samma nod
+# till ett textfält. Efter ett släpp glider kortet på plats på 160 ms (request_frame), så fallen
+# anger `frames` själva. Manifestet begär ime (textfälten, SPEC-10.4.2) och storage (tavlan sparas
+# efter varje ändring, SPEC-5.2.9).
+
+[[case]]
+name = "kanban-1280x800@1"
+module = "kanban"
+width = 1280
+height = 800
+scale = 1
+semantic = "kanban"
+capabilities = ["ime", "storage"]
+
+[[case]]
+name = "kanban-800x600@1-dragging"                 # mitt i en dragning: kortet i luften, luckan där det hamnar
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 120, y = 121},       # första kortet i Att göra: fokus, tryck
+  {kind = "pointer_move", x = 400, y = 180, buttons = 1},   # längre än 4 px: kortet lyfts
+  {kind = "pointer_move", x = 420, y = 150, buttons = 1},   # över Pågår, mellan första och andra kortet
+]
+
+[[case]]
+name = "kanban-800x600@1-moved"
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+frames = 80
+semantic = "kanban-moved"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 120, y = 121},       # dra första kortet till Pågår, plats 2
+  {kind = "pointer_move", x = 400, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 420, y = 150, buttons = 1},
+  {kind = "pointer_up", x = 420, y = 150},         # släpp: kortet glider på plats (11 frames)
+  {kind = "pointer_down", x = 650, y = 554},       # fältet i Klart: fokus, ime_begin
+  {kind = "text_input", text = "Fira med tårta och en lång titel som bryts på två rader"},
+  {kind = "key_down", code = 40},                   # Enter: nytt kort sist i Klart, sparas
+  {kind = "key_down", code = 43},                   # Tab: knappen Lägg till
+  {kind = "key_down", code = 43},                   # Tab: första kortet i Att göra
+  {kind = "key_down", code = 79},                   # pil höger: kortet till Pågår, fokus följer med
+  {kind = "key_down", code = 81},                   # pil ned: ett steg ned i kolumnen
+  {kind = "key_down", code = 40},                   # Enter: kortets nod blir ett textfält
+  {kind = "text_input", text = "Boka lokalen"},    # titeln är markerad: ersätts
+  {kind = "key_down", code = 40},                   # Enter: nytt namn, noden är en knapp igen
+]
+
+[[case]]
+name = "kanban-800x600@1-reloaded"                 # dubbelklick byter namn, pilarna flyttar; en ny instans läser tavlan
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+frames = 80
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 120, y = 121},
+  {kind = "pointer_up", x = 120, y = 121},
+  {kind = "pointer_down", x = 120, y = 121},       # andra trycket inom 400 ms: redigera
+  {kind = "pointer_up", x = 120, y = 121},
+  {kind = "text_input", text = "Skriv nyhetsbrevet"},
+  {kind = "key_down", code = 40},                   # Enter: sparas
+  {kind = "key_down", code = 79},                   # pil höger x2: kortet till Klart
+  {kind = "key_down", code = 79},
+  {kind = "suspend"},
+  {kind = "reinit"},                                # ny instans med samma lagring (SPEC-5.2.9)
+]
+
+[[case]]
+name = "kanban-400x700@2-tabs"                     # under 640 px: en kolumn i taget bakom flikar
+module = "kanban"
+width = 400
+height = 700
+scale = 2
+semantic = "kanban-tabs"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 200, y = 76},        # fliken Pågår
+  {kind = "pointer_up", x = 200, y = 76},
+  {kind = "pointer_down", x = 150, y = 214},       # andra kortet lyfts ...
+  {kind = "pointer_move", x = 250, y = 150, buttons = 1},
+  {kind = "pointer_move", x = 320, y = 80, buttons = 1},    # ... och hålls över fliken Klart
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i
