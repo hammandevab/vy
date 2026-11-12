@@ -1069,6 +1069,177 @@ events = [
   {kind = "text_input", text = "=SUMMA(B5:D5)*12"},   # skrivs i cellen, ännu inte bekräftad
 ]
 
+# rita: exempelsidan Ritbord (modules/rita) – frihand med förenklade streck ritade som mjuka
+# kurvor med PATH. Verktygen är knappar med tillståndet i texten; pappret är en image-nod med antalet
+# streck. Ritningen hålls under 2 500 punkter (SPEC-5.3.3). Manifestet begär storage (ritningen
+# sparas efter varje ändring, SPEC-5.2.9). Inga textfält, ingen ime.
+
+[[case]]
+name = "rita-1280x800@1"
+module = "rita"
+width = 1280
+height = 800
+scale = 1
+semantic = "rita"
+capabilities = ["storage"]
+
+[[case]]
+name = "rita-800x600@1-drawn"                      # sex streck och en prick i fyra färger och tre pennor; sudd och ångra
+module = "rita"
+width = 800
+height = 600
+scale = 1
+frames = 200
+semantic = "rita-drawn"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 146, y = 64},                 # gul
+  {kind = "pointer_down", x = 437, y = 64},                 # bred penna
+  {kind = "pointer_down", x = 665, y = 190},
+  {kind = "pointer_move", x = 659, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 235, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 575, y = 190, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 145, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 659, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 665, y = 190, buttons = 1},
+  {kind = "pointer_up", x = 665, y = 190},
+  {kind = "pointer_down", x = 184, y = 64},                 # grön
+  {kind = "pointer_down", x = 60, y = 470},
+  {kind = "pointer_move", x = 140, y = 455, buttons = 1},
+  {kind = "pointer_move", x = 220, y = 468, buttons = 1},
+  {kind = "pointer_move", x = 300, y = 452, buttons = 1},
+  {kind = "pointer_move", x = 380, y = 466, buttons = 1},
+  {kind = "pointer_move", x = 460, y = 450, buttons = 1},
+  {kind = "pointer_move", x = 540, y = 464, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 448, buttons = 1},
+  {kind = "pointer_move", x = 700, y = 462, buttons = 1},
+  {kind = "pointer_move", x = 740, y = 452, buttons = 1},
+  {kind = "pointer_up", x = 740, y = 452},
+  {kind = "pointer_down", x = 222, y = 64},                 # blå
+  {kind = "pointer_down", x = 349, y = 64},                 # tunn penna
+  {kind = "pointer_down", x = 150, y = 200},
+  {kind = "pointer_move", x = 180, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 210, y = 200, buttons = 1},
+  {kind = "pointer_move", x = 240, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 270, y = 200, buttons = 1},
+  {kind = "pointer_up", x = 270, y = 200},
+  {kind = "pointer_down", x = 70, y = 64},                  # röd
+  {kind = "pointer_down", x = 393, y = 64},                 # mellanpenna
+  {kind = "pointer_down", x = 300, y = 452},
+  {kind = "pointer_move", x = 300, y = 350, buttons = 1},
+  {kind = "pointer_move", x = 420, y = 350, buttons = 1},
+  {kind = "pointer_move", x = 420, y = 452, buttons = 1},
+  {kind = "pointer_up", x = 420, y = 452},
+  {kind = "pointer_down", x = 285, y = 355},
+  {kind = "pointer_move", x = 360, y = 290, buttons = 1},
+  {kind = "pointer_move", x = 435, y = 355, buttons = 1},
+  {kind = "pointer_up", x = 435, y = 355},
+  {kind = "pointer_down", x = 32, y = 64},                  # svart
+  {kind = "pointer_down", x = 345, y = 410},
+  {kind = "pointer_up", x = 345, y = 410},
+  {kind = "pointer_down", x = 497, y = 64},                 # sudd på
+  {kind = "pointer_down", x = 360, y = 270},
+  {kind = "pointer_move", x = 360, y = 300, buttons = 1},
+  {kind = "pointer_up", x = 360, y = 300},
+  {kind = "key_down", code = 29, modifiers = 2},  # Ctrl+Z: taket är tillbaka
+  {kind = "pointer_down", x = 32, y = 64},                  # svart: pennan igen
+]
+
+[[case]]
+name = "rita-800x600@1-confirm"                    # Rensa frågar först: dialogen ensam i Tab-ordningen
+module = "rita"
+width = 800
+height = 600
+scale = 1
+frames = 60
+semantic = "rita-confirm"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 60, y = 470},
+  {kind = "pointer_move", x = 140, y = 455, buttons = 1},
+  {kind = "pointer_move", x = 220, y = 468, buttons = 1},
+  {kind = "pointer_move", x = 300, y = 452, buttons = 1},
+  {kind = "pointer_move", x = 380, y = 466, buttons = 1},
+  {kind = "pointer_move", x = 460, y = 450, buttons = 1},
+  {kind = "pointer_move", x = 540, y = 464, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 448, buttons = 1},
+  {kind = "pointer_move", x = 700, y = 462, buttons = 1},
+  {kind = "pointer_move", x = 740, y = 452, buttons = 1},
+  {kind = "pointer_up", x = 740, y = 452},
+  {kind = "pointer_down", x = 751, y = 64},        # Rensa: dialogen öppnas, verktygen lämnar trädet
+  {kind = "key_down", code = 43},                   # Tab: dialogens knapp Rensa
+]
+
+[[case]]
+name = "rita-400x700@2-eraser"                     # smalt: verktygen på två rader; suddet hålls nere över ett streck
+module = "rita"
+width = 400
+height = 700
+scale = 2
+frames = 60
+semantic = "rita-eraser"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 260, y = 64},        # lila
+  {kind = "pointer_down", x = 40, y = 200},
+  {kind = "pointer_move", x = 100, y = 170, buttons = 1},
+  {kind = "pointer_move", x = 160, y = 210, buttons = 1},
+  {kind = "pointer_move", x = 220, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 280, y = 220, buttons = 1},
+  {kind = "pointer_move", x = 340, y = 190, buttons = 1},
+  {kind = "pointer_up", x = 340, y = 190},
+  {kind = "pointer_down", x = 108, y = 64},        # orange
+  {kind = "pointer_down", x = 123, y = 104},       # bred penna
+  {kind = "pointer_down", x = 60, y = 300},
+  {kind = "pointer_move", x = 150, y = 330, buttons = 1},
+  {kind = "pointer_move", x = 250, y = 300, buttons = 1},
+  {kind = "pointer_move", x = 340, y = 330, buttons = 1},
+  {kind = "pointer_up", x = 340, y = 330},
+  {kind = "pointer_down", x = 183, y = 104},       # sudd på
+  {kind = "pointer_down", x = 150, y = 150},       # suddet ned ...
+  {kind = "pointer_move", x = 150, y = 205, buttons = 1},   # ... och över det lila strecket: det är märkt
+]
+
+[[case]]
+name = "rita-500x400@1-reloaded"                   # en ny instans läser ritningen; pappret skalas till ett mindre fönster
+module = "rita"
+width = 800
+height = 600
+scale = 1
+frames = 60
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 222, y = 64},        # blå
+  {kind = "pointer_down", x = 665, y = 190},
+  {kind = "pointer_move", x = 659, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 235, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 575, y = 190, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 145, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 659, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 665, y = 190, buttons = 1},
+  {kind = "pointer_up", x = 665, y = 190},
+  {kind = "pointer_down", x = 70, y = 64},         # röd
+  {kind = "pointer_down", x = 285, y = 355},
+  {kind = "pointer_move", x = 360, y = 290, buttons = 1},
+  {kind = "pointer_move", x = 435, y = 355, buttons = 1},
+  {kind = "pointer_up", x = 435, y = 355},
+  {kind = "suspend"},
+  {kind = "reinit"},                                # ny instans med samma lagring (SPEC-5.2.9)
+  {kind = "resize", width = 500, height = 400, scale = 1},
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i

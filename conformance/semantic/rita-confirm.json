@@ -1,0 +1,13 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 11, "w": 100, "h": 25, "text": "Ritbord"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 731.99, "y": 17, "w": 52.01, "h": 16.25, "text": "1 streck"},
+    {"id": 4, "parent_id": 1, "role": 10, "role_name": "image", "x": 31, "y": 92, "w": 738, "h": 492, "text": "Ritning med 1 streck"},
+    {"id": 5, "parent_id": 0, "role": 17, "role_name": "dialog", "x": 230, "y": 225, "w": 340, "h": 150, "text": "Rensa hela ritningen?"},
+    {"id": 6, "parent_id": 5, "role": 2, "role_name": "heading", "x": 250, "y": 243, "w": 300, "h": 21.25, "text": "Rensa hela ritningen?"},
+    {"id": 7, "parent_id": 5, "role": 1, "role_name": "text", "x": 250, "y": 270.25, "w": 300, "h": 17.5, "text": "Det går att ångra efteråt."},
+    {"id": -40, "parent_id": 5, "role": 4, "role_name": "button", "x": 340, "y": 319, "w": 100, "h": 36, "text": "Rensa"},
+    {"id": -41, "parent_id": 5, "role": 4, "role_name": "button", "x": 450, "y": 319, "w": 100, "h": 36, "text": "Avbryt"}
+  ]
+}
