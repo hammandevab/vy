@@ -1,0 +1,11 @@
+{
+  "abi": "1.0",
+  "name": "Anteckningar",
+  "summary": "Exempelsida: en Markdown-redigerare med förhandsvisning bredvid. Rubriker, stycken, fet och betonad text, kod i löptext och kodblock, citat, listor i två nivåer, linjer och länkar bryts och sätts av sidan själv; länkarna registreras med link_register och följs med Enter. Under 720 px visas flikarna Skriv och Läs. Begär ime för textfältet (SPEC-10.4.2) och storage; utan storage sparas texten inte.",
+  "lang": "sv",
+  "memory_max": 64,
+  "published": "2026-11-12",
+  "capabilities": {"ime": {}, "storage": {"quota_kb": 16}},
+  "fallback": "# Anteckningar\n\nEn Markdown-redigerare med förhandsvisning. Sidan kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/skriv"
+}
