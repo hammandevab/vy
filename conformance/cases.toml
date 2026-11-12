@@ -989,6 +989,86 @@ events = [
   {kind = "pointer_move", x = 320, y = 80, buttons = 1},    # ... och hålls över fliken Klart
 ]
 
+# kalkyl: exempelsidan Kalkylark (modules/kalkyl) – 26 × 100 celler, formler och omräkning i
+# beroendeordning. Cellerna är cell-noder och kan inte ha värdens fokus (SPEC-10.3.2): utan fokus
+# tar rutnätet tangenterna. Formelfältet är ett textfält mellan fälten för cellerna bredvid, tre
+# nod-id i en ring, så Tab (värdens tangent, SPEC-10.3.1) bekräftar och går höger. Manifestet begär
+# ime (formelfältet, SPEC-10.4.2) och storage (bladet sparas efter varje ändring, SPEC-5.2.9).
+
+[[case]]
+name = "kalkyl-1280x800@1"
+module = "kalkyl"
+width = 1280
+height = 800
+scale = 1
+semantic = "kalkyl"
+capabilities = ["ime", "storage"]
+
+[[case]]
+name = "kalkyl-960x640@1-formulas"
+module = "kalkyl"
+width = 960
+height = 640
+scale = 1
+semantic = "kalkyl-formulas"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 640, y = 205},       # G4: rutnätet tar tangenterna
+  {kind = "pointer_up", x = 640, y = 205},
+  {kind = "text_input", text = "=E4-E10"},         # skrivs i cellen
+  {kind = "key_down", code = 40},                   # Enter: 49613,75, ned till G5
+  {kind = "text_input", text = "=G4/0"},
+  {kind = "key_down", code = 40},                   # #DIV/0
+  {kind = "text_input", text = "=G7+1"},
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "=G6*2"},
+  {kind = "key_down", code = 40},                   # G6 och G7 läser varandra: #CIRKEL
+  {kind = "text_input", text = "=SUMMA(B4:D4"},
+  {kind = "key_down", code = 40},                   # parentesen saknas: #FEL
+  {kind = "key_down", code = 43},                   # Tab: formelfältet får fokus
+  {kind = "text_input", text = "=MEDEL(B6:D6)"},
+  {kind = "key_down", code = 43},                   # Tab: bekräftar G9 och går höger till H9
+  {kind = "text_input", text = "Tab går åt höger"},
+  {kind = "key_down", code = 43},                   # Tab: bekräftar H9, I9
+  {kind = "pointer_down", x = 160, y = 205},       # B4 ...
+  {kind = "pointer_move", x = 352, y = 309, buttons = 1},   # ... dras till D8: summan i statusraden
+  {kind = "pointer_up", x = 352, y = 309},
+]
+
+[[case]]
+name = "kalkyl-800x600@1-reloaded"                 # ett ändrat värde räknas om, sparas och läses av en ny instans
+module = "kalkyl"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 160, y = 205},       # B4
+  {kind = "pointer_up", x = 160, y = 205},
+  {kind = "text_input", text = "40000"},
+  {kind = "key_down", code = 40},                   # Enter: summorna följer med, bladet sparas
+  {kind = "suspend"},
+  {kind = "reinit"},                                # ny instans med samma lagring (SPEC-5.2.9)
+  {kind = "scroll", dy = 78},                       # tre rader ned: rubrikerna ligger kvar
+  {kind = "scroll", dy = 2, lines = true, modifiers = 1},   # Skift+hjul: två kolumner åt höger
+]
+
+[[case]]
+name = "kalkyl-400x700@2-typing"                   # enbart tangentbord, mitt i en inmatning i cellen
+module = "kalkyl"
+width = 400
+height = 700
+scale = 2
+semantic = "kalkyl-typing"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 81},                   # pil ned x4: A5
+  {kind = "key_down", code = 79}, {kind = "key_down", code = 79}, {kind = "key_down", code = 79},
+  {kind = "key_down", code = 79}, {kind = "key_down", code = 79},   # pil höger x5: F5, bladet följer med
+  {kind = "text_input", text = "=SUMMA(B5:D5)*12"},   # skrivs i cellen, ännu inte bekräftad
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i
