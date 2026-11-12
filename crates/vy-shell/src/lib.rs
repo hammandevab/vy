@@ -812,8 +812,10 @@ mod tests {
         let form = shell.open_tab(Some(local("form")));
         settle(&mut shell, 1, TIMEOUT).unwrap();
         assert_eq!(shell.tab_status(form), "running");
-        // Tab to the name field, paste: the field holds the text, line
-        // endings normalised and nothing stripped.
+        // Tab to the name field, paste: the field holds the text, nothing
+        // stripped. It is a one-line `ui::TextBox` (m5/sdk), which turns the
+        // line break into a space; the shell's own normalisation of line
+        // endings is `clipboard::tests` (`normalize_line_endings`).
         shell.key(key::TAB, true, 0, false);
         shell.key(key::TAB, false, 0, false);
         settle(&mut shell, 1, TIMEOUT).unwrap();
@@ -830,12 +832,12 @@ mod tests {
                 .find(|n| n.id == -10)
                 .map(|n| n.text)
         };
-        assert_eq!(name_field(&shell).as_deref(), Some("Anna\nLind "));
+        assert_eq!(name_field(&shell).as_deref(), Some("Anna Lind "));
         // An empty clipboard pastes nothing.
         shell.set_clipboard_text("");
         shell.key(hid::V, true, CTRL, false);
         settle(&mut shell, 1, TIMEOUT).unwrap();
-        assert_eq!(name_field(&shell).as_deref(), Some("Anna\nLind "));
+        assert_eq!(name_field(&shell).as_deref(), Some("Anna Lind "));
         // The address bar: paste replaces the selection, copy and cut
         // write the clipboard.
         shell.set_clipboard_text("vy://docs.example/rapport");

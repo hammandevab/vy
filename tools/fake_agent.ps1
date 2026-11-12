@@ -35,10 +35,10 @@ if ($mission.Contains('SLOW')) {
     $sleeper.WaitForExit()
 }
 
-Say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/lib.rs","old_string":"Inga klick","new_string":"Agenten var har. Inga klick"}}]}}'
+Say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/lib.rs","old_string":"Ditt namn","new_string":"Agenten var har. Ditt namn"}}]}}'
 $lib = Join-Path $PWD 'src\lib.rs'
 $text = [IO.File]::ReadAllText($lib, $utf8)
-[IO.File]::WriteAllText($lib, $text.Replace('Inga klick', 'Agenten var har. Inga klick'), $utf8)
+[IO.File]::WriteAllText($lib, $text.Replace('Ditt namn', 'Agenten var har. Ditt namn'), $utf8)
 
 if ($mission.Contains('FAIL')) {
     Say '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"N\u00e5got gick fel."}'

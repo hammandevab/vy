@@ -1,0 +1,11 @@
+{
+  "abi": "1.0",
+  "name": "Komponenter",
+  "summary": "Referensmodul 12: alla kontroller i vy_sdk::ui på en sida – textfält på en och flera rader, kryssruta, radiogrupp, slider, knappar, en virtualiserad lista och en rullruta i en rullande huvudyta. Begär ime för textfälten (SPEC-10.4.2) och clipboard för knappen Kopiera namnet; Ctrl+C och Ctrl+X skriver urklippet under kopieringsgesten utan capability.",
+  "lang": "sv",
+  "memory_max": 64,
+  "published": "2026-11-06",
+  "capabilities": {"ime": {}, "clipboard": {}},
+  "fallback": "# Komponenter\n\nGalleriet kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/widgets"
+}

@@ -59,15 +59,18 @@ fn pages_cannot_drive_the_dev_api() {
     };
     settled(1);
 
-    // The page under development asks for `net` to the Studio origin.
+    // The page under development asks for `net` to the Studio origin, next
+    // to the `ime` the starter's text field needs.
     let manifest = project.join("manifest.json");
     let draft = std::fs::read_to_string(&manifest).unwrap();
     let studio_origin = format!("http://localhost:{b}");
+    let caps = "\"capabilities\": {\"ime\": {}},";
+    assert!(draft.contains(caps), "{draft}");
     std::fs::write(
         &manifest,
         draft.replace(
-            "\"memory_max\": 32,",
-            &format!("\"memory_max\": 32,\n  \"capabilities\": {{\"net\": {{\"origins\": [\"{studio_origin}\"]}}}},"),
+            caps,
+            &format!("\"capabilities\": {{\"ime\": {{}}, \"net\": {{\"origins\": [\"{studio_origin}\"]}}}},"),
         ),
     )
     .unwrap();

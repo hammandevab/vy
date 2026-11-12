@@ -798,6 +798,105 @@ events = [
   {kind = "fetch_done"},
 ]
 
+# widgets: alla kontroller i vy_sdk::ui (modules/widgets) – textfält på en och flera rader,
+# kryssruta, radiogrupp, slider, knappar, en virtualiserad lista och en rullruta i en rullande
+# huvudyta. Manifestet begär ime (textfälten, SPEC-10.4.2) och clipboard (Kopiera namnet).
+# Huvudlöst finns inget urklipp: Ctrl+C skriver under kopieringsgesten (SPEC-8.2.4) men värden
+# svarar E_DENIED, och statusraden visar det. Listan och rutan har ingen fokuserbar roll
+# (SPEC-10.3.2): de tar tangenter efter ett tryck i dem.
+
+[[case]]
+name = "widgets-800x600@1"
+module = "widgets"
+width = 800
+height = 600
+scale = 1
+semantic = "widgets"
+capabilities = ["ime", "clipboard"]
+
+[[case]]
+name = "widgets-800x600@1-typed"
+module = "widgets"
+width = 800
+height = 600
+scale = 1
+semantic = "widgets-typed"
+capabilities = ["ime", "clipboard"]
+events = [
+  {kind = "pointer_down", x = 200, y = 320},                   # anteckningen: fokus, ime_begin
+  {kind = "pointer_up", x = 200, y = 320},
+  {kind = "text_input", text = "Första raden"},
+  {kind = "key_down", code = 40},                               # Enter: ny rad
+  {kind = "text_input", text = "Den andra raden är längre än fältet och bryts vid ett ord."},
+  {kind = "pointer_down", x = 200, y = 214},                   # namnfältet
+  {kind = "pointer_up", x = 200, y = 214},
+  {kind = "text_input", text = "Anna Lind"},
+  {kind = "key_down", code = 80, modifiers = 1},               # Skift+vänster x4: "Lind"
+  {kind = "key_down", code = 80, modifiers = 1},
+  {kind = "key_down", code = 80, modifiers = 1},
+  {kind = "key_down", code = 80, modifiers = 1},
+  {kind = "key_down", code = 6, modifiers = 2},                # Ctrl+C: E_DENIED headless
+]
+
+[[case]]
+name = "widgets-800x600@1-list"
+module = "widgets"
+width = 800
+height = 600
+scale = 1
+semantic = "widgets-list"
+capabilities = ["ime", "clipboard"]
+events = [
+  {kind = "pointer_down", x = 60, y = 406},                    # kryssrutan
+  {kind = "pointer_down", x = 60, y = 538},                    # radioknappen Stor
+  {kind = "pointer_down", x = 249, y = 598},                   # slidern: 75
+  {kind = "pointer_up", x = 249, y = 598},
+  {kind = "pointer_down", x = 500, y = 222},                   # listan: Göteborg, listan aktiv
+  {kind = "pointer_up", x = 500, y = 222},
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 40},                               # Enter: Öppnad: Helsingborg
+]
+
+[[case]]
+name = "widgets-800x600@1-scrolled"
+module = "widgets"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime", "clipboard"]
+events = [
+  {kind = "pointer_move", x = 600, y = 560},                   # över rutan
+  {kind = "scroll", dy = 2, lines = true},                      # rutan rullar, inte sidan
+  {kind = "pointer_down", x = 600, y = 560},                   # rutan aktiv
+  {kind = "key_down", code = 81},                               # pil ned
+  {kind = "pointer_move", x = 100, y = 30},                    # utanför rutan
+  {kind = "scroll", dy = 500},                                  # huvudytan till slutet
+]
+
+[[case]]
+name = "widgets-400x700@2-keyboard"
+module = "widgets"
+width = 400
+height = 700
+scale = 2
+capabilities = ["ime", "clipboard"]
+events = [                                                      # enbart tangentbord (SPEC-10.3.1)
+  {kind = "key_down", code = 43},                               # Tab: namn
+  {kind = "key_down", code = 43},                               # Tab: anteckning
+  {kind = "text_input", text = "Hej"},
+  {kind = "key_down", code = 43},                               # Tab: kryssrutan
+  {kind = "key_down", code = 44},                               # mellanslag: kryssad
+  {kind = "key_down", code = 43},                               # Tab x3: Stor
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 44},                               # mellanslag: vald
+  {kind = "key_down", code = 43},                               # Tab: slidern, rullas i bild
+  {kind = "key_down", code = 79}, {kind = "key_down", code = 79}, {kind = "key_down", code = 79},
+  {kind = "key_down", code = 43},                               # Tab: Spara
+  {kind = "key_down", code = 40},                               # Enter: sparat
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i

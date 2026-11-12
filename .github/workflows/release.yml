@@ -129,6 +129,12 @@ jobs:
           fi
           tools/publish_site.sh deploy $key
           rm -f "$RUNNER_TEMP/dev.key"
+      # m5/sdk: vy-conformance-<version>.zip, konformanssviten för andra klienter, som
+      # release-tillgång (.github/actions/conformance; release-jobbet fäster artefakten).
+      - name: Package the conformance suite
+        uses: ./.github/actions/conformance
+        with:
+          version: ${{ needs.version.outputs.version }}
       - name: Zip
         env:
           VERSION: ${{ needs.version.outputs.version }}

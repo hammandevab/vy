@@ -181,6 +181,10 @@ pub struct MockHost {
     pub clipboard: String,
     /// Granted capabilities.
     pub caps: Caps,
+    /// True while the page handles the `KEY_DOWN` for Ctrl+C or Ctrl+X the
+    /// host delivered: `clipboard_write` then succeeds without capability
+    /// `clipboard` (SPEC-8.2.4). Set it with [`as_copy_gesture`].
+    pub copy_gesture: bool,
     dl_open: bool,
     op_count: u32,
     clip_depth: u32,
@@ -203,6 +207,17 @@ pub fn reset() {
 /// Take the current thread's mock host, leaving a fresh one.
 pub fn take() -> MockHost {
     with(core::mem::take)
+}
+
+/// Run `f` as the host runs the page's handling of a Ctrl+C or Ctrl+X
+/// `KEY_DOWN`: a `clipboard_write` inside it succeeds without capability
+/// `clipboard` (SPEC-8.2.4), as `vy-runtime` grants it during the copy
+/// gesture; `clipboard_read` still needs the capability.
+pub fn as_copy_gesture<R>(f: impl FnOnce() -> R) -> R {
+    with(|h| h.copy_gesture = true);
+    let r = f();
+    with(|h| h.copy_gesture = false);
+    r
 }
 
 /// Run one `vy_frame` of `app` against the mock as the export glue would:
@@ -725,7 +740,8 @@ impl MockHost {
     }
 
     pub(crate) fn clipboard_write(&mut self, bytes: &[u8]) -> i32 {
-        if !self.caps.clipboard {
+        // During the copy gesture a write needs no capability (SPEC-8.2.4).
+        if !self.caps.clipboard && !self.copy_gesture {
             self.refuse("clipboard_write", err::E_DENIED);
             return err::E_DENIED;
         }

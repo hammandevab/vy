@@ -30,9 +30,9 @@ if grep -q SLOW fake-agent-mission.txt; then
   wait
 fi
 
-say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/lib.rs","old_string":"Inga klick","new_string":"Agenten var har. Inga klick"}}]}}'
+say '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/lib.rs","old_string":"Ditt namn","new_string":"Agenten var har. Ditt namn"}}]}}'
 # Portable in-place edit: GNU and BSD sed disagree on -i.
-sed 's/Inga klick/Agenten var har. Inga klick/' src/lib.rs > src/lib.rs.fake-agent
+sed 's/Ditt namn/Agenten var har. Ditt namn/' src/lib.rs > src/lib.rs.fake-agent
 mv src/lib.rs.fake-agent src/lib.rs
 
 if grep -q FAIL fake-agent-mission.txt; then

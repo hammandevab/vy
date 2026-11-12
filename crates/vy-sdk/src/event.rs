@@ -77,6 +77,12 @@ impl Modifiers {
     pub fn meta(self) -> bool {
         self.0 & modifier::META != 0
     }
+    /// The shortcut modifier, by the host's own rule: Ctrl without Alt
+    /// (Ctrl+Alt is AltGr on Windows and X11, which types a character), or
+    /// Meta (Cmd on macOS).
+    pub fn shortcut(self) -> bool {
+        self.ctrl() && !self.alt() || self.meta()
+    }
 }
 
 /// One event as the host delivers it. Coordinates are logical pixels; the
@@ -335,4 +341,13 @@ pub mod key {
     pub const DOWN: i32 = 0x51;
     /// Up arrow.
     pub const UP: i32 = 0x52;
+    /// The letter A; with Ctrl (Cmd on macOS) "select all" in a text field.
+    pub const A: i32 = 0x04;
+    /// The letter C; with Ctrl (Cmd) "copy", the copy gesture of SPEC-8.2.4.
+    pub const C: i32 = 0x06;
+    /// The letter V; Ctrl+V (Cmd+V) is consumed by the host, which delivers
+    /// the clipboard as `TEXT_INPUT` (SPEC-8.2.4).
+    pub const V: i32 = 0x19;
+    /// The letter X; with Ctrl (Cmd) "cut", a copy gesture too.
+    pub const X: i32 = 0x1B;
 }

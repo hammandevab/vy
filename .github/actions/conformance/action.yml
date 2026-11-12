@@ -1,0 +1,24 @@
+# Konformanssviten för andra klienter (SPEC-12.1.2): tools/package_conformance.sh bygger
+# vy-conformance-<version>.zip (fall, guldbilder, träd, manifestutkast, byggda referensmoduler,
+# hur sviten körs) och laddar upp den som artefakt; release-jobbet fäster varje artefakts zip vid
+# releasen. Ett steg i release.yml kan inte både köra ett skript och ladda upp en artefakt, så
+# båda ligger här och release.yml har ett enda steg för sviten.
+name: Konformanssviten
+description: Paketera konformanssviten och ladda upp den som artefakt
+inputs:
+  version:
+    description: Versionen utan v, t.ex. 0.3.0
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Package
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: tools/package_conformance.sh "$VERSION" .
+    - uses: actions/upload-artifact@v4
+      with:
+        name: vy-conformance
+        path: vy-conformance-*.zip
+        if-no-files-found: error
