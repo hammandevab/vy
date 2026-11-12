@@ -16,8 +16,8 @@ den publika sajten (`tools/publish_site.sh` tar varje utkast i `conformance/mani
 | 1 | Tavlan | `kanban` | klar: 54 267 byte, 0,11 M bränsle per frame (1,1 M med 60 kort), 5 fall | 2188796, 94e6aa2 |
 | 2 | Kalkylark | `kalkyl` | klar: 61 149 byte, 0,33 M bränsle per frame (1,6 M med 1 040 celler vid 1600 × 1000), 4 fall | c252b0f, 01c49db |
 | 3 | Ritbord | `rita` | klar: 37 376 byte, 0,08 M bränsle per frame tom (3,0 M full, 4,1 M när banorna byggs om), 5 fall | dae13cb, 121a185 |
-| 4 | Anteckningar | `skriv` | pågår | – |
-| 5 | Block | `block` | ej påbörjad | – |
+| 4 | Anteckningar | `skriv` | klar: 60 895 byte, 0,45 M bränsle per frame (1,6 M med 6 000 byte där varje ord byter stil, 3,9 M när den bryts om), 4 fall | 8742960, 686aefd |
+| 5 | Block | `block` | pågår | – |
 | 6 | Rymd | `rymd` | ej påbörjad | – |
 | 7 | `docs/EXEMPEL.md` | – | ej påbörjad | – |
 
@@ -105,6 +105,23 @@ Från `rita`:
 - **Ingen dialog.** Skymning, kort och att hålla Tab inne i dialogen (verktygen lämnar trädet medan
   den är öppen) skrivs för hand. Förslag: `ui::Dialog` som ritar skymningen och säger vilka noder
   som får registreras.
+
+Från `skriv`:
+
+- **`text_style` har ingen lutning** (typsnittsroll, storlek, vikt, färg; SPEC-5.2.5), och värden har
+  bara DejaVu Sans, Sans Bold, Serif och Sans Mono. Betoning sätts därför i serifrollen i stället för
+  kursivt. En 1.x-fråga: en kursiv roll eller ett lutningsargument.
+- **Ingen hjälp för text i flera stilar.** En rad med fet, kod och länk bryts för hand: en
+  `text_measure` per ord, bredden av ett mellanslag mätt per stil, ett fragment per stil och rad.
+  `text_measure` ger bredd och höjd men ingen baslinje, så olika storlekar på samma rad centreras
+  på radhöjden. Förslag: `ui::RichText` (stilade stycken in, fragment ut) – det är samma kod som
+  `document`, `text` och `skriv` nu har var sin variant av.
+- **Ingen länkkomponent.** `link_register` + `link`-nod med fast id + ring + Enter som anropar
+  `navigate` skrivs om i varje sida med länkar. Förslag: `ui::Link`.
+- **Inga flikar.** `kanban` och `skriv` ritar var sin flikrad med `tab`-noder. Förslag: `ui::Tabs`.
+- **`TextBox` säger inte när texten ändrats annat än genom svaret** (ingen revisionsräknare att
+  jämföra), och det går inte att fråga var markören står i bild. Sidan räknar själv revisioner och
+  följer markörens byteposition.
 
 ## Berör andra spår
 
