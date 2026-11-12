@@ -155,6 +155,9 @@ pub struct Glyph<'a> {
     pub y: i32,
     /// Coverage or colour bitmap.
     pub image: &'a SwashImage,
+    /// What the bitmap is cached under: the face, size, glyph and
+    /// sub-pixel position. The same key is the same bitmap.
+    pub key: cosmic_text::CacheKey,
 }
 
 /// Hits and misses of the shaped-text cache (SPEC-13.2.3): a lookup is
@@ -542,6 +545,7 @@ impl TextEngine {
                         x: pg.x + image.placement.left,
                         y: pg.y - image.placement.top,
                         image,
+                        key: pg.cache_key,
                     });
                 }
             }

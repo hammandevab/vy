@@ -2,7 +2,9 @@
 //!
 //! Every op is drawn in order, later over earlier (SPEC-6.1.3). Coordinates
 //! are logical pixels scaled by `scale` to physical pixels (SPEC-6.3.1).
-//! Headless and windowed rendering share this function (SPEC-11.3.2).
+//! Headless and windowed rendering share this code (SPEC-11.3.2): [`render`]
+//! is the reference, and [`crate::Renderer`] runs the same `Canvas` over
+//! regions of the canvas, as described at `Canvas`.
 //!
 //! Two things bound the host's own work here (SPEC-5.3.3, SPEC-9.3.1):
 //!
@@ -35,8 +37,8 @@
 //!   the tests that compare the two byte for byte.
 
 use crate::image::{ImageCache, RgbaImage};
-use crate::text::{Glyph, TextEngine};
-use cosmic_text::SwashContent;
+use crate::text::TextEngine;
+use cosmic_text::{SwashContent, SwashImage};
 use tiny_skia::{
     Color, FillRule, IntSize, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
@@ -113,13 +115,13 @@ pub struct Rendered {
 }
 
 /// True when every value is finite and within [`MAX_MAGNITUDE`].
-fn sane(values: &[f32]) -> bool {
+pub(crate) fn sane(values: &[f32]) -> bool {
     values
         .iter()
         .all(|v| v.is_finite() && v.abs() <= MAX_MAGNITUDE)
 }
 
-fn sane_path(cmds: &[PathCmd], stroke_w: f32) -> bool {
+pub(crate) fn sane_path(cmds: &[PathCmd], stroke_w: f32) -> bool {
     sane(&[stroke_w])
         && cmds.iter().all(|c| match *c {
             PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => sane(&[x, y]),
@@ -192,7 +194,14 @@ fn paint_over(rgba: u32) -> Paint<'static> {
 
 /// Rounded rectangle path in logical coordinates, built in `pb` (whose
 /// buffers are reused); `None` if degenerate.
-fn rounded_rect(mut pb: PathBuilder, x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
+pub(crate) fn rounded_rect(
+    mut pb: PathBuilder,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+) -> Option<Path> {
     if !(w > 0.0 && h > 0.0) || !x.is_finite() || !y.is_finite() {
         return None;
     }
@@ -228,26 +237,26 @@ fn multiply_coverage(a: u8, b: u8) -> u8 {
 }
 
 /// A rectangle of whole pixels on the canvas: columns `x0..x1`, rows `y0..y1`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Pixels {
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Pixels {
+    pub(crate) x0: i32,
+    pub(crate) y0: i32,
+    pub(crate) x1: i32,
+    pub(crate) y1: i32,
 }
 
 impl Pixels {
-    fn area(&self) -> u64 {
+    pub(crate) fn area(&self) -> u64 {
         u64::try_from(self.x1 - self.x0).unwrap_or(0)
             * u64::try_from(self.y1 - self.y0).unwrap_or(0)
     }
 
-    fn contains(&self, o: &Pixels) -> bool {
+    pub(crate) fn contains(&self, o: &Pixels) -> bool {
         o.x0 >= self.x0 && o.y0 >= self.y0 && o.x1 <= self.x1 && o.y1 <= self.y1
     }
 
     /// Grown by `n` pixels on every side, within a `w` × `h` canvas.
-    fn grown(&self, n: i32, w: u32, h: u32) -> Pixels {
+    pub(crate) fn grown(&self, n: i32, w: u32, h: u32) -> Pixels {
         Pixels {
             x0: (self.x0 - n).max(0),
             y0: (self.y0 - n).max(0),
@@ -256,7 +265,7 @@ impl Pixels {
         }
     }
 
-    fn intersect(&self, o: &Pixels) -> Option<Pixels> {
+    pub(crate) fn intersect(&self, o: &Pixels) -> Option<Pixels> {
         let p = Pixels {
             x0: self.x0.max(o.x0),
             y0: self.y0.max(o.y0),
@@ -283,7 +292,7 @@ fn pixel_edge(v: f32) -> i32 {
 /// The pixels a non-anti-aliased fill of `r` covers on a `w` × `h` canvas:
 /// what a mask built from a plain clip rectangle holds, computed instead of
 /// rasterized. `None` when nothing is covered.
-fn exact_pixels(r: &Rect, w: u32, h: u32) -> Option<Pixels> {
+pub(crate) fn exact_pixels(r: &Rect, w: u32, h: u32) -> Option<Pixels> {
     if r.width().abs() <= NEARLY_ZERO || r.height().abs() <= NEARLY_ZERO {
         return None;
     }
@@ -338,6 +347,9 @@ struct Level {
     rounded: bool,
     /// The mask, built on first use and kept until the level is popped.
     mask: Option<Mask>,
+    /// True once the mask has been built and charged, or only charged in
+    /// a dry pass ([`Clip::dry`]), which builds no masks.
+    materialized: bool,
     /// True once the mask of a plain level has been paid for, built or
     /// not: ops under a plain clip are drawn without it but charged as if
     /// it had been built at their first use.
@@ -394,15 +406,19 @@ struct Clip {
     levels: Vec<Level>,
     /// All-zero masks of popped levels, for the next level that needs one.
     pool: Vec<Mask>,
+    /// Charge every mask exactly where it would be built, and build none:
+    /// the accounting pass of [`crate::Renderer`], which draws nothing.
+    dry: bool,
 }
 
 impl Clip {
-    fn new(width: u32, height: u32) -> Self {
+    fn new(width: u32, height: u32, dry: bool) -> Self {
         Self {
             width,
             height,
             levels: Vec::new(),
             pool: Vec::new(),
+            dry,
         }
     }
 
@@ -441,6 +457,7 @@ impl Clip {
             bounds,
             rounded,
             mask: None,
+            materialized: false,
             charged: false,
             dirty: None,
         });
@@ -481,7 +498,7 @@ impl Clip {
             return Ok(());
         };
         debug_assert!(!level.rounded);
-        if level.charged || level.mask.is_some() {
+        if level.charged || level.materialized {
             return Ok(());
         }
         if let Some(bounds) = level.bounds {
@@ -509,25 +526,30 @@ impl Clip {
         }
     }
 
-    /// The mask ops under the current clip draw through: `None` without a
-    /// clip; built on first use. `Err` when the budget cannot pay for it.
-    fn mask(&mut self, budget: &mut Budget) -> Result<Option<&Mask>, Exhausted> {
+    /// Make sure the current level's mask exists, built and charged on
+    /// first use (in a dry pass only charged): `false` without a clip,
+    /// `true` when ops draw through [`Clip::top_mask`]. `Err` when the
+    /// budget cannot pay for it.
+    fn mask(&mut self, budget: &mut Budget) -> Result<bool, Exhausted> {
         let Some(top) = self.levels.len().checked_sub(1) else {
-            return Ok(None);
+            return Ok(false);
         };
         self.materialize(top, budget)?;
-        Ok(self.levels[top].mask.as_ref())
+        Ok(true)
     }
 
     fn materialize(&mut self, k: usize, budget: &mut Budget) -> Result<(), Exhausted> {
-        if self.levels[k].mask.is_some() {
+        if self.levels[k].materialized {
             return Ok(());
         }
         let (w, h) = (self.width, self.height);
         let Some(bounds) = self.levels[k].bounds else {
             // Nothing visible: an all-zero mask, and nothing is ever drawn
             // through it because callers check `bounds` first.
-            self.levels[k].mask = self.zeroed_mask();
+            if !self.dry {
+                self.levels[k].mask = self.zeroed_mask();
+            }
+            self.levels[k].materialized = true;
             return Ok(());
         };
         if !self.levels[k].rounded {
@@ -535,9 +557,14 @@ impl Clip {
                 budget.charge(bounds.area())?;
                 self.levels[k].charged = true;
             }
+            if self.dry {
+                self.levels[k].materialized = true;
+                return Ok(());
+            }
             let mut mask = self.zeroed_mask().ok_or(Exhausted)?;
             fill_pixels(&mut mask, &bounds, w);
             self.levels[k].mask = Some(mask);
+            self.levels[k].materialized = true;
             self.levels[k].dirty = Some(bounds);
             return Ok(());
         }
@@ -554,6 +581,10 @@ impl Clip {
             .and_then(|r| covering_pixels(&r, w, h))
             .unwrap_or(bounds);
         budget.charge(region.area().saturating_mul(MASK_WEIGHT))?;
+        if self.dry {
+            self.levels[k].materialized = true;
+            return Ok(());
+        }
         let mut mask = self.zeroed_mask().ok_or(Exhausted)?;
         match shape.rect {
             Some(r) if shape.radius > 0.0 => {
@@ -589,6 +620,7 @@ impl Clip {
             }
         }
         self.levels[k].mask = Some(mask);
+        self.levels[k].materialized = true;
         // The fill touches the shape's covering pixels; a pixel of margin
         // costs nothing and keeps the pool's masks zero if it ever did not.
         self.levels[k].dirty = Some(region.grown(1, w, h));
@@ -638,12 +670,67 @@ fn keep_within(mask: &mut Mask, keep: &Pixels, region: &Pixels, w: u32) {
     }
 }
 
+/// Where a [`Canvas`] gets the glyphs of a `TEXT` op.
+pub(crate) enum TextSource<'a> {
+    /// Shaped and rasterized here, as the reference does it.
+    Engine(&'a mut TextEngine),
+    /// Resolved before the pass, one entry per op ([`crate::Renderer`]):
+    /// the band threads share them and need no engine.
+    Resolved(&'a [Option<TextOp>], &'a [SwashImage]),
+}
+
+/// A `TEXT` op resolved to positioned glyphs before a pass: its run and
+/// the colour of its style. `None` in [`TextSource::Resolved`] is a style
+/// id that names no style, which draws and costs nothing.
+#[derive(Clone)]
+pub(crate) struct TextOp {
+    pub(crate) run: std::sync::Arc<ResolvedRun>,
+    pub(crate) color: u32,
+}
+
+/// The glyphs of a laid-out text run at one origin and scale, as
+/// [`TextEngine::rasterize`] hands them to the reference: physical
+/// positions and an index into the image table.
+pub(crate) struct ResolvedRun {
+    pub(crate) glyphs: Vec<PlacedGlyph>,
+    /// Union of the glyph boxes, unclipped; `None` without glyphs.
+    pub(crate) bounds: Option<Pixels>,
+    /// Sum of the glyph boxes' areas: what the budget charges for them.
+    pub(crate) px: u64,
+    /// Where the GL path's atlas holds these glyphs (`gl` feature): the
+    /// atlas's generation and a position per glyph, so a run drawn again
+    /// costs one lookup, not one per glyph.
+    #[cfg(feature = "gl")]
+    pub(crate) atlas: std::sync::Mutex<(u64, AtlasSpots)>,
+}
+
+/// The atlas position of every glyph of a run (see `ResolvedRun::atlas`).
+#[cfg(feature = "gl")]
+pub(crate) type AtlasSpots = std::sync::Arc<[(i32, i32)]>;
+
+/// One glyph of a [`ResolvedRun`].
+#[derive(Clone, Copy)]
+pub(crate) struct PlacedGlyph {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) image: u32,
+}
+
+/// What one pass over the list does besides the reference's drawing.
+///
+/// The reference ([`render`]) draws everything, charges the budget and
+/// restricts nothing. [`crate::Renderer`] first runs a dry pass (charges
+/// and footprints, no pixels), then draws regions of the canvas – bands
+/// on threads, or the damage since the last frame – with the budget off,
+/// each on a pixmap of the whole canvas's size so that every tiny-skia
+/// call is the reference's call; what vy-render fills itself is cut to
+/// the region.
 struct Canvas<'a> {
     pixmap: Pixmap,
     scale: f32,
     clip: Clip,
     budget: Budget,
-    text: &'a mut TextEngine,
+    text: TextSource<'a>,
     images: &'a ImageCache,
     /// Buffers of the last path, reused by the next.
     builder: PathBuilder,
@@ -651,29 +738,38 @@ struct Canvas<'a> {
     row: Vec<u8>,
     /// Source columns of an image's pixels, reused.
     columns: Vec<usize>,
+    /// False in the dry pass: charge and measure, draw nothing.
+    draw: bool,
+    /// The pixels this pass is for; the whole canvas for the reference.
+    region: Pixels,
+    /// Index of the op being drawn (for [`TextSource::Resolved`]).
+    op: usize,
+    /// Every pixel the op being drawn may change, set by the op methods:
+    /// what the dry pass records for the band and damage passes.
+    footprint: Option<Pixels>,
 }
 
 /// Where an image lands on the canvas, in physical pixels: the drawn region
 /// (the whole scaled image, which may overflow the destination under
 /// `cover` or underfill it under `contain`) and the destination rectangle
 /// that clips it.
-struct Placement {
+pub(crate) struct Placement {
     /// Left of the scaled image.
-    rx: f32,
+    pub(crate) rx: f32,
     /// Top of the scaled image.
-    ry: f32,
+    pub(crate) ry: f32,
     /// Physical pixels per source pixel, horizontally.
-    kx: f32,
+    pub(crate) kx: f32,
     /// Physical pixels per source pixel, vertically.
-    ky: f32,
+    pub(crate) ky: f32,
     /// Pixel columns to fill: `px0..px1`.
-    px0: i32,
+    pub(crate) px0: i32,
     /// See `px0`.
-    px1: i32,
+    pub(crate) px1: i32,
     /// Pixel rows to fill: `py0..py1`.
-    py0: i32,
+    pub(crate) py0: i32,
     /// See `py0`.
-    py1: i32,
+    pub(crate) py1: i32,
 }
 
 impl Placement {
@@ -687,7 +783,7 @@ impl Placement {
 /// (SPEC-5.2.3: 0 cover, 1 contain, 2 stretch), limited to a `cw` × `ch`
 /// canvas. `None` when nothing is visible or `fit` is unknown.
 #[allow(clippy::too_many_arguments)]
-fn place(
+pub(crate) fn place(
     fit_mode: u8,
     iw: u32,
     ih: u32,
@@ -928,18 +1024,46 @@ impl Canvas<'_> {
                 return Ok(Through::Pixels(bounds));
             }
         }
-        match self.clip.mask(&mut self.budget)? {
-            Some(_) => Ok(Through::Mask),
-            None => Ok(Through::Canvas),
+        if self.clip.mask(&mut self.budget)? {
+            Ok(Through::Mask)
+        } else {
+            Ok(Through::Canvas)
         }
     }
 
     /// Fill a path already in physical pixels with `paint` through `mask`,
     /// then keep its buffers for the next path.
     fn fill_physical(&mut self, path: Path, paint: &Paint<'_>, mask: Option<&Mask>) {
-        self.pixmap
-            .fill_path(&path, paint, FillRule::Winding, Transform::identity(), mask);
+        if self.draw {
+            self.pixmap
+                .fill_path(&path, paint, FillRule::Winding, Transform::identity(), mask);
+        }
         self.builder = path.clear();
+    }
+
+    /// Fill a path already in physical pixels with `paint` through the
+    /// current level's mask, then keep its buffers.
+    fn fill_masked(&mut self, path: Path, paint: &Paint<'_>) {
+        if self.draw {
+            self.pixmap.fill_path(
+                &path,
+                paint,
+                FillRule::Winding,
+                Transform::identity(),
+                self.clip.top_mask(),
+            );
+        }
+        self.builder = path.clear();
+    }
+
+    /// [`fill_whole_pixels`] within the pass's region.
+    fn fill_whole(&mut self, p: &Pixels, rgba: u32) {
+        if !self.draw {
+            return;
+        }
+        if let Some(p) = p.intersect(&self.region) {
+            fill_whole_pixels(&mut self.pixmap, &mut self.row, &p, rgba);
+        }
     }
 
     /// Fill a logical-coordinate path through the clip, charging `area`
@@ -957,25 +1081,9 @@ impl Canvas<'_> {
         };
         let own = covering_pixels(&path.bounds(), self.pixmap.width(), self.pixmap.height());
         match self.through(own, false)? {
-            Through::Canvas => {
-                let p = paint(rgba);
-                self.fill_physical(path, &p, None);
-            }
-            Through::Pixels(_) => {
-                let p = paint_over(rgba);
-                self.fill_physical(path, &p, None);
-            }
-            Through::Mask => {
-                let p = paint(rgba);
-                self.pixmap.fill_path(
-                    &path,
-                    &p,
-                    FillRule::Winding,
-                    Transform::identity(),
-                    self.clip.top_mask(),
-                );
-                self.builder = path.clear();
-            }
+            Through::Canvas => self.fill_physical(path, &paint(rgba), None),
+            Through::Pixels(_) => self.fill_physical(path, &paint_over(rgba), None),
+            Through::Mask => self.fill_masked(path, &paint(rgba)),
         }
         Ok(())
     }
@@ -989,9 +1097,12 @@ impl Canvas<'_> {
         };
         // A stroke reaches past its bounds by its joins, so it is never
         // cut: under a clip it goes through the mask.
-        let mask = self.clip.mask(&mut self.budget)?;
-        self.pixmap
-            .stroke_path(path, &paint(rgba), &stroke, t, mask);
+        let masked = self.clip.mask(&mut self.budget)?;
+        if self.draw {
+            let mask = if masked { self.clip.top_mask() } else { None };
+            self.pixmap
+                .stroke_path(path, &paint(rgba), &stroke, t, mask);
+        }
         Ok(())
     }
 
@@ -1007,6 +1118,7 @@ impl Canvas<'_> {
         let Some(visible) = self.visible(x, y, w, h) else {
             return Ok(());
         };
+        self.footprint = Some(visible);
         if radius <= 0.0 {
             return self.plain_rect(x, y, w, h, rgba, &visible);
         }
@@ -1046,7 +1158,7 @@ impl Canvas<'_> {
             let weight = if opaque { 1 } else { PIPELINE_WEIGHT };
             self.budget.charge(visible.area().saturating_mul(weight))?;
             if let Some(p) = whole_pixels(&r, cw, ch) {
-                fill_whole_pixels(&mut self.pixmap, &mut self.row, &p, rgba);
+                self.fill_whole(&p, rgba);
                 return Ok(());
             }
             let mut pb = std::mem::take(&mut self.builder);
@@ -1076,20 +1188,13 @@ impl Canvas<'_> {
             return Ok(());
         };
         if let Through::Mask = self.through(None, true)? {
-            self.pixmap.fill_path(
-                &path,
-                &paint(rgba),
-                FillRule::Winding,
-                Transform::identity(),
-                self.clip.top_mask(),
-            );
-            self.builder = path.clear();
+            self.fill_masked(path, &paint(rgba));
             return Ok(());
         }
         // Cut to a plain clip's pixels (there is a clip, so never `Canvas`).
         match whole_pixels(&c, cw, ch) {
             Some(p) => {
-                fill_whole_pixels(&mut self.pixmap, &mut self.row, &p, rgba);
+                self.fill_whole(&p, rgba);
                 self.builder = path.clear();
             }
             None => self.fill_physical(path, &paint_over(rgba), None),
@@ -1125,6 +1230,20 @@ impl Canvas<'_> {
             ) else {
                 return Ok(());
             };
+            // What it may change reaches further: a miter join (limit 4)
+            // ends up to twice the width from its vertex, and the
+            // anti-aliasing (or a hairline) a pixel beyond.
+            let (cw, ch) = (self.pixmap.width(), self.pixmap.height());
+            let reach = 2.0 * stroke_w;
+            self.footprint = self
+                .visible(
+                    b.left() - reach,
+                    b.top() - reach,
+                    b.width() + 2.0 * reach,
+                    b.height() + 2.0 * reach,
+                )
+                .map(|p| p.grown(2, cw, ch))
+                .and_then(|p| p.intersect(&self.clip.bounds()?));
             let swept = (polyline_length(cmds) * s) as u64 * ((stroke_w * s).max(1.0) as u64);
             let units = swept
                 .min(visible.area())
@@ -1137,6 +1256,7 @@ impl Canvas<'_> {
             let Some(visible) = self.visible(b.left(), b.top(), b.width(), b.height()) else {
                 return Ok(());
             };
+            self.footprint = Some(visible);
             self.budget.charge(setup)?;
             self.fill(path, rgba, visible.area())
         }
@@ -1155,9 +1275,10 @@ impl Canvas<'_> {
         let Ok(img) = images.get(resource_id) else {
             return self.rect(x, y, w, h, 0.0, IMAGE_PLACEHOLDER_COLOR);
         };
-        if self.visible(x, y, w, h).is_none() {
+        let Some(visible) = self.visible(x, y, w, h) else {
             return Ok(());
-        }
+        };
+        self.footprint = Some(visible);
         let s = self.scale;
         let (cw, ch) = (self.pixmap.width(), self.pixmap.height());
         let Some(p) = place(
@@ -1185,15 +1306,18 @@ impl Canvas<'_> {
         // the same list gives the same pixels on every machine
         // (SPEC-2.1.5), composited as `draw_pixmap` composites the sampled
         // pixmap. Each pixel is sampled on its own, so cutting the region to
-        // a plain clip changes nothing in it.
+        // a plain clip, or to the pass's region, changes nothing in it.
         let (region, masked) = match self.through(None, true)? {
             Through::Canvas => (Some(all), false),
             Through::Pixels(b) => (all.intersect(&b), false),
             Through::Mask => (Some(all), true),
         };
-        let Some(region) = region else {
+        let Some(region) = region.and_then(|r| r.intersect(&self.region)) else {
             return Ok(());
         };
+        if !self.draw {
+            return Ok(());
+        }
         let mask = if masked {
             self.clip.top_mask().map(Mask::data)
         } else {
@@ -1246,6 +1370,23 @@ impl Canvas<'_> {
         });
     }
 
+    /// Where a text op's glyphs may go: the canvas, or the plain clip's
+    /// pixels, and whether through the mask.
+    fn text_limit(&mut self) -> Result<(Pixels, bool), Exhausted> {
+        let (cw, ch) = (self.pixmap.width(), self.pixmap.height());
+        let canvas = Pixels {
+            x0: 0,
+            y0: 0,
+            x1: cw as i32,
+            y1: ch as i32,
+        };
+        Ok(match self.through(None, true)? {
+            Through::Canvas => (canvas, false),
+            Through::Pixels(b) => (b, false),
+            Through::Mask => (canvas, true),
+        })
+    }
+
     fn text(
         &mut self,
         x: f32,
@@ -1254,9 +1395,15 @@ impl Canvas<'_> {
         style_id: u16,
         text: &[u8],
     ) -> Result<(), Exhausted> {
+        if let TextSource::Resolved(ops, images) = self.text {
+            return self.text_resolved(ops, images, text.len());
+        }
+        let TextSource::Engine(engine) = &mut self.text else {
+            unreachable!("handled above")
+        };
         // Invalid UTF-8 is drawn lossily; the module is told nothing extra (SPEC-6.4.1).
         let s = String::from_utf8_lossy(text);
-        let Some(style) = self.text.get_style(style_id) else {
+        let Some(style) = engine.get_style(style_id) else {
             return Ok(());
         };
         if self.clip.bounds().is_none() {
@@ -1267,31 +1414,67 @@ impl Canvas<'_> {
             .charge((text.len() as u64).saturating_mul(PIPELINE_WEIGHT))?;
         let rgba = style.color;
         let scale = self.scale;
-        let (cw, ch) = (self.pixmap.width(), self.pixmap.height());
-        let canvas = Pixels {
-            x0: 0,
-            y0: 0,
-            x1: cw as i32,
-            y1: ch as i32,
-        };
-        let (limit, masked) = match self.through(None, true)? {
-            Through::Canvas => (canvas, false),
-            Through::Pixels(b) => (b, false),
-            Through::Mask => (canvas, true),
-        };
+        let (limit, masked) = self.text_limit()?;
+        let limit = limit.intersect(&self.region);
         let mask = if masked { self.clip.top_mask() } else { None };
         let pixmap = &mut self.pixmap;
         let tint = tint_table(rgba);
+        let draw = self.draw;
         let mut glyph_px = 0u64;
-        let _ = self
-            .text
-            .rasterize(style_id, (x, y), max_w, scale, &s, |g| {
-                glyph_px +=
-                    u64::from(g.image.placement.width) * u64::from(g.image.placement.height);
-                blit_glyph(pixmap, &limit, mask, &g, &tint, rgba & 0xFF);
-            });
+        let TextSource::Engine(engine) = &mut self.text else {
+            unreachable!("handled above")
+        };
+        let _ = engine.rasterize(style_id, (x, y), max_w, scale, &s, |g| {
+            glyph_px += u64::from(g.image.placement.width) * u64::from(g.image.placement.height);
+            if let (true, Some(limit)) = (draw, &limit) {
+                blit_glyph(pixmap, limit, mask, g.x, g.y, g.image, &tint, rgba & 0xFF);
+            }
+        });
         self.budget
             .charge_done(glyph_px.saturating_mul(PIPELINE_WEIGHT));
+        Ok(())
+    }
+
+    /// [`Canvas::text`] from a run resolved before the pass: the same
+    /// checks, charges and pixels.
+    fn text_resolved(
+        &mut self,
+        ops: &[Option<TextOp>],
+        images: &[SwashImage],
+        bytes: usize,
+    ) -> Result<(), Exhausted> {
+        let Some(Some(op)) = ops.get(self.op) else {
+            return Ok(());
+        };
+        if self.clip.bounds().is_none() {
+            return Ok(());
+        }
+        self.budget
+            .charge((bytes as u64).saturating_mul(PIPELINE_WEIGHT))?;
+        let (limit, masked) = self.text_limit()?;
+        let run = &op.run;
+        self.footprint = run.bounds.and_then(|b| b.intersect(&limit));
+        let target = self.footprint.and_then(|f| f.intersect(&self.region));
+        if let (true, Some(target)) = (self.draw, target) {
+            let rgba = op.color;
+            let tint = tint_table(rgba);
+            let mask = if masked { self.clip.top_mask() } else { None };
+            for g in &run.glyphs {
+                let image = &images[g.image as usize];
+                blit_glyph(
+                    &mut self.pixmap,
+                    &target,
+                    mask,
+                    g.x,
+                    g.y,
+                    image,
+                    &tint,
+                    rgba & 0xFF,
+                );
+            }
+        }
+        self.budget
+            .charge_done(run.px.saturating_mul(PIPELINE_WEIGHT));
         Ok(())
     }
 }
@@ -1324,29 +1507,32 @@ fn tint_table(rgba: u32) -> [[u8; 4]; 256] {
 /// tinted with `tint` ([`tint_table`]), subpixel coverage averaged first,
 /// colour bitmaps keeping their colour with the style alpha `alpha`
 /// applied. A bitmap shorter than its placement says draws nothing.
+#[allow(clippy::too_many_arguments)]
 fn blit_glyph(
     pixmap: &mut Pixmap,
     limit: &Pixels,
     mask: Option<&Mask>,
-    g: &Glyph<'_>,
+    gx: i32,
+    gy: i32,
+    image: &SwashImage,
     tint: &[[u8; 4]; 256],
     alpha: u32,
 ) {
-    let (w, h) = (g.image.placement.width, g.image.placement.height);
+    let (w, h) = (image.placement.width, image.placement.height);
     let n = (w as usize) * (h as usize);
-    let bytes_per_px = match g.image.content {
+    let bytes_per_px = match image.content {
         SwashContent::Mask => 1,
         SwashContent::SubpixelMask => 3,
         SwashContent::Color => 4,
     };
-    if n == 0 || g.image.data.len() < n * bytes_per_px {
+    if n == 0 || image.data.len() < n * bytes_per_px {
         return;
     }
     let glyph = Pixels {
-        x0: g.x,
-        y0: g.y,
-        x1: g.x.saturating_add(w as i32),
-        y1: g.y.saturating_add(h as i32),
+        x0: gx,
+        y0: gy,
+        x1: gx.saturating_add(w as i32),
+        y1: gy.saturating_add(h as i32),
     };
     let Some(region) = glyph.intersect(limit) else {
         return;
@@ -1354,17 +1540,17 @@ fn blit_glyph(
     let cw = pixmap.width() as usize;
     let mask = mask.map(Mask::data);
     let data = pixmap.data_mut();
-    let src = &g.image.data;
+    let src = &image.data;
     let (x0, x1) = (region.x0 as usize, region.x1 as usize);
-    let gx0 = (region.x0 - g.x) as usize;
+    let gx0 = (region.x0 - gx) as usize;
     for y in region.y0..region.y1 {
         let at = y as usize * cw;
         let dst = &mut data[(at + x0) * 4..(at + x1) * 4];
         let masks = mask.map(|m| &m[at + x0..at + x1]);
-        let k0 = (y - g.y) as usize * w as usize + gx0;
+        let k0 = (y - gy) as usize * w as usize + gx0;
         let len = x1 - x0;
         let m_at = |j: usize| masks.map_or(255, |m| m[j]);
-        match g.image.content {
+        match image.content {
             SwashContent::Mask => {
                 for (j, (&cov, d)) in src[k0..k0 + len]
                     .iter()
@@ -1404,6 +1590,147 @@ fn blit_glyph(
     }
 }
 
+impl<'a> Canvas<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        pixmap: Pixmap,
+        scale: f32,
+        budget: u64,
+        text: TextSource<'a>,
+        images: &'a ImageCache,
+        draw: bool,
+        region: Pixels,
+    ) -> Self {
+        let (w, h) = (pixmap.width(), pixmap.height());
+        Self {
+            pixmap,
+            scale,
+            clip: Clip::new(w, h, !draw),
+            budget: Budget {
+                limit: budget,
+                used: 0,
+            },
+            text,
+            images,
+            builder: PathBuilder::new(),
+            row: Vec::new(),
+            columns: Vec::new(),
+            draw,
+            region,
+            op: 0,
+            footprint: None,
+        }
+    }
+
+    /// Process `ops[..stop]` in order (SPEC-6.1.3) until the list ends or
+    /// the budget runs out: `(ops done, truncated)`. With `skip`, a
+    /// drawing op whose footprint misses the region is passed over (clip
+    /// pushes and pops never are); with `record`, every op's footprint is
+    /// pushed there.
+    fn run(
+        &mut self,
+        ops: &[Op],
+        stop: usize,
+        skip: Option<&[Option<Pixels>]>,
+        mut record: Option<&mut Vec<Option<Pixels>>>,
+    ) -> (usize, bool) {
+        // Ops with non-finite or absurd values are skipped (`MAX_MAGNITUDE`);
+        // `CLIP_PUSH` is the exception and always pushes, see `Canvas::clip_push`.
+        // A rounded clip (`radius > 0`) clips to a rounded rectangle (SPEC-5.2.3).
+        let mut ops_done = 0;
+        let mut truncated = false;
+        for (i, op) in ops.iter().enumerate().take(stop) {
+            if self.budget.exhausted() || self.budget.charge(OP_UNITS).is_err() {
+                truncated = true;
+                break;
+            }
+            if let Some(skip) = skip {
+                let drawing = !matches!(op, Op::ClipPush { .. } | Op::ClipPop);
+                let reaches = skip
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|f| f.intersect(&self.region).is_some());
+                if drawing && !reaches {
+                    ops_done += 1;
+                    continue;
+                }
+            }
+            self.op = i;
+            self.footprint = None;
+            let drawn = match op {
+                Op::Rect {
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius,
+                    color,
+                } if sane(&[*x, *y, *w, *h, *radius]) => self.rect(*x, *y, *w, *h, *radius, *color),
+                Op::Text {
+                    x,
+                    y,
+                    max_w,
+                    style_id,
+                    text,
+                } if sane(&[*x, *y]) => self.text(*x, *y, *max_w, *style_id, text),
+                Op::Image {
+                    x,
+                    y,
+                    w,
+                    h,
+                    resource_id,
+                    fit,
+                } if sane(&[*x, *y, *w, *h]) => self.image(*x, *y, *w, *h, *resource_id, *fit),
+                Op::Path {
+                    color,
+                    stroke_w,
+                    cmds,
+                } if sane_path(cmds, *stroke_w) => self.path(cmds, *color, *stroke_w),
+                Op::ClipPush { x, y, w, h, radius } => {
+                    self.clip_push(*x, *y, *w, *h, *radius);
+                    Ok(())
+                }
+                Op::ClipPop => {
+                    self.clip.pop();
+                    Ok(())
+                }
+                Op::Rect { .. } | Op::Text { .. } | Op::Image { .. } | Op::Path { .. } => Ok(()),
+            };
+            if drawn.is_err() {
+                truncated = true;
+                break;
+            }
+            if let Some(r) = record.as_deref_mut() {
+                r.push(self.footprint);
+            }
+            ops_done += 1;
+        }
+        (ops_done, truncated)
+    }
+}
+
+/// `Err(BadSize)` unless `width` × `height` at `scale` is a canvas
+/// [`render`] draws.
+pub(crate) fn check_size(width: u32, height: u32, scale: f32) -> Result<IntSize, RenderError> {
+    let scale_ok = scale.is_finite() && scale > 0.0;
+    let side = 1..=MAX_CANVAS_SIDE_PX;
+    if !side.contains(&width) || !side.contains(&height) || !scale_ok {
+        return Err(RenderError::BadSize);
+    }
+    IntSize::from_wh(width, height).ok_or(RenderError::BadSize)
+}
+
+/// The whole canvas as a region.
+pub(crate) fn whole(width: u32, height: u32) -> Pixels {
+    Pixels {
+        x0: 0,
+        y0: 0,
+        x1: width as i32,
+        y1: height as i32,
+    }
+}
+
 /// Rasterize a display list into a `width` × `height` physical-pixel image.
 ///
 /// `width` and `height` are physical pixels; `scale` is the logical-to-physical
@@ -1413,6 +1740,10 @@ fn blit_glyph(
 /// [`IMAGE_PLACEHOLDER_COLOR`]. The work is bounded by
 /// [`raster_budget_units`] (SPEC-5.3.3): when it runs out the remaining ops
 /// are not drawn and the report says so.
+///
+/// This is the reference: headless rendering and the conformance suite
+/// use it, and [`crate::Renderer`]'s faster path is tested against it
+/// byte for byte.
 pub fn render(
     display_list: &[u8],
     width: u32,
@@ -1422,85 +1753,21 @@ pub fn render(
     images: &ImageCache,
 ) -> Result<Rendered, RenderError> {
     let ops = vy_dl::decode(display_list).map_err(RenderError::Decode)?;
-    let scale_ok = scale.is_finite() && scale > 0.0;
-    let side = 1..=MAX_CANVAS_SIDE_PX;
-    if !side.contains(&width) || !side.contains(&height) || !scale_ok {
-        return Err(RenderError::BadSize);
-    }
+    let size = check_size(width, height, scale)?;
     // Opaque white, premultiplied: every byte 255.
-    let size = IntSize::from_wh(width, height).ok_or(RenderError::BadSize)?;
     let pixmap = Pixmap::from_vec(vec![255; width as usize * height as usize * 4], size)
         .ok_or(RenderError::BadSize)?;
     let budget = raster_budget_units(width, height);
-    let mut canvas = Canvas {
+    let mut canvas = Canvas::new(
         pixmap,
         scale,
-        clip: Clip::new(width, height),
-        budget: Budget {
-            limit: budget,
-            used: 0,
-        },
-        text,
+        budget,
+        TextSource::Engine(text),
         images,
-        builder: PathBuilder::new(),
-        row: Vec::new(),
-        columns: Vec::new(),
-    };
-    // Ops with non-finite or absurd values are skipped (`MAX_MAGNITUDE`);
-    // `CLIP_PUSH` is the exception and always pushes, see `Canvas::clip_push`.
-    // A rounded clip (`radius > 0`) clips to a rounded rectangle (SPEC-5.2.3).
-    let mut ops_done = 0;
-    let mut truncated = false;
-    for op in &ops {
-        if canvas.budget.exhausted() || canvas.budget.charge(OP_UNITS).is_err() {
-            truncated = true;
-            break;
-        }
-        let drawn = match op {
-            Op::Rect {
-                x,
-                y,
-                w,
-                h,
-                radius,
-                color,
-            } if sane(&[*x, *y, *w, *h, *radius]) => canvas.rect(*x, *y, *w, *h, *radius, *color),
-            Op::Text {
-                x,
-                y,
-                max_w,
-                style_id,
-                text,
-            } if sane(&[*x, *y]) => canvas.text(*x, *y, *max_w, *style_id, text),
-            Op::Image {
-                x,
-                y,
-                w,
-                h,
-                resource_id,
-                fit,
-            } if sane(&[*x, *y, *w, *h]) => canvas.image(*x, *y, *w, *h, *resource_id, *fit),
-            Op::Path {
-                color,
-                stroke_w,
-                cmds,
-            } if sane_path(cmds, *stroke_w) => canvas.path(cmds, *color, *stroke_w),
-            Op::ClipPush { x, y, w, h, radius } => {
-                canvas.clip_push(*x, *y, *w, *h, *radius);
-                Ok(())
-            }
-            Op::ClipPop => {
-                canvas.clip.pop();
-                Ok(())
-            }
-            Op::Rect { .. } | Op::Text { .. } | Op::Image { .. } | Op::Path { .. } => Ok(()),
-        };
-        if drawn.is_err() {
-            truncated = true;
-            break;
-        }
-        ops_done += 1;
-    }
+        true,
+        whole(width, height),
+    );
+    let (ops_done, truncated) = canvas.run(&ops, ops.len(), None, None);
     // The canvas starts opaque and every op blends source over it, so every
     // pixel stays opaque and demultiplying would change nothing.
     let data = canvas.pixmap.take();
@@ -1520,8 +1787,84 @@ pub fn render(
     })
 }
 
+/// The accounting pass of [`crate::Renderer`]: everything [`render`]
+/// charges, in the same order, and nothing drawn. Returns the report the
+/// reference would give and every finished op's footprint (`None` for an
+/// op that can change no pixel); the list after a truncation has none.
+pub(crate) fn dry_pass(
+    ops: &[Op],
+    width: u32,
+    height: u32,
+    scale: f32,
+    text_ops: &[Option<TextOp>],
+    glyph_images: &[SwashImage],
+    images: &ImageCache,
+) -> Result<(RasterReport, Vec<Option<Pixels>>), RenderError> {
+    let size = check_size(width, height, scale)?;
+    // Never written: the pages of a zeroed allocation stay unmapped.
+    let pixmap = Pixmap::new(size.width(), size.height()).ok_or(RenderError::BadSize)?;
+    let budget = raster_budget_units(width, height);
+    let mut canvas = Canvas::new(
+        pixmap,
+        scale,
+        budget,
+        TextSource::Resolved(text_ops, glyph_images),
+        images,
+        false,
+        whole(width, height),
+    );
+    let mut footprints = Vec::with_capacity(ops.len());
+    let (ops_done, truncated) = canvas.run(ops, ops.len(), None, Some(&mut footprints));
+    let report = RasterReport {
+        truncated,
+        ops_done,
+        units: canvas.budget.used,
+        budget,
+    };
+    Ok((report, footprints))
+}
+
+/// Draw `ops[..stop]` into `region` of `pixmap`, a canvas of the whole
+/// frame's size, exactly as [`render`] draws those pixels: the region is
+/// first set to the canvas's opaque white, ops whose footprint misses it
+/// are passed over, and the budget is not charged (the dry pass decided
+/// `stop`). Pixels outside the region are left in any state.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_region(
+    ops: &[Op],
+    stop: usize,
+    footprints: &[Option<Pixels>],
+    region: Pixels,
+    mut pixmap: Pixmap,
+    scale: f32,
+    text_ops: &[Option<TextOp>],
+    glyph_images: &[SwashImage],
+    images: &ImageCache,
+) -> Pixmap {
+    let w = pixmap.width() as usize;
+    {
+        let data = pixmap.data_mut();
+        let (x0, x1) = (region.x0 as usize * 4, region.x1 as usize * 4);
+        for y in region.y0..region.y1 {
+            let at = y as usize * w * 4;
+            data[at + x0..at + x1].fill(255);
+        }
+    }
+    let mut canvas = Canvas::new(
+        pixmap,
+        scale,
+        u64::MAX,
+        TextSource::Resolved(text_ops, glyph_images),
+        images,
+        true,
+        region,
+    );
+    canvas.run(ops, stop, Some(footprints), None);
+    canvas.pixmap
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use vy_dl::{DisplayList, Fit};
 
@@ -1728,20 +2071,20 @@ mod tests {
     }
 
     /// A deterministic generator for the differential tests.
-    struct Gen(u64);
+    pub(crate) struct Gen(pub(crate) u64);
 
     impl Gen {
-        fn next(&mut self) -> u64 {
+        pub(crate) fn next(&mut self) -> u64 {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;
             self.0 ^= self.0 << 17;
             self.0
         }
-        fn below(&mut self, n: u64) -> u64 {
+        pub(crate) fn below(&mut self, n: u64) -> u64 {
             self.next() % n
         }
         /// A coordinate: whole, half, quarter or any value, sometimes off the canvas.
-        fn coord(&mut self, max: f32) -> f32 {
+        pub(crate) fn coord(&mut self, max: f32) -> f32 {
             let whole = self.below((max as u64) + 20) as f32 - 10.0;
             match self.below(5) {
                 0 | 1 => whole,
@@ -1750,14 +2093,14 @@ mod tests {
                 _ => whole + (self.below(1000) as f32) / 1000.0,
             }
         }
-        fn length(&mut self, max: f32) -> f32 {
+        pub(crate) fn length(&mut self, max: f32) -> f32 {
             match self.below(4) {
                 0 => (1 + self.below(max as u64)) as f32,
                 1 => (1 + self.below(12)) as f32 + 0.5,
                 _ => (self.below((max * 1000.0) as u64) as f32) / 1000.0 + 0.01,
             }
         }
-        fn color(&mut self) -> u32 {
+        pub(crate) fn color(&mut self) -> u32 {
             let rgb = (self.next() as u32) & 0xFFFF_FF00;
             match self.below(10) {
                 0..=4 => rgb | 0xFF,
@@ -1768,7 +2111,7 @@ mod tests {
     }
 
     /// A small PNG with every kind of alpha.
-    fn test_picture() -> Vec<u8> {
+    pub(crate) fn test_picture() -> Vec<u8> {
         let mut img = RgbaImage::new(9, 7);
         for (i, p) in img.data.chunks_exact_mut(4).enumerate() {
             let a = [255u8, 0, 128, 1, 254, 77][i % 6];
@@ -1781,7 +2124,7 @@ mod tests {
     /// pixels, halves and anything, plain and rounded, opaque, translucent
     /// and invisible), nested plain and rounded clips with their pops,
     /// text in three styles, images in three fits, filled and stroked paths.
-    fn random_list(g: &mut Gen, styles: &[u16], w: f32, h: f32) -> Vec<u8> {
+    pub(crate) fn random_list(g: &mut Gen, styles: &[u16], w: f32, h: f32) -> Vec<u8> {
         const TEXTS: [&str; 4] = [
             "Vy ritar text",
             "Lägesrapport: allt grönt",

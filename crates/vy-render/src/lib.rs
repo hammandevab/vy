@@ -1,14 +1,20 @@
 //! Rasterization: rectangles, paths, images, text shaping and glyph cache (SPEC §6).
 //!
-//! M1 ships a software rasterizer used by `vy-cli render`; wgpu arrives with M3.
-//! Headless and windowed rendering share this code path (SPEC-11.3.2).
+//! [`render`] is the reference: `vy-cli render`, the conformance suite and
+//! the shell's headless screenshots use it. The window uses [`Renderer`],
+//! which runs the same drawing code (`raster.rs`) over the regions that
+//! changed and in bands on threads, and gives the reference's bytes for
+//! every frame (SPEC-11.3.2). There is no GPU path (docs/notes/m5-gpu.md).
 #![deny(missing_docs)]
 
 pub mod bench;
+#[cfg(feature = "gl")]
+pub mod gl;
 pub mod image;
 pub mod raster;
 #[cfg(test)]
 mod raster_reference;
+pub mod renderer;
 pub mod text;
 
 pub use image::{diff_ratio, ImageCache, ImageError, Resource, RgbaImage, MAX_IMAGE_CACHE_BYTES};
@@ -16,6 +22,7 @@ pub use raster::{
     raster_budget_units, render, RasterReport, RenderError, Rendered, MASK_WEIGHT, OP_UNITS,
     PIPELINE_WEIGHT, RASTER_BUDGET_OVERDRAWS, RASTER_BUDGET_UNITS,
 };
+pub use renderer::{FrameInfo, RasterPath, Renderer};
 pub use text::{pack_x100, CacheStats, Size, TextEngine};
 
 #[cfg(test)]
@@ -799,10 +806,13 @@ mod tests {
     /// SPEC-13.2.1: 2 000 ops rasterize in <= 2 ms on the reference machine,
     /// P95 over 100 runs (SPEC §13): the frame of `bench::frame_2000`, in
     /// the reference pages' proportions, at 1280 × 800 with a warm text
-    /// engine, the same bytes `vy-cli bench` times as `raster.ops-2000`. A
+    /// engine, the same bytes `vy-cli bench` times as `raster.ops-2000`,
+    /// drawn whole the way the window draws it: [`Renderer::render_full`],
+    /// in as many bands as the machine has threads (at most four), without
+    /// the damage tracking, which would make a repeated frame free. A
     /// release-mode budget: a debug build only reports.
     #[test]
-    #[ignore = "M5: CPU raster in release, P95 17.5 ms (P50 14.9 ms) at load 0.2-0.5 and 44-56 ms (P50 34-35 ms) at load 4-6, vs 2 ms; GPU path, spec question 65, docs/notes/m4-perf.md"]
+    #[ignore = "M5: no GPU path fits SPEC-12.3.1 (spec question 66). The window's software path in release, 2 bands on a 2-vCPU Xeon @ 2.1 GHz VM at load 1.6-2.3: P50 10.8-11.5 ms, P95 11.9-16.9 ms (the reference at the same time 19.5 / 21.6-23.9 ms); its 4-band critical path is 68 M of the reference's 230 M instructions, about 4.4 ms on four such cores; docs/notes/m5-gpu.md"]
     fn spec_13_2_1_raster_budget() {
         if cfg!(debug_assertions) {
             eprintln!("SPEC-13.2.1 is a release-mode budget; run with --release");
@@ -811,20 +821,22 @@ mod tests {
         let _serial = serial();
         let mut t = TextEngine::new();
         let frame = crate::bench::frame_2000(&mut t, 1280.0, 800.0);
+        let mut r = Renderer::new(RasterPath::Fast);
         let mut samples: Vec<_> = (0..100)
             .map(|_| {
                 let start = std::time::Instant::now();
-                let r = raster::render(&frame.list, 1280, 800, 1.0, &mut t, &frame.images);
+                let report = r.render_full(&frame.list, 1280, 800, 1.0, &mut t, &frame.images);
                 let took = start.elapsed();
-                assert!(!r.unwrap().report.truncated);
+                assert!(!report.unwrap().truncated);
                 took
             })
             .collect();
         samples.sort();
         let p95 = samples[94];
         eprintln!(
-            "SPEC-13.2.1: 2 000 ops in {p95:?} (P95, P50 {:?})",
-            samples[49]
+            "SPEC-13.2.1: 2 000 ops in {p95:?} (P95, P50 {:?}), {} bands",
+            samples[49],
+            r.info().bands
         );
         assert!(
             p95 <= std::time::Duration::from_millis(2),

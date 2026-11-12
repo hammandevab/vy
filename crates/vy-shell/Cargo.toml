@@ -18,8 +18,13 @@ path = "src/main.rs"
 # The window itself (winit + softbuffer). Off, the crate is the shell's
 # model, chrome, tab processes and the headless screenshot pipeline, which
 # is what `vy-cli conformance` links.
-default = ["window"]
+default = ["window", "gl"]
 window = ["dep:winit", "dep:softbuffer", "dep:accesskit_winit", "os-clipboard"]
+# The GPU path (spec-fråga 66, docs/notes/m5-gpu.md): OpenGL 3.3 core or
+# OpenGL ES 3.0 on the window, EGL on Linux and WGL on Windows, falling
+# back to the CPU path. macOS builds without it (the context crates are
+# not dependencies there) and stays on the CPU path.
+gl = ["window", "dep:glow", "dep:glutin", "dep:glutin-winit", "vy-render/gl"]
 # The system clipboard behind Ctrl+C/V/X (`arboard`); without it the
 # window uses an in-memory clipboard, as headless runs always do.
 os-clipboard = ["dep:arboard"]
@@ -41,6 +46,11 @@ softbuffer = { workspace = true, optional = true }
 arboard = { workspace = true, optional = true }
 accesskit.workspace = true
 accesskit_winit = { workspace = true, optional = true }
+glow = { workspace = true, optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+glutin = { workspace = true, optional = true }
+glutin-winit = { workspace = true, optional = true }
 
 # `ShellExecuteW` for https:// links (SPEC-2.1.7), instead of `cmd /C start`,
 # which parses the URL. The same crate, version and features softbuffer
@@ -69,6 +79,15 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+
+[[test]]
+# SPEC-11.3.2: the GL path against the reference, on a hidden window. Its
+# own binary without the test harness, so winit's event loop runs on the
+# main thread; it skips (with a line on stderr) where no GL context can be
+# made, unless VY_GL_REQUIRED is set (the CI step with Mesa under Xvfb).
+name = "gl"
+harness = false
+required-features = ["gl"]
 
 [dev-dependencies]
 wat.workspace = true

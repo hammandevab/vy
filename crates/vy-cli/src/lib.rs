@@ -1122,3 +1122,5 @@ mod tests {
 
 #[cfg(test)]
 mod bench_tests;
+#[cfg(test)]
+mod raster_tests;

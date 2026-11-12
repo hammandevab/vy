@@ -14,7 +14,7 @@ use crate::a11y;
 use crate::address::{AddressField, Edit};
 use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
 use crate::clipboard::{self, ClipboardBackend};
-use crate::compose::{blend, blit, fill_blend, physical};
+use crate::compose::{blend, blit, clear, fill_blend, physical};
 use crate::devtools::{self, Command, Pane};
 use crate::external::{is_external, Opener};
 use crate::find;
@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use vy_abi::{cap, event, key, modifier};
 use vy_manifest::Manifest;
-use vy_render::{ImageCache, RgbaImage, TextEngine};
+use vy_render::{ImageCache, RasterPath, Renderer, RgbaImage, TextEngine};
 use vy_runtime::{Capabilities, Link, RandomSource, SemNode};
 
 /// Milliseconds between frames of an animating page, and the headless
@@ -159,7 +159,13 @@ struct Tab {
     text: TextEngine,
     images: ImageCache,
     display_list: Vec<u8>,
-    rendered: Option<(u32, u32, f32, RgbaImage)>,
+    /// The page's rasterizer (SPEC-11.3.2): the reference headless, the
+    /// fast path, byte for byte the same, in the window. Its image is the
+    /// page's last frame.
+    raster: Renderer,
+    /// The physical size and scale `raster` last drew the current list
+    /// at; `None` when the list changed since.
+    rendered: Option<(u32, u32, f32)>,
     links: Vec<Link>,
     sem: Vec<SemNode>,
     has_tree: Option<bool>,
@@ -218,7 +224,7 @@ struct Tab {
 }
 
 impl Tab {
-    fn new(id: TabId) -> Self {
+    fn new(id: TabId, raster: RasterPath) -> Self {
         Self {
             id,
             conn: None,
@@ -241,6 +247,7 @@ impl Tab {
             text: TextEngine::new(),
             images: ImageCache::empty(0),
             display_list: Vec::new(),
+            raster: Renderer::new(raster),
             rendered: None,
             links: Vec::new(),
             sem: Vec::new(),
@@ -453,6 +460,14 @@ pub struct Shell {
     layout: Layout,
     frame: RgbaImage,
     frame_dirty: bool,
+    /// True when the window draws the page itself (the GL path): the
+    /// composited frame leaves the page area transparent, and
+    /// [`Shell::page_layer`] says what to draw there.
+    page_layer: bool,
+    /// Where the page went in the last composition, in layer mode.
+    layer: Option<LayerPlace>,
+    /// The window's raster path, for the tabs' logs (devtools).
+    raster_line: Option<String>,
     /// The chrome as last rasterized: its list and pixels, reused while
     /// the list is the same (a page frame changes nothing in it).
     chrome_cache: Option<(Vec<u8>, u32, u32, RgbaImage)>,
@@ -518,6 +533,9 @@ impl Shell {
             layout: Layout::default(),
             frame: RgbaImage::new(1, 1),
             frame_dirty: true,
+            page_layer: false,
+            layer: None,
+            raster_line: None,
             chrome_cache: None,
             pointer: (-1.0, -1.0),
             in_page: false,
@@ -800,7 +818,23 @@ impl Shell {
     pub fn open_tab(&mut self, source: Option<Source>) -> TabId {
         let id = self.next_id;
         self.next_id += 1;
-        self.tabs.push(Tab::new(id));
+        // Headless runs (screenshots, the conformance suite) draw with the
+        // reference; the window with the fast path, which says so in the
+        // tab's log (devtools).
+        let raster = if self.config.headless {
+            RasterPath::Reference
+        } else {
+            RasterPath::Fast
+        };
+        let mut tab = Tab::new(id, raster);
+        if raster == RasterPath::Fast {
+            let line = self
+                .raster_line
+                .clone()
+                .unwrap_or_else(|| tab.raster.describe());
+            tab.log(format!("[host] {line}"));
+        }
+        self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         self.activate(index);
         if let Some(s) = source {
@@ -1955,6 +1989,70 @@ impl Shell {
         chrome::draw(&view, &mut self.chrome_text, &self.styles)
     }
 
+    /// Leave the page area transparent in the composited frame, for the
+    /// window to draw the page under it ([`Shell::page_layer`]; the GL
+    /// path), or draw the page into the frame (`false`, the default and
+    /// the CPU path).
+    pub fn set_page_layer(&mut self, on: bool) {
+        if self.page_layer != on {
+            self.page_layer = on;
+            self.frame_dirty = true;
+            for tab in &mut self.tabs {
+                tab.rendered = None;
+            }
+        }
+    }
+
+    /// The window's raster path, one line: logged in every open tab now
+    /// and in every tab opened later (devtools, *Logg*).
+    pub fn set_raster_path(&mut self, line: String) {
+        for tab in &mut self.tabs {
+            tab.log(format!("[host] {line}"));
+        }
+        self.raster_line = Some(line);
+    }
+
+    /// In layer mode, after [`Shell::frame`]: the page to draw under the
+    /// frame, where, and with what. `None` when no page shows.
+    pub fn page_layer(&mut self) -> Option<PageLayer<'_>> {
+        let place = self.layer?;
+        let tab = self.tabs.iter_mut().find(|t| t.id == place.tab)?;
+        Some(PageLayer {
+            version: (
+                place.tab,
+                tab.frames,
+                place.width,
+                place.height,
+                place.scale.to_bits(),
+                tab.images.generation(),
+            ),
+            list: &tab.display_list,
+            text: &mut tab.text,
+            images: &tab.images,
+            raster: &mut tab.raster,
+            place,
+        })
+    }
+
+    /// The page of [`Shell::page_layer`] was drawn with `report` (and by
+    /// the path its rasterizer is on now): a frame cut short by the
+    /// budget is reported to the tab as when the shell draws it
+    /// (SPEC-5.3.3), and a change of path is logged.
+    pub fn page_drawn(&mut self, tab: TabId, report: vy_render::RasterReport, before: RasterPath) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab) else {
+            return;
+        };
+        note_raster_change(tab, before);
+        if report.truncated {
+            tab.send(&ToTab::Raster {
+                truncated: report.truncated,
+                ops_done: report.ops_done as u32,
+                units: report.units,
+                budget: report.budget,
+            });
+        }
+    }
+
     /// True when the composited frame changed since it was last taken.
     pub fn needs_redraw(&self) -> bool {
         self.frame_dirty
@@ -2002,14 +2100,20 @@ impl Shell {
         let page = self.layout.page;
         let scale = self.scale;
         let mut raster_due = None;
+        self.layer = None;
+        let layered = self.page_layer;
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.state == State::Running && !tab.under_min && !tab.display_list.is_empty() {
                 let (lw, lh, s) = page_size(page, tab.zoom, scale);
                 let (ppw, pph) = physical(lw as f32, lh as f32, s);
                 let fresh =
-                    !matches!(&tab.rendered, Some((w, h, rs, _)) if (*w, *h, *rs) == (ppw, pph, s));
-                if fresh {
-                    match vy_render::render(
+                    !matches!(&tab.rendered, Some((w, h, rs)) if (*w, *h, *rs) == (ppw, pph, s));
+                if layered {
+                    // The window draws the page (`page_layer`) and reports
+                    // its cost (`page_drawn`).
+                } else if fresh {
+                    let before = tab.raster.path();
+                    match tab.raster.render(
                         &tab.display_list,
                         ppw,
                         pph,
@@ -2017,16 +2121,17 @@ impl Shell {
                         &mut tab.text,
                         &tab.images,
                     ) {
-                        Ok(r) => {
-                            if r.report.truncated {
-                                raster_due = Some(r.report);
+                        Ok(report) => {
+                            if report.truncated {
+                                raster_due = Some(report);
                             }
-                            tab.rendered = Some((ppw, pph, s, r.image));
+                            tab.rendered = Some((ppw, pph, s));
                         }
                         Err(e) => tab.log(format!("[host] display list not rendered: {e}")),
                     }
+                    note_raster_change(tab, before);
                 }
-                if let Some((_, _, _, img)) = &tab.rendered {
+                if layered || tab.rendered.is_some() {
                     let (px, py) = (
                         (page.x * scale).round() as i64,
                         (page.y * scale).round() as i64,
@@ -2037,7 +2142,22 @@ impl Shell {
                         (page.w * scale).round() as i64,
                         (page.h * scale).round() as i64,
                     );
-                    blit(&mut self.frame, img, px, py, Some(clip));
+                    if layered {
+                        // Transparent where the page shows; the overlays
+                        // below blend onto it premultiplied, and the window
+                        // puts the frame over the page it draws.
+                        clear(&mut self.frame, clip);
+                        self.layer = Some(LayerPlace {
+                            tab: tab.id,
+                            width: ppw,
+                            height: pph,
+                            scale: s,
+                            at: (px, py),
+                            clip,
+                        });
+                    } else {
+                        blit(&mut self.frame, tab.raster.image(), px, py, Some(clip));
+                    }
                     // The selection, over the page and under nothing else
                     // the shell draws there (SPEC-10.2.2); the page's own
                     // list is untouched.
@@ -3637,6 +3757,49 @@ fn find_tab(tabs: &mut [Tab], id: TabId) -> Option<&mut Tab> {
 }
 
 /// The page area's logical size and scale for a tab at `zoom`.
+/// Where the page went in a layered composition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerPlace {
+    /// The tab whose page it is.
+    pub tab: TabId,
+    /// The page canvas in physical pixels.
+    pub width: u32,
+    /// See `width`.
+    pub height: u32,
+    /// The page's scale (the window's times the zoom).
+    pub scale: f32,
+    /// Top-left of the page canvas in the window, physical pixels.
+    pub at: (i64, i64),
+    /// The page area (left, top, width, height): nothing of the page
+    /// shows outside it (SPEC-9.6.1).
+    pub clip: (i64, i64, i64, i64),
+}
+
+/// The page for the window to draw under the frame (layer mode).
+pub struct PageLayer<'a> {
+    /// Changes exactly when the page must be drawn again: tab, frame,
+    /// size, scale and decoded images.
+    pub version: (TabId, u64, u32, u32, u32, u64),
+    /// The display list.
+    pub list: &'a [u8],
+    /// The tab's text engine (its styles).
+    pub text: &'a mut TextEngine,
+    /// The tab's decoded resources.
+    pub images: &'a ImageCache,
+    /// The tab's rasterizer.
+    pub raster: &'a mut Renderer,
+    /// Where it goes.
+    pub place: LayerPlace,
+}
+
+/// Log a change of the tab's raster path (the fast path gave up).
+fn note_raster_change(tab: &mut Tab, before: RasterPath) {
+    if tab.raster.path() != before {
+        let line = format!("[host] {}", tab.raster.describe());
+        tab.log(line);
+    }
+}
+
 fn page_size(page: Rect, zoom: f32, scale: f32) -> (u32, u32, f32) {
     (
         (page.w / zoom).round().max(1.0) as u32,
@@ -3737,7 +3900,7 @@ mod tests {
         ));
 
         // In the gate, with `net` granted and every origin below listed.
-        let mut tab = Tab::new(1);
+        let mut tab = Tab::new(1, RasterPath::Reference);
         tab.caps = vec![Resolved {
             name: "net",
             granted: true,

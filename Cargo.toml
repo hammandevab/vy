@@ -83,6 +83,13 @@ arboard = { version = "3.7", default-features = false }
 # feature: it adds 3.1 MB, which takes the Linux client past 25 MB.
 accesskit = "0.25"
 accesskit_winit = { version = "0.34", default-features = false, features = ["rwh_06"] }
+# M5 (m5/gpu): the GL path, spec-fråga 66; motiveringar i docs/notes/m5-gpu.md.
+# OpenGL function loading and typed calls (vy-render's pipeline), no context.
+glow = "0.17"
+# The GL context on the winit window: EGL on Linux (X11 and Wayland, no GLX),
+# WGL on Windows; macOS is not built with it (the CPU path).
+glutin = { version = "0.32", default-features = false, features = ["egl", "x11", "wayland", "wgl"] }
+glutin-winit = { version = "0.5", default-features = false, features = ["egl", "x11", "wayland", "wgl"] }
 
 [profile.release]
 lto = "thin"

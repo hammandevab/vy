@@ -16,4 +16,5 @@ Sessionen kan startas om: läget står här och i `git log`.
 
 | Commit | Spår | Konflikter | Grindar efteråt |
 | --- | --- | --- | --- |
-| (denna) Slå ihop m5/sdk | `1de409e`, 15 commits | inga | 390 gröna / 4 ignorerade, spec 140/140, 13 moduler, 64/64 à 0,000 % |
+| `843bce2` Slå ihop m5/sdk | `1de409e`, 15 commits | inga | 390 gröna / 4 ignorerade, spec 140/140, 13 moduler, 64/64 à 0,000 % |
+| (denna) Slå ihop m5/gpu | `bcd26f8`, 10 commits | inga | 397 / 4, spec 140/140, 13 moduler, 64/64 à 0,000 %; GL-testet under Xvfb med llvmpipe grönt (sidorna nu 99 frames med `widgets`, värsta 0,254 %) |

@@ -17,6 +17,8 @@ pub mod compose;
 pub mod devtools;
 pub mod external;
 pub mod find;
+#[cfg(all(feature = "gl", not(target_os = "macos")))]
+pub mod gl;
 pub mod grants;
 pub mod headless;
 pub mod history;
