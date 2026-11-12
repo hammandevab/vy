@@ -18,7 +18,7 @@ path = "src/main.rs"
 # The window itself (winit + softbuffer). Off, the crate is the shell's
 # model, chrome, tab processes and the headless screenshot pipeline, which
 # is what `vy-cli conformance` links.
-default = ["window", "gl"]
+default = ["window", "gl", "a11y-linux"]
 window = ["dep:winit", "dep:softbuffer", "dep:accesskit_winit", "os-clipboard"]
 # The GPU path (spec-fråga 66, docs/notes/m5-gpu.md): OpenGL 3.3 core or
 # OpenGL ES 3.0 on the window, EGL on Linux and WGL on Windows, falling
@@ -29,8 +29,10 @@ gl = ["window", "dep:glow", "dep:glutin", "dep:glutin-winit", "vy-render/gl"]
 # window uses an in-memory clipboard, as headless runs always do.
 os-clipboard = ["dep:arboard"]
 # AT-SPI over D-Bus for the accessibility tree on Linux and the BSDs
-# (SPEC-10.2.1). Off by default: +3.1 MB takes the client past SPEC-12.3.1's
-# 25 MB. Windows (UIA) and macOS (NSAccessibility) always have it.
+# (SPEC-10.2.1), on by default; it does nothing elsewhere, where Windows
+# (UIA) and macOS (NSAccessibility) always have their adapter. About 2.4 MB in
+# release with the stack built for size (the workspace's release profile),
+# which keeps the client under SPEC-12.3.1's 25 MB.
 a11y-linux = ["window", "accesskit_winit/accesskit_unix", "accesskit_winit/async-io"]
 
 [dependencies]

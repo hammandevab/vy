@@ -36,7 +36,10 @@ med spåret och dess egen numrering inom parentes. Spårens noteringar använder
     (`accesskit_unix`, zbus) tar Linux-klienten över 25 miljoner byte (under 25 MiB); därför är
     funktionen `a11y-linux` frivillig och Linux-klienten exponerar inget träd som standard. Avses MB
     eller MiB? Ska taket höjas, Linux-tillgänglighet vara frivillig, eller något annat trimmas?
-    Talen efter sammanslagningen står i `notes/m4-integration.md`.
+    Talen efter sammanslagningen står i `notes/m4-integration.md`. *Läget efter m5/release:*
+    `a11y-linux` är på som standard; med serif och mono komprimerade och AT-SPI-stacken byggd för
+    storlek är Linux-klienten 24 365 264 byte, under 25 000 000 (decimalt, som testet läser det;
+    `notes/m5-release.md`). Frågan om MB eller MiB står kvar för ägaren.
 57. **SPEC-10.1.1 "värden klipper trädet mot fönstret"** (m4/ux, 55). AccessKit klipper genom
     `clips_children` på sidnoden med nodernas rektanglar oklippta, så plattformen vet att noder
     utanför vyn finns. Avses att noder utanför vyn inte ska exponeras alls?

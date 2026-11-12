@@ -68,10 +68,112 @@ const WEIGHTS_SANS: [i32; 2] = [weight::NORMAL, weight::BOLD];
 /// Weights bundled for `serif` and `mono`.
 const WEIGHTS_SINGLE: [i32; 1] = [weight::NORMAL];
 
-static FONT_SANS: &[u8] = include_bytes!("../fonts/DejaVuSans.ttf");
-static FONT_SANS_BOLD: &[u8] = include_bytes!("../fonts/DejaVuSans-Bold.ttf");
-static FONT_SERIF: &[u8] = include_bytes!("../fonts/DejaVuSerif.ttf");
-static FONT_MONO: &[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");
+/// One bundled face as it is in the binary, with the metadata the font
+/// system matches on, so that it is registered without being parsed and its
+/// bytes are read the first time text is shaped with it.
+///
+/// Serif and mono are `fonts/<face>.ttf` compressed with zstd at level 19
+/// (369 072 bytes for 723 800, so 354 728 fewer, for SPEC-12.3.1's 25 MB
+/// with AT-SPI on Linux) and decompressed when the font system first reads
+/// them, once per process (about 0.9 ms each in release): for serif or mono
+/// text, or the first time text in weight 700 is matched, since cosmic-text
+/// then reads every face of another weight to look for a variable `wght`
+/// axis. A page in weight 400 sans never decompresses them. Sans and sans
+/// bold stay uncompressed: matching weight 400 reads bold the same way,
+/// already in [`TextEngine::new`], so every process would pay for them (3–5
+/// ms of a tab's 15 ms cold start). `bundled_faces_are_the_ttf_files`
+/// checks bytes and metadata against the `.ttf`; after changing one,
+/// `zstd -19 --no-check -f fonts/<face>.ttf` writes its `.ttf.zst`.
+struct BundledFace {
+    data: FaceData,
+    family: &'static str,
+    post_script_name: &'static str,
+    weight: u16,
+    monospaced: bool,
+}
+
+/// A bundled face's bytes.
+enum FaceData {
+    /// The `.ttf` as it is.
+    Ttf(&'static [u8]),
+    /// The `.ttf.zst`, and the `.ttf` once decompressed.
+    Zstd(&'static [u8], std::sync::OnceLock<Vec<u8>>),
+}
+
+impl BundledFace {
+    /// What `fontdb` would read from the face's tables, without reading them.
+    fn info(&'static self) -> fontdb::FaceInfo {
+        fontdb::FaceInfo {
+            id: fontdb::ID::dummy(),
+            source: fontdb::Source::Binary(Arc::new(self)),
+            index: 0,
+            families: vec![(
+                self.family.to_string(),
+                fontdb::Language::English_UnitedStates,
+            )],
+            post_script_name: self.post_script_name.to_string(),
+            style: fontdb::Style::Normal,
+            weight: fontdb::Weight(self.weight),
+            stretch: fontdb::Stretch::Normal,
+            monospaced: self.monospaced,
+        }
+    }
+}
+
+impl AsRef<[u8]> for BundledFace {
+    fn as_ref(&self) -> &[u8] {
+        match &self.data {
+            FaceData::Ttf(ttf) => ttf,
+            FaceData::Zstd(zstd, ttf) => ttf.get_or_init(|| {
+                // One call into the exact size the frame header gives: no
+                // streaming buffer, no reallocation.
+                let size = zstd::zstd_safe::get_frame_content_size(zstd)
+                    .ok()
+                    .flatten()
+                    .expect("a bundled font's frame has its size");
+                zstd::bulk::decompress(zstd, size as usize).expect("a bundled font decompresses")
+            }),
+        }
+    }
+}
+
+/// The bundled faces in load order: sans, sans bold, serif, mono.
+static BUNDLED_FACES: [BundledFace; 4] = [
+    BundledFace {
+        data: FaceData::Ttf(include_bytes!("../fonts/DejaVuSans.ttf")),
+        family: FAMILY_SANS,
+        post_script_name: "DejaVuSans",
+        weight: 400,
+        monospaced: false,
+    },
+    BundledFace {
+        data: FaceData::Ttf(include_bytes!("../fonts/DejaVuSans-Bold.ttf")),
+        family: FAMILY_SANS,
+        post_script_name: "DejaVuSans-Bold",
+        weight: 700,
+        monospaced: false,
+    },
+    BundledFace {
+        data: FaceData::Zstd(
+            include_bytes!("../fonts/DejaVuSerif.ttf.zst"),
+            std::sync::OnceLock::new(),
+        ),
+        family: FAMILY_SERIF,
+        post_script_name: "DejaVuSerif",
+        weight: 400,
+        monospaced: false,
+    },
+    BundledFace {
+        data: FaceData::Zstd(
+            include_bytes!("../fonts/DejaVuSansMono.ttf.zst"),
+            std::sync::OnceLock::new(),
+        ),
+        family: FAMILY_MONO,
+        post_script_name: "DejaVuSansMono",
+        weight: 400,
+        monospaced: true,
+    },
+];
 
 /// Family name and bundled weights for a built-in role, or `None` for a
 /// resource id that is not one (package fonts arrive with WOFF2 support).
@@ -334,8 +436,8 @@ impl TextEngine {
     /// Engine with the bundled fonts only (SPEC-6.4.2); never touches system fonts.
     pub fn new() -> Self {
         let mut db = fontdb::Database::new();
-        for bytes in [FONT_SANS, FONT_SANS_BOLD, FONT_SERIF, FONT_MONO] {
-            db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+        for face in &BUNDLED_FACES {
+            db.push_face_info(face.info());
         }
         db.set_sans_serif_family(FAMILY_SANS);
         db.set_serif_family(FAMILY_SERIF);
@@ -575,6 +677,53 @@ pub fn pack_x100(a: f32, b: f32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The faces the engine registers are the `.ttf` files in `fonts/`:
+    /// the same bytes (once decompressed), and the same metadata `fontdb`
+    /// reads from them; compressing serif and mono saves 350 KB or more.
+    #[test]
+    fn bundled_faces_are_the_ttf_files() {
+        let ttf: [&'static [u8]; 4] = [
+            include_bytes!("../fonts/DejaVuSans.ttf"),
+            include_bytes!("../fonts/DejaVuSans-Bold.ttf"),
+            include_bytes!("../fonts/DejaVuSerif.ttf"),
+            include_bytes!("../fonts/DejaVuSansMono.ttf"),
+        ];
+        let start = std::time::Instant::now();
+        let mut parsed = fontdb::Database::new();
+        for t in ttf {
+            parsed.load_font_source(fontdb::Source::Binary(Arc::new(t)));
+        }
+        let parse = start.elapsed();
+        assert_eq!(parsed.len(), BUNDLED_FACES.len());
+        for (i, (face, read)) in BUNDLED_FACES.iter().zip(parsed.faces()).enumerate() {
+            let start = std::time::Instant::now();
+            let bytes = face.as_ref();
+            eprintln!("face {i}: decompressed in {:?}", start.elapsed());
+            assert!(bytes == ttf[i], "face {i} is not its .ttf");
+            assert!(std::ptr::eq(bytes, face.as_ref()), "face {i}: once");
+            let mine = face.info();
+            assert_eq!(
+                (&mine.families, &mine.post_script_name, mine.index),
+                (&read.families, &read.post_script_name, read.index),
+                "face {i}"
+            );
+            assert_eq!(
+                (mine.style, mine.weight, mine.stretch, mine.monospaced),
+                (read.style, read.weight, read.stretch, read.monospaced),
+                "face {i}"
+            );
+        }
+        eprintln!("the four .ttf parsed by fontdb in {parse:?}");
+        let (mut packed, mut plain) = (0, 0);
+        for (face, ttf) in BUNDLED_FACES.iter().zip(ttf) {
+            if let FaceData::Zstd(zstd, _) = &face.data {
+                packed += zstd.len();
+                plain += ttf.len();
+            }
+        }
+        assert!(plain - packed >= 350_000, "{packed} of {plain}");
+    }
 
     /// Glyphs of a rasterized run as plain data: position, placement and bitmap.
     fn glyphs(

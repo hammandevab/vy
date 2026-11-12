@@ -17,6 +17,12 @@ pub const SDK_README: &str = include_str!("../../vy-sdk/README.md");
 /// The git repository the SDK comes from without `--sdk`.
 pub const SDK_GIT: &str = "https://github.com/hammandevab/vy";
 
+/// The release tag of that repository a project made without `--sdk` pins:
+/// the version of this `vy-dev`, which is the workspace version, which
+/// release.yml requires to be the release's tag. A project then builds
+/// against the SDK of the release whose `vy-dev` made it, not against main.
+pub const SDK_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
 /// File name of the manifest draft in a project.
 pub const MANIFEST_FILE: &str = "manifest.json";
 
@@ -189,7 +195,7 @@ impl Scaffold {
                 }
                 format!("vy-sdk = {{ path = \"{path}\" }}")
             }
-            None => format!("vy-sdk = {{ git = \"{SDK_GIT}\" }}"),
+            None => format!("vy-sdk = {{ git = \"{SDK_GIT}\", tag = \"{SDK_TAG}\" }}"),
         };
         let name = self.name.as_str();
         let lib = lib_name(name);
@@ -730,6 +736,40 @@ mod tests {
     /// a non-empty directory, a checkout without the SDK and a bad name,
     /// and the `CLAUDE.md` carries the loop, the API summary and the SDK
     /// README.
+    /// A project without `--sdk` pins the SDK to the release tag of this
+    /// `vy-dev`: `v` and the version in `[workspace.package]` of the root
+    /// `Cargo.toml`, which release.yml requires the tag to be.
+    #[test]
+    fn sdk_tag_is_the_release_version() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let section = manifest
+            .split("[workspace.package]")
+            .nth(1)
+            .expect("[workspace.package]");
+        let version = section
+            .lines()
+            .find_map(|l| l.strip_prefix("version = \""))
+            .and_then(|v| v.strip_suffix('"'))
+            .expect("version in [workspace.package]");
+        assert_eq!(SDK_TAG, format!("v{version}"));
+        let dir = std::env::temp_dir().join(format!("vy-dev-sdk-tag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Scaffold {
+            dir: dir.join("sida"),
+            name: "sida".into(),
+            sdk: None,
+        }
+        .create()
+        .unwrap();
+        let cargo = std::fs::read_to_string(dir.join("sida/Cargo.toml")).unwrap();
+        let line = format!(
+            "vy-sdk = {{ git = \"https://github.com/hammandevab/vy\", tag = \"v{version}\" }}"
+        );
+        assert!(cargo.lines().any(|l| l == line), "{line} in {cargo}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn writes_a_project() {
         let dir = std::env::temp_dir().join(format!("vy-dev-scaffold-{}", std::process::id()));
@@ -769,7 +809,9 @@ mod tests {
         };
         git.create().unwrap();
         let cargo = std::fs::read_to_string(dir.join("annan/Cargo.toml")).unwrap();
-        assert!(cargo.contains(&format!("vy-sdk = {{ git = \"{SDK_GIT}\" }}")));
+        assert!(cargo.contains(&format!(
+            "vy-sdk = {{ git = \"{SDK_GIT}\", tag = \"{SDK_TAG}\" }}"
+        )));
         let bad = Scaffold {
             dir: dir.join("x"),
             name: "x".into(),

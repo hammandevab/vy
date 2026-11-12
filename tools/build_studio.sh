@@ -9,14 +9,18 @@
 #
 # The package is signed with a throwaway key: `vy-dev serve` writes its own
 # origin and per-run token into the module, sets `net` to that origin and signs
-# the result with the developer key every time it starts. VY_PUBLISH names a
-# vy-publish binary to use instead of `cargo run -p vy-publish`.
+# the result with the developer key every time it starts. So two builds differ
+# only in the signature: their package identity (the unsigned manifest, which
+# names the module's and resources' hashes; `vy-publish inspect`) is the same
+# (SPEC-9.7.1). VY_PUBLISH names a vy-publish binary to use instead of
+# `cargo run -p vy-publish`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=${1:-target/studio.vyp}
 
-(cd modules/studio && cargo build --release --target wasm32-unknown-unknown --quiet)
-wasm=modules/studio/target/wasm32-unknown-unknown/release/studio.wasm
+# The same reproducible module build as every other page (SPEC-9.7.1).
+tools/build_modules.sh studio > /dev/null
+wasm=target/wasm/studio.wasm
 
 if [ -n "${VY_PUBLISH:-}" ]; then
   publish=("$VY_PUBLISH")

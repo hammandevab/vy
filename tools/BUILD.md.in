@@ -1,0 +1,42 @@
+# Vy @TAG@ – byggrecept (SPEC-9.7.1)
+
+Bygget av commit `@COMMIT@` med `SOURCE_DATE_EPOCH=@EPOCH@` (@DATE@, commitens tid). Varje binär,
+`LICENSE` och zip-filen har sin SHA-256 i `SHA256SUMS`; samma commit byggd igen på samma klass av
+maskin ger samma byte, oavsett katalog, användare och tid. Hur det går till står i
+`docs/RELEASING.md` i repot.
+
+## Maskiner och verktygskedja
+
+@MACHINES@
+
+Verktygskedjan är den `rust-toolchain.toml` pekar ut (rustc 1.97.0 med målen ovan och
+`wasm32-unknown-unknown`). Zip-filerna skrivs av `tools/release_files.py` med runnerns python3;
+deras byte beror också på dess zlib, binärerna i dem gör det inte.
+
+## Bygga om och jämföra
+
+```sh
+git clone https://github.com/hammandevab/vy && cd vy
+git checkout @TAG@            # commit @COMMIT@
+rustup show                   # installerar 1.97.0 enligt rust-toolchain.toml
+rustup target add <mål>       # t.ex. x86_64-unknown-linux-gnu
+export SOURCE_DATE_EPOCH=@EPOCH@
+tools/build_release.sh <mål> stage
+python3 tools/release_files.py sums vy-@VERSION@-<mål> stage/vy-* stage/LICENSE
+```
+
+Raderna ska stå i `SHA256SUMS`. En signerad binär (kolumnen *Signerad*) skiljer sig från bygget
+med sin signatur; dess osignerade SHA-256 står under `vy-@VERSION@-<mål>.unsigned/`. Bygget kräver
+inget utöver verktygskedjan och, på Linux och macOS, en C-kompilator (ring och zstd-sys); inga
+miljövariabler behöver sättas för hand, `tools/repro_env.sh` sätter `CARGO_ENCODED_RUSTFLAGS`
+(`--remap-path-prefix` för arbetskopian, `CARGO_HOME` och `CARGO_TARGET_DIR`), `CFLAGS` och
+`SOURCE_DATE_EPOCH`.
+
+## Paket
+
+`studio.vyp` signeras med en engångsnyckel (`vy-dev serve` skriver in sin origin och nyckel och
+signerar om paketet vid varje start), så filen skiljer sig mellan byggen men inte paketet: det
+osignerade manifestet, som namnger modulens och resursernas hash, är detsamma.
+`vy-publish inspect stage/studio.vyp` skriver det som `identity:`.
+
+@PACKAGES@

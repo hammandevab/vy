@@ -3264,11 +3264,11 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vy-abi"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "vy-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "png",
@@ -3288,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "vy-dev"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "getrandom 0.2.17",
@@ -3304,14 +3304,14 @@ dependencies = [
 
 [[package]]
 name = "vy-dl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vy-abi",
 ]
 
 [[package]]
 name = "vy-manifest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "minicbor",
@@ -3326,7 +3326,7 @@ dependencies = [
 
 [[package]]
 name = "vy-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.2.17",
  "minicbor",
@@ -3339,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "vy-publish"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.2.17",
  "vy-abi",
@@ -3350,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "vy-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cosmic-text",
  "glow",
@@ -3359,11 +3359,12 @@ dependencies = [
  "unicode-script",
  "vy-abi",
  "vy-dl",
+ "zstd",
 ]
 
 [[package]]
 name = "vy-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "sha2 0.11.1",
@@ -3377,14 +3378,14 @@ dependencies = [
 
 [[package]]
 name = "vy-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vy-abi",
 ]
 
 [[package]]
 name = "vy-serve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tiny_http",
  "vy-manifest",
@@ -3396,7 +3397,7 @@ dependencies = [
 
 [[package]]
 name = "vy-shell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
