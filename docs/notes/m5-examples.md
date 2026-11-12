@@ -14,8 +14,8 @@ den publika sajten (`tools/publish_site.sh` tar varje utkast i `conformance/mani
 | # | Sida | Modul | Läge | Commits |
 | --- | --- | --- | --- | --- |
 | 1 | Tavlan | `kanban` | klar: 54 267 byte, 0,11 M bränsle per frame (1,1 M med 60 kort), 5 fall | 2188796, 94e6aa2 |
-| 2 | Kalkylark | `kalkyl` | pågår | – |
-| 3 | Ritbord | `rita` | ej påbörjad | – |
+| 2 | Kalkylark | `kalkyl` | klar: 61 149 byte, 0,33 M bränsle per frame (1,6 M med 1 040 celler vid 1600 × 1000), 4 fall | c252b0f, 01c49db |
+| 3 | Ritbord | `rita` | pågår | – |
 | 4 | Anteckningar | `skriv` | ej påbörjad | – |
 | 5 | Block | `block` | ej påbörjad | – |
 | 6 | Rymd | `rymd` | ej påbörjad | – |
@@ -62,6 +62,28 @@ Från `kanban`:
   skrivs för hand. Förslag: en liten `ui::Drag` som ger `Started/Moved/Dropped/Clicked/DoubleClicked`.
 - **Centrerad text.** `text_measure` + `f.text` med halva skillnaden skrivs om i varje sida;
   `Frame::text_centred(r, style, text)` vore en rad.
+
+Från `kalkyl`:
+
+- **Tab kan inte gå mellan celler.** `cell` är ingen fokuserbar roll (SPEC-10.3.2) och Tab når aldrig
+  sidan (SPEC-10.3.1). "Tab bekräftar och går höger" görs därför med trädet: formelfältet registreras
+  mellan två `textbox`-noder till, fälten för cellen till vänster och höger, med tre nod-id i en ring.
+  När Tab ger grannen fokus väljer sidan den cellen och låter fältet ta över den fokuserade noden.
+  Det följer reglerna men är mycket kod för en vanlig sak; samma spec-fråga som m5/sdk:s nr 1 (en
+  fokuserbar roll för en markeringsbar lista), här för ett rutnät.
+- **`TextBox` kan inte byta nod-id** (det sätts i `new`), så ringen bygger ett nytt fält vid varje
+  Tab. Förslag: `TextBox::set_id`.
+- **`ui::scroll::Activity` är inte publik.** Ett eget tangentbordsområde utan fokuserbar roll
+  (rutnätet) skriver om regeln "aktiv efter ett tryck som inte gav någon nod fokus, tills en nod får
+  fokus". Förslag: gör `Activity` publik, som `List` och `ScrollView` redan använder den.
+- **`ScrollView` rullar bara i höjdled** och ritar alltid sin ring när den är aktiv. Bladet behövde
+  två axlar och fasta rubriker, så sidan använder `ScrollView` för raderna (hjul, list) utan dess
+  `draw` – listen ritas ur `thumb()` – och har en egen list för kolumnerna. Förslag: en
+  `ScrollView` för två axlar, och `draw_bar` publik.
+- **Ett enradsfält tar Upp/Ned utan att göra något** (noterat i m5-sdk), så sidan måste hinna före
+  fältet för att låta pilarna bekräfta och flytta markeringen.
+- **`core::fmt` kostar runt 4 KB i en modul.** `kalkyl` bygger sina strängar för hand och gick från
+  65,2 till 61,0 KB. En `push_int` i SDK:t vore nog för de flesta sidor som bara skriver heltal.
 
 ## Berör andra spår
 
