@@ -245,7 +245,11 @@ pub fn encode(strokes: &[Stroke]) -> Vec<u8> {
 }
 
 /// The strokes a stored value describes; `None` for anything else, or
-/// for a drawing over the limits.
+/// for a drawing over the limits: more points than [`MAX_POINTS`], or a
+/// stroke after the ink reached [`MAX_INK`]. The page takes no stroke
+/// once the drawing is that full, so it saved none either, and a value
+/// that holds more would cost a frame more than the page lets anyone
+/// draw.
 pub fn decode(mut bytes: &[u8]) -> Option<Vec<Stroke>> {
     let u16_at = |b: &mut &[u8]| -> Option<usize> {
         let (head, rest) = b.split_at_checked(2)?;
@@ -260,12 +264,16 @@ pub fn decode(mut bytes: &[u8]) -> Option<Vec<Stroke>> {
     let count = u16_at(&mut bytes)?;
     let mut strokes = Vec::new();
     let mut total = 0;
+    // Summed in the order the page sums it, so that what it took for
+    // not full is not full here.
+    let mut ink = 0.0;
     for _ in 0..count {
         let (&tool, rest) = bytes.split_first()?;
         bytes = rest;
         let n = u16_at(&mut bytes)?;
         total += n;
-        if n == 0 || n > MAX_STROKE_POINTS || total > MAX_POINTS || tool & 3 == 3 {
+        let over = n > MAX_STROKE_POINTS || total > MAX_POINTS || ink >= MAX_INK;
+        if n == 0 || over || tool & 3 == 3 {
             return None;
         }
         let mut pts = Vec::with_capacity(n);
@@ -280,11 +288,13 @@ pub fn decode(mut bytes: &[u8]) -> Option<Vec<Stroke>> {
             }
             pts.push((last.0 as i16, last.1 as i16));
         }
-        strokes.push(Stroke {
+        let stroke = Stroke {
             color: tool >> 2,
             width: tool & 3,
             pts,
-        });
+        };
+        ink += stroke.ink();
+        strokes.push(stroke);
     }
     bytes.is_empty().then_some(strokes)
 }

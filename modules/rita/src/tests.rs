@@ -223,8 +223,8 @@ fn the_stored_form_round_trips_and_is_compact() {
     assert_eq!(decode(&[1, 1, 0, 0, 1, 0, 1, 0]), None, "off the paper");
     assert_eq!(decode(&[1, 0, 0]), Some(Vec::new()));
 
-    // The largest drawing the page keeps fits the 64 KB quota: 2 500
-    // points as far apart as the paper allows.
+    // The most points the page keeps fit the 64 KB quota: 2 500 of them
+    // as far apart as the paper allows.
     let mut big = Vec::new();
     for s in 0..MAX_POINTS / MAX_STROKE_POINTS {
         let raw: Vec<Point> = (0..MAX_STROKE_POINTS)
@@ -242,7 +242,15 @@ fn the_stored_form_round_trips_and_is_compact() {
     assert_eq!(points, MAX_POINTS);
     let bytes = encode(&big);
     assert!(bytes.len() < 32 * 1024, "{}", bytes.len());
-    assert_eq!(decode(&bytes).map(|d| d.len()), Some(big.len()));
+    // That is thirty times the ink the page takes: after the first of
+    // those strokes the drawing is full, so a value with a second one is
+    // not a drawing the page saved.
+    assert!(big[0].ink() > MAX_INK);
+    assert_eq!(decode(&bytes), None, "over the ink");
+    assert_eq!(decode(&encode(&big[..1])), Some(big[..1].to_vec()));
+    let dot = Stroke::new(0, 2, &[(5.0, 5.0)], TOLERANCE).unwrap();
+    let last = vec![dot, big[0].clone()];
+    assert_eq!(decode(&encode(&last)), Some(last), "the stroke that fills");
 }
 
 /// A drag draws one simplified stroke with the chosen colour and pen;
@@ -416,6 +424,9 @@ fn a_full_drawing_refuses_strokes_with_a_message() {
     assert!(p.points <= MAX_POINTS);
     assert!(p.strokes.iter().all(|s| s.pts.len() <= MAX_STROKE_POINTS));
     let n = p.strokes.len();
+    // A full drawing is read back as it was saved.
+    assert!(p.ink >= MAX_INK);
+    assert_eq!(decode(&encode(&p.strokes)), Some(p.strokes.clone()));
     stroke(&mut p, &zigzag);
     assert_eq!(p.strokes.len(), n, "refused");
     assert!(p.refused);
@@ -457,6 +468,7 @@ fn a_full_drawing_refuses_strokes_with_a_message() {
     assert!(p.strokes.len() >= 5, "{}", p.strokes.len());
     assert!(p.points > 2490, "{}: nothing was cut off", p.points);
     assert!(p.strokes.iter().all(|s| s.pts.len() <= MAX_STROKE_POINTS));
+    assert_eq!(decode(&encode(&p.strokes)), Some(p.strokes.clone()));
 }
 
 /// SPEC-10.1.1: every tool is a button whose text says its state, in
