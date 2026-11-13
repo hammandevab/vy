@@ -3889,8 +3889,9 @@ fn spec_13_1_4_code_store_evicts_least_recently_used() {
     age(&a, 3600);
     age(&b, 1800);
     assert_eq!(store.get(&a).as_ref(), Some(&code_a));
-    let stale = dir.join(".interrupted.tmp");
-    let fresh = dir.join(".in-progress.tmp");
+    // Temporary files as the store names its own: `.<entry>.<pid>.<nanos>.tmp`.
+    let stale = dir.join(format!(".{}.4242.17.tmp", c.file_name()));
+    let fresh = dir.join(format!(".{}.4242.18.tmp", c.file_name()));
     std::fs::write(&stale, b"half an entry").unwrap();
     std::fs::write(&fresh, b"half an entry").unwrap();
     let f = std::fs::OpenOptions::new()
@@ -3910,4 +3911,150 @@ fn spec_13_1_4_code_store_evicts_least_recently_used() {
     store.put(&d, 4000, &code_d).unwrap();
     assert!(store.size() <= 2 * 1040);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SPEC-9.4.2 (granskning 0014:3): the store keeps to its own directory
+/// and its own files. A cache directory that is a link to another
+/// directory of the user's is no store, at opening or later, and nothing
+/// is written, read or removed through it. In its own directory the store
+/// counts, evicts and removes only regular files that carry its names
+/// (64 hex digits and `.code`; `.<entry or stamp>.<pid>.<nanos>.tmp`):
+/// someone else's `notes.tmp` and `backup.code` outlive the size cap, a
+/// clearing and a change of client version, however old they are. A link
+/// under an entry's name is not read through: it is a miss, the link goes
+/// and its target is left as it was.
+#[cfg(unix)]
+#[test]
+fn spec_9_4_2_code_store_touches_only_its_own_files() {
+    use std::os::unix::fs::symlink;
+    use std::time::{Duration, SystemTime};
+    let old = |path: &std::path::Path, secs: u64| {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(secs))
+            .unwrap();
+    };
+    let modified = |path: &std::path::Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    let names = |dir: &std::path::Path| {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    };
+    let root = cache_dir("own");
+    compile_cache::create_dir(&root).unwrap();
+    let (key, code) = (CodeKey::of(&[1]), vec![1u8; 1000]);
+
+    // Another directory of the user's own, with files of its own.
+    let elsewhere = root.join("elsewhere");
+    compile_cache::create_dir(&elsewhere).unwrap();
+    for name in ["notes.tmp", "backup.code"] {
+        std::fs::write(elsewhere.join(name), b"not the cache's").unwrap();
+        old(&elsewhere.join(name), 7200);
+    }
+    let theirs = names(&elsewhere);
+
+    // The cache's name as a link to it: no store, nothing through it.
+    let link = root.join("code-link");
+    symlink(&elsewhere, &link).unwrap();
+    assert!(
+        std::fs::metadata(&link).unwrap().is_dir(),
+        "the link leads to a directory"
+    );
+    assert!(CodeStore::open(&link).is_none(), "a link is not followed");
+    assert_eq!(
+        names(&elsewhere),
+        theirs,
+        "nothing written or removed there"
+    );
+
+    // Opened as a directory, turned into a link afterwards.
+    let dir = root.join("code");
+    let store = CodeStore::open(&dir).unwrap().with_cap(2 * 1040);
+    store.put(&key, 1000, &code).unwrap();
+    let aside = root.join("code-aside");
+    std::fs::rename(&dir, &aside).unwrap();
+    symlink(&elsewhere, &dir).unwrap();
+    std::fs::copy(aside.join(key.file_name()), elsewhere.join(key.file_name())).unwrap();
+    let theirs = names(&elsewhere);
+    assert_eq!(store.get(&key), None, "not read through the link");
+    assert_eq!(store.put(&key, 1000, &code), Err(PutError::NotPrivate));
+    store.remove(&key);
+    assert_eq!(store.clear(), 0);
+    assert_eq!(store.size(), 0);
+    assert_eq!(names(&elsewhere), theirs);
+    std::fs::remove_file(&dir).unwrap();
+    std::fs::rename(&aside, &dir).unwrap();
+    assert_eq!(
+        store.get(&key).as_ref(),
+        Some(&code),
+        "its own directory again"
+    );
+
+    // Files in the cache's directory that are not the cache's: old, and
+    // large enough to be the first to go if they were counted.
+    let upper = "ABCDEF0123456789".repeat(4) + ".code";
+    let short = "abcdef0123456789".repeat(4)[..63].to_string() + ".code";
+    let foreign = [
+        "notes.tmp".to_string(),
+        "backup.code".to_string(),
+        upper,
+        short,
+        ".notes.1.2.tmp".to_string(),
+        format!(".{}.tmp", key.file_name()),
+        format!(".{}.x.2.tmp", key.file_name()),
+    ];
+    for name in &foreign {
+        std::fs::write(dir.join(name), vec![0u8; 5000]).unwrap();
+        old(&dir.join(name), 7200);
+    }
+    // Its own: an interrupted write of an entry and one of the stamp.
+    let own_tmp = [
+        format!(".{}.4242.17.tmp", key.file_name()),
+        format!(".{STAMP_FILE}.4242.17.tmp"),
+    ];
+    for name in &own_tmp {
+        std::fs::write(dir.join(name), b"half").unwrap();
+        old(&dir.join(name), 7200);
+    }
+    assert_eq!(store.size(), 1040, "only its own entry counts");
+    let (b, c) = (CodeKey::of(&[2]), CodeKey::of(&[3]));
+    old(&dir.join(key.file_name()), 3600);
+    store.put(&b, 1000, &[2; 1000]).unwrap();
+    store.put(&c, 1000, &[3; 1000]).unwrap();
+    assert_eq!(store.get(&key), None, "its own oldest entry was evicted");
+    assert_eq!(store.size(), 2 * 1040);
+    for name in &foreign {
+        assert!(
+            dir.join(name).exists(),
+            "{name} is not the cache's to remove"
+        );
+    }
+    for name in &own_tmp {
+        assert!(!dir.join(name).exists(), "{name}: its own stale write");
+    }
+    // A clearing, and a change of client version.
+    assert_eq!(store.clear(), 2);
+    store.put(&b, 1000, &[2; 1000]).unwrap();
+    let was = CodeStore::open_for(&dir, "0.0.1").unwrap();
+    assert_eq!(was.size(), 0, "another version: emptied");
+    for name in &foreign {
+        assert!(dir.join(name).exists(), "{name}");
+    }
+
+    // A link under an entry's name, to a whole entry somewhere else.
+    let target = elsewhere.join(key.file_name());
+    old(&target, 3600);
+    let before = (std::fs::read(&target).unwrap(), modified(&target));
+    let key_old = CodeKey::of_client(&[1], "0.0.1");
+    symlink(&target, dir.join(key_old.file_name())).unwrap();
+    assert_eq!(was.size(), 0, "a link is no entry");
+    assert_eq!(was.get(&key_old), None, "and is not read through");
+    assert!(
+        std::fs::symlink_metadata(dir.join(key_old.file_name())).is_err(),
+        "the link is gone"
+    );
+    assert_eq!((std::fs::read(&target).unwrap(), modified(&target)), before);
+    let _ = std::fs::remove_dir_all(&root);
 }

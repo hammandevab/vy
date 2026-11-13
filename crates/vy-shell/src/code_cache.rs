@@ -830,8 +830,9 @@ mod tests {
     }
 
     /// SPEC-9.4.2: without a directory of the user's own there is no
-    /// cache: one that group or others may write is not opened, and one
-    /// that turns so later is neither read nor written.
+    /// cache: one that group or others may write is not opened, nor one
+    /// that is a link to another directory, and one that turns writable
+    /// for others later is neither read nor written.
     #[cfg(unix)]
     #[test]
     fn spec_9_4_2_no_cache_in_a_directory_others_may_write() {
@@ -854,6 +855,23 @@ mod tests {
         assert_eq!(sh.tab_code(tab), None);
         assert!(entries(&code_dir).is_empty());
         sh.shutdown();
+
+        // Nor in a link to another directory of the user's (granskning
+        // 0014:3): the cache is not followed out of its place.
+        let elsewhere = dir.join("elsewhere");
+        vy_runtime::compile_cache::create_dir(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("notes.tmp"), b"not the cache's").unwrap();
+        let link = dir.join("code-link");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        assert!(CodeCache::open(&link).is_none());
+        let mut sh = shell(Some(exe.clone()), &dir, Some(&link));
+        assert!(sh.code_cache().is_none());
+        let tab = sh.open_tab_loaded(page(wasm.clone()));
+        settle(&mut sh, 1, TIMEOUT).unwrap();
+        assert_eq!(sh.tab_status(tab), "running");
+        assert_eq!(sh.tab_code(tab), None);
+        sh.shutdown();
+        assert_eq!(entries(&elsewhere), ["notes.tmp"], "untouched");
 
         // Opened while private, opened up afterwards.
         mode(0o700);

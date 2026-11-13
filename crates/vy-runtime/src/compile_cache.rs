@@ -29,15 +29,19 @@
 //! it is stored only under that module's key and handed only to a tab
 //! process loaded with that module, where it runs inside the OS sandbox;
 //! the directory is the user's own (created 0700 on Unix and refused when
-//! another user owns it or group or others may write it); entries are
-//! written to a temporary file and renamed, read whole into memory, and
-//! checked against the hash written with them, which catches a torn or
-//! damaged file but not someone who can write the directory.
+//! another user owns it, group or others may write it, or it is a link
+//! to a directory somewhere else); entries are written to a temporary
+//! file and renamed, read whole into memory, and checked against the
+//! hash written with them, which catches a torn or damaged file but not
+//! someone who can write the directory. The store reads, evicts and
+//! removes only files that carry its own names ([`is_entry_name`],
+//! [`is_tmp_name`]): whatever else lies in the directory is not its to
+//! touch (granskning 0014:3).
 
 use crate::{sha256, Error};
 use sha2::{Digest, Sha256};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
@@ -160,18 +164,47 @@ impl CodeKey {
     }
 }
 
-/// True when `dir` may hold entries: it exists and is a directory and, on
-/// Unix, the user this process runs as (the effective uid) owns it and no
-/// one else may write it. Mode alone is not enough: a 0700 directory that
-/// another user made, and put where the cache is looked for, is theirs to
-/// fill.
+/// True when `name` is an entry's file name: 64 lowercase hex digits and
+/// `.code`, which is what [`CodeKey::file_name`] gives and nothing else.
+fn is_entry_name(name: &str) -> bool {
+    name.strip_suffix(".code").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// True when `name` is a temporary file of the store's own
+/// ([`CodeStore::tmp_path`]): a dot, the name of the entry or stamp it
+/// will become, the writer's process id, the nanoseconds of its clock,
+/// and `.tmp`.
+fn is_tmp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".tmp")) else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = rest.rsplitn(3, '.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(nanos), Some(pid), Some(base)) => {
+            digits(nanos) && digits(pid) && (is_entry_name(base) || base == STAMP_FILE)
+        }
+        _ => false,
+    }
+}
+
+/// True when `dir` may hold entries: it exists and is a directory itself,
+/// not a link to one, and, on Unix, the user this process runs as (the
+/// effective uid) owns it and no one else may write it. Mode alone is not
+/// enough: a 0700 directory that another user made, and put where the
+/// cache is looked for, is theirs to fill. And a link is not followed:
+/// whoever may write the directory above could point the cache's name at
+/// any other directory of the user's, whose files the cache would then
+/// write among and clear away.
 ///
 /// On Windows only existence and kind are checked; the ACL is not read.
 /// The cache lives in the user's profile (`%APPDATA%`), which only the
 /// user, SYSTEM and administrators may write, and a tab process runs at
 /// low integrity and cannot write there (SPEC-9.1.3).
 fn dir_is_private(dir: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(dir) else {
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
         return false;
     };
     if !meta.is_dir() {
@@ -298,10 +331,7 @@ impl CodeStore {
         // A temporary file and a rename, as for an entry: the stamp is
         // whole or absent, and a link left under its name is replaced,
         // never written through.
-        let tmp = self
-            .dir
-            .join(format!(".{STAMP_FILE}.{}.tmp", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
+        let tmp = self.tmp_path(STAMP_FILE);
         let written = private_file()
             .open(&tmp)
             .and_then(|mut f| f.write_all(want.as_bytes()))
@@ -312,10 +342,21 @@ impl CodeStore {
         written.is_ok()
     }
 
+    /// Where a write that will become `name` (an entry or the stamp) is
+    /// made first: a name of the store's own ([`is_tmp_name`]), new for
+    /// every write.
+    fn tmp_path(&self, name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        self.dir
+            .join(format!(".{name}.{}.{nanos}.tmp", std::process::id()))
+    }
+
     /// Remove every entry, and the temporary files of writes under way or
     /// interrupted: the cache is empty, as when the directory was made.
-    /// Returns how many entries went. Nothing is done once the directory
-    /// is not private.
+    /// Returns how many entries went. Only files with the store's own
+    /// names go; nothing is done once the directory is not private.
     pub fn clear(&self) -> usize {
         if !dir_is_private(&self.dir) {
             return 0;
@@ -326,9 +367,13 @@ impl CodeStore {
         let mut removed = 0;
         for e in read_dir.flatten() {
             let name = e.file_name();
-            let name = name.to_string_lossy();
-            let entry = name.ends_with(".code");
-            if (entry || name.ends_with(".tmp")) && std::fs::remove_file(e.path()).is_ok() {
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let entry = is_entry_name(name);
+            // `remove_file` takes a link under one of the names away, not
+            // what it points to.
+            if (entry || is_tmp_name(name)) && std::fs::remove_file(e.path()).is_ok() {
                 removed += usize::from(entry);
             }
         }
@@ -349,38 +394,19 @@ impl CodeStore {
     /// The code kept under `key`, read whole and checked against the hash
     /// written with it; reading it marks the entry as just used. A file
     /// that is short, damaged or over the size cap is removed and is a
-    /// miss, and so is everything once the directory is not private.
+    /// miss, and so is everything once the directory is not private. A
+    /// link under the entry's name is not followed: it is a miss, and the
+    /// link, not what it points to, is removed.
     pub fn get(&self, key: &CodeKey) -> Option<Vec<u8>> {
         if !dir_is_private(&self.dir) {
             return None;
         }
         let path = self.dir.join(&key.0);
-        let len = std::fs::metadata(&path).ok()?.len();
-        let good = (len <= (HEADER_BYTES + MAX_CODE_BYTES) as u64)
-            .then(|| std::fs::read(&path).ok())
-            .flatten()
-            .and_then(|mut bytes| {
-                let rest = bytes.strip_prefix(MAGIC.as_slice())?;
-                let (digest, code) = rest.split_at_checked(32)?;
-                if code.is_empty() || digest != sha256(code) {
-                    return None;
-                }
-                bytes.drain(..HEADER_BYTES);
-                Some(bytes)
-            });
-        match good {
-            Some(code) => {
-                // Used now: the last to be evicted.
-                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
-                    let _ = f.set_modified(SystemTime::now());
-                }
-                Some(code)
-            }
-            None => {
-                let _ = std::fs::remove_file(&path);
-                None
-            }
+        let code = read_entry(&path);
+        if code.is_none() {
+            let _ = std::fs::remove_file(&path);
         }
+        code
     }
 
     /// Keep `code` under `key` for a module of `module_len` bytes, in
@@ -399,12 +425,7 @@ impl CodeStore {
         if !dir_is_private(&self.dir) {
             return Err(PutError::NotPrivate);
         }
-        let nanos = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let tmp = self
-            .dir
-            .join(format!(".{}.{}.{nanos}.tmp", key.0, std::process::id()));
+        let tmp = self.tmp_path(&key.0);
         let result = private_file()
             .open(&tmp)
             .and_then(|mut f| {
@@ -434,25 +455,40 @@ impl CodeStore {
     }
 
     /// Every entry as (last used, size, path), and the stale temporary
-    /// files of interrupted writes removed on the way.
+    /// files of interrupted writes removed on the way. Only regular files
+    /// with the store's own names are entries or temporary files of its:
+    /// anything else in the directory is neither counted, evicted nor
+    /// removed. Nothing once the directory is not private.
     fn entries(&self) -> Vec<(SystemTime, u64, PathBuf)> {
+        if !dir_is_private(&self.dir) {
+            return Vec::new();
+        }
         let Ok(read_dir) = std::fs::read_dir(&self.dir) else {
             return Vec::new();
         };
         let mut entries = Vec::new();
         for e in read_dir.flatten() {
             let name = e.file_name();
-            let name = name.to_string_lossy();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let (entry, tmp) = (is_entry_name(name), is_tmp_name(name));
+            if !entry && !tmp {
+                continue;
+            }
+            // Of the name itself: a link is not followed.
             let Ok(meta) = e.metadata() else {
                 continue;
             };
+            if !meta.is_file() {
+                continue;
+            }
             let Ok(modified) = meta.modified() else {
                 continue;
             };
-            if name.ends_with(".code") {
+            if entry {
                 entries.push((modified, meta.len(), e.path()));
-            } else if name.ends_with(".tmp") && modified.elapsed().is_ok_and(|age| age > STALE_TMP)
-            {
+            } else if modified.elapsed().is_ok_and(|age| age > STALE_TMP) {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -474,6 +510,43 @@ impl CodeStore {
             }
         }
     }
+}
+
+/// The code in the entry file at `path`, marked as just used (the last
+/// to be evicted); `None` for anything that is not a whole entry in a
+/// regular file. The file is opened once and never through a link:
+/// `O_NOFOLLOW` on Unix, a look at the name first elsewhere.
+fn read_entry(path: &Path) -> Option<Vec<u8>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    if !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let file = options.open(path).ok()?;
+    let cap = (HEADER_BYTES + MAX_CODE_BYTES) as u64;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > cap {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    (&file).take(cap + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > cap {
+        return None;
+    }
+    let rest = bytes.strip_prefix(MAGIC.as_slice())?;
+    let (digest, code) = rest.split_at_checked(32)?;
+    if code.is_empty() || digest != sha256(code) {
+        return None;
+    }
+    bytes.drain(..HEADER_BYTES);
+    let _ = file.set_modified(SystemTime::now());
+    Some(bytes)
 }
 
 /// The compiled module for verified `wasm`: deserialized from the code
@@ -561,6 +634,54 @@ mod tests {
             assert_eq!(root.mode() & 0o022, 0);
             assert!(!dir_is_private(Path::new("/")), "owned by root");
             assert!(CodeStore::open(Path::new("/")).is_none(), "no store there");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 0014, finding 3: the names the store takes for its own. An
+    /// entry is what `CodeKey::file_name` gives; a temporary file is what
+    /// `CodeStore::tmp_path` gives for an entry or the stamp.
+    #[test]
+    fn own_names() {
+        let key = CodeKey::of(b"module");
+        assert!(is_entry_name(key.file_name()));
+        let hex = &key.file_name()[..64];
+        for not in [
+            "backup.code".to_string(),
+            ".code".to_string(),
+            hex.to_string(),
+            format!("{hex}.CODE"),
+            format!("{}.code", hex.to_uppercase()),
+            format!("{}.code", &hex[1..]),
+            format!("{hex}0.code"),
+            format!("{hex}.code.bak"),
+            format!("x{}.code", &hex[1..]),
+            STAMP_FILE.to_string(),
+        ] {
+            assert!(!is_entry_name(&not), "{not}");
+            assert!(!is_tmp_name(&not), "{not}");
+        }
+        let dir = std::env::temp_dir().join(format!("vy-cc-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = CodeStore::open(&dir).unwrap();
+        for base in [key.file_name(), STAMP_FILE] {
+            let tmp = store.tmp_path(base);
+            let name = tmp.file_name().unwrap().to_str().unwrap();
+            assert!(is_tmp_name(name), "{name}");
+            assert!(!is_entry_name(name), "{name}");
+        }
+        for not in [
+            "notes.tmp".to_string(),
+            ".notes.tmp".to_string(),
+            ".notes.1.2.tmp".to_string(),
+            format!(".{}.tmp", key.file_name()),
+            format!(".{}.1.tmp", key.file_name()),
+            format!(".{}.1.x.tmp", key.file_name()),
+            format!(".{}..2.tmp", key.file_name()),
+            format!("{}.1.2.tmp", key.file_name()),
+            format!(".{}.1.2.tmp.bak", key.file_name()),
+        ] {
+            assert!(!is_tmp_name(&not), "{not}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
