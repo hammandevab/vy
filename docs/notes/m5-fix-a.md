@@ -22,8 +22,8 @@ roten före varje commit (`target/gate/fixa.sh`, ocommittad: fmt, clippy, module
 | 5 | 0010:5 komposition, U+2028/U+2029 | klar | `f1902e2` | `spec_5_2_6_textbox_press_ends_the_composition_in_the_host`, `spec_5_2_6_textbox_composition_replaces_the_selection`, `spec_5_1_6_textbox_line_separators_are_line_breaks` |
 | 6 | 0014:7 storlekstak för enradssidor | klar | `5faa507` | taket i `tools/test_modules.sh` (form 32 000) och i `scaffold_builds_to_wasm_and_passes_check_abi` (startsidan 30 000) |
 | 7 | två SDK-hjälpare ur m5-examples | klar | `f1e7f32` | `spec_2_1_5_numbers_as_text_without_fmt`, `spec_5_2_4_text_centred`, doctest i `num` |
-| A | 0013:1 `skriv` låser sig på sparad text (hög) | – | | |
-| B | 0013:2 `kalkyl` låser sig på sparat blad (hög) | – | | |
+| A | 0013:1 `skriv` låser sig på sparad text (hög) | klar | `906cfad` | `spec_5_3_3_skriv_starts_on_any_text_it_saved` (vy-cli), `spec_5_3_3_hostile_markdown_is_searched_once`, `spec_5_3_3_a_long_note_is_prepared_over_several_frames` (skriv) |
+| B | 0013:2 `kalkyl` låser sig på sparat blad (hög) | klar | `0f9cdc1` | `spec_5_3_3_kalkyl_starts_on_any_sheet_it_saved` (vy-cli), `a_recalculation_goes_on_in_steps_of_bounded_work` (kalkyl) |
 | C | sparad data får aldrig stoppa sidan (alla sex) | – | | |
 | D | 0013:3 `kalkyl` långa texter och rasterbudgeten | – | | |
 | E | 0013:4 fall utan `storage`, förinställd lagring | – | | |
@@ -179,9 +179,78 @@ verklig tillväxt.
 | chat | 24 875 | 24 961 |
 | startsidan (`vy-dev new`) | 28 342 | 28 848 |
 
+## A – `skriv` på sin sparade text (0013:1)
+
+**Mätt före (efter 0010:1), dyraste frame, `skriv` startad på texten som sparat värde:**
+
+| Text (6 000 byte) | före | efter |
+| --- | --- | --- |
+| `[` × 6 000 | avbruten vid 64 M | 1,2 M |
+| `[a](` × 1 500; 5 999 × `[` och en `]`; `[` × 2 000 + `](` × 1 000 | avbrutna vid 64 M | under 2,5 M |
+| `[a](b)` × 1 000 (ett stycke med 1 000 länkar) | 14,6 M per frame, sedan avstängd | 3,0 M |
+| `[a](vy://x) ` × 500 | 7,3 M | 2,3 M |
+| `a\n\n` × 2 000 (2 000 stycken) | 9,6 M första, 11,0 M efter storleksbyte | 5,2 M |
+| `\n` × 6 000 | 6,3 M / 7,5 M | **5,56 M** (dyrast av alla) |
+| `W` × 6 000 (fynd a) | 49,3 M / avbruten (före 0010:1) | 1,6 M |
+
+**Tre rättningar.** (1) `md.rs`: `link_at` minns var nästa `]` och `)` finns (`Next`), så en
+genomgång ser varje byte en gång; övriga konstruktioner sökte bara till nästa markör och var redan
+linjära. (2) En länks text slogs upp med en sökning genom blockets löpningar för varje länk i varje
+frame (kvadratiskt i antal länkar i ett stycke); fragmentet bär nu sin löpning. (3) Över 2 000 byte
+text gör sidan ett tungt steg per frame: redigerarens radbrytning, tolkningen, layouten;
+förhandsvisningen visar sin förra layout tills den nya är klar, och en breddändring lägger ut den
+redan tolkade texten igen.
+
+**Vad som är kvar av kostnaden.** Den dyraste framen (5,56 M) är SDK:ts flerradsfält som bryter om
+6 001 tomma stycken efter ett storleksbyte: omkring 700 bränsle per stycke, varav 90 är
+`str::find` och 350 är en `Vec` per stycke. Inte kvadratiskt och under budgeten, men värt en
+omgång i SDK:t (en gemensam lista för alla styckens rader). Se *Öppet*.
+
+`budget_tests` kompilerar varje modul en gång och ger koden till varje senare laddning
+(`CompileCache::Host`): testet för `skriv` gick från 429 s till 20 s.
+
+## B – `kalkyl` på sitt sparade blad (0013:2)
+
+| Blad | före | efter (dyraste frame, 1024 × 720 / 1600 × 1000) |
+| --- | --- | --- |
+| 100 tal + 2 500 × `=SUMMA(A1:A100)` (45,6 KB) | `vy_init` avbruten vid 64 M | 3,15 M / 3,55 M, 45 frames |
+| 200 × `=SUMMA(A1:Z100)` (3,6 KB) | `vy_init` avbruten vid 64 M | 2,0 M / 2,1 M, 28 frames |
+| 2 600 × `=SUMMA(A1:Z100)` | gav upp ("för många beroenden") | 3,6 M / 4,0 M, 352 frames (**4,56 M** efter en ändrad cell: dyrast) |
+| kedja genom alla 2 600 celler | 8,1 M i en frame | 3,5 M / 4,0 M, 12 frames |
+| 1 260 formler à 200 byte (`=1+1+…`) | fälla i `vy_init` (minnet slut) | 2,9 M / 3,2 M, 104 frames |
+
+- **Passet.** `Sheet::step(budget)`: läs igenom nya formler → vandra beroendena (ordning, cirklar)
+  → räkna i ordning. Varje fas kan stanna mellan två celler; bara en formels egen uträkning är
+  odelad, och en formel får därför läsa högst 5 200 celler genom områden (annars `#FEL`).
+- **Enheter och bränsle** (mätt per fas som bränsle per frame minus ritningen, delat med stegets
+  enheter): genomläsning 48–77, vandring 39–67, uträkning 59–89 bränsle per enhet. Vikterna:
+  områdescell 1, formeltext 4 per byte, in i en formel 4, en uträkning 40 + text + celler.
+  `RECALC_STEP` = 20 000 enheter ≈ högst 1,8 M; med en formel som läser två blad sist 2,4 M.
+  Ritningen av ett fullt blad är 1,7–2,7 M.
+- **Minnet.** Formler hålls som text; vandringen har en markör per öppen formel (8 byte) i stället
+  för en lista över formelns beroenden (förr upp till 5 KB per nivå, 13 MB i värsta fall).
+- **`vy_init` går inte att mäta** (se *Öppet*): den läser bladet (`state_get`: värden debiterar
+  32 bränsle per byte, alltså 8,2 M för en full kvot på 256 KB) och lägger in källtexterna, utan
+  att tolka eller räkna något. Uppskattat högst 12–15 M mot den hårda gränsen 64 M.
+- **Allokatorn.** 1 260 etiketter som behövde växa under en omräkning kostade 9 000 bränsle
+  styck: SDK:ts allokator söker vid varje frigörelse genom de fria block som ligger före (listan är
+  adressordnad), och de nya blocken togs ur ett stort hål längst fram medan de gamla blev hål längre
+  bak. Rättat i sidan (etiketten får plats från början och skrivs om på plats). Se *Öppet*.
+
 ## Öppet
 
-- Händelsers bränsle går inte att läsa ur `vy-runtime` (bara `last_frame()`); testerna ser en
-  händelse först om den når den hårda gränsen och avbryts. En `last_event()` vore del B:s.
+- **Bränslet för `vy_init` och `vy_event` går inte att läsa ur `vy-runtime`** (bara
+  `last_frame()`); testerna ser ett sådant anrop först om det når den hårda gränsen (64 M) och
+  avbryts. "init ≤ 8 M" kan alltså inte hävdas av ett test i dag, och med `storage` kan det inte
+  heller hållas alltid: värden debiterar själv 8,2 M för att läsa 256 KB. En
+  `Runtime::last_call()` vore del B:s (vy-runtime).
+- **SDK:ts allokator** (`heap.rs`) är först-passar över en adressordnad lista: en frigörelse går
+  igenom alla fria block före sin adress. Många små frigörelser bakom ett stort hål blir
+  kvadratiskt (uppmätt i `kalkyl`, 9 000 bränsle per frigörelse vid 1 260 hål). Storleksklasser för
+  små block (prövat: ingen mätbar skillnad för `skriv`, avgörande för `kalkyl`) är en ändring i
+  varje moduls allokator och inte gjord här.
+- **Flerradsfältets omradning** kostar omkring 700 bränsle per stycke (4 096 radbrytningar ≈ 3 M,
+  `skriv` med 6 000 ≈ 5,5 M efter ett storleksbyte). Linjärt, men den dyraste enskilda framen som
+  återstår.
 - `studio`: `relayout` mäter varje post på nytt när loggens bredd ändras (högst 300 poster à högst
   60 KB). Inte samma mönster och inte uppmätt här.
