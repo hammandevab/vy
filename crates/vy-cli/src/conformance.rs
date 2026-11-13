@@ -1798,7 +1798,9 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
     /// SPEC-5.2.9 (granskning 0013:4): a case may preset what an earlier
     /// visit stored, as text or as bytes in hexadecimal, and the page
     /// starts on it; only a case that grants `storage` may, and only
-    /// what the manifest's quota holds (SPEC-9.3.1).
+    /// what the manifest's quota holds (SPEC-9.3.1). Every example page
+    /// that stores something has a case that starts on a stored value
+    /// and a case without `storage`, where its status says "sparas inte".
     #[test]
     fn spec_5_2_9_a_case_presets_stored_state() {
         let base = "[[case]]\nname = \"x\"\nmodule = \"block\"\nwidth = 640\nheight = 480\n";
@@ -1870,6 +1872,30 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         let r = run_case(&root(), &over, false);
         let problem = r.problem.unwrap_or_default();
         assert!(problem.contains("quota is 1024 (SPEC-9.3.1)"), "{problem}");
+
+        // In the suite: a stored value and a missing `storage` for each
+        // page that stores.
+        let cases = load_cases(&root()).unwrap();
+        for module in ["kanban", "kalkyl", "rita", "skriv", "block"] {
+            let of = |pick: &dyn Fn(&Case) -> bool| {
+                cases
+                    .iter()
+                    .filter(|c| c.module == module && pick(c))
+                    .count()
+            };
+            assert!(
+                of(&|c| !c.state.is_empty()) >= 1,
+                "{module}: a stored value"
+            );
+            let storage = vy_abi::cap::STORAGE;
+            assert!(
+                of(&|c| !c.shell && !c.capabilities.has(storage)) >= 1,
+                "{module}: a case without storage"
+            );
+        }
+        for r in suite().iter().filter(|r| r.name.ends_with("-unsaved")) {
+            assert!(r.ok(), "{}: {:?}", r.name, r.problem);
+        }
     }
 
     /// SPEC-10.4.2, SPEC-8.2.2: a page with input fields whose manifest does

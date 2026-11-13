@@ -1516,6 +1516,105 @@ events = [
   {kind = "pointer_up", x = 720, y = 194, after_frames = 1},
 ]
 
+# Sparad data och sidor utan lagring (granskning 0013:4). `state` är vad ett tidigare besök
+# sparade: sidan läser det i vy_init och visar det. Värdena är i sidornas egna lagringsformat
+# (`Board::encode`, `Sheet::encode`, `ink::encode`, texten, poängen som u32). Fallen utan `storage`
+# i `capabilities` kör sidan som i begränsat läge (SPEC-7.4.3): state_get nekas, sidan visar sitt
+# exempel och skriver "sparas inte" i sin statusrad.
+
+[[case]]
+name = "kanban-800x600@1-stored"                   # sex kort i tre kolumner, lästa ur lagringen
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+semantic = "kanban-stored"
+capabilities = ["ime", "storage"]
+state = [{key = "tavlan", hex = "01020b4cc3a4732073706563656e12536b72697620657474206d616e6966657374010c4279676720656e207369646103095075626c6963657261134dc3a4742076c3a4727374612066616c6c65740c5465737461206e6174697674"}]
+
+[[case]]
+name = "kanban-800x600@1-unsaved"                  # utan storage: exemplet och "sparas inte"
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+semantic = "kanban-unsaved"
+capabilities = ["ime"]
+
+[[case]]
+name = "kalkyl-800x600@1-stored"                   # ett sparat blad: formlerna räknas i framen efter, en lång text kapas vid sin cell, en annan breder ut sig
+module = "kalkyl"
+width = 800
+height = 600
+scale = 1
+semantic = "kalkyl-stored"
+capabilities = ["ime", "storage"]
+state = [{key = "kalkyl", hex = "0100000456617261010005416e74616c0200045072697303000553756d6d611a0007c38470706c656e1b000231321c0003342c351d00063d42322a433234001e50c3a4726f6e206672c3a56e2067c3a57264656e2076696420736ac3b66e35000138360004362c32353700063d42332a4333680030456e2072616420736f6d206272656465722075742073696720c3b676657220646520746f6d6d612063656c6c65726e61840006546f74616c7485000d3d53554d4d412844323a443329"}]
+
+[[case]]
+name = "kalkyl-800x600@1-unsaved"
+module = "kalkyl"
+width = 800
+height = 600
+scale = 1
+semantic = "kalkyl-unsaved"
+capabilities = ["ime"]
+
+[[case]]
+name = "rita-800x600@1-stored"                     # en våg, en ruta och en prick, lästa ur lagringen
+module = "rita"
+width = 800
+height = 600
+scale = 1
+semantic = "rita-stored"
+capabilities = ["storage"]
+state = [{key = "rita", hex = "010300051e00e0128032e0039407e003ae06e003f204e003ec02e00342e003ef01e0038904e003e705e003f506e0039d07e003e506e003cb05e003e103e003c301e00370e0039803e0039205e003c406e0039a07e0038a07e0039806e003ce04e003c202e00314e0039d02e003af04e0038306e0038107e0039b070e0500c025e012804b0000c03eff4a0000bf3e140100804b8032"}]
+
+[[case]]
+name = "rita-800x600@1-unsaved"
+module = "rita"
+width = 800
+height = 600
+scale = 1
+semantic = "rita-unsaved"
+
+[[case]]
+name = "skriv-800x600@1-stored"                    # värdet som text
+module = "skriv"
+width = 800
+height = 600
+scale = 1
+semantic = "skriv-stored"
+capabilities = ["ime", "storage"]
+state = [{key = "skriv", value = "En sparad anteckning med **fet** text, `kod` och en [länk](vy://exempel/skriv)."}]
+
+[[case]]
+name = "skriv-800x600@1-unsaved"
+module = "skriv"
+width = 800
+height = 600
+scale = 1
+semantic = "skriv-unsaved"
+capabilities = ["ime"]
+
+[[case]]
+name = "block-800x600@1-stored"                    # bästa poäng 12 345, läst ur lagringen
+module = "block"
+width = 800
+height = 600
+scale = 1
+semantic = "block-stored"
+capabilities = ["storage"]
+state = [{key = "block", hex = "39300000"}]
+
+[[case]]
+name = "block-800x600@1-unsaved"
+module = "block"
+width = 800
+height = 600
+scale = 1
+semantic = "block-unsaved"
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i

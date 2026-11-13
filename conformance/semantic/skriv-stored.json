@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 13, "w": 160, "h": 25, "text": "Anteckningar"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 16, "y": 52, "w": 0, "h": 0, "text": "Anteckningens text i Markdown"},
+    {"id": -1, "parent_id": 1, "role": 5, "role_name": "textbox", "x": 16, "y": 52, "w": 376, "h": 512, "text": "En sparad anteckning med **fet** text, `kod` och en [länk](vy://exempel/skriv)."},
+    {"id": 4, "parent_id": 1, "role": 16, "role_name": "region", "x": 408, "y": 52, "w": 376, "h": 512, "text": "Förhandsvisning"},
+    {"id": 5, "parent_id": 4, "role": 1, "role_name": "text", "x": 427, "y": 71, "w": 332, "h": 48, "text": "En sparad anteckning med fet text, kod och en länk."},
+    {"id": -100, "parent_id": 4, "role": 3, "role_name": "link", "x": 485.89, "y": 97, "w": 33.66, "h": 20, "text": "länk"},
+    {"id": 6, "parent_id": 1, "role": 1, "role_name": "text", "x": 16, "y": 573.875, "w": 118.61, "h": 16.25, "text": "10 ord · 79 tecken"}
+  ]
+}
