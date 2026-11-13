@@ -489,6 +489,7 @@ fn drive_case(root: &Path, case: &conformance::Case) -> Result<Driven> {
         resources: &resources,
         events: &case.events,
         fetch: &case.fetch,
+        state: &case.state,
         net_origins: &net_origins,
         storage_quota_bytes,
         // An empty in-memory clipboard (conformance/README.md): a copy

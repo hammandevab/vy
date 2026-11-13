@@ -22,7 +22,10 @@
 # högst N frames körs mellan föregående händelse och denna, så en sida kan nås mitt i en
 # animation. `fetch = [{url, status, body}]` är inspelade svar som fetch_begin besvaras med
 # när `net` beviljas (SPEC-5.2.7); manifestets net-origins gäller (SPEC-5.2.8) och dess
-# storage-kvot och memory_max tillämpas. Värden äger fokus (SPEC-10.3.1):
+# storage-kvot och memory_max tillämpas. `state = [{key, value}]` eller `[{key, hex}]` är vad ett
+# tidigare besök sparade (SPEC-5.2.9): värdet som text, eller som byte i hexadecimal; första
+# instansen startar med det i sin lagring. Bara i ett fall som beviljar `storage`, och högst vad
+# manifestets kvot rymmer (SPEC-9.3.1). Värden äger fokus (SPEC-10.3.1):
 # key_down 43 (Tab, med modifiers = 1 för Skift) når aldrig modulen utan flyttar värdens fokus
 # genom trädets fokuserbara noder och blir FOCUS-händelser; ett pointer_down flyttar fokus till
 # noden under pekaren först; ett scriptat focus sätter värdens fokus direkt. Modulen följer

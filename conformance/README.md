@@ -1,8 +1,11 @@
 # Konformanssvit
 
 - `cases.toml` – fallen: modul, logisk storlek, skala, antal frames, beviljade `capabilities`,
-  `resources`, inspelade svar (`fetch`) och `events` som spelas upp före sista framen (körs av
-  `vy-cli conformance`). Strängar skrivs `"…"` utan escapes eller som TOML-literalsträngar `'…'`,
+  `resources`, inspelade svar (`fetch`), sparade värden (`state`) och `events` som spelas upp före
+  sista framen (körs av `vy-cli conformance`). `state = [{key = "…", value = "…"}]` är vad ett
+  tidigare besök sparade (SPEC-5.2.9), värdet som text eller med `hex = "…"` som byte i
+  hexadecimal; bara i ett fall som beviljar `storage` och högst vad manifestets kvot rymmer.
+  Ett fall utan `storage` bland sina `capabilities` kör en sida som begär lagring utan den. Strängar skrivs `"…"` utan escapes eller som TOML-literalsträngar `'…'`,
   som får innehålla `"` (ett inspelat JSON-svar i `body`) men inte `'`. Händelserna är både indata (pekare, tangenter, text, rullning, fokus)
   och värdhändelser: `visibility`, `budget`, `resize`, `suspend`, `reinit` och `fetch_done`,
   var och en med valfritt `after_frames = N` som begränsar hur många frames som körs före den.
@@ -84,7 +87,9 @@ is in memory and starts empty: `clipboard_read` and `clipboard_write` serve it u
 and a `key_down` of C (6) or X (27) with Ctrl and without Alt, or with Meta, is a copy gesture: a
 `clipboard_write` while the module handles that event succeeds without the `clipboard` capability
 (SPEC-8.2.4). There is no navigation: `navigate` answers `E_DENIED`. Storage is in memory
-with the draft's quota; `reinit` starts a new instance with the old instance's storage.
+with the draft's quota and starts with the case's `state`: each `{key, value}` is a key and its
+value as the UTF-8 bytes of the text, each `{key, hex}` a key and its value as bytes written in
+hexadecimal. `reinit` starts a new instance with the old instance's storage.
 
 **Output of a case.**
 

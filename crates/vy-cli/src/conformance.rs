@@ -4,9 +4,9 @@
 //! scale and compares the pixels with `conformance/golden/<name>.png`. A case
 //! may also name a semantic tree under `conformance/semantic/`, grant
 //! capabilities to the headless host, declare canned responses for
-//! `fetch_begin`, and replay input and host events before the final frame,
-//! so focus, hover, scroll, paused, reflowed, persisted and delivered
-//! states are testable. Every frame a case runs is measured in fuel, and
+//! `fetch_begin`, preset what an earlier visit stored, and replay input
+//! and host events before the final frame, so focus, hover, scroll,
+//! paused, reflowed, persisted and delivered states are testable. Every frame a case runs is measured in fuel, and
 //! the rasterization of its image in work units: a case over the 8 ms
 //! budget of SPEC-5.3.3 fails unless it scripts the breach itself.
 
@@ -47,6 +47,10 @@ pub struct Case {
     pub events: Vec<Step>,
     /// Responses the headless host answers `fetch_begin` with (SPEC-5.2.7).
     pub fetch: Vec<CannedResponse>,
+    /// What an earlier visit stored (SPEC-5.2.9): keys and values the
+    /// first instance finds in its storage. For a case that grants
+    /// `storage`, and within the manifest's quota.
+    pub state: Vec<(Vec<u8>, Vec<u8>)>,
     /// Package resources as paths relative to the repository root;
     /// `resources[i]` becomes resource id `i + 1` (SPEC-4.5.1). The list
     /// must name the same files, in the same order, as the module's
@@ -332,6 +336,39 @@ fn parse_fetch(table: &str, line: usize) -> Result<CannedResponse> {
     Ok(CannedResponse { url, status, body })
 }
 
+/// One stored value from `{key, value}`, the value as text, or
+/// `{key, hex}`, the value as bytes in hexadecimal.
+fn parse_state(table: &str, line: usize) -> Result<(Vec<u8>, Vec<u8>)> {
+    let pairs = parse_table(table, line)?;
+    let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    for (k, _) in &pairs {
+        if !["key", "value", "hex"].contains(&k.as_str()) {
+            bail!("line {line}: state has no key {k:?}");
+        }
+    }
+    let key = get("key")
+        .ok_or_else(|| anyhow!("line {line}: state needs key"))?
+        .str("key", line)?;
+    if key.is_empty() || key.len() > vy_abi::limits::MAX_STATE_KEY_BYTES as usize {
+        bail!("line {line}: a state key is 1 to 256 bytes (SPEC-9.3.2)");
+    }
+    let value = match (get("value"), get("hex")) {
+        (Some(text), None) => text.str("value", line)?.as_bytes().to_vec(),
+        (None, Some(hex)) => {
+            let hex = hex.str("hex", line)?;
+            let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+            let byte = |pair: &[u8]| Some(digit(pair[0])? << 4 | digit(*pair.get(1)?)?);
+            hex.as_bytes()
+                .chunks(2)
+                .map(byte)
+                .collect::<Option<Vec<u8>>>()
+                .ok_or_else(|| anyhow!("line {line}: hex is pairs of hexadecimal digits"))?
+        }
+        _ => bail!("line {line}: state needs value or hex, one of them"),
+    };
+    Ok((key.as_bytes().to_vec(), value))
+}
+
 /// One step from its inline table: `kind` plus the arguments of that kind,
 /// and `after_frames` for any kind.
 fn parse_event(table: &str, line: usize) -> Result<Step> {
@@ -445,8 +482,8 @@ fn parse_event(table: &str, line: usize) -> Result<Step> {
 /// Parse the restricted TOML used by `cases.toml`: `[[case]]` tables holding
 /// `key = value` lines with quoted strings, numbers, booleans, arrays of
 /// strings (`capabilities`), arrays of strings or `{path, w, h}` tables
-/// (`resources`) and arrays of inline tables (`events` and `fetch`, which
-/// may span lines); `#` comments.
+/// (`resources`) and arrays of inline tables (`events`, `fetch` and
+/// `state`, which may span lines); `#` comments.
 ///
 /// This is deliberately not a TOML parser (CLAUDE.md: no dependency for what
 /// fits in 200 lines); anything outside the subset is an error.
@@ -464,6 +501,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
         events: Vec<Step>,
         resources: Vec<CaseResource>,
         fetch: Vec<CannedResponse>,
+        state: Vec<(Vec<u8>, Vec<u8>)>,
         shell: bool,
         address: Option<String>,
     }
@@ -475,9 +513,20 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             && (!d.events.is_empty()
                 || d.semantic.is_some()
                 || !d.fetch.is_empty()
+                || !d.state.is_empty()
                 || d.capabilities != Capabilities::default())
         {
-            bail!("case {name}: a shell case has no events, fetch, semantic tree or capabilities (the policy grants, SPEC-8.2.3)");
+            bail!("case {name}: a shell case has no events, fetch, state, semantic tree or capabilities (the policy grants, SPEC-8.2.3)");
+        }
+        // Without the capability the page cannot read what is stored, so
+        // a preset would say nothing.
+        if !d.state.is_empty() && !d.capabilities.has(vy_abi::cap::STORAGE) {
+            bail!("case {name}: state is for a case that grants `storage` (SPEC-5.2.9)");
+        }
+        for (i, (key, _)) in d.state.iter().enumerate() {
+            if d.state[i + 1..].iter().any(|(other, _)| other == key) {
+                bail!("case {name}: state has a key twice");
+            }
         }
         if d.address.is_some() && !d.shell {
             bail!("case {name}: address is for shell cases");
@@ -500,6 +549,7 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
             events: d.events,
             resources: d.resources,
             fetch: d.fetch,
+            state: d.state,
             shell: d.shell,
             address: d.address,
             name,
@@ -592,6 +642,12 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                 d.fetch = parse_array(value, line)?
                     .into_iter()
                     .map(|e| parse_fetch(e, line))
+                    .collect::<Result<_>>()?;
+            }
+            "state" => {
+                d.state = parse_array(value, line)?
+                    .into_iter()
+                    .map(|e| parse_state(e, line))
                     .collect::<Result<_>>()?;
             }
             other => bail!("line {line}: unknown key {other:?}"),
@@ -1030,6 +1086,15 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         .as_ref()
         .map(|s| u64::from(s.quota_kb) * 1024)
         .unwrap_or(vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES);
+    // What the case presets is what the page could have stored itself.
+    let stored: u64 = case
+        .state
+        .iter()
+        .map(|(key, value)| (key.len() + value.len()) as u64)
+        .sum();
+    if stored > storage_quota_bytes {
+        bail!("case presets {stored} bytes of state but the manifest's quota is {storage_quota_bytes} (SPEC-9.3.1)");
+    }
     let req = RenderRequest {
         wasm: &wasm,
         width: case.width,
@@ -1041,6 +1106,7 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         resources: &resources,
         events: &case.events,
         fetch: &case.fetch,
+        state: &case.state,
         net_origins: &net_origins,
         storage_quota_bytes,
         // An empty in-memory clipboard (conformance/README.md): a copy
@@ -1305,6 +1371,7 @@ events = [{kind = "text_input", text = "it's"}]   # a comment with ' and "
             capabilities: Capabilities::default(),
             events,
             fetch: Vec::new(),
+            state: Vec::new(),
             resources: Vec::new(),
             shell: false,
             address: None,
@@ -1726,6 +1793,83 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
         ] {
             assert!(parse_cases(&format!("{base}{bad}\n")).is_err(), "{bad}");
         }
+    }
+
+    /// SPEC-5.2.9 (granskning 0013:4): a case may preset what an earlier
+    /// visit stored, as text or as bytes in hexadecimal, and the page
+    /// starts on it; only a case that grants `storage` may, and only
+    /// what the manifest's quota holds (SPEC-9.3.1).
+    #[test]
+    fn spec_5_2_9_a_case_presets_stored_state() {
+        let base = "[[case]]\nname = \"x\"\nmodule = \"block\"\nwidth = 640\nheight = 480\n";
+        let granted = format!("{base}capabilities = [\"storage\"]\n");
+        let parsed = parse_cases(&format!(
+            "{granted}state = [\n  {{key = \"block\", hex = \"39300000\"}}, # 12 345\n  {{key = \"note\", value = \"å, #1\"}},\n]\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            parsed[0].state,
+            [
+                (b"block".to_vec(), vec![0x39, 0x30, 0, 0]),
+                (b"note".to_vec(), "å, #1".as_bytes().to_vec()),
+            ]
+        );
+        assert_eq!(
+            parse_cases(&format!("{granted}state = [{{key = \"k\", hex = \"\"}}]\n")).unwrap()[0]
+                .state,
+            [(b"k".to_vec(), Vec::new())],
+            "an empty value"
+        );
+        assert!(parse_cases(&granted).unwrap()[0].state.is_empty());
+        let long = "k".repeat(257);
+        for bad in [
+            "state = [{key = \"k\"}]".to_string(),
+            "state = [{value = \"v\"}]".into(),
+            "state = [{key = \"k\", value = \"v\", hex = \"00\"}]".into(),
+            "state = [{key = \"k\", hex = \"0\"}]".into(),
+            "state = [{key = \"k\", hex = \"0g\"}]".into(),
+            "state = [{key = \"k\", hex = 10}]".into(),
+            "state = [{key = \"k\", value = 1}]".into(),
+            "state = [{key = \"\", value = \"v\"}]".into(),
+            format!("state = [{{key = \"{long}\", value = \"v\"}}]"),
+            "state = [{key = \"k\", value = \"v\", quota = 1}]".into(),
+            "state = [{key = \"k\", value = \"a\"}, {key = \"k\", value = \"b\"}]".into(),
+            "state = {key = \"k\", value = \"v\"}".into(),
+        ] {
+            assert!(parse_cases(&format!("{granted}{bad}\n")).is_err(), "{bad}");
+        }
+        let preset = "state = [{key = \"k\", value = \"v\"}]\n";
+        let e = parse_cases(&format!("{base}{preset}")).unwrap_err();
+        assert!(e.to_string().contains("grants `storage`"), "{e}");
+        assert!(parse_cases(&format!("{base}shell = true\n{preset}")).is_err());
+
+        // The page starts on the value: `block` shows the stored best
+        // score, and without the capability it does not see it.
+        let wasm = fs::read(root().join("target/wasm/block.wasm")).unwrap();
+        let state = parsed[0].state.clone();
+        let texts = |capabilities: Capabilities| -> Vec<String> {
+            let req = RenderRequest {
+                capabilities,
+                state: &state,
+                ..RenderRequest::new(&wasm, 640, 480)
+            };
+            let out = render(&req).unwrap();
+            out.semantic.into_iter().map(|n| n.text).collect()
+        };
+        let with = texts(parsed[0].capabilities);
+        assert!(with.iter().any(|t| t.contains("12345")), "{with:?}");
+        assert!(!with.iter().any(|t| t.contains("sparas inte")));
+        let without = texts(Capabilities::default());
+        assert!(!without.iter().any(|t| t.contains("12345")));
+        assert!(without.iter().any(|t| t.contains("sparas inte")));
+
+        // More than the quota is not something the page stored: block's
+        // is 1 KB.
+        let mut over = parsed[0].clone();
+        over.state = vec![(b"block".to_vec(), vec![0; 1024])];
+        let r = run_case(&root(), &over, false);
+        let problem = r.problem.unwrap_or_default();
+        assert!(problem.contains("quota is 1024 (SPEC-9.3.1)"), "{problem}");
     }
 
     /// SPEC-10.4.2, SPEC-8.2.2: a page with input fields whose manifest does

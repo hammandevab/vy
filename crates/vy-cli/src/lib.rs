@@ -291,6 +291,10 @@ pub struct RenderRequest<'a> {
     pub events: &'a [Step],
     /// Responses the headless host serves for `fetch_begin` (SPEC-5.2.7).
     pub fetch: &'a [CannedResponse],
+    /// What the first instance finds in its storage, as keys and values
+    /// (SPEC-5.2.9): what an earlier visit left. The module reads it only
+    /// with the `storage` capability.
+    pub state: &'a [(Vec<u8>, Vec<u8>)],
     /// Origins the manifest lists under `net` (SPEC-5.2.8); empty skips the gate.
     pub net_origins: &'a [String],
     /// Storage quota in bytes (SPEC-9.3.1): the manifest's `quota_kb` × 1024.
@@ -318,6 +322,7 @@ impl<'a> RenderRequest<'a> {
             resources: &[],
             events: &[],
             fetch: &[],
+            state: &[],
             net_origins: &[],
             storage_quota_bytes: vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES,
             clipboard: None,
@@ -459,7 +464,7 @@ pub(crate) fn drive(req: &RenderRequest<'_>) -> Result<Driven> {
         Runtime::load(req.wasm, &hash, options).map_err(|e| anyhow!("{e}"))
     };
     let (mut width, mut height, mut scale) = (req.width, req.height, req.scale);
-    let mut rt = load(Storage::new())?;
+    let mut rt = load(req.state.iter().cloned().collect())?;
     rt.init(width, height, scale).map_err(|e| anyhow!("{e}"))?;
     let mut display_list = Vec::new();
     let mut frame_stats: Vec<FrameStats> = Vec::new();
