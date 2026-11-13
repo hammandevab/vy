@@ -11,9 +11,11 @@ use crate::dns::{DnsError, SystemResolver, TxtResolver};
 use crate::keys::{KeyStore, LogHead};
 use crate::net::{Net, NetClass, Refused, Rule};
 use crate::url::{cache_control, media_type, resolve, CacheControl, HttpUrl};
+use std::collections::HashSet;
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use ureq::config::Config;
 use vy_manifest::{
@@ -567,12 +569,50 @@ fn request_with(
 
 /// Fetches pages with a content-addressed cache, an HTTP cache for
 /// manifests and a per-origin key store.
+///
+/// One fetcher serves every thread that loads pages: fetches of different
+/// origins run side by side, so an origin whose server or DNS lookup hangs
+/// holds up no other origin's page. Fetches of the *same* origin take
+/// turns ([`Fetcher::fetch`], [`Fetcher::revalidate`]): the trust decision
+/// reads and writes that origin's pins, successors and log head, and two
+/// first visits at once must not both ask DNS and both pin (SPEC-7.4.5).
+/// The caches and the key store are each behind a lock held only around
+/// one read or write, never across a request.
 pub struct Fetcher {
     net: Net,
-    blobs: BlobCache,
-    http: HttpCache,
-    keys: KeyStore,
+    blobs: Mutex<BlobCache>,
+    http: Mutex<HttpCache>,
+    keys: Mutex<KeyStore>,
     resolver: Box<dyn TxtResolver>,
+    turns: Mutex<Turns>,
+    turn_over: Condvar,
+}
+
+/// Whose turn it is: the origins being fetched now, and how many fetches
+/// wait for one of them.
+#[derive(Default)]
+struct Turns {
+    busy: HashSet<String>,
+    waiting: usize,
+}
+
+/// An origin's turn, held for one fetch; dropping it lets the next in.
+struct Turn<'a> {
+    fetcher: &'a Fetcher,
+    origin: String,
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        lock(&self.fetcher.turns).busy.remove(&self.origin);
+        self.fetcher.turn_over.notify_all();
+    }
+}
+
+/// A lock whatever a panicking holder left: what these locks guard is
+/// whole after every statement that holds one.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Fetcher {
@@ -615,11 +655,44 @@ impl Fetcher {
         let io = |e: std::io::Error| Error::Io(e.to_string());
         Ok(Fetcher {
             net,
-            blobs: BlobCache::open(&options.cache_dir, options.cache_cap_bytes).map_err(io)?,
-            http: HttpCache::open(&options.cache_dir, options.http_cache_cap_bytes).map_err(io)?,
-            keys: KeyStore::open(&options.cache_dir).map_err(io)?,
+            blobs: Mutex::new(
+                BlobCache::open(&options.cache_dir, options.cache_cap_bytes).map_err(io)?,
+            ),
+            http: Mutex::new(
+                HttpCache::open(&options.cache_dir, options.http_cache_cap_bytes).map_err(io)?,
+            ),
+            keys: Mutex::new(KeyStore::open(&options.cache_dir).map_err(io)?),
             resolver,
+            turns: Mutex::new(Turns::default()),
+            turn_over: Condvar::new(),
         })
+    }
+
+    /// Wait for `origin`'s turn and take it: at most one fetch of an
+    /// origin runs at a time, any number of different origins.
+    fn turn(&self, origin: String) -> Turn<'_> {
+        let mut turns = lock(&self.turns);
+        if turns.busy.contains(&origin) {
+            turns.waiting += 1;
+            while turns.busy.contains(&origin) {
+                turns = self
+                    .turn_over
+                    .wait(turns)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            turns.waiting -= 1;
+        }
+        turns.busy.insert(origin.clone());
+        Turn {
+            fetcher: self,
+            origin,
+        }
+    }
+
+    /// Fetches waiting for their origin's turn right now. For tests and
+    /// diagnostics.
+    pub fn waiting(&self) -> usize {
+        lock(&self.turns).waiting
     }
 
     /// The agents' configuration for test agents built around another
@@ -629,14 +702,16 @@ impl Fetcher {
         Self::config(options)
     }
 
-    /// The content-addressed cache.
-    pub fn blobs(&self) -> &BlobCache {
-        &self.blobs
+    /// The content-addressed cache, locked while the guard lives: look
+    /// and let go, never across a fetch.
+    pub fn blobs(&self) -> MutexGuard<'_, BlobCache> {
+        lock(&self.blobs)
     }
 
-    /// The key store.
-    pub fn keys(&self) -> &KeyStore {
-        &self.keys
+    /// The key store, locked while the guard lives: look and let go,
+    /// never across a fetch.
+    pub fn keys(&self) -> MutexGuard<'_, KeyStore> {
+        lock(&self.keys)
     }
 
     /// One plain request on a page's behalf (`fetch_begin`, SPEC-5.2.7),
@@ -680,13 +755,17 @@ impl Fetcher {
     /// package the server answers with; two different answers mean the page
     /// changed. For development: the client's live reload of a localhost
     /// page (vy-shell devtools).
-    pub fn revalidate(&mut self, address: &Address) -> Result<Hash, Error> {
+    pub fn revalidate(&self, address: &Address) -> Result<Hash, Error> {
+        let _turn = self.turn(address.origin());
         let url = address.fetch_url();
         let reach = self.page_reach(address);
         let key = http_key(&url, reach.page);
-        if let Some(mut rec) = self.http.get(&key) {
-            rec.max_age = 0;
-            let _ = self.http.put(&key, &rec);
+        {
+            let mut http = lock(&self.http);
+            if let Some(mut rec) = http.get(&key) {
+                rec.max_age = 0;
+                let _ = http.put(&key, &rec);
+            }
         }
         let mut requests = 0;
         let resp = self.get_with_http_cache(&url, reach, &mut requests)?;
@@ -704,8 +783,10 @@ impl Fetcher {
         }
     }
 
-    /// Fetch a page.
-    pub fn fetch(&mut self, address: &Address) -> Result<Fetched, Error> {
+    /// Fetch a page. Waits for any other fetch of the same origin to end
+    /// first; fetches of other origins are not waited for.
+    pub fn fetch(&self, address: &Address) -> Result<Fetched, Error> {
+        let _turn = self.turn(address.origin());
         let mut requests = 0;
         let reach = self.page_reach(address);
         // Everything after the page's own URL: blobs, key file, log.
@@ -796,19 +877,18 @@ impl Fetcher {
         })
     }
 
-    fn store_blob(&mut self, hash: &Hash, bytes: &[u8]) -> Result<(), Error> {
-        if self.blobs.contains(hash) {
+    fn store_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), Error> {
+        let mut blobs = lock(&self.blobs);
+        if blobs.contains(hash) {
             return Ok(());
         }
-        self.blobs
-            .put(hash, bytes)
-            .map_err(|e| Error::Io(e.to_string()))
+        blobs.put(hash, bytes).map_err(|e| Error::Io(e.to_string()))
     }
 
     /// A module or resource by hash: from the cache, else fetched from
     /// its URL and verified (SPEC-7.3.1, SPEC-9.4.1).
     fn blob(
-        &mut self,
+        &self,
         hash: &Hash,
         size: u64,
         url: Option<&str>,
@@ -816,7 +896,7 @@ impl Fetcher {
         reach: Reach,
         requests: &mut u32,
     ) -> Result<Vec<u8>, Error> {
-        if let Some(bytes) = self.blobs.get(hash) {
+        if let Some(bytes) = lock(&self.blobs).get(hash) {
             return Ok(bytes);
         }
         let reference = match url {
@@ -842,7 +922,7 @@ impl Fetcher {
                 expected: *hash,
             });
         }
-        self.blobs
+        lock(&self.blobs)
             .put(hash, &resp.body)
             .map_err(|e| Error::Io(e.to_string()))?;
         Ok(resp.body)
@@ -852,14 +932,14 @@ impl Fetcher {
     /// without a request; a stale one is revalidated with `If-None-Match`.
     /// Records are kept per class of the page ([`http_key`]).
     fn get_with_http_cache(
-        &mut self,
+        &self,
         url: &str,
         reach: Reach,
         requests: &mut u32,
     ) -> Result<Response, Error> {
         let now = now_secs();
         let key = http_key(url, reach.page);
-        let cached = self.http.get(&key);
+        let cached = lock(&self.http).get(&key);
         if let Some(rec) = &cached {
             if rec.is_fresh(now) {
                 return Ok(Response {
@@ -886,7 +966,7 @@ impl Fetcher {
                 if resp.etag.is_some() {
                     rec.etag = resp.etag.clone();
                 }
-                let _ = self.http.put(&key, &rec);
+                let _ = lock(&self.http).put(&key, &rec);
                 return Ok(Response {
                     url: rec.url,
                     status: 200,
@@ -904,7 +984,7 @@ impl Fetcher {
             });
         }
         if resp.cache.no_store {
-            self.http.remove(&key);
+            lock(&self.http).remove(&key);
         } else {
             let rec = HttpRecord {
                 url: resp.url.clone(),
@@ -914,7 +994,7 @@ impl Fetcher {
                 media_type: resp.media_type.clone(),
                 body: resp.body.clone(),
             };
-            let _ = self.http.put(&key, &rec);
+            let _ = lock(&self.http).put(&key, &rec);
         }
         Ok(resp)
     }
@@ -1015,7 +1095,7 @@ impl Fetcher {
     /// the signature's verification under that key. Anything else is
     /// restricted mode, with the reason.
     fn trust(
-        &mut self,
+        &self,
         address: &Address,
         reach: Reach,
         manifest: &Manifest,
@@ -1025,20 +1105,33 @@ impl Fetcher {
             return Err(Restriction::Unsigned);
         };
         let origin = address.origin();
-        let key = match self.keys.pinned(&origin, &sig.key_id) {
+        // What the store says of this origin now. It stays so until this
+        // fetch changes it: the origin's turn is ours (`Fetcher::fetch`).
+        let (pinned, has_pins, is_successor) = {
+            let keys = lock(&self.keys);
+            (
+                keys.pinned(&origin, &sig.key_id),
+                keys.has_pins(&origin),
+                keys.is_successor(&origin, &sig.key_id),
+            )
+        };
+        let key = match pinned {
             Some(k) => k,
-            None if !self.keys.has_pins(&origin) => {
+            None if !has_pins => {
                 // First visit: pin what both sources publish (SPEC-7.4.5)
                 // and, when the origin serves a log, the log lists
                 // (SPEC-7.6.2).
                 let agreed = self.first_visit_keys(address, reach, requests)?;
                 let published = agreed.iter().any(|k| k.key_id() == sig.key_id);
                 let (logged, head) = self.logged_keys(address, reach, agreed, requests)?;
-                for k in &logged {
-                    let _ = self.keys.pin(&origin, *k);
-                }
-                if let (Some((count, head)), false) = (head, logged.is_empty()) {
-                    let _ = self.keys.set_log_head(&origin, count, head);
+                {
+                    let mut keys = lock(&self.keys);
+                    for k in &logged {
+                        let _ = keys.pin(&origin, *k);
+                    }
+                    if let (Some((count, head)), false) = (head, logged.is_empty()) {
+                        let _ = keys.set_log_head(&origin, count, head);
+                    }
                 }
                 let key_id = sig.key_id.clone();
                 match logged.into_iter().find(|k| k.key_id() == sig.key_id) {
@@ -1047,7 +1140,7 @@ impl Fetcher {
                     None => return Err(Restriction::KeyNotPublished { key_id }),
                 }
             }
-            None if self.keys.is_successor(&origin, &sig.key_id) => {
+            None if is_successor => {
                 // Rotation (SPEC-7.4.4): the announced key comes from the
                 // key file alone; DNS is not asked again.
                 let published = self
@@ -1072,9 +1165,10 @@ impl Fetcher {
                 if manifest.verify(&key).is_none() {
                     return Err(Restriction::BadSignature);
                 }
-                let _ = self.keys.promote(&origin, key);
+                let mut keys = lock(&self.keys);
+                let _ = keys.promote(&origin, key);
                 if let Some((count, head)) = head {
-                    let _ = self.keys.set_log_head(&origin, count, head);
+                    let _ = keys.set_log_head(&origin, count, head);
                 }
                 key
             }
@@ -1086,7 +1180,7 @@ impl Fetcher {
         };
         let trust = manifest.verify(&key).ok_or(Restriction::BadSignature)?;
         if let Some(next) = &manifest.next_key_id {
-            let _ = self.keys.announce_successor(&origin, next);
+            let _ = lock(&self.keys).announce_successor(&origin, next);
         }
         Ok(trust)
     }
@@ -1097,7 +1191,7 @@ impl Fetcher {
     /// alone. A missing record, a disagreement or a failed lookup is a
     /// restriction: nothing is pinned, the next visit asks again.
     fn first_visit_keys(
-        &mut self,
+        &self,
         address: &Address,
         reach: Reach,
         requests: &mut u32,
@@ -1136,14 +1230,14 @@ impl Fetcher {
     /// log that cannot be fetched, does not hold, or no longer starts with
     /// the entries seen before is a restriction.
     fn logged_keys(
-        &mut self,
+        &self,
         address: &Address,
         reach: Reach,
         candidates: Vec<PublicKey>,
         requests: &mut u32,
     ) -> Result<(Vec<PublicKey>, Option<LogHead>), Restriction> {
         let origin = address.origin();
-        let seen = self.keys.log_head(&origin);
+        let seen = lock(&self.keys).log_head(&origin);
         let log = match self.fetch_log(address, reach, requests) {
             Err(e) => return Err(Restriction::LogInvalid(e)),
             Ok(None) if seen.is_some() => return Err(Restriction::LogWithdrawn),

@@ -13,6 +13,7 @@ pub mod a11y;
 pub mod address;
 pub mod chrome;
 pub mod clipboard;
+pub mod code_cache;
 pub mod compose;
 pub mod devtools;
 pub mod external;
@@ -1068,6 +1069,7 @@ mod tests {
                 opener: Box::new(RecordingOpener::default()),
                 clipboard: Box::new(MemoryClipboard::new()),
                 waker: Waker::none(),
+                code_cache: None,
             },
             800.0,
             600.0,
@@ -1897,7 +1899,7 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("vy-page-class-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut fetcher = vy_proto::test_net::fetcher(
+        let fetcher = vy_proto::test_net::fetcher(
             vy_proto::Options::new(&dir),
             Box::new(Txt(format!("v=vy1; k={}", key.public()))),
             port,
@@ -1908,15 +1910,15 @@ mod tests {
             ],
         )
         .unwrap();
-        let load = |fetcher: &mut vy_proto::Fetcher, host: &str| {
+        let load = |fetcher: &vy_proto::Fetcher, host: &str| {
             let source = Source::parse(&format!("vy://{host}:{port}/")).unwrap();
             let page = crate::page::load(fetcher, &source).unwrap();
             assert!(page.trusted, "{host}: {:?}", page.restriction);
             page
         };
-        let lan = load(&mut fetcher, "lan.example");
+        let lan = load(&fetcher, "lan.example");
         assert_eq!(lan.net_class, NetClass::Private);
-        let public = load(&mut fetcher, "public.example");
+        let public = load(&fetcher, "public.example");
         assert_eq!(public.net_class, NetClass::Public);
 
         let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();

@@ -1094,8 +1094,12 @@ mod tests {
     /// runs (SPEC §13), and getting it on a compilation-cache hit takes 0 ms
     /// in whole milliseconds, for every reference module. `hello` stands
     /// in for the 300 KB module of the sentence for the cold half: the
-    /// largest reference module is 31 KB (see docs/notes/m4-perf.md). A
-    /// release-mode budget: a debug build only reports.
+    /// largest reference module is 64 KB (see docs/notes/m5-polish.md).
+    /// The hit is measured along the shell's path (SPEC-9.4.2): the main
+    /// process's lookup under its own key and the frame it sends, and a
+    /// locked-down tab process taking the module from that code
+    /// (`bench::cache_hit_times`). A release-mode budget: a debug build
+    /// only reports.
     #[test]
     fn spec_13_1_4_compile_time() {
         if cfg!(debug_assertions) {
@@ -1127,9 +1131,10 @@ mod tests {
                 continue;
             }
             let wasm = std::fs::read(&path).unwrap();
-            let hit = p95(crate::bench::cache_hit_times(&wasm, 100).unwrap());
+            let exe = crate::conformance::tab_executable().unwrap();
+            let hit = p95(crate::bench::cache_hit_times(&exe, &wasm, 100).unwrap());
             eprintln!(
-                "SPEC-13.1.4: {} from the cache in {hit:?} (P95)",
+                "SPEC-13.1.4: {} from the shell's cache in {hit:?} (P95)",
                 path.display()
             );
             assert_eq!(hit.as_millis(), 0, "{}: cache hit {hit:?}", path.display());

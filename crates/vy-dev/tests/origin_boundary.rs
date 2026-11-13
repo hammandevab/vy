@@ -85,7 +85,7 @@ fn pages_cannot_drive_the_dev_api() {
     // The client fetches it like any page: signed with the developer key,
     // pinned on first use, trusted. Its `net` to another origin is a
     // question (SPEC-8.2.3), never granted without one.
-    let mut fetcher = Fetcher::new(Options::new(tmp.join("cache"))).unwrap();
+    let fetcher = Fetcher::new(Options::new(tmp.join("cache"))).unwrap();
     let page = fetcher
         .fetch(&Address::parse(&format!("vy://localhost:{a}/grans-sida")).unwrap())
         .unwrap();

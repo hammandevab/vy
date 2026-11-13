@@ -43,6 +43,34 @@ struct Para {
     lines: Vec<(usize, usize)>,
 }
 
+/// A field's state and all of its logic, whatever its line mode: the one
+/// copy of the editing code a page carries, however many fields and
+/// whichever modes it has. The mode comes in as an argument from
+/// [`TextBox`], whose type knows it, so a page with one-line fields only
+/// still carries no wrapping code: every call says `false` and the
+/// compiler drops the other half.
+#[derive(Clone, Debug)]
+struct Field {
+    id: i32,
+    text: String,
+    caret: usize,
+    anchor: usize,
+    compose: String,
+    compose_caret: usize,
+    max_len: usize,
+    focused: bool,
+    dragging: bool,
+    hover: bool,
+    reveal: bool,
+    scroll_x: f32,
+    scroll_y: f32,
+    preferred_x: Option<f32>,
+    ime: Option<Rect>,
+    last_copy: Option<Result<(), VyError>>,
+    revision: u64,
+    wrap: Wrap,
+}
+
 /// A text field with a `textbox` node of a fixed id whose text is the
 /// value (at most 4 KB of it, SPEC-9.3.2).
 ///
@@ -77,25 +105,8 @@ struct Para {
 /// wrapping code.
 #[derive(Clone, Debug)]
 pub struct TextBox<L: Lines = OneLine> {
-    id: i32,
+    field: Field,
     lines: PhantomData<L>,
-    text: String,
-    caret: usize,
-    anchor: usize,
-    compose: String,
-    compose_caret: usize,
-    max_len: usize,
-    focused: bool,
-    dragging: bool,
-    hover: bool,
-    reveal: bool,
-    scroll_x: f32,
-    scroll_y: f32,
-    preferred_x: Option<f32>,
-    ime: Option<Rect>,
-    last_copy: Option<Result<(), VyError>>,
-    revision: u64,
-    wrap: Wrap,
 }
 
 /// The line mode of a [`TextBox`]: [`OneLine`] or [`Multiline`].
@@ -145,14 +156,119 @@ impl TextBox<Multiline> {
 impl<L: Lines> TextBox<L> {
     fn empty(id: i32) -> Self {
         Self {
-            id,
+            field: Field::empty(id, L::MAX_BYTES),
             lines: PhantomData,
+        }
+    }
+
+    /// The same field holding `text`, caret at its end.
+    pub fn with_text(mut self, text: &str) -> Self {
+        self.set_text(text);
+        self
+    }
+
+    /// The same field taking at most `max_len` bytes; longer input is cut
+    /// at a character boundary.
+    pub fn with_max_len(mut self, max_len: usize) -> Self {
+        self.field.max_len = max_len;
+        let t = String::from(self.field.text.as_str());
+        self.set_text(&t);
+        self
+    }
+
+    /// The node id `Event::Focus` names.
+    pub fn id(&self) -> NodeId {
+        NodeId(self.field.id)
+    }
+
+    /// The value.
+    pub fn text(&self) -> &str {
+        &self.field.text
+    }
+
+    /// True for a multi-line field.
+    pub fn is_multiline(&self) -> bool {
+        L::MULTI
+    }
+
+    /// Most bytes the field takes.
+    pub fn max_len(&self) -> usize {
+        self.field.max_len
+    }
+
+    /// Replace the value (cleaned and cut like typed text), caret at its
+    /// end, no selection.
+    pub fn set_text(&mut self, text: &str) {
+        self.field.set_text(text, L::MULTI);
+    }
+
+    /// True while the field has the host's focus.
+    pub fn focused(&self) -> bool {
+        self.field.focused
+    }
+
+    /// The caret as a byte offset into the value.
+    pub fn caret(&self) -> usize {
+        self.field.caret
+    }
+
+    /// The selected bytes; empty when nothing is selected.
+    pub fn selection(&self) -> Range<usize> {
+        self.field.selection()
+    }
+
+    /// The selected text.
+    pub fn selected_text(&self) -> &str {
+        &self.field.text[self.field.selection()]
+    }
+
+    /// Select `range` (clamped to character boundaries); the caret goes to
+    /// its end.
+    pub fn select(&mut self, range: Range<usize>) {
+        self.field.select(range);
+    }
+
+    /// Select the whole value, as Ctrl+A does.
+    pub fn select_all(&mut self) {
+        self.field.select_all();
+    }
+
+    /// The outcome of the last Ctrl+C or Ctrl+X: `Ok` when the selection
+    /// reached the clipboard, the host's refusal otherwise (a host without
+    /// a clipboard refuses), `None` before the first.
+    pub fn last_copy(&self) -> Option<Result<(), VyError>> {
+        self.field.last_copy
+    }
+
+    /// Handle an event for the field in `r`: `Changed` when the value
+    /// changed, `Activated` on Enter in a one-line field.
+    pub fn event(&mut self, ui: &mut Input<'_>, r: Rect, theme: &Theme) -> Response {
+        self.field.event(ui, r, theme, L::MULTI)
+    }
+
+    /// Draw the field in `r`, with `placeholder` while it is empty, and
+    /// register its node.
+    pub fn draw(
+        &mut self,
+        f: &mut Frame,
+        r: Rect,
+        theme: &Theme,
+        placeholder: &str,
+    ) -> Result<(), VyError> {
+        self.field.draw(f, r, theme, placeholder, L::MULTI)
+    }
+}
+
+impl Field {
+    fn empty(id: i32, max_len: usize) -> Self {
+        Self {
+            id,
             text: String::new(),
             caret: 0,
             anchor: 0,
             compose: String::new(),
             compose_caret: 0,
-            max_len: L::MAX_BYTES,
+            max_len,
             focused: false,
             dragging: false,
             hover: false,
@@ -167,90 +283,27 @@ impl<L: Lines> TextBox<L> {
         }
     }
 
-    /// The same field holding `text`, caret at its end.
-    pub fn with_text(mut self, text: &str) -> Self {
-        self.set_text(text);
-        self
-    }
-
-    /// The same field taking at most `max_len` bytes; longer input is cut
-    /// at a character boundary.
-    pub fn with_max_len(mut self, max_len: usize) -> Self {
-        self.max_len = max_len;
-        let t = String::from(self.text.as_str());
-        self.set_text(&t);
-        self
-    }
-
-    /// The node id `Event::Focus` names.
-    pub fn id(&self) -> NodeId {
-        NodeId(self.id)
-    }
-
-    /// The value.
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// True for a multi-line field.
-    pub fn is_multiline(&self) -> bool {
-        L::MULTI
-    }
-
-    /// Most bytes the field takes.
-    pub fn max_len(&self) -> usize {
-        self.max_len
-    }
-
-    /// Replace the value (cleaned and cut like typed text), caret at its
-    /// end, no selection.
-    pub fn set_text(&mut self, text: &str) {
+    fn set_text(&mut self, text: &str, multi: bool) {
         self.text.clear();
         self.caret = 0;
         self.anchor = 0;
         self.compose.clear();
-        self.insert(text);
+        self.insert(text, multi);
         self.edited();
     }
 
-    /// True while the field has the host's focus.
-    pub fn focused(&self) -> bool {
-        self.focused
-    }
-
-    /// The caret as a byte offset into the value.
-    pub fn caret(&self) -> usize {
-        self.caret
-    }
-
-    /// The selected bytes; empty when nothing is selected.
-    pub fn selection(&self) -> Range<usize> {
+    fn selection(&self) -> Range<usize> {
         self.anchor.min(self.caret)..self.anchor.max(self.caret)
     }
 
-    /// The selected text.
-    pub fn selected_text(&self) -> &str {
-        &self.text[self.selection()]
-    }
-
-    /// Select `range` (clamped to character boundaries); the caret goes to
-    /// its end.
-    pub fn select(&mut self, range: Range<usize>) {
+    fn select(&mut self, range: Range<usize>) {
         self.anchor = self.text.floor_char_boundary(range.start);
         self.caret = self.text.floor_char_boundary(range.end.max(range.start));
         self.reveal = true;
     }
 
-    /// Select the whole value, as Ctrl+A does.
-    pub fn select_all(&mut self) {
+    fn select_all(&mut self) {
         self.select(0..self.text.len());
-    }
-
-    /// The outcome of the last Ctrl+C or Ctrl+X: `Ok` when the selection
-    /// reached the clipboard, the host's refusal otherwise (a headless host
-    /// has no clipboard), `None` before the first.
-    pub fn last_copy(&self) -> Option<Result<(), VyError>> {
-        self.last_copy
     }
 
     // ---- editing --------------------------------------------------------
@@ -265,7 +318,7 @@ impl<L: Lines> TextBox<L> {
     /// `\r` are one line break, a line break becomes a space in a one-line
     /// field, other control characters are dropped, and what does not fit
     /// `max_len` is cut. False when nothing changed.
-    fn insert(&mut self, s: &str) -> bool {
+    fn insert(&mut self, s: &str, multi: bool) -> bool {
         let sel = self.selection();
         let room = self
             .max_len
@@ -275,7 +328,7 @@ impl<L: Lines> TextBox<L> {
         while let Some(c) = chars.next() {
             let c = match c {
                 '\r' if chars.peek() == Some(&'\n') => continue,
-                '\n' | '\r' if L::MULTI => '\n',
+                '\n' | '\r' if multi => '\n',
                 '\n' | '\r' | '\t' => ' ',
                 c if c.is_control() => continue,
                 c => c,
@@ -375,8 +428,8 @@ impl<L: Lines> TextBox<L> {
     }
 
     /// Where the first line's text starts.
-    fn origin(&self, r: Rect, theme: &Theme) -> (f32, f32) {
-        let y = if L::MULTI {
+    fn origin(r: Rect, theme: &Theme, multi: bool) -> (f32, f32) {
+        let y = if multi {
             r.y + Self::pad_y(theme)
         } else {
             r.y + (r.h - theme.line_h) / 2.0
@@ -388,7 +441,7 @@ impl<L: Lines> TextBox<L> {
         (r.w - 2.0 * PAD).max(1.0)
     }
 
-    fn view_h(&self, r: Rect, theme: &Theme) -> f32 {
+    fn view_h(r: Rect, theme: &Theme) -> f32 {
         (r.h - 2.0 * Self::pad_y(theme)).max(theme.line_h)
     }
 
@@ -396,14 +449,14 @@ impl<L: Lines> TextBox<L> {
         self.wrap.lines.len() as f32 * theme.line_h
     }
 
-    fn layout(&mut self, theme: &Theme, width: f32) -> Result<(), VyError> {
+    fn layout(&mut self, theme: &Theme, width: f32, multi: bool) -> Result<(), VyError> {
         let key = (self.revision, width.to_bits(), theme.text.0);
         if self.wrap.key == Some(key) {
             return Ok(());
         }
         self.wrap.key = None;
         self.wrap.lines.clear();
-        if !L::MULTI {
+        if !multi {
             self.wrap.lines.push((0, self.text.len()));
             self.wrap.key = Some(key);
             return Ok(());
@@ -491,23 +544,30 @@ impl<L: Lines> TextBox<L> {
         o
     }
 
-    fn offset_at(&mut self, x: f32, y: f32, r: Rect, theme: &Theme) -> usize {
-        if self.layout(theme, Self::text_w(r)).is_err() {
+    fn offset_at(&mut self, x: f32, y: f32, r: Rect, theme: &Theme, multi: bool) -> usize {
+        if self.layout(theme, Self::text_w(r), multi).is_err() {
             return self.caret;
         }
-        let (tx, ty) = self.origin(r, theme);
-        let k = if L::MULTI {
+        let (tx, ty) = Self::origin(r, theme, multi);
+        let k = if multi {
             let row = math::floor((y - ty + self.scroll_y) / theme.line_h);
             (row.max(0.0) as usize).min(self.wrap.lines.len().saturating_sub(1))
         } else {
             0
         };
-        let scroll_x = if L::MULTI { 0.0 } else { self.scroll_x };
+        let scroll_x = if multi { 0.0 } else { self.scroll_x };
         self.offset_in_line(theme, k, x - tx + scroll_x)
     }
 
-    fn vertical(&mut self, down: bool, extend: bool, r: Rect, theme: &Theme) -> Response {
-        if !L::MULTI || self.layout(theme, Self::text_w(r)).is_err() {
+    fn vertical(
+        &mut self,
+        down: bool,
+        extend: bool,
+        r: Rect,
+        theme: &Theme,
+        multi: bool,
+    ) -> Response {
+        if !multi || self.layout(theme, Self::text_w(r), multi).is_err() {
             return Response::Nothing;
         }
         let k = self.line_of(self.caret);
@@ -551,6 +611,7 @@ impl<L: Lines> TextBox<L> {
         m: Modifiers,
         r: Rect,
         theme: &Theme,
+        multi: bool,
     ) -> Response {
         let extend = m.shift();
         if m.shortcut() {
@@ -584,9 +645,9 @@ impl<L: Lines> TextBox<L> {
         ui.take();
         let sel = self.selection();
         match code {
-            key::ENTER if !L::MULTI => Response::Activated,
+            key::ENTER if !multi => Response::Activated,
             key::ENTER => {
-                if self.insert("\n") {
+                if self.insert("\n", multi) {
                     Response::Changed
                 } else {
                     Response::Nothing
@@ -596,10 +657,10 @@ impl<L: Lines> TextBox<L> {
             key::RIGHT if !extend && !sel.is_empty() => self.move_to(sel.end, false),
             key::LEFT => self.move_to(self.prev_char(self.caret), extend),
             key::RIGHT => self.move_to(self.next_char(self.caret), extend),
-            key::UP => self.vertical(false, extend, r, theme),
-            key::DOWN => self.vertical(true, extend, r, theme),
+            key::UP => self.vertical(false, extend, r, theme, multi),
+            key::DOWN => self.vertical(true, extend, r, theme, multi),
             key::HOME | key::END => {
-                let _ = self.layout(theme, Self::text_w(r));
+                let _ = self.layout(theme, Self::text_w(r), multi);
                 let k = self.line_of(self.caret);
                 let (s, line) = self.line_str(k);
                 let o = if code == key::HOME {
@@ -623,9 +684,7 @@ impl<L: Lines> TextBox<L> {
         }
     }
 
-    /// Handle an event for the field in `r`: `Changed` when the value
-    /// changed, `Activated` on Enter in a one-line field.
-    pub fn event(&mut self, ui: &mut Input<'_>, r: Rect, theme: &Theme) -> Response {
+    fn event(&mut self, ui: &mut Input<'_>, r: Rect, theme: &Theme, multi: bool) -> Response {
         let event = ui.event();
         if let Some(gained) = focus_of(&event, self.id) {
             return ui.respond(self.set_focused(gained, r));
@@ -646,7 +705,7 @@ impl<L: Lines> TextBox<L> {
                 }
                 ui.take();
                 self.compose.clear();
-                let o = self.offset_at(x, y, r, theme);
+                let o = self.offset_at(x, y, r, theme, multi);
                 self.dragging = true;
                 self.move_to(o, modifiers.shift());
                 Response::Redraw
@@ -661,7 +720,7 @@ impl<L: Lines> TextBox<L> {
                     return Response::Nothing;
                 }
                 ui.take();
-                let o = self.offset_at(x, y, r, theme);
+                let o = self.offset_at(x, y, r, theme, multi);
                 self.move_to(o, true)
             }
             Event::PointerUp { .. } if self.dragging => {
@@ -673,12 +732,12 @@ impl<L: Lines> TextBox<L> {
                 self.hover = false;
                 Response::Nothing
             }
-            Event::Scroll { dy, lines, .. } if L::MULTI && self.hover => {
-                if self.layout(theme, Self::text_w(r)).is_err() {
+            Event::Scroll { dy, lines, .. } if multi && self.hover => {
+                if self.layout(theme, Self::text_w(r), multi).is_err() {
                     return Response::Nothing;
                 }
                 let px = if lines { dy * theme.line_h } else { dy };
-                let max = (self.content_h(theme) - self.view_h(r, theme)).max(0.0);
+                let max = (self.content_h(theme) - Self::view_h(r, theme)).max(0.0);
                 let next = (self.scroll_y + px).clamp(0.0, max);
                 if next == self.scroll_y {
                     return Response::Nothing;
@@ -692,11 +751,11 @@ impl<L: Lines> TextBox<L> {
             }
             Event::KeyDown {
                 code, modifiers, ..
-            } if self.focused => self.key(ui, code, modifiers, r, theme),
+            } if self.focused => self.key(ui, code, modifiers, r, theme, multi),
             Event::TextInput { text } if self.focused => {
                 ui.take();
                 self.compose.clear();
-                if self.insert(text) {
+                if self.insert(text, multi) {
                     Response::Changed
                 } else {
                     Response::Nothing
@@ -720,17 +779,17 @@ impl<L: Lines> TextBox<L> {
 
     /// Scroll so the caret is in view after an edit or a caret move, and
     /// keep the scroll inside the content after a resize.
-    fn scroll_into_view(&mut self, r: Rect, theme: &Theme) {
+    fn scroll_into_view(&mut self, r: Rect, theme: &Theme, multi: bool) {
         let k = self.line_of(self.caret);
         let (s, line) = self.line_str(k);
-        if L::MULTI {
-            let max = (self.content_h(theme) - self.view_h(r, theme)).max(0.0);
+        if multi {
+            let max = (self.content_h(theme) - Self::view_h(r, theme)).max(0.0);
             if self.reveal {
                 let y = k as f32 * theme.line_h;
                 if y < self.scroll_y {
                     self.scroll_y = y;
-                } else if y + theme.line_h > self.scroll_y + self.view_h(r, theme) {
-                    self.scroll_y = y + theme.line_h - self.view_h(r, theme);
+                } else if y + theme.line_h > self.scroll_y + Self::view_h(r, theme) {
+                    self.scroll_y = y + theme.line_h - Self::view_h(r, theme);
                 }
             }
             self.scroll_y = self.scroll_y.clamp(0.0, max);
@@ -750,14 +809,13 @@ impl<L: Lines> TextBox<L> {
         self.reveal = false;
     }
 
-    /// Draw the field in `r`, with `placeholder` while it is empty, and
-    /// register its node.
-    pub fn draw(
+    fn draw(
         &mut self,
         f: &mut Frame,
         r: Rect,
         theme: &Theme,
         placeholder: &str,
+        multi: bool,
     ) -> Result<(), VyError> {
         let p = &theme.palette;
         let line = if self.focused { 2.0 } else { 1.0 };
@@ -770,10 +828,10 @@ impl<L: Lines> TextBox<L> {
                 self.ime = Some(r);
             }
         }
-        self.layout(theme, Self::text_w(r))?;
-        self.scroll_into_view(r, theme);
+        self.layout(theme, Self::text_w(r), multi)?;
+        self.scroll_into_view(r, theme, multi);
         let this = &*self;
-        f.clipped(inner, 0.0, |f| this.paint(f, r, theme, placeholder))?;
+        f.clipped(inner, 0.0, |f| this.paint(f, r, theme, placeholder, multi))?;
         let value = clip_str(&self.text, limits::MAX_SEM_TEXT_BYTES as usize);
         f.sem.node_with_id(self.id, Role::Textbox, r, value)?;
         Ok(())
@@ -785,10 +843,11 @@ impl<L: Lines> TextBox<L> {
         r: Rect,
         theme: &Theme,
         placeholder: &str,
+        multi: bool,
     ) -> Result<(), VyError> {
         let p = &theme.palette;
         let lh = theme.line_h;
-        let (tx, ty) = self.origin(r, theme);
+        let (tx, ty) = Self::origin(r, theme, multi);
         let caret_rect = |x: f32, y: f32| Rect::new(x, y + 1.0, 1.0, (lh - 2.0).max(1.0));
         if self.text.is_empty() && self.compose.is_empty() {
             if !placeholder.is_empty() {
@@ -799,11 +858,11 @@ impl<L: Lines> TextBox<L> {
             }
             return Ok(());
         }
-        let x0 = if L::MULTI { tx } else { tx - self.scroll_x };
+        let x0 = if multi { tx } else { tx - self.scroll_x };
         let n = self.wrap.lines.len();
-        let (first, last) = if L::MULTI {
+        let (first, last) = if multi {
             let first = math::floor(self.scroll_y / lh).max(0.0) as usize;
-            let last = math::ceil((self.scroll_y + self.view_h(r, theme)) / lh) as usize;
+            let last = math::ceil((self.scroll_y + Self::view_h(r, theme)) / lh) as usize;
             (first.min(n), last.min(n))
         } else {
             (0, n)
@@ -861,8 +920,8 @@ impl<L: Lines> TextBox<L> {
                 f.rect(caret_rect(x0 + xc, y), 0.0, p.ink)?;
             }
         }
-        if L::MULTI {
-            let view = self.view_h(r, theme);
+        if multi {
+            let view = Self::view_h(r, theme);
             let content = self.content_h(theme);
             if content > view {
                 let thumb = (view * view / content).max(16.0);

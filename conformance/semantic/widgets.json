@@ -53,6 +53,6 @@
     {"id": 42, "parent_id": 39, "role": 1, "role_name": "text", "x": 440, "y": 612.5, "w": 298, "h": 105, "text": "Innehållet läggs ut med rutans förskjutning avdragen, så träfftest och ritning använder samma rektanglar. Det som hamnar utanför klipps bort, men varje stycke registreras ändå som en textnod."},
     {"id": 43, "parent_id": 39, "role": 1, "role_name": "text", "x": 440, "y": 727.5, "w": 298, "h": 70, "text": "Listan ritar bara raderna i bild men registrerar alla 24 som listitem-noder. Upp och ned flyttar markeringen när listan är aktiv, och Enter öppnar raden."},
     {"id": 44, "parent_id": 39, "role": 1, "role_name": "text", "x": 440, "y": 807.5, "w": 298, "h": 70, "text": "Fokus ägs av värden: Tab går genom textfälten, kryssrutan, radioknapparna, slidern och knapparna i dokumentordning, och varje kontroll ritar sin egen fokusring."},
-    {"id": 45, "parent_id": 39, "role": 1, "role_name": "text", "x": 440, "y": 887.5, "w": 298, "h": 70, "text": "Ctrl+C i ett textfält kopierar markeringen under kopieringsgesten. Huvudlöst finns inget urklipp, så statusraden visar värdens svar."}
+    {"id": 45, "parent_id": 39, "role": 1, "role_name": "text", "x": 440, "y": 887.5, "w": 298, "h": 70, "text": "Ctrl+C i ett textfält kopierar markeringen under kopieringsgesten, och statusraden visar om det gick eller vad värden svarade."}
   ]
 }

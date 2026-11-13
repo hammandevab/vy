@@ -1,0 +1,340 @@
+# M5 – putsning före v0.3.0 (`m5/polish`)
+
+Byggagentens noteringar för grenen `m5/polish` (från `m5/integration` `bc22baa`). Fyra punkter i
+ordning: kompileringscachen i skalet (SPEC-13.1.4, granskning 0008:1), sidladdningar parallellt mellan
+flikar (granskning 0009:2), `widgets`-sidans hjälptext, och textfältets kodstorlek i SDK:t.
+Granskningssidan skrivs av en annan agent. Sessionen kan startas om: läget står här och i `git log`.
+
+## Läge
+
+| Punkt | Läge | Commits |
+| --- | --- | --- |
+| 1 Kompileringscachen i skalet | klar; release-mätningen står under *Slutmätningar* | `f46daac` (`spec:` SPEC-9.4.2), `1d8b7a2`, `2339f12` (noteringar) |
+| 2 Parallella sidladdningar | klar | `b362580` |
+| 3 `widgets`-hjälptexten | klar | `daf0fe1` (`golden:`) |
+| 4 Textfältets kod delad mellan radlägena | klar | `7d73fe7` |
+
+## Punkt 1 – kompileringscachen i skalet (SPEC-13.1.4, SPEC-9.4.2)
+
+**Före.** `tab.rs` satte `CompileCache::Off`: varje laddning kompilerade, och SPEC-13.1.4:s "0 ms vid
+kompileringscache-träff" gällde bara benchen (granskning 0008:1). `vy-runtime` hade en katalogbaserad
+cache (`ReadOnly`/`ReadWrite`, `precompile`) som ingen produktväg använde, och som hade krävt att
+flikprocessen läste filer (omöjligt efter låsningen, SPEC-9.1.3) eller att huvudprocessen
+deserialiserade.
+
+**Nu.** Flikprocessen rör aldrig filsystemet och huvudprocessen deserialiserar aldrig.
+
+- **Fliken (`vy-runtime`, `tab.rs`).** `CompileCache::Host { code }` ersätter de katalogbaserade
+  lägena: med kod från huvudprocessen deserialiseras modulen i stället för att kompileras; utan kod,
+  eller om koden inte går att deserialisera, kompileras den som förr och den serialiserade modulen
+  sparas i `Runtime` tills värden hämtar den (`Runtime::take_code`). `LoadStats::refused` säger att
+  erbjuden kod avvisades. Fliken svarar en gång per laddning, före `vy_init` (alltså innan någon av
+  sidans kod körts; en start-funktion vägras av ABI-kontrollen, SPEC-5.3.4), med
+  `ToShell::Code { cached, micros, code }` (tagg 79).
+- **Huvudprocessen (`vy_runtime::CodeStore`, `vy-shell/src/code_cache.rs`, `shell.rs`).** Före
+  `Load` slår skalet upp modulen (`CodeCache::offer`): nyckeln `CodeKey::of(wasm)` är SHA-256 över
+  formatets magi, motorns kompatibilitetshash (wasmtimes version och varje kompileringsinställning,
+  `Engine::precompile_compatibility_hash`) och SHA-256 av **de modulbyte huvudprocessen själv ska
+  skicka**. Träffen skickas i en egen ram precis före laddningen, `ToTab::CodeCache { code }` (tagg
+  15), som gäller exakt nästa meddelande. Nyckeln ligger kvar i huvudprocessen (`Tab::code`) tills
+  fliken svarat; svaret räknas en gång per laddning, bara medan laddningen är obesvarad och bara när
+  huvudprocessen slog på cachen för den laddningen. Koden sparas under den nyckeln, vad fliken än
+  säger: inget i svaret namnger nyckel, hash eller sökväg.
+- **Posten.** `<data>/cache/code/<hex>.code` (`paths::code_cache_dir`), innehåll `VYCODE01`, SHA-256
+  av koden, koden (`Module::serialize`). Katalogen skapas 0700 och används bara om den ägs av
+  användaren och varken grupp eller andra får skriva (`dir_is_private`, prövas vid varje läsning och
+  skrivning; annars är cachen av). Skrivs till en temporär fil och döps om; läses hel till minnet och
+  kontrolleras mot hashen; en trasig, avhuggen eller för stor fil tas bort vid uppslaget.
+- **Tak.** Högst 64 MB kod per modul och högst 256 byte kod per byte modul (`MAX_CODE_BYTES`,
+  `MAX_CODE_PER_MODULE_BYTE`); samma 64 MB är IPC-ramens tak åt båda håll. Katalogen rymmer 256 MB
+  (`COMPILE_CACHE_CAP_BYTES`); över det tas de poster bort som användes för längst sedan (en läsning
+  sätter filens tid, så ordningen är senast använd). Gamla `.tmp`-filer efter avbrutna skrivningar
+  städas efter tio minuter.
+- **När koden inte duger.** Avvisar fliken koden (`cached: false` fast kod erbjöds) tas posten bort
+  och ersätts med flikens nya kod. Dör flikprocessen medan den håller erbjuden kod, eller innan den
+  hunnit svara, tas posten bort och erbjuds inte igen.
+- **Utan cache.** Huvudlöst (`headless_shell`: `--screenshot`, konformansens skalfall, testerna),
+  `vy-cli render` och konformanssviten har `code_cache: None` respektive `CompileCache::Off`: allt
+  kompileras, inget sparas, inget läses. En inspelad flik får aldrig kod (skalet slår inte på cachen,
+  och skrivartråden släpper inte igenom en kodram till en inspelad flik), så en inspelning innehåller
+  ingen maskinkod; en uppspelning matas aldrig med en kodram ur sin fil (skrivartråden hoppar över
+  tagg 15), så en fil någon fått av en annan kan inte bära maskinkod in i fliken.
+- **Trådar.** Uppslaget (en hash och en filläsning) görs där det begärs, i `start_page`. Skrivning,
+  borttagning och den utrensning som följer en skrivning görs på cachens egen tråd, i ordning, så
+  UI-tråden aldrig väntar på disken för en skrivning. Samma tråd bygger wasmtime-motorn första gången
+  (nyckeln behöver motorns inställningar): huvudprocessen har alltså nu en wasmtime-`Engine`, men
+  kompilerar, deserialiserar och kör ingenting med den.
+
+### Hotbild – kompileringscachen i skalet
+
+- **Vad.** En ny lagringsyta i huvudprocessen (`<data>/cache/code`), två nya IPC-ramar (kod till
+  fliken före laddningen, flikens svar med kod), och deserialisering av sparad kod i flikprocessen.
+  `Module::deserialize` validerar inte maskinkoden: en post **är** nativ kod för den process som
+  deserialiserar den.
+- **Vem kan missbruka.** (1) En sida som tagit sig ut ur wasm-sandlådan i sin flikprocess och lämnar
+  förgiftad kod i sitt svar. (2) En sida som försöker få sin kod sparad för en annan modul eller en
+  annan origin. (3) En fil utifrån: en inspelning (`.vyrec`) med en kodram i. (4) Ett annat konto
+  eller program som skriver i cachekatalogen. (5) En flik som skickar för mycket, för ofta eller vid
+  fel tillfälle.
+- **Hur begränsas det.**
+  - *Nyckeln är huvudprocessens.* Den räknas ur de modulbyte huvudprocessen själv skickar fliken och
+    bärs i huvudprocessen från erbjudandet till svaret. En post för modul X kan därför bara komma
+    från en flik som laddades med X och bara sparas under X:s nyckel; den lämnas bara till en flik
+    som laddas med exakt samma byte. En komprometterad flik kan förgifta **sin egen moduls** post,
+    aldrig en annan moduls eller en annan origins sida med andra byte.
+  - *Koden körs bara i en sandlådad flik.* Huvudprocessen håller byte och deserialiserar aldrig.
+    Fliken som kör posten har samma OS-sandlåda som alla flikar (SPEC-9.1.3).
+  - *En gång, före sidans kod.* Svaret räknas en gång per laddning, bara före `Loaded`, bara när
+    cachen är på för laddningen; allt annat loggas och ignoreras. Ett påstått "träff" utan erbjuden
+    kod ignoreras.
+  - *Tak.* 64 MB per ram och post, 256 × modulens storlek, 256 MB i katalogen.
+  - *Filer utifrån.* Kodramar släpps aldrig igenom till en uppspelande flik och skrivs aldrig i en
+    inspelning.
+  - *Katalogen.* Ägarkontroll och läge vid varje läsning och skrivning; atomär skrivning; hash över
+    koden fångar trasiga filer (inte den som kan skriva katalogen).
+- **Kvarstående risk, rakt sagt.** (a) *Beständighet för den modulen.* En sida som en gång brutit
+  sig ut ur wasmtime i sin flik kan lämna kod som körs nativt, utan wasm-sandlådan, varje gång
+  samma modulbyte laddas igen, också efter omstart, tills posten tas bort eller modulen ändras.
+  Koden körs fortfarande bara i en sandlådad flikprocess och bara för den modulen, så den når inte
+  mer än utbrytningen redan nådde, men den överlever fliken. (b) *Windows standardsandlåda* hindrar
+  inte läsning av filer eller nätverk (spec-fråga 62), så där når sådan kod mer än på Linux och
+  macOS. (c) *Samma modul på flera origins.* Nyckeln är modulens byte, inte originen: serverar två
+  sajter exakt samma modul delar de post. Det som hindrar att en sajt förgiftar posten för en annan
+  är när svaret räknas: varje laddning får en ny process, och det enda svaret tas emot innan
+  `vy_init`, alltså när processen bara hunnit läsa huvudprocessens ramar, kontrollera hash och ABI
+  och kompilera just de modulbyten. Resurser (PNG) avkodas först vid första `dl_image`, och en
+  process som komprometteras senare, av sidans kod eller av en resurs, får inget svar till räknat.
+  Kvar är en utbrytning genom själva kompileringen av modulen, och den som har en sådan modul kan
+  servera den var som helst. (d) *Lokal manipulation* av katalogen av samma användare
+  ligger utanför modellen. (e) Huvudprocessen har nu en wasmtime-`Engine` (signalhanterare
+  installeras processvitt), utan moduler.
+- **Så rensar användaren cachen.** Ta bort katalogen `cache/code` under klientens katalog
+  (`~/.config/vy/cache/code`, `~/Library/Application Support/vy/cache/code`,
+  `%APPDATA%\vy\cache\code`, eller under `VY_DATA_DIR`); den skapas igen vid nästa start. Det finns
+  ingen knapp för det än (se *Öppet*).
+- **Test som bevisar begränsningen.** Se tabellen nedan.
+
+### Tester (punkt 1)
+
+| Test | Var | Visar |
+| --- | --- | --- |
+| `spec_13_1_4_a_second_load_does_not_compile` | vy-shell `code_cache.rs` | riktiga flikprocesser: första laddningen kompilerar och posten sparas under modulens nyckel; ny process, omladdning och omstartad klient tar modulen ur cachen (flikens rapport före sidan körs), samma display list; processerna rapporterar hel sandlåda och sonden kan fortfarande inte skriva en fil; utan cache sägs och sparas inget |
+| `spec_9_4_2_code_is_kept_under_the_main_process_key` | vy-shell `code_cache.rs` | en flik laddad med `hello` lämnar `text`s kod: den sparas under `hello`s nyckel, `text` får ingen post; andra svaret, svar efter `Loaded`, "träff" utan erbjudande, kod över taket och svar utan påslagen cache ändrar inget |
+| `spec_13_1_4_unusable_code_is_dropped_and_compiled` | vy-shell `code_cache.rs` | vänd byte och halv fil: tas bort vid uppslaget, kompileras, sparas på nytt; hel fil som inte är en modul: erbjuds, avvisas, ersätts; avvisad utan ersättning: borta; flikprocess som dör med erbjuden kod: posten borta |
+| `spec_9_4_2_no_cache_in_a_directory_others_may_write` | vy-shell `code_cache.rs` | 0777: ingen cache; öppnad privat och sedan 0777: varken läst eller skriven |
+| `spec_9_4_2_recordings_hold_no_code` | vy-shell `code_cache.rs` | inspelad flik kompilerar själv fast cachen har modulen, filen saknar kodramar; en inspelning med en kodram före laddningen spelas upp som om ramen inte fanns |
+| `spec_13_1_4_compile_cache_hit_skips_compilation` | vy-runtime | `Host` utan kod kompilerar och lämnar koden; med koden: träff, samma frames; `Off` lämnar inget; lägen 0700/0600 |
+| `spec_9_4_2_code_store_keeps_bytes_under_module_keys` | vy-runtime | nyckeln ur modulens byte; skräp och halv kod avvisas och kompileras; trasiga filer tas bort; taken; katalog som andra får skriva |
+| `spec_13_1_4_code_store_evicts_least_recently_used` | vy-runtime | taket hålls, minst nyligen använd först, läsning räknas som användning, gamla `.tmp` städas |
+| `spec_11_2_1_messages_round_trip`, `spec_11_2_2_bad_frames_are_errors`, `spec_9_3_2_main_process_holds_tab_messages_to_the_caps` | vy-shell `ipc.rs` | 15 `ToTab`- och 16 `ToShell`-varianter; en träff bär ingen kod; 64 MB-taket åt båda håll |
+| `fuzz_ipc_corpus_has_the_code_cache` | vy-shell `tests/fuzz_regressions.rs` | fyra nya frön i `fuzz/corpus/ipc/`, mutationer panikar inte |
+| `spec_13_1_4_compile_time` | vy-cli | träffhalvan mäter skalets väg i release (`bench::cache_hit_times`) |
+
+### Storlek efter punkt 1
+
+`vy-shell` i release (Linux x86_64, strippad, receptet ur `tools/build_release.sh` med
+`repro_env.sh`, byggd ur en ögonblicksbild av `2339f12`): **24 572 200 byte** (SHA-256
+`9b9e6c89…abfa0e83`), 47 888 mer än `bc22baa` (24 524 312). Marginal mot 25 000 000: 427 800 byte
+(1,7 %). Träffhalvan av `spec_13_1_4_compile_time` i release mättes sist, tillsammans med
+slutstorleken (se *Slutmätningar*).
+
+### Mutationskontroller (punkt 1)
+
+Tre skydd stängdes av ett i taget i en provbyggnad och testerna föll som de ska: uppspelningens
+filter för kodramar (`spec_9_4_2_recordings_hold_no_code`), borttagningen av posten när
+flikprocessen dör (`spec_13_1_4_unusable_code_is_dropped_and_compiled`) och villkoret att svaret
+bara räknas medan laddningen är obesvarad (`spec_9_4_2_code_is_kept_under_the_main_process_key`).
+
+## Punkt 2 – sidladdningar parallellt mellan origins (SPEC-7.4.5, granskning 0009:2)
+
+**Före.** En laddartråd ägde den enda `Fetcher`. Sidladdningar och live-omladdningens kontroller
+kördes i tur och ordning, så en origins hängande DNS-uppslag (upp till 6 s) eller långsamma server
+höll varje annan fliks sida.
+
+**Nu.**
+
+- **`vy_proto::Fetcher` delas mellan trådar.** `fetch` och `revalidate` tar `&self`. Blobcachen,
+  HTTP-cachen och nyckelförrådet ligger bakom var sitt lås som hålls runt en läsning eller skrivning
+  och aldrig över en nätverksförfrågan. Hämtningar av **samma origin turas om** (`Fetcher::turn`:
+  en mängd upptagna origins och en villkorsvariabel): hela hämtningen med sitt förtroendebeslut –
+  pinnar, efterträdare, logghuvud – görs av en hämtning i taget per origin, så två samtidiga första
+  besök ger ett DNS-uppslag, en hämtning av nyckelfilen och en pin; den andra väntar och finner
+  origin pinnad. Hämtningar av olika origins väntar inte på varandra. `Fetcher::waiting()` säger hur
+  många som väntar på sin tur (test och felsökning). `blobs()` och `keys()` ger ett lås i stället
+  för en referens: titta och släpp, aldrig över en hämtning.
+- **Skalets laddare är en pool** (`page.rs`): `LOADER_WORKERS` = 4 trådar över en gemensam kö. En
+  arbetare tar det äldsta jobbet vars origin ingen annan arbetare håller på med; jobb för samma
+  origin körs alltså ett i taget i den ordning de begärdes och **tar aldrig en andra arbetare**
+  (annars kunde fyra flikar mot en hängande origin ta hela poolen), jobb för olika origins körs sida
+  vid sida. En lokal fil har ingen origin och väntar aldrig. När skalet stängs släpps det som
+  väntar i kön; arbetarna slutar när deras pågående jobb är klart. Sidornas egna anrop går som förr
+  på en tråd per flik.
+- **Gräns.** Fyra olika origins som alla hänger samtidigt tar ändå hela poolen tills deras
+  tidsgränser löpt ut (DNS 6 s, HTTP 30 s). Poolen är avsiktligt liten och fast.
+
+**Tester (hållna svar, inga tider).**
+
+| Test | Var | Visar |
+| --- | --- | --- |
+| `spec_7_4_5_first_visits_at_once_pin_once` | vy-proto | första besöket hålls i sitt DNS-uppslag; ett andra besök av samma origin väntar på sin tur (`waiting() == 1`) utan eget uppslag; en annan origin hämtas, betros och pinnas under tiden; efter släppet: båda betrodda, ett uppslag, en nyckelfil, en pin |
+| `spec_7_4_5_page_loads_do_not_wait_for_other_origins` | vy-shell `page.rs` | origin A:s server håller sin sida, fem sidor till för A köar (fler än arbetarna); origin B:s sida och live-kontroll besvaras ändå; efter släppet kommer A:s sex sidor i begärd ordning |
+
+Mutationskontroll: utan turordningen gör det andra besöket ett eget DNS-uppslag och vy-proto-testet
+faller; utan köns origin-regel tar A:s jobb alla arbetare och skaltestet faller (B hålls).
+Befintliga `spec_5_2_7_requests_do_not_wait_for_other_tabs` är oförändrat grönt.
+
+## Punkt 3 – `widgets`-sidans hjälptext
+
+Sista stycket i rullrutan sade "Huvudlöst finns inget urklipp, så statusraden visar värdens svar".
+Konformansens värd har sedan `8b15ef0` ett minnesurklipp och kopierar, medan `vy-cli render` saknar
+ett och nekar; texten var alltså sann i en värd av tre. Nu: "Ctrl+C i ett textfält kopierar
+markeringen under kopieringsgesten, och statusraden visar om det gick eller vad värden svarade."
+Modulens dokumentation säger samma sak. Stycket har samma rektangel som förr (298 × 70, lika många
+rader), så bara textnoden i de tre träden `widgets`, `widgets-typed` och `widgets-list` ändras.
+**Ingen guldbild ändrades**, inte heller `widgets`-fallens: stycket ligger under fönstret i alla
+fem fall, och `conformance --update` skrev de 64 bilderna byte för byte lika. Modulen är 8 byte
+mindre (64 482 → 64 474).
+
+## Punkt 4 – textfältets kod i en kopia (SPEC-13.1.4)
+
+**Före.** `TextBox<L>` höll tillståndet och all logik i generiska metoder; `TextBox` och
+`TextBox<Multiline>` blev två uppsättningar funktioner. En sida med båda radlägena bar två kopior
+av redigering, markör, markering, träfftest och ritning (m5/sdk: galleriet 55 → 64 KB).
+
+**Nu.** Tillståndet och logiken ligger i en privat, icke-generisk `Field`. `TextBox<L>` är
+`Field` plus `PhantomData<L>`, och dess publika metoder skickar `L::MULTI` som ett argument
+(`multi: bool`) till `Field`s metoder. På en sida med bara enradsfält är argumentet samma konstant
+vid varje anrop, så LLVM viker det (IPSCCP) och radbrytningen, upp/ned-förflyttningen, hjulet och
+rullningslisten faller bort som förr; på en sida med båda lägena finns en kopia med körtidsgrenar.
+Publikt API är oförändrat (`TextBox`, `TextBox<Multiline>`, `Lines`, `OneLine`, `Multiline`, alla
+metoder med samma signaturer). Kontrollerat per funktion i en ostrippad `form`: ingen
+flerradsfunktion (`wrap_paragraph`, `fit_prefix`, `vertical`s kropp) finns kvar, och skillnaden mot
+förr är att LLVM inlinar några hjälpfunktioner annorlunda (`text_caret` är t.ex. en egen funktion
+nu).
+
+**Beteende.** Varje guldbild och varje semantiskt träd är byte för byte detsamma: konformans
+64/64 à 0,000 % utan `--update`, `git status` rent under `conformance/`. vy-sdk:s 33 enhetstester
+och 5 doctester är gröna. Enda ändringen i testerna: nio åtkomster av privata fält i
+`textbox_tests.rs` (`tb.wrap.lines`, `tb.scroll_y`) går nu via `tb.field`; inget påstående är
+ändrat. Dokumentationen av `last_copy` säger "a host without a clipboard refuses" i stället för
+"a headless host has no clipboard" (punkt 3:s sak, i den fil som ändå skrevs om).
+
+### Modulstorlekar (byte)
+
+`tools/build_modules.sh` (det reproducerbara receptet) för modulerna; startsidan och guidens sida
+ur `target/vy-dev-tests` efter `scaffold_builds`-testerna.
+
+| Modul | före (`bc22baa`) | efter punkt 3 | efter punkt 4 | Ändring punkt 4 |
+| --- | --- | --- | --- | --- |
+| widgets (båda radlägena) | 64 482 | 64 474 | **55 493** | −8 981 (−13,9 %) |
+| form (enradsfält) | 30 547 | 30 547 | 30 627 | +80 (+0,3 %) |
+| studio (ingen `ui::TextBox`) | 61 123 | 61 123 | 61 180 | +57 (+0,1 %) |
+| startsidan (`vy-dev new`, enradsfält) | 28 189 | 28 189 | 28 342 | +153 (+0,5 %) |
+| guidens sida (Att göra, enradsfält) | 33 291 | 33 291 | 33 557 | +266 (+0,8 %) |
+| övriga tio | – | – | oförändrade | 0 |
+
+De små ökningarna är inte kvarbliven flerradskod utan andra inliningbeslut och en annan
+funktionsordning när koden kompileras i `vy-sdk` i stället för i sidans crate (Studio använder inte
+textfältet alls och flyttar sig ändå 57 byte). Ett försök att hålla läget konstant ända in i
+`paint` med två stängningar ändrade inget för `form` och gjorde `widgets` 218 byte större; det är
+inte kvar.
+
+## Slutmätningar (release, `624ff27`)
+
+Byggt ur en ögonblicksbild av commiten (`git archive`) i den egna byggkatalogen med releasens recept
+(`tools/repro_env.sh`, `cargo build --release --locked --target x86_64-unknown-linux-gnu`), utan
+den ospårade `.cargo/config.toml`. Maskinen delades med en annan agent (last 1,0–1,9).
+
+| Mått | Värde |
+| --- | --- |
+| `vy-shell` (strippad, standardfunktionerna) | **24 591 912 byte**, SHA-256 `fcbce1fd…ac27e4f62` |
+| ökning mot `bc22baa` (24 524 312) | +67 600 (punkt 1: +47 888, punkt 2: +19 712) |
+| marginal mot 25 000 000 (SPEC-12.3.1) | **408 088 byte (1,6 %)**; `spec_12_3_1_size_budget` grönt i release |
+| `vy-cli` | 20 191 904 byte |
+| `spec_13_1_4_compile_time` (release) | grönt: `hello` kallt P95 17,5 ms (≤ 60); träff längs skalets väg P95 0,25–0,57 ms för alla 13 moduler (0 ms i hela millisekunder; `widgets` 0,57, `studio` 0,52, `hello` 0,25) |
+| `vy-cli bench --only compile --runs 30` | träff P50 0,11–0,48 ms, P95 0,16–0,59 ms; kallt över 60 ms i P95 för `widgets` (118), `studio` (107), `form` (64), `dashboard` (62) vid den här lasten |
+| A/B kall kompilering, `widgets` före/efter punkt 4 (3 × 40 körningar) | P50 104–114 → 88–92 ms (median 108 → 90, −17 %); P95 135–152 → 112–126 ms |
+| A/B kall kompilering, `form` | P50 53–58 → 54–57 ms: oförändrat inom bruset |
+
+Träffmätningen är huvudprocessens uppslag (nyckeln ur modulens byte, läsning, hashkontroll) och
+kodning av ramen, plus den tid en riktig, låst flikprocess rapporterar för att ta modulen ur
+koden. Rörets kopiering av koden mellan processerna (0,1–0,5 MB) mäts inte för sig.
+
+Kall kompilering av de största modulerna ligger kvar över 60 ms på den här maskinen (SPEC-13.1.4
+talar om 300 KB); det är cachen som gör återbesöken gratis, och punkt 4 som gör `widgets` 17 %
+snabbare kall.
+
+## Grindar på HEAD
+
+Från arbetskopians rot, i den egna byggkatalogen med `CARGO_INCREMENTAL=0`, efter varje kodcommit
+(dokumentcommits: fmt och spec_trace):
+
+| Grind | Utfall |
+| --- | --- |
+| `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` | rena |
+| `tools/build_modules.sh` + `check-abi target/wasm/hello.wasm` + `tools/test_modules.sh` | 13 moduler, ABI 1.0 OK |
+| `cargo test --workspace` | **412 gröna, 0 röda, 2 ignorerade** (`spec_13_2_1_raster_budget`, `spec_13_1_1_cold_start`); `bc22baa` hade 403 / 2 |
+| `python3 tools/spec_trace.py` | 141/141 (SPEC-9.4.2 ny) |
+| `vy-cli conformance` | **64/64 à 0,000 %**; enda ändrade filer under `conformance/` är de tre `widgets`-träden i `daf0fe1` |
+| `check-cross --workspace --all-targets` | Windows och macOS rena (efter punkt 1 och efter punkt 4) |
+| GL-testet (`xvfb-run … VY_GL_REQUIRED=1 cargo test -p vy-shell --test gl`) | grönt med llvmpipe på HEAD |
+| ABI 1.0 | `crates/vy-abi` och `docs/ABI-1.0.md` orörda; `SPEC.md` har en ny rad, SPEC-9.4.2, inget i §5 eller bilaga A och C |
+| Nya beroenden | inga (`Cargo.lock` och varje `Cargo.toml` orörda) |
+
+Nya tester mot `bc22baa`: +9 (vy-runtime +1: tre cachetester ersätter två; vy-shell +5 i
+`code_cache.rs`, +1 i `page.rs`, +1 i `tests/fuzz_regressions.rs`; vy-proto +1).
+
+## Beslut
+
+- **De katalogbaserade lägena och `precompile` är borttagna ur `vy-runtime`**, inte bara oanvända:
+  `precompile` deserialiserade en befintlig post i huvudprocessen, vilket är precis det den nya
+  modellen förbjuder. Ett sätt (princip 1).
+- **Koden går i en egen ram före `Load`, inte i `Load`.** `Load`-ramens kodning är oförändrad, så
+  äldre inspelningar spelas upp som förr, och allt som har med cachen att göra går att känna igen på
+  en tagg (uppspelningens filter).
+- **Flikens svar är ett meddelande med tre fält** (`cached`, `micros`, `code`) i stället för bara
+  `Compiled { bytes }`: skalet får veta att erbjuden kod avvisades (posten tas bort), testerna får
+  ett svar från fliken på att den inte kompilerade, och §13-testet får flikens tid.
+
+- **Punkt 4: radläget som argument, inte som fält eller funktionspekare.** Ett fält i `Field`
+  hade dragit in radbrytningen i varje sida med ett textfält (m5/sdk mätte 30 → 37 KB för `form`);
+  ett argument som är konstant vid varje anrop viks bort av kompilatorn. Det vilar på en
+  optimering (LLVM:s interprocedurella konstantpropagering med `opt-level = "s"`, `lto = true`,
+  `codegen-units = 1`, som modulerna byggs med); slutar den verka syns det som ungefär +7 KB i
+  `form` och i startsidan.
+- **Punkt 2: turordning per origin i `vy-proto` och i skalets kö.** Antingen ensam räcker för att
+  förtroendebesluten ska vara rätt; båda finns för att `Fetcher` ska vara riktig i sig själv och
+  för att samma origin inte ska ta flera av skalets fyra arbetare.
+
+## Öppet
+
+1. Ingen knapp eller flagga för att rensa kompileringscachen; katalogen tas bort för hand.
+2. Fyra olika origins som hänger samtidigt tar hela laddarpoolen tills tidsgränserna löpt ut.
+3. Enradssidor blev 80–266 byte större av punkt 4 (inlining, inte ny kod). Ingen storleksgrind
+   vaktar att radbrytningen fortsätter att vikas bort ur enradssidor.
+4. `conformance/bench/build-vm.json`: `compile-hit.*` mäter nu skalets väg (huvudprocessens
+   uppslag och ram plus flikprocessens deserialisering) och `compile.widgets` saknar rad; baslinjen
+   är orörd (ändras bara i ett `bench:`-commit på en tyst maskin).
+5. `fuzz/corpus/manifest/*.cbor` har glidit sedan M4: `VY_WRITE_FUZZ_SEEDS=1` skriver om tio
+   manifestfrön (modulerna har ändrats) och lägger till `widgets`. Inte incheckat här; bara de fyra
+   nya IPC-fröna är det.
+
+## Berör andra spår
+
+- **m5/examples** (sex nya exempelsidor, `modules/`, `conformance/`, `docs/`): inga av dess filer
+  är rörda. Det som kan märkas vid sammanslagningen:
+  - `crates/vy-sdk/src/ui/textbox.rs` är omskriven (punkt 4) med samma publika API. En sida med
+    båda radlägena blir mindre, en med bara enradsfält ändras med någon tiondels procent; sidornas
+    guldbilder påverkas inte (alla 64 befintliga är byte för byte desamma). Har m5/examples ändrat
+    `textbox.rs` blir det en konflikt som löses för hand.
+  - `modules/widgets/src/lib.rs` och de tre `conformance/semantic/widgets*.json` (punkt 3).
+  - `vy_proto::Fetcher::fetch` och `revalidate` tar `&self`, och `blobs()`/`keys()` ger ett lås
+    (punkt 2). Anropare med `let mut fetcher` får en varning om onödig `mut`; `vy_shell::page::load`
+    tar `&Fetcher`.
+  - `vy_shell::shell::Config` har ett nytt fält `code_cache: Option<PathBuf>` (punkt 1); den som
+    bygger en `Config` själv måste ange det (`None` huvudlöst).
+  - `vy_runtime::CompileCache` har varianterna `Off` och `Host { code }`; `ReadOnly`, `ReadWrite`,
+    `precompile` och `LoadStats::written` finns inte längre.
+- **IPC:** två nya ramar, `ToTab::CodeCache` (tagg 15) och `ToShell::Code` (tagg 79). `Load`-ramen
+  är oförändrad, så äldre inspelningar spelas upp som förr.
+- **Releasen:** klientbinären växer (se *Slutmätningar*); marginalen mot 25 MB krymper.

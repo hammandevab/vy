@@ -145,6 +145,90 @@ fn fuzz_ipc_corpus_has_the_sandbox_report() {
 }
 
 /// xorshift64*: the same mutations on every run and machine.
+/// m5/polish: the compilation cache's two messages (SPEC-9.4.2): the code
+/// the main process offers ahead of a load (`ToTab::CodeCache`, tag 15),
+/// with and without code, and the tab's report (`ToShell::Code`, tag 79),
+/// compiled and from the cache: the seeds `write_seeds` writes for them.
+fn code_messages() -> Vec<(&'static str, u8, Vec<u8>)> {
+    use vy_shell::ipc::{ToShell, ToTab};
+    let code = b"\x7fELF\x02\x01\x01\x00 not a module, only its shape".to_vec();
+    vec![
+        (
+            "code-cache.bin",
+            15,
+            ToTab::CodeCache {
+                code: Some(code.clone()),
+            }
+            .encode(),
+        ),
+        (
+            "code-cache-none.bin",
+            15,
+            ToTab::CodeCache { code: None }.encode(),
+        ),
+        (
+            "code.bin",
+            79,
+            ToShell::Code {
+                cached: false,
+                micros: 41_500,
+                code,
+            }
+            .encode(),
+        ),
+        (
+            "code-hit.bin",
+            79,
+            ToShell::Code {
+                cached: true,
+                micros: 300,
+                code: Vec::new(),
+            }
+            .encode(),
+        ),
+    ]
+}
+
+/// The compilation cache's seeds are in the IPC corpus, byte for byte
+/// what the writer makes, each decodes in its own direction only, and
+/// mutations of them (the flags, the length, the size cap) never panic
+/// the IPC entry point.
+#[test]
+fn fuzz_ipc_corpus_has_the_code_cache() {
+    use vy_shell::ipc::{ToShell, ToTab};
+    let saved = inputs("ipc");
+    let mut state = 0x5A4D_B0C5_000F_004Fu64;
+    for (name, tag, body) in code_messages() {
+        let path = root().join("fuzz/corpus/ipc").join(name);
+        let seed = &saved
+            .iter()
+            .find(|(p, _)| *p == path)
+            .unwrap_or_else(|| panic!("{} is missing (VY_WRITE_FUZZ_SEEDS=1)", path.display()))
+            .1;
+        assert_eq!(seed, &body, "{name}");
+        assert_eq!(seed[0], tag, "{name}");
+        assert_eq!(
+            ToTab::decode(seed).is_ok(),
+            tag == 15,
+            "{name}: to the tab only"
+        );
+        assert_eq!(
+            ToShell::decode(seed).is_ok(),
+            tag == 79,
+            "{name}: to the shell only"
+        );
+        for _ in 0..1000 {
+            let m = mutate(seed, &mut state);
+            let r = catch_unwind(AssertUnwindSafe(|| entry::ipc(&m)));
+            assert!(
+                r.is_ok(),
+                "ipc: a mutation of {name} panics; input {}",
+                hex(&m)
+            );
+        }
+    }
+}
+
 fn next(state: &mut u64) -> u64 {
     *state ^= *state >> 12;
     *state ^= *state << 25;
@@ -375,6 +459,9 @@ fn write_seeds() {
     }
     for (name, report) in sandbox_reports() {
         write("ipc", name, &ToShell::Sandbox(report).encode());
+    }
+    for (name, _, body) in code_messages() {
+        write("ipc", name, &body);
     }
 
     for (i, a) in [

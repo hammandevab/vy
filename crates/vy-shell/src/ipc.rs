@@ -40,6 +40,9 @@ pub const MAX_MESSAGE_TEXT_BYTES: usize = 64 << 10;
 /// Largest storage a tab may hand back: the quota's ceiling (SPEC-5.2.9,
 /// SPEC-8.2.1: `quota_kb` ≤ 16 384).
 pub const MAX_STORAGE_BYTES: usize = 16 << 20;
+/// Largest compiled code in a [`ToShell::Code`] or a [`ToTab::CodeCache`]:
+/// what the main process's store keeps at most for one module (SPEC-9.4.2).
+pub const MAX_CODE_BYTES: usize = vy_runtime::MAX_CODE_BYTES;
 /// Most lines in each list of a [`ToShell::Sandbox`] report: a lockdown
 /// has a handful of layers.
 pub const MAX_SANDBOX_LINES: usize = 32;
@@ -495,6 +498,27 @@ pub enum ToTab {
     /// the main process writes it last to the file instead of sending it,
     /// and a tab that reads it in a replay does nothing.
     StopRecording,
+    /// The compilation cache is on for the [`ToTab::Load`] that follows
+    /// (SPEC-13.1.4, SPEC-9.4.2): the tab takes the module from `code`
+    /// instead of compiling it, or compiles and hands the compiled code
+    /// back, and says which in [`ToShell::Code`]. One-shot, like
+    /// [`ToTab::CopyGesture`]: it arms exactly the message that follows
+    /// it. Never sent to a recorded tab and never fed to a replaying one,
+    /// so a recording holds no machine code and a replay runs none from
+    /// its file.
+    CodeCache {
+        /// What the main process's store held for the module it is about
+        /// to load, if anything.
+        code: Option<Vec<u8>>,
+    },
+}
+
+impl ToTab {
+    /// True when `body` is the frame of a [`ToTab::CodeCache`]: what the
+    /// main process leaves out of a replay.
+    pub fn is_code_cache(body: &[u8]) -> bool {
+        body.first() == Some(&T_CODE_CACHE)
+    }
 }
 
 /// Messages from a tab process to the main process.
@@ -583,6 +607,20 @@ pub enum ToShell {
         /// What happened.
         reason: String,
     },
+    /// How the tab got the compiled module of the load it is handling
+    /// (SPEC-13.1.4), sent once per load that a [`ToTab::CodeCache`]
+    /// armed, before `vy_init`: before any code of that page has run.
+    Code {
+        /// True when the module was taken from the code offered with the
+        /// load; false when the tab compiled it (nothing was offered, or
+        /// the offer did not deserialize, or the load failed).
+        cached: bool,
+        /// What getting the compiled module took, in microseconds.
+        micros: u32,
+        /// The compiled code for the main process to keep, when the tab
+        /// compiled; empty with `cached` and when there is none.
+        code: Vec<u8>,
+    },
 }
 
 const T_LOAD: u8 = 1;
@@ -599,6 +637,7 @@ const T_CLIPBOARD: u8 = 11;
 const T_RASTER: u8 = 12;
 const T_COPY_GESTURE: u8 = 13;
 const T_STOP_RECORDING: u8 = 14;
+const T_CODE_CACHE: u8 = 15;
 
 const S_LOADED: u8 = 64;
 const S_FRAME: u8 = 65;
@@ -615,6 +654,7 @@ const S_IME: u8 = 75;
 const S_STOPPED: u8 = 76;
 const S_FOCUS: u8 = 77;
 const S_SANDBOX: u8 = 78;
+const S_CODE: u8 = 79;
 
 fn put_random(w: &mut Writer, r: RandomSource) {
     match r {
@@ -806,6 +846,11 @@ impl ToTab {
             }
             Self::CopyGesture => Writer::new(T_COPY_GESTURE).finish(),
             Self::StopRecording => Writer::new(T_STOP_RECORDING).finish(),
+            Self::CodeCache { code } => {
+                let mut w = Writer::new(T_CODE_CACHE);
+                w.opt_bytes(code.as_deref());
+                w.finish()
+            }
         }
     }
 
@@ -905,6 +950,13 @@ impl ToTab {
             },
             T_COPY_GESTURE => Self::CopyGesture,
             T_STOP_RECORDING => Self::StopRecording,
+            T_CODE_CACHE => Self::CodeCache {
+                code: if r.bool()? {
+                    Some(r.bytes_max(MAX_CODE_BYTES, "code")?.to_vec())
+                } else {
+                    None
+                },
+            },
             other => return Err(DecodeError::Tag(other)),
         };
         r.finish()?;
@@ -1050,6 +1102,17 @@ impl ToShell {
             Self::Stopped { reason } => {
                 let mut w = Writer::new(S_STOPPED);
                 w.str(reason);
+                w.finish()
+            }
+            Self::Code {
+                cached,
+                micros,
+                code,
+            } => {
+                let mut w = Writer::new(S_CODE);
+                w.bool(*cached);
+                w.u32(*micros);
+                w.bytes(code);
                 w.finish()
             }
         }
@@ -1199,6 +1262,20 @@ impl ToShell {
             S_STOPPED => Self::Stopped {
                 reason: r.str_max(MAX_MESSAGE_TEXT_BYTES, "reason")?.to_string(),
             },
+            S_CODE => {
+                let cached = r.bool()?;
+                let micros = r.u32()?;
+                let code = r.bytes_max(MAX_CODE_BYTES, "code")?.to_vec();
+                // One canonical form: a hit hands nothing back.
+                if cached && !code.is_empty() {
+                    return Err(DecodeError::Value("code"));
+                }
+                Self::Code {
+                    cached,
+                    micros,
+                    code,
+                }
+            }
             other => return Err(DecodeError::Tag(other)),
         };
         r.finish()?;
@@ -1283,6 +1360,10 @@ mod tests {
             },
             ToTab::CopyGesture,
             ToTab::StopRecording,
+            ToTab::CodeCache { code: None },
+            ToTab::CodeCache {
+                code: Some(vec![0x7F, b'E', b'L', b'F']),
+            },
         ]
     }
 
@@ -1360,6 +1441,16 @@ mod tests {
                 warnings: vec!["landlock: Operation not supported (os error 95)".into()],
             }),
             ToShell::Sandbox(crate::sandbox::Report::default()),
+            ToShell::Code {
+                cached: false,
+                micros: 41_500,
+                code: vec![0x7F, b'E', b'L', b'F'],
+            },
+            ToShell::Code {
+                cached: true,
+                micros: 300,
+                code: Vec::new(),
+            },
         ]
     }
 
@@ -1382,8 +1473,8 @@ mod tests {
             assert!(ToTab::decode(&body).is_err(), "tags are disjoint: {m:?}");
             shell_tags.insert(body[0]);
         }
-        assert_eq!(tab_tags.len(), 14, "every ToTab variant is covered");
-        assert_eq!(shell_tags.len(), 15, "every ToShell variant is covered");
+        assert_eq!(tab_tags.len(), 15, "every ToTab variant is covered");
+        assert_eq!(shell_tags.len(), 16, "every ToShell variant is covered");
         assert!(tab_tags.is_disjoint(&shell_tags));
         // Over a byte stream: lengths first, little-endian.
         let mut pipe = Vec::new();
@@ -1469,6 +1560,24 @@ mod tests {
             Err(DecodeError::Value("image side")),
             "a side over SPEC-6.5.1's 8192 is refused before the size is even multiplied"
         );
+        // A cache hit hands no code back: one form per message.
+        let mut hit = Writer::new(S_CODE);
+        hit.bool(true);
+        hit.u32(0);
+        hit.bytes(&[1]);
+        assert_eq!(
+            ToShell::decode(&hit.finish()),
+            Err(DecodeError::Value("code"))
+        );
+        // The code cache's frame is told from every other by its tag.
+        for m in to_tab_messages() {
+            assert_eq!(
+                ToTab::is_code_cache(&m.encode()),
+                matches!(m, ToTab::CodeCache { .. }),
+                "{m:?}"
+            );
+        }
+        assert!(!ToTab::is_code_cache(&[]));
         // Frame lengths: zero, over the cap, and cut mid-frame.
         let mut zero = std::io::Cursor::new(0u32.to_le_bytes().to_vec());
         assert!(read_frame(&mut zero).is_err());
@@ -1487,8 +1596,9 @@ mod tests {
 
     /// SPEC-9.3.2, SPEC-9.3.1: the main process holds a tab's messages to
     /// the runtime's caps before keeping anything: more links, nodes,
-    /// text, body, clipboard or storage than a page may produce, or a
-    /// longer sandbox report than a lockdown makes, is a refused frame,
+    /// text, body, clipboard or storage than a page may produce, a
+    /// longer sandbox report than a lockdown makes, or more compiled code
+    /// than the store keeps for a module (SPEC-9.4.2), is a refused frame,
     /// not a bigger allocation. The caps are the same constants the
     /// runtime applies, so a conforming tab never hits them.
     #[test]
@@ -1550,6 +1660,11 @@ mod tests {
                 layers: vec!["l".repeat(MAX_SANDBOX_LINE_BYTES); MAX_SANDBOX_LINES],
                 warnings: vec!["w".repeat(MAX_SANDBOX_LINE_BYTES); MAX_SANDBOX_LINES],
             }),
+            ToShell::Code {
+                cached: false,
+                micros: u32::MAX,
+                code: vec![0; MAX_CODE_BYTES],
+            },
         ];
         for m in &ok {
             assert_eq!(&ToShell::decode(&m.encode()).unwrap(), m);
@@ -1684,6 +1799,14 @@ mod tests {
                 }),
                 "sandbox warnings",
             ),
+            (
+                ToShell::Code {
+                    cached: false,
+                    micros: 0,
+                    code: vec![0; MAX_CODE_BYTES + 1],
+                },
+                "code",
+            ),
         ];
         for (m, what) in &over {
             assert_eq!(
@@ -1692,6 +1815,16 @@ mod tests {
                 "{what}"
             );
         }
+        // The tab holds the main process to the same cap for offered code.
+        assert_eq!(
+            ToTab::decode(
+                &ToTab::CodeCache {
+                    code: Some(vec![0; MAX_CODE_BYTES + 1])
+                }
+                .encode()
+            ),
+            Err(DecodeError::Value("code"))
+        );
         // The same storage caps hold for the file the shell reads back.
         let big = crate::storage::encode(&[(
             Vec::new(),

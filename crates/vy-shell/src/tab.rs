@@ -17,7 +17,10 @@ use crate::ipc::{IpcTransport, LoadRequest, StyleSpec, ToShell, ToTab};
 use std::collections::BTreeMap;
 use std::io;
 use vy_abi::event;
-use vy_runtime::{Capabilities, ClockSource, LogSource, Options, Resource, Runtime, Transport};
+use vy_runtime::{
+    Capabilities, ClockSource, CompileCache, CompileSource, LogSource, Options, Resource, Runtime,
+    Transport,
+};
 
 /// The tab loop's state around the runtime.
 pub struct TabLoop<T: IpcTransport> {
@@ -38,6 +41,10 @@ pub struct TabLoop<T: IpcTransport> {
     /// The process's sandbox, sent as [`ToShell::Sandbox`] just before the
     /// first load is handled (SPEC-9.1.3).
     sandbox_report: Option<crate::sandbox::Report>,
+    /// Set by [`ToTab::CodeCache`] and spent by the next message: when
+    /// that is a load, the main process holds the compilation cache for
+    /// it and offered this code, if any (SPEC-13.1.4).
+    code_cache: Option<Option<Vec<u8>>>,
 }
 
 /// Capability ids packed as bits for [`LoadRequest::capabilities`].
@@ -74,6 +81,7 @@ impl<T: IpcTransport> TabLoop<T> {
             last_focus: None,
             copy_gesture_armed: false,
             sandbox_report: None,
+            code_cache: None,
         }
     }
 
@@ -111,8 +119,12 @@ impl<T: IpcTransport> TabLoop<T> {
 
     /// Handle one message; false when the loop should end.
     fn handle(&mut self, msg: ToTab) -> io::Result<bool> {
+        // Spent by this message, whatever it is: the cache was for the
+        // load that follows its frame and for nothing later.
+        let code_cache = self.code_cache.take();
         match msg {
-            ToTab::Load(req) => self.load(*req)?,
+            ToTab::CodeCache { code } => self.code_cache = Some(code),
+            ToTab::Load(req) => self.load(*req, code_cache)?,
             ToTab::Tick { clock_ms } => self.tick(clock_ms)?,
             ToTab::Event {
                 kind,
@@ -234,7 +246,14 @@ impl<T: IpcTransport> TabLoop<T> {
         }
     }
 
-    fn load(&mut self, req: LoadRequest) -> io::Result<()> {
+    /// Load a page. With `code_cache` the main process holds the
+    /// compilation cache for this load: the module is taken from the code
+    /// it offered instead of being compiled, or compiled and its code
+    /// handed back, and [`ToShell::Code`] says which before `vy_init`
+    /// runs, so before any code of the page has (SPEC-9.4.2). Without it
+    /// the load compiles and nothing is said, as headless and under a
+    /// recording.
+    fn load(&mut self, req: LoadRequest, code_cache: Option<Option<Vec<u8>>>) -> io::Result<()> {
         if let Some(report) = self.sandbox_report.take() {
             self.send(&ToShell::Sandbox(report))?;
         }
@@ -265,10 +284,39 @@ impl<T: IpcTransport> TabLoop<T> {
             random: req.random,
             transport: Transport::External,
             navigation: true,
-            compile_cache: vy_runtime::CompileCache::Off,
+            compile_cache: match code_cache {
+                None => CompileCache::Off,
+                Some(code) => CompileCache::Host { code },
+            },
         };
+        let hosted = options.compile_cache != CompileCache::Off;
         let pid = std::process::id();
-        let outcome = Runtime::load(&req.wasm, &req.sha256, options).and_then(|mut rt| {
+        let mut loaded = Runtime::load(&req.wasm, &req.sha256, options);
+        if hosted {
+            // A load that failed used no offered code either.
+            let report = match &mut loaded {
+                Ok(rt) => {
+                    let stats = rt.load_stats();
+                    ToShell::Code {
+                        cached: stats.source == CompileSource::CacheHit,
+                        micros: u32::try_from(stats.module_time.as_micros()).unwrap_or(u32::MAX),
+                        // Code over the cap is not kept; as a frame it
+                        // would not even be read.
+                        code: rt
+                            .take_code()
+                            .filter(|c| c.len() <= crate::ipc::MAX_CODE_BYTES)
+                            .unwrap_or_default(),
+                    }
+                }
+                Err(_) => ToShell::Code {
+                    cached: false,
+                    micros: 0,
+                    code: Vec::new(),
+                },
+            };
+            self.send(&report)?;
+        }
+        let outcome = loaded.and_then(|mut rt| {
             rt.set_clock_ms(req.clock_ms);
             rt.init(req.width, req.height, req.scale).map(|()| rt)
         });

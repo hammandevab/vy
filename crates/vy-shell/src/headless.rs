@@ -63,6 +63,8 @@ pub fn headless_shell(
             opener: Box::new(RecordingOpener::default()),
             clipboard: Box::new(MemoryClipboard::new()),
             waker: Waker::none(),
+            // Every load compiles: nothing kept, nothing read (SPEC-2.1.5).
+            code_cache: None,
         },
         width,
         height,

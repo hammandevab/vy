@@ -432,7 +432,7 @@ fn spec_6_4_3_textbox_multiline() {
     assert!(tb.is_multiline());
     let (ops, _) = drawn(|f| tb.draw(f, r, &t, ""));
     assert_eq!(
-        tb.wrap.lines,
+        tb.field.wrap.lines,
         [(0, 8), (8, 15), (16, 16), (17, 27), (27, 33)]
     );
     // 80 high: 60 px of text, three lines; the caret at the end scrolled
@@ -445,7 +445,7 @@ fn spec_6_4_3_textbox_multiline() {
         })
         .collect();
     assert_eq!(lines, ["abcdefghij", "klmnop"], "the empty line has no op");
-    assert_eq!(tb.scroll_y, 40.0);
+    assert_eq!(tb.field.scroll_y, 40.0);
 
     send(&mut tb, focus(-3, true), r, &t);
     send(&mut tb, key_with(key::HOME, CTRL), r, &t);
@@ -478,7 +478,7 @@ fn spec_6_4_3_textbox_multiline() {
     // A press on the second visual line (scrolled to the top first).
     send(&mut tb, key_with(key::HOME, CTRL), r, &t);
     drawn(|f| tb.draw(f, r, &t, ""));
-    assert_eq!(tb.scroll_y, 0.0);
+    assert_eq!(tb.field.scroll_y, 0.0);
     send(&mut tb, down(12.0 + 2.0 * CW, 10.0 + 20.0 + 5.0), r, &t);
     assert_eq!(tb.caret(), 10);
     send(&mut tb, down(12.0 + 9.0 * CW, 15.0), r, &t);
@@ -508,7 +508,7 @@ fn spec_6_4_3_textbox_multiline() {
         &t,
     );
     assert_eq!(send(&mut tb, wheel, r, &t), (Response::Redraw, true));
-    assert_eq!(tb.scroll_y, 20.0);
+    assert_eq!(tb.field.scroll_y, 20.0);
     let far = Event::Scroll {
         dx: 0.0,
         dy: 500.0,
@@ -516,7 +516,7 @@ fn spec_6_4_3_textbox_multiline() {
         modifiers: Modifiers(0),
     };
     send(&mut tb, far, r, &t);
-    assert_eq!(tb.scroll_y, 6.0 * 20.0 - 60.0);
+    assert_eq!(tb.field.scroll_y, 6.0 * 20.0 - 60.0);
     assert_eq!(
         send(&mut tb, far, r, &t),
         (Response::Nothing, false),
@@ -542,13 +542,13 @@ fn spec_6_4_3_textbox_rewrap_matches_fresh_wrap() {
     let fresh = |text: &str| {
         let mut tb = TextBox::multiline(-1).with_text(text);
         drawn(|f| tb.draw(f, r, &t, ""));
-        tb.wrap.lines.clone()
+        tb.field.wrap.lines.clone()
     };
     let mut tb = TextBox::multiline(-1).with_text("aaa bbb ccc\nsame\nsame\nddd eee fff ggg");
     send(&mut tb, focus(-1, true), r, &t);
     drawn(|f| tb.draw(f, r, &t, ""));
     assert_eq!(
-        tb.wrap.lines,
+        tb.field.wrap.lines,
         fresh("aaa bbb ccc\nsame\nsame\nddd eee fff ggg")
     );
     let edits: [(Event<'static>, &str); 4] = [
@@ -570,17 +570,17 @@ fn spec_6_4_3_textbox_rewrap_matches_fresh_wrap() {
         send(&mut tb, e, r, &t);
         drawn(|f| tb.draw(f, r, &t, ""));
         assert_eq!(tb.text(), want);
-        assert_eq!(tb.wrap.lines, fresh(want), "after {e:?}");
+        assert_eq!(tb.field.wrap.lines, fresh(want), "after {e:?}");
     }
     // End of the soft line "aaa bbb ": before its space; Delete takes the
     // space (one paragraph shrinks), Enter splits it in two.
     send(&mut tb, key(key::END), r, &t);
     send(&mut tb, key(key::DELETE), r, &t);
     drawn(|f| tb.draw(f, r, &t, ""));
-    assert_eq!(tb.wrap.lines, fresh(tb.text()));
+    assert_eq!(tb.field.wrap.lines, fresh(tb.text()));
     send(&mut tb, key(key::ENTER), r, &t);
     drawn(|f| tb.draw(f, r, &t, ""));
-    assert_eq!(tb.wrap.lines, fresh(tb.text()));
+    assert_eq!(tb.field.wrap.lines, fresh(tb.text()));
     assert_eq!(
         tb.text(),
         "aaa bbb\nccc\nsame\nsame\nddd eee fff ggg!\nx y z"

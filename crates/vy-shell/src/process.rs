@@ -385,6 +385,9 @@ fn write_from_shell(
     let shutdown = ToTab::Shutdown.encode();
     while let Ok(out) = rx.recv() {
         match out {
+            // A recorded tab compiles its module itself: a recording holds
+            // no machine code (SPEC-9.4.2), and it holds what the tab read.
+            Out::Frame(body) if record.is_some() && ToTab::is_code_cache(&body) => {}
             Out::Frame(body) => {
                 write_frame(w, &body)?;
                 if let Some(rec) = &mut record {
@@ -427,6 +430,10 @@ fn connect(id: TabId, sink: impl Sink, pipes: Pipes, source: Source) -> io::Resu
                 Source::Replay(mut file) => {
                     loop {
                         match read_frame(&mut file) {
+                            // Machine code is never run from a file the
+                            // user was handed (SPEC-9.4.2): the tab
+                            // compiles the recording's module.
+                            Ok(Some(body)) if ToTab::is_code_cache(&body) => {}
                             Ok(Some(body)) => {
                                 if write_frame(&mut w, &body).is_err() {
                                     break;

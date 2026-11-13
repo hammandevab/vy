@@ -129,7 +129,7 @@ fn studio_runs_a_mission_through_the_client_path() {
 
     // The client fetches Studio and trusts it with the developer key; it is
     // fitted to this run, and its `net` is its own origin, granted.
-    let mut fetcher = Fetcher::new(Options::new(tmp.join("cache"))).unwrap();
+    let fetcher = Fetcher::new(Options::new(tmp.join("cache"))).unwrap();
     let studio = fetcher
         .fetch(&Address::parse(&format!("vy://localhost:{b}/")).unwrap())
         .unwrap();

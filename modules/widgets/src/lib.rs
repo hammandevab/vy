@@ -16,8 +16,8 @@
 //! rings the controls draw (SPEC-10.3.1, SPEC-10.3.3), and the main area
 //! scrolling the control the keyboard focused into view; wheel, keys and
 //! scroll bars; the whole semantic tree every frame, off-screen nodes too
-//! (SPEC-10.1.1). A headless host has no clipboard, so the status line
-//! shows its refusal there.
+//! (SPEC-10.1.1). The status line says how each copy went: copied, or the
+//! host's refusal, as a host without a clipboard gives.
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
@@ -94,7 +94,7 @@ const TERMS: [&str; 5] = [
     "Innehållet läggs ut med rutans förskjutning avdragen, så träfftest och ritning använder samma rektanglar. Det som hamnar utanför klipps bort, men varje stycke registreras ändå som en textnod.",
     "Listan ritar bara raderna i bild men registrerar alla 24 som listitem-noder. Upp och ned flyttar markeringen när listan är aktiv, och Enter öppnar raden.",
     "Fokus ägs av värden: Tab går genom textfälten, kryssrutan, radioknapparna, slidern och knapparna i dokumentordning, och varje kontroll ritar sin egen fokusring.",
-    "Ctrl+C i ett textfält kopierar markeringen under kopieringsgesten. Huvudlöst finns inget urklipp, så statusraden visar värdens svar.",
+    "Ctrl+C i ett textfält kopierar markeringen under kopieringsgesten, och statusraden visar om det gick eller vad värden svarade.",
 ];
 
 #[derive(Clone, Copy)]

@@ -1,63 +1,75 @@
-//! The compilation cache (SPEC-13.1.4): machine code wasmtime compiled for a
-//! module, kept on disk by the module's SHA-256, so a module loaded again
-//! is not compiled again.
+//! The compilation cache (SPEC-13.1.4, SPEC-9.4.2): machine code wasmtime
+//! compiled for a module, kept on disk by the client's main process, so a
+//! module loaded again is not compiled again.
 //!
-//! An entry is `MAGIC`, the SHA-256 of the payload, and the payload, which
-//! is `Module::serialize`. Its name is the hex SHA-256 of the module's hash,
-//! the cache format and the engine's compatibility hash (wasmtime's version
-//! and every compilation setting of the engine in `lib.rs`), so another
-//! wasmtime or another configuration never finds it.
+//! Two halves, in two processes:
+//!
+//! - A **tab process** has no file system (SPEC-9.1.3). Its runtime is given
+//!   [`CompileCache::Host`]: the code the main process held for the module,
+//!   if any, which it deserializes instead of compiling; when it compiles,
+//!   it keeps the serialized module for the main process to store
+//!   ([`crate::Runtime::take_code`]).
+//! - The **main process** owns the [`CodeStore`]: files of bytes it never
+//!   deserializes. An entry's name is the [`CodeKey`], which the main
+//!   process computes from the module bytes it holds and this build's
+//!   engine (wasmtime's version and every compilation setting of the
+//!   engine in `lib.rs`); nothing a tab process says is part of it.
 //!
 //! **Deserializing trusts the bytes:** `Module::deserialize` maps them as
-//! executable code without validating them, so whoever can write an entry
-//! can run code in every process that reads it. The mitigations, in
-//! `docs/notes/m4-perf.md` under "Hotbild": only the client writes
-//! ([`CompileCache::ReadWrite`]; a tab process gets [`CompileCache::ReadOnly`]
-//! or nothing), the directory is the user's own (created 0700 on Unix and
-//! refused when another user owns it or group or others may write it),
-//! entries are written to a
-//! temporary file and renamed, read whole into memory (never mapped from
-//! the file, which could change under the module), and checked against
-//! the payload hash, which catches a torn or truncated file but not an
-//! attacker who can write the directory.
+//! executable code without validating them, so an entry is native code for
+//! whoever deserializes it. What bounds that is in
+//! `docs/notes/m5-polish.md` under "Hotbild": an entry for a module is
+//! only ever what a tab process loaded with that same module handed over,
+//! it is stored only under that module's key and handed only to a tab
+//! process loaded with that module, where it runs inside the OS sandbox;
+//! the directory is the user's own (created 0700 on Unix and refused when
+//! another user owns it or group or others may write it); entries are
+//! written to a temporary file and renamed, read whole into memory, and
+//! checked against the hash written with them, which catches a torn or
+//! damaged file but not someone who can write the directory.
 
 use crate::{sha256, Error};
 use sha2::{Digest, Sha256};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime};
 use wasmtime::{Engine, Module};
 
 /// First bytes of every entry; the version of this format.
 const MAGIC: &[u8; 8] = b"VYCODE01";
-/// Largest total size of a cache directory; past it the oldest entries
-/// are removed when a new one is written.
+/// Bytes of an entry before the code: the magic and the code's SHA-256.
+const HEADER_BYTES: usize = MAGIC.len() + 32;
+/// Largest total size of a cache directory; past it the entries used
+/// longest ago are removed when a new one is written.
 pub const COMPILE_CACHE_CAP_BYTES: u64 = 256 << 20;
+/// Largest code kept for one module, whatever the module's size.
+pub const MAX_CODE_BYTES: usize = 64 << 20;
+/// Largest code kept for one module, in bytes per byte of the module:
+/// Cranelift's output for a real module is a few times its size, and a
+/// module of a few hundred bytes still gets a few kilobytes of headers.
+pub const MAX_CODE_PER_MODULE_BYTE: usize = 256;
+/// How old a temporary file of an interrupted write has to be before it
+/// is cleared away.
+const STALE_TMP: Duration = Duration::from_secs(600);
 
-/// Where compiled machine code of modules is kept between loads
-/// (SPEC-13.1.4).
+/// How a runtime gets the compiled code of its module (SPEC-13.1.4).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CompileCache {
-    /// No cache: every load compiles and nothing is written. The default,
-    /// so `vy-cli render`, the conformance suite and the tests keep no
-    /// state on disk.
+    /// No cache: every load compiles and nothing is kept. The default, so
+    /// `vy-cli render`, the conformance suite and the tests keep no state.
     #[default]
     Off,
-    /// Use entries under this directory, never write them: a tab process.
-    ReadOnly(PathBuf),
-    /// Use and write entries under this directory: the client's main
-    /// process, the only writer.
-    ReadWrite(PathBuf),
-}
-
-impl CompileCache {
-    fn dir(&self) -> Option<&Path> {
-        match self {
-            Self::Off => None,
-            Self::ReadOnly(d) | Self::ReadWrite(d) => Some(d),
-        }
-    }
+    /// The host process holds the cache, since a tab process has no file
+    /// system: `code` is what its [`CodeStore`] held for this module, if
+    /// anything. Code that deserializes is used instead of compiling; when
+    /// the load compiles (nothing offered, or the offer refused), the
+    /// serialized module is kept for the host ([`crate::Runtime::take_code`]).
+    Host {
+        /// The entry the host process read for this module.
+        code: Option<Vec<u8>>,
+    },
 }
 
 /// How [`crate::Runtime::load`] got the compiled module.
@@ -65,33 +77,56 @@ impl CompileCache {
 pub enum CompileSource {
     /// Compiled by Cranelift now.
     Compiled,
-    /// Read from the compilation cache.
+    /// Deserialized from the code the host process offered.
     CacheHit,
 }
 
 /// What getting the compiled module cost (SPEC-13.1.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoadStats {
-    /// Compiled or read from the cache.
+    /// Compiled or taken from the cache.
     pub source: CompileSource,
-    /// Wall-clock time to get the compiled module: compiling, or reading,
-    /// checking and deserializing the entry. Hashing, the ABI check and
+    /// Wall-clock time to get the compiled module: compiling, or
+    /// deserializing the offered code. Hashing, the ABI check and
     /// instantiation are not included.
     pub module_time: Duration,
-    /// True when a new entry was written.
-    pub written: bool,
+    /// True when code was offered and did not deserialize, so the module
+    /// was compiled after all: the host drops that entry.
+    pub refused: bool,
 }
 
-/// The entry name for a module: hex SHA-256 over the format, the engine's
-/// compatibility hash and the module's SHA-256.
-fn entry_name(engine: &Engine, module_sha256: &[u8; 32]) -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    engine.precompile_compatibility_hash().hash(&mut h);
-    let mut key = Sha256::new();
-    key.update(MAGIC);
-    key.update(h.finish().to_le_bytes());
-    key.update(module_sha256);
-    format!("{}.code", crate::hex(&key.finalize()))
+/// This build's engine as eight bytes: wasmtime's version and every
+/// compilation setting, which wasmtime hashes for exactly this purpose.
+fn engine_tag(engine: &Engine) -> [u8; 8] {
+    static TAG: OnceLock<[u8; 8]> = OnceLock::new();
+    *TAG.get_or_init(|| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        engine.precompile_compatibility_hash().hash(&mut h);
+        h.finish().to_le_bytes()
+    })
+}
+
+/// The name of a module's entry in a [`CodeStore`] (SPEC-9.4.2): the hex
+/// SHA-256 over the cache format, this build's engine and the SHA-256 of
+/// the module's bytes. Made only from the module bytes the caller holds;
+/// there is no way to make one from a name or a path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CodeKey(String);
+
+impl CodeKey {
+    /// The key of the module with exactly these bytes.
+    pub fn of(wasm: &[u8]) -> CodeKey {
+        let mut key = Sha256::new();
+        key.update(MAGIC);
+        key.update(engine_tag(crate::engine()));
+        key.update(sha256(wasm));
+        CodeKey(format!("{}.code", crate::hex(&key.finalize())))
+    }
+
+    /// The entry's file name.
+    pub fn file_name(&self) -> &str {
+        &self.0
+    }
 }
 
 /// True when `dir` may hold entries: it exists and is a directory and, on
@@ -101,9 +136,9 @@ fn entry_name(engine: &Engine, module_sha256: &[u8; 32]) -> String {
 /// fill.
 ///
 /// On Windows only existence and kind are checked; the ACL is not read.
-/// The cache lives in the user's profile (`%LOCALAPPDATA%`), which only
-/// the user, SYSTEM and administrators may write, and a tab process runs
-/// at low integrity and cannot write there (SPEC-9.1.3).
+/// The cache lives in the user's profile (`%APPDATA%`), which only the
+/// user, SYSTEM and administrators may write, and a tab process runs at
+/// low integrity and cannot write there (SPEC-9.1.3).
 fn dir_is_private(dir: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(dir) else {
         return false;
@@ -126,84 +161,6 @@ fn dir_is_private(dir: &Path) -> bool {
     true
 }
 
-/// Read the entry for a module, check it and deserialize it; `None` for a
-/// missing, short, foreign or damaged entry, or one wasmtime refuses.
-fn read(engine: &Engine, path: &Path) -> Option<Module> {
-    let bytes = std::fs::read(path).ok()?;
-    let rest = bytes.strip_prefix(MAGIC.as_slice())?;
-    let (digest, payload) = rest.split_at_checked(32)?;
-    if digest != sha256(payload) {
-        return None;
-    }
-    // SAFETY: the bytes are an entry this client wrote with
-    // `Module::serialize` for this engine configuration (the name holds
-    // the compatibility hash, wasmtime checks its version and settings
-    // again), read whole into memory so they cannot change under the
-    // module, and checked against the hash written with them. Who can
-    // write the directory is the trust boundary: see the module docs.
-    unsafe { Module::deserialize(engine, payload) }.ok()
-}
-
-/// Write the entry for `module` atomically: a temporary file in the
-/// directory, then a rename. Errors are ignored by the caller: a cache that
-/// cannot be written is a cache miss next time.
-fn write(dir: &Path, name: &str, module: &Module) -> std::io::Result<()> {
-    let payload = module
-        .serialize()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let mut entry = Vec::with_capacity(MAGIC.len() + 32 + payload.len());
-    entry.extend_from_slice(MAGIC);
-    entry.extend_from_slice(&sha256(&payload));
-    entry.extend_from_slice(&payload);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let tmp = dir.join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = options
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(&entry))
-        .and_then(|()| std::fs::rename(&tmp, dir.join(name)));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result?;
-    evict(dir);
-    Ok(())
-}
-
-/// Remove the oldest entries until the directory holds at most
-/// [`COMPILE_CACHE_CAP_BYTES`].
-fn evict(dir: &Path) {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<(std::time::SystemTime, u64, PathBuf)> = read_dir
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".code"))
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            Some((meta.modified().ok()?, meta.len(), e.path()))
-        })
-        .collect();
-    let mut total: u64 = entries.iter().map(|(_, len, _)| len).sum();
-    entries.sort();
-    for (_, len, path) in entries {
-        if total <= COMPILE_CACHE_CAP_BYTES {
-            break;
-        }
-        if std::fs::remove_file(&path).is_ok() {
-            total -= len;
-        }
-    }
-}
-
 /// Create a cache directory the way the client wants it: 0700 on Unix.
 pub fn create_dir(dir: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
@@ -216,51 +173,247 @@ pub fn create_dir(dir: &Path) -> std::io::Result<()> {
     builder.create(dir)
 }
 
-/// The compiled module for verified `wasm` with SHA-256 `module_sha256`:
-/// from the cache when it holds a good entry, otherwise compiled now (and
-/// written when the cache is [`CompileCache::ReadWrite`]).
+/// Why [`CodeStore::put`] kept nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PutError {
+    /// No code at all.
+    Empty,
+    /// More than [`MAX_CODE_BYTES`], or more than
+    /// [`MAX_CODE_PER_MODULE_BYTE`] times the module's size.
+    TooLarge,
+    /// The directory is no longer the user's own.
+    NotPrivate,
+    /// The file could not be written.
+    Io(String),
+}
+
+impl std::fmt::Display for PutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("no code"),
+            Self::TooLarge => f.write_str("code over the size cap for its module"),
+            Self::NotPrivate => f.write_str("the cache directory is not the user's own"),
+            Self::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The main process's store of compiled code (SPEC-9.4.2): one file per
+/// [`CodeKey`] in a directory of the user's own. It holds bytes and never
+/// deserializes them; that is a tab process's, inside its sandbox.
+#[derive(Clone, Debug)]
+pub struct CodeStore {
+    dir: PathBuf,
+    cap_bytes: u64,
+}
+
+impl CodeStore {
+    /// The store at `dir`, created 0700 when it is missing. `None` when
+    /// the directory cannot be made or is not the user's own (another
+    /// owner, or writable by group or others): then there is no cache.
+    pub fn open(dir: &Path) -> Option<CodeStore> {
+        let _ = create_dir(dir);
+        dir_is_private(dir).then(|| CodeStore {
+            dir: dir.to_path_buf(),
+            cap_bytes: COMPILE_CACHE_CAP_BYTES,
+        })
+    }
+
+    /// The same store with another total size cap (tests).
+    pub fn with_cap(mut self, cap_bytes: u64) -> CodeStore {
+        self.cap_bytes = cap_bytes;
+        self
+    }
+
+    /// The directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The code kept under `key`, read whole and checked against the hash
+    /// written with it; reading it marks the entry as just used. A file
+    /// that is short, damaged or over the size cap is removed and is a
+    /// miss, and so is everything once the directory is not private.
+    pub fn get(&self, key: &CodeKey) -> Option<Vec<u8>> {
+        if !dir_is_private(&self.dir) {
+            return None;
+        }
+        let path = self.dir.join(&key.0);
+        let len = std::fs::metadata(&path).ok()?.len();
+        let good = (len <= (HEADER_BYTES + MAX_CODE_BYTES) as u64)
+            .then(|| std::fs::read(&path).ok())
+            .flatten()
+            .and_then(|mut bytes| {
+                let rest = bytes.strip_prefix(MAGIC.as_slice())?;
+                let (digest, code) = rest.split_at_checked(32)?;
+                if code.is_empty() || digest != sha256(code) {
+                    return None;
+                }
+                bytes.drain(..HEADER_BYTES);
+                Some(bytes)
+            });
+        match good {
+            Some(code) => {
+                // Used now: the last to be evicted.
+                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
+                    let _ = f.set_modified(SystemTime::now());
+                }
+                Some(code)
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+                None
+            }
+        }
+    }
+
+    /// Keep `code` under `key` for a module of `module_len` bytes, in
+    /// place of whatever was there: a temporary file in the directory,
+    /// then a rename, then the entries used longest ago are removed until
+    /// the directory is within its cap. Code over the size caps is refused.
+    pub fn put(&self, key: &CodeKey, module_len: usize, code: &[u8]) -> Result<(), PutError> {
+        if code.is_empty() {
+            return Err(PutError::Empty);
+        }
+        if code.len() > MAX_CODE_BYTES
+            || code.len() > module_len.saturating_mul(MAX_CODE_PER_MODULE_BYTE)
+        {
+            return Err(PutError::TooLarge);
+        }
+        if !dir_is_private(&self.dir) {
+            return Err(PutError::NotPrivate);
+        }
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let tmp = self
+            .dir
+            .join(format!(".{}.{}.{nanos}.tmp", key.0, std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = options
+            .open(&tmp)
+            .and_then(|mut f| {
+                f.write_all(MAGIC)?;
+                f.write_all(&sha256(code))?;
+                f.write_all(code)
+            })
+            .and_then(|()| std::fs::rename(&tmp, self.dir.join(&key.0)));
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(PutError::Io(e.to_string()));
+        }
+        self.evict();
+        Ok(())
+    }
+
+    /// Forget the entry under `key`.
+    pub fn remove(&self, key: &CodeKey) {
+        if dir_is_private(&self.dir) {
+            let _ = std::fs::remove_file(self.dir.join(&key.0));
+        }
+    }
+
+    /// Bytes the entries take in all.
+    pub fn size(&self) -> u64 {
+        self.entries().iter().map(|(_, len, _)| len).sum()
+    }
+
+    /// Every entry as (last used, size, path), and the stale temporary
+    /// files of interrupted writes removed on the way.
+    fn entries(&self) -> Vec<(SystemTime, u64, PathBuf)> {
+        let Ok(read_dir) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        for e in read_dir.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let Ok(meta) = e.metadata() else {
+                continue;
+            };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if name.ends_with(".code") {
+                entries.push((modified, meta.len(), e.path()));
+            } else if name.ends_with(".tmp") && modified.elapsed().is_ok_and(|age| age > STALE_TMP)
+            {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        entries
+    }
+
+    /// Remove the entries used longest ago until the directory holds at
+    /// most its cap.
+    fn evict(&self) {
+        let mut entries = self.entries();
+        let mut total: u64 = entries.iter().map(|(_, len, _)| len).sum();
+        entries.sort();
+        for (_, len, path) in entries {
+            if total <= self.cap_bytes {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total -= len;
+            }
+        }
+    }
+}
+
+/// The compiled module for verified `wasm`: deserialized from the code
+/// the host offered, otherwise compiled now. With [`CompileCache::Host`] a
+/// compiled module comes with its serialized form, for the host to store.
 pub(crate) fn module(
     engine: &Engine,
     wasm: &[u8],
-    module_sha256: &[u8; 32],
-    cache: &CompileCache,
-) -> Result<(Module, LoadStats), Error> {
+    cache: CompileCache,
+) -> Result<(Module, LoadStats, Option<Vec<u8>>), Error> {
     let started = Instant::now();
-    let usable = cache.dir().filter(|d| {
-        if let CompileCache::ReadWrite(dir) = cache {
-            let _ = create_dir(dir);
+    let (hosted, offered) = match cache {
+        CompileCache::Off => (false, None),
+        CompileCache::Host { code } => (true, code),
+    };
+    let refused = match offered {
+        None => false,
+        Some(code) => {
+            // SAFETY: the bytes are what the client's main process kept
+            // for this very module (its `CodeKey` is made from the module
+            // bytes the main process holds, SPEC-9.4.2), and an entry is
+            // only ever what a tab process loaded with this module handed
+            // over from `Module::serialize`. wasmtime checks its version
+            // and settings again. The bytes are still only as good as that
+            // earlier tab process: this is the trust boundary the module
+            // docs describe, and the reason the caller is a sandboxed tab
+            // process (SPEC-9.1.3) and never the main process.
+            match unsafe { Module::deserialize(engine, &code) } {
+                Ok(module) => {
+                    let stats = LoadStats {
+                        source: CompileSource::CacheHit,
+                        module_time: started.elapsed(),
+                        refused: false,
+                    };
+                    return Ok((module, stats, None));
+                }
+                Err(_) => true,
+            }
         }
-        dir_is_private(d)
-    });
-    let name = usable.map(|_| entry_name(engine, module_sha256));
-    if let (Some(dir), Some(name)) = (usable, &name) {
-        if let Some(module) = read(engine, &dir.join(name)) {
-            return Ok((
-                module,
-                LoadStats {
-                    source: CompileSource::CacheHit,
-                    module_time: started.elapsed(),
-                    written: false,
-                },
-            ));
-        }
-    }
+    };
     let module = Module::new(engine, wasm).map_err(|e| Error::Instantiate(e.to_string()))?;
     let module_time = started.elapsed();
-    let mut written = false;
-    if let (CompileCache::ReadWrite(dir), Some(name)) = (cache, &name) {
-        if usable.is_some() {
-            written = write(dir, name, &module).is_ok();
-        }
-    }
-    Ok((
-        module,
-        LoadStats {
-            source: CompileSource::Compiled,
-            module_time,
-            written,
-        },
-    ))
+    let code = hosted.then(|| module.serialize().ok()).flatten();
+    let stats = LoadStats {
+        source: CompileSource::Compiled,
+        module_time,
+        refused,
+    };
+    Ok((module, stats, code))
 }
 
 // The ownership check is Unix's; on Windows only existence is checked.
@@ -292,11 +445,13 @@ mod tests {
             std::os::unix::fs::chown(&dir, Some(65534), Some(65534)).unwrap();
             assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
             assert!(!dir_is_private(&dir), "0700, owned by uid 65534");
+            assert!(CodeStore::open(&dir).is_none(), "no store there");
         } else {
             let root = std::fs::metadata("/").unwrap();
             assert_ne!(root.uid(), me);
             assert_eq!(root.mode() & 0o022, 0);
             assert!(!dir_is_private(Path::new("/")), "owned by root");
+            assert!(CodeStore::open(Path::new("/")).is_none(), "no store there");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

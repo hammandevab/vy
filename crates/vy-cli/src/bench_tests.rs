@@ -120,9 +120,8 @@ fn first_frame_cold(exe: &Path, served: &Served, runs: usize) -> Vec<Duration> {
         .map(|_| {
             let cache = scratch("cache");
             let t = Instant::now();
-            let mut fetcher =
-                vy_proto::Fetcher::new(vy_proto::Options::new(&cache)).expect("a cache");
-            let page = vy_shell::page::load(&mut fetcher, &source)
+            let fetcher = vy_proto::Fetcher::new(vy_proto::Options::new(&cache)).expect("a cache");
+            let page = vy_shell::page::load(&fetcher, &source)
                 .unwrap_or_else(|e| panic!("{}: {e:?}", served.address));
             assert!(page.trusted, "signed and pinned at first visit");
             vy_shell::headless::screenshot_loaded(page, &options).unwrap();
