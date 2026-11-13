@@ -355,6 +355,27 @@ pub enum Job {
     },
 }
 
+impl Job {
+    /// True for a page load or a live-reload check of `tab` made for a
+    /// navigation before `generation`: one whose result the shell would
+    /// drop.
+    fn is_older(&self, tab: u32, generation: u64) -> bool {
+        match self {
+            Job::Page {
+                tab: t,
+                generation: g,
+                ..
+            }
+            | Job::Check(Check {
+                tab: t,
+                generation: g,
+                ..
+            }) => *t == tab && *g < generation,
+            Job::Request { .. } => false,
+        }
+    }
+}
+
 /// Live reload (devtools, SPEC-7.3.2): ask a page's server whether the
 /// page changed, with a conditional GET whatever the HTTP cache's
 /// freshness says.
@@ -501,9 +522,24 @@ impl Loader {
     pub fn send(&mut self, job: Job) {
         let tab = match &job {
             Job::Request { tab, .. } => *tab,
-            Job::Page { source, .. } => {
+            Job::Page {
+                tab,
+                generation,
+                source,
+            } => {
                 let origin = source.origin();
-                lock(&self.queue.state).jobs.push_back((origin, job));
+                let (tab, generation) = (*tab, *generation);
+                let mut state = lock(&self.queue.state);
+                // What still waits for an earlier navigation of this tab
+                // is for nothing: the shell drops its result (granskning
+                // 0014:6). Five reloads of a page whose server hangs are
+                // then the fetch under way and the last one, not five in
+                // a row. The job a worker is on runs to its end.
+                state
+                    .jobs
+                    .retain(|(_, queued)| !queued.is_older(tab, generation));
+                state.jobs.push_back((origin, job));
+                drop(state);
                 self.queue.changed.notify_all();
                 return;
             }
@@ -548,9 +584,13 @@ impl Loader {
         }
     }
 
-    /// The tab is gone: its worker ends once its queued requests are done.
+    /// The tab is gone: its worker ends once its queued requests are
+    /// done, and its page loads and checks that still wait are dropped.
     pub fn close_tab(&mut self, tab: u32) {
         self.workers.remove(&tab);
+        lock(&self.queue.state)
+            .jobs
+            .retain(|(_, queued)| !queued.is_older(tab, u64::MAX));
     }
 
     /// Tabs with a request worker, for tests.
@@ -824,14 +864,24 @@ mod tests {
     /// A loopback server that answers every path with its own name, and
     /// holds a path starting with `/slow` until the test releases it.
     fn held_server() -> (u16, std::sync::mpsc::Sender<()>) {
+        let (port, release, _) = held_server_logged();
+        (port, release)
+    }
+
+    /// [`held_server`], and the paths it was asked for, in the order the
+    /// requests arrived (a held one is listed when it arrives).
+    fn held_server_logged() -> (u16, std::sync::mpsc::Sender<()>, Arc<Mutex<Vec<String>>>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (release, held) = std::sync::mpsc::channel::<()>();
         let held = Arc::new(std::sync::Mutex::new(held));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let held = held.clone();
+                let log = log.clone();
                 thread::spawn(move || {
                     let mut reader = BufReader::new(stream);
                     let mut first = String::new();
@@ -843,6 +893,7 @@ mod tests {
                         }
                     }
                     let path = first.split(' ').nth(1).unwrap_or("").to_string();
+                    lock(&log).push(path.clone());
                     if path.starts_with("/slow") {
                         let _ = held
                             .lock()
@@ -859,7 +910,7 @@ mod tests {
                 });
             }
         });
-        (port, release)
+        (port, release, seen)
     }
 
     /// SPEC-5.2.7, SPEC-7.4.5: a page's requests run on its tab's own
@@ -1025,6 +1076,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// SPEC-7.4.5 (granskning 0014:6): a page load that still waits when
+    /// its tab navigates again is dropped, not fetched. While origin A's
+    /// server holds a tab's first load, the tab is reloaded four times,
+    /// another tab asks for a page of A, and a third asks and is closed;
+    /// what waited for the tab's earlier navigations and for the closed
+    /// tab is never asked of the server. Once the server answers: the
+    /// load that was under way, the other tab's page and the tab's last
+    /// navigation, in that order, and nothing else.
+    #[test]
+    fn spec_7_4_5_stale_page_loads_are_dropped_from_the_queue() {
+        let (port, release, seen) = held_server_logged();
+        let (tx, rx) = std::sync::mpsc::channel::<Done>();
+        let tx = std::sync::Mutex::new(tx);
+        let dir = std::env::temp_dir().join(format!("vy-loader-stale-{}", std::process::id()));
+        let mut loader = start_loader(dir.clone(), move |d| {
+            let _ = tx.lock().unwrap().send(d);
+        })
+        .unwrap();
+        let address = |path: &str| Address::parse(&format!("vy://127.0.0.1:{port}{path}")).unwrap();
+        let page = |tab: u32, generation: u64, path: &str| Job::Page {
+            tab,
+            generation,
+            source: Source::Address(address(path)),
+        };
+        let wait = std::time::Duration::from_secs(20);
+        let asked = || -> Vec<String> { lock(&seen).clone() };
+
+        loader.send(page(1, 1, "/slow-first"));
+        let deadline = std::time::Instant::now() + wait;
+        while asked().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first load never started"
+            );
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Four reloads, a check for the first navigation, another tab's
+        // page in between, and a tab that is closed while it waits.
+        loader.send(page(1, 2, "/reload-2"));
+        loader.send(page(1, 3, "/reload-3"));
+        loader.send(Job::Check(Check {
+            tab: 1,
+            generation: 3,
+            address: address("/check-3"),
+        }));
+        loader.send(page(2, 1, "/other-tab"));
+        loader.send(page(3, 1, "/closed-tab"));
+        loader.send(page(1, 4, "/reload-4"));
+        loader.close_tab(3);
+        loader.send(page(1, 5, "/reload-5"));
+        assert!(rx.try_recv().is_err(), "all of it waits for origin A");
+        assert_eq!(asked(), ["/slow-first"]);
+
+        release.send(()).unwrap();
+        let done: Vec<(u32, u64)> = (0..3)
+            .map(|_| match rx.recv_timeout(wait).expect("a page") {
+                Done::Page {
+                    tab, generation, ..
+                } => (tab, generation),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(done, [(1, 1), (2, 1), (1, 5)]);
+        // A page asked for now comes next: nothing else was waiting.
+        loader.send(page(4, 1, "/last"));
+        match rx.recv_timeout(wait).expect("the last page") {
+            Done::Page { tab: 4, .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            asked(),
+            ["/slow-first", "/other-tab", "/reload-5", "/last"],
+            "what waited for an earlier navigation was never fetched"
+        );
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// SPEC-7.4.5, SPEC-9.5.1 (granskning 0014:5): a loader worker whose
     /// job panics answers for it and goes on. The tab of the job is told
     /// its page failed, a later page of the same origin is loaded (the
@@ -1039,8 +1168,9 @@ mod tests {
         let tx = std::sync::Mutex::new(tx);
         let dir = std::env::temp_dir().join(format!("vy-loader-panic-{}", std::process::id()));
         let real = loader_work(&dir);
+        // The jobs of tab 13 and up panic.
         let work: Work = Arc::new(move |job| match &job {
-            Job::Page { tab: BAD, .. } | Job::Check(Check { tab: BAD, .. }) => {
+            Job::Page { tab, .. } | Job::Check(Check { tab, .. }) if *tab >= BAD => {
                 panic!("a fault in the loader's code (this test's)")
             }
             _ => real(job),
@@ -1099,14 +1229,15 @@ mod tests {
             } => assert!(result.is_err()),
             other => panic!("{other:?}"),
         }
-        // More panics than workers, a local file among them, then a page.
+        // More panics than workers (a tab each, a local file among
+        // them), then a page.
         let hello = root().join("target/wasm/hello.wasm");
-        for n in 0..2 * LOADER_WORKERS as u64 {
-            loader.send(page(BAD, 100 + n, "/again"));
+        for n in 0..2 * LOADER_WORKERS as u32 {
+            loader.send(page(100 + n, 1, "/again"));
         }
         loader.send(Job::Page {
-            tab: BAD,
-            generation: 200,
+            tab: 200,
+            generation: 1,
             source: Source::File {
                 path: hello.clone(),
                 draft: None,
@@ -1118,19 +1249,15 @@ mod tests {
                 .recv_timeout(wait)
                 .expect("every panicked job is answered")
             {
-                Done::Page {
-                    tab: BAD,
-                    generation,
-                    result,
-                } => {
+                Done::Page { tab, result, .. } => {
                     assert!(result.is_err());
-                    failed.push(generation);
+                    failed.push(tab);
                 }
                 other => panic!("{other:?}"),
             }
         }
         failed.sort();
-        let mut want: Vec<u64> = (100..100 + 2 * LOADER_WORKERS as u64).collect();
+        let mut want: Vec<u32> = (100..100 + 2 * LOADER_WORKERS as u32).collect();
         want.push(200);
         assert_eq!(failed, want);
         loader.send(Job::Page {
