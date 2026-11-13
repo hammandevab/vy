@@ -11,7 +11,9 @@
 //! `GlContext::compose` with a real shell (a page, the devtools panel, a
 //! zoomed page, a page that paints far outside its canvas): the chrome's
 //! pixels byte for byte the CPU composition's, and the page nowhere but
-//! inside the page area.
+//! inside the page area. And a page whose list does not decode shows no
+//! page, not the picture another tab left in the framebuffer (granskning
+//! 0011:3).
 //!
 //! Without a test harness (`harness = false`), so winit's event loop runs
 //! on the main thread. Where no GL context can be made (no display, no
@@ -26,7 +28,7 @@ mod imp {
     use vy_render::gl::PageAt;
     use vy_render::{ImageCache, RasterPath, Renderer, RgbaImage, TextEngine};
     use vy_runtime::{Options, Runtime};
-    use vy_shell::gl::GlContext;
+    use vy_shell::gl::{GlContext, PageState};
     use vy_shell::headless::{headless_shell, settle};
     use vy_shell::page::Source;
     use vy_shell::shell::Shell;
@@ -543,27 +545,36 @@ mod imp {
         )
     }
 
+    /// Composite `shell`'s window with GL, as its window would with what
+    /// it knows of the page framebuffer in `page`, and read it back.
+    fn composed(
+        ctx: &mut GlContext,
+        shell: &mut Shell,
+        page: &mut PageState,
+        what: &str,
+    ) -> Result<RgbaImage, String> {
+        shell.set_page_layer(true);
+        let (w, h) = (shell.frame().width, shell.frame().height);
+        // Every row of the frame is sent: this is not the frame the
+        // context composited last.
+        ctx.compose(shell, Some((0, h)), page)
+            .map_err(|e| format!("{what}: {e}"))?;
+        Ok(window(ctx, w, h))
+    }
+
     /// Composite `shell`'s window with GL and on the CPU and compare:
     /// outside the page area the two are the same bytes; inside it they
     /// are within the tolerance of SPEC-11.3.2.
     fn compare_window(
         ctx: &mut GlContext,
         shell: &mut Shell,
+        page: &mut PageState,
         scale: f32,
         what: &str,
         failures: &mut Vec<String>,
     ) -> Result<(Diff, u64), String> {
-        let mut drawn = None;
-        shell.set_page_layer(true);
-        let (w, h) = (shell.frame().width, shell.frame().height);
-        // Every row of the frame is sent: this is not the frame the
-        // context composited last.
-        ctx.compose(shell, Some((0, h)), &mut drawn)
-            .map_err(|e| format!("{what}: {e}"))?;
-        let got = window(ctx, w, h);
-        if drawn.is_none() {
-            failures.push(format!("{what}: no page was drawn"));
-        }
+        let got = composed(ctx, shell, page, what)?;
+        let (w, h) = (got.width, got.height);
         // The same state composited on the CPU, with the reference.
         shell.set_page_layer(false);
         let want = shell.frame().clone();
@@ -601,10 +612,10 @@ mod imp {
         Ok((d, chrome))
     }
 
-    /// A module that paints red from far outside its canvas to far
-    /// outside it.
-    fn red_page(dir: &Path) -> Result<PathBuf, String> {
-        let wasm = wat::parse_str(
+    /// A module that paints one colour (`rgba`, opaque) from far outside
+    /// its canvas to far outside it, as `<name>.wasm` in `dir`.
+    fn solid_page(dir: &Path, name: &str, rgba: u32) -> Result<Source, String> {
+        let wasm = wat::parse_str(format!(
             r#"(module
                 (import "vy" "dl_begin" (func $dl_begin (result i32)))
                 (import "vy" "dl_end" (func $dl_end (result i32)))
@@ -613,19 +624,148 @@ mod imp {
                 (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
                 (func (export "vy_frame") (param i32) (result i32)
                     (drop (call $dl_begin))
-                    (drop (call $dl_rect (f32.const -10000) (f32.const -10000) (f32.const 20000) (f32.const 20000) (f32.const 0) (i32.const 0xFF0000FF)))
+                    (drop (call $dl_rect (f32.const -10000) (f32.const -10000) (f32.const 20000) (f32.const 20000) (f32.const 0) (i32.const {})))
                     (drop (call $dl_end))
                     i32.const 0)
                 (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
                 (func (export "vy_resize") (param i32 i32 f32))
                 (func (export "vy_suspend") (result i32) i32.const 0)
                 (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
-        )
+            rgba as i32
+        ))
         .map_err(|e| e.to_string())?;
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let path = dir.join("red.wasm");
+        let path = dir.join(format!("{name}.wasm"));
         std::fs::write(&path, wasm).map_err(|e| e.to_string())?;
-        Ok(path)
+        Ok(Source::File { path, draft: None })
+    }
+
+    /// How many pixels of `area` in `img` are exactly `rgb`.
+    fn count(img: &RgbaImage, area: Area, rgb: [u8; 3]) -> u64 {
+        let mut n = 0;
+        for y in 0..img.height {
+            for x in 0..img.width {
+                n += u64::from(inside(area, x, y) && pixel(img, x, y)[..3] == rgb);
+            }
+        }
+        n
+    }
+
+    /// SPEC-9.6.1, SPEC-11.3.2 (granskning 0011:3): a page whose display
+    /// list the reference refuses shows no page in the GL window, as in
+    /// the CPU window, and never the picture the framebuffer still holds
+    /// of another tab. A red page and a blue page in two tabs; while the
+    /// red one is shown (and is what the page framebuffer holds), the
+    /// blue tab's process sends a list that does not decode; the blue tab
+    /// is switched to. Its area is then empty, twice in a row (the second
+    /// composition is of the same page version), nothing red is under
+    /// the blue tab's address, the window is the CPU composition's, and
+    /// the tab's log says why. Loaded again, the blue page is shown.
+    fn shows_no_page_for_a_refused_list(
+        ctx: &mut GlContext,
+        failures: &mut Vec<String>,
+    ) -> Result<String, String> {
+        use vy_shell::ipc::ToShell;
+        use vy_shell::process::Inbound;
+        use vy_shell::shell::Incoming;
+        const RED: [u8; 3] = [255, 0, 0];
+        const BLUE: [u8; 3] = [0, 0, 255];
+        const WHITE: [u8; 3] = [255, 255, 255];
+        let timeout = std::time::Duration::from_secs(60);
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_vy-shell"));
+        let dir = std::env::temp_dir().join(format!("vy-gl-refused-{}", std::process::id()));
+        let mut shell = headless_shell(Some(exe), 640.0, 480.0, 1.0).map_err(|e| e.to_string())?;
+        let mut page = PageState::default();
+        let red = shell.open_tab(Some(solid_page(&dir, "red", 0xFF00_00FF)?));
+        settle(&mut shell, 2, timeout)?;
+        let blue = shell.open_tab(Some(solid_page(&dir, "blue", 0x0000_FFFF)?));
+        settle(&mut shell, 2, timeout)?;
+        let area = page_area(&shell, 1.0);
+        let all = (area.2 * area.3) as u64;
+        let expect = |got: &RgbaImage, rgb: [u8; 3], what: &str, failures: &mut Vec<String>| {
+            let (r, b, w) = (
+                count(got, area, RED),
+                count(got, area, BLUE),
+                count(got, area, WHITE),
+            );
+            if count(got, area, rgb) != all {
+                failures.push(format!(
+                    "{what}: of {all} pixels in the page area {r} are red, {b} blue, {w} white"
+                ));
+            }
+        };
+        let got = composed(ctx, &mut shell, &mut page, "the blue tab")?;
+        expect(&got, BLUE, "the blue tab", failures);
+        shell.switch_tab(false);
+        settle(&mut shell, 2, timeout)?;
+        let got = composed(ctx, &mut shell, &mut page, "the red tab")?;
+        expect(&got, RED, "the red tab", failures);
+        if shell.active_tab() != Some(red) || page.shown().is_none() {
+            return Err("the red tab is not the one shown".into());
+        }
+
+        // The blue tab's process, in the background, sends a list that
+        // does not decode; then the user switches to the tab.
+        let generation = shell.tab_generation(blue);
+        shell.handle(Incoming::Tab(
+            blue,
+            generation,
+            Inbound::Message(ToShell::Frame {
+                // No opcode 0x7E (appendix C), and no END.
+                display_list: vec![0x7E, 0x01, 0x02, 0x03],
+                styles: Vec::new(),
+                wants_more: false,
+                over_budget: false,
+            }),
+        ));
+        shell.switch_tab(true);
+        if shell.active_tab() != Some(blue) {
+            return Err("the blue tab is not active".into());
+        }
+        for round in ["first", "second"] {
+            let what = format!("a refused list after a tab switch, {round} composition");
+            let got = composed(ctx, &mut shell, &mut page, &what)?;
+            expect(&got, WHITE, &what, failures);
+            if page.shown().is_some() {
+                failures.push(format!("{what}: the framebuffer's picture counts as shown"));
+            }
+        }
+        let (d, _) = compare_window(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "a refused list against the CPU window",
+            failures,
+        )?;
+        if d.any != 0 {
+            failures.push(format!(
+                "a refused list: the page area is not the CPU window's: {d:?}"
+            ));
+        }
+        if !shell
+            .tab_logs(blue)
+            .iter()
+            .any(|l| l.contains("display list not rendered"))
+        {
+            failures.push(format!(
+                "a refused list is not in the tab's log: {:?}",
+                shell.tab_logs(blue)
+            ));
+        }
+        // The page loaded again draws, and is shown.
+        shell.reload();
+        settle(&mut shell, 2, timeout)?;
+        let got = composed(ctx, &mut shell, &mut page, "the blue tab reloaded")?;
+        expect(&got, BLUE, "the blue tab reloaded", failures);
+        if page.shown().is_none() {
+            failures.push("the reloaded page does not count as shown".into());
+        }
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(format!(
+            "refused    a list that does not decode, after a tab switch: no page in the {all} pixels of the page area (not the other tab's), twice; shown again after a reload"
+        ))
     }
 
     /// SPEC-9.6.1, SPEC-11.3.2 (granskning 0011:2): the GL window of a
@@ -653,12 +793,16 @@ mod imp {
         let mut cases = 0;
         let mut step = |ctx: &mut GlContext,
                         shell: &mut Shell,
+                        page: &mut PageState,
                         scale: f32,
                         what: &str,
                         failures: &mut Vec<String>|
          -> Result<Diff, String> {
             settle(shell, 2, timeout)?;
-            let (d, c) = compare_window(ctx, shell, scale, what, failures)?;
+            let (d, c) = compare_window(ctx, shell, page, scale, what, failures)?;
+            if page.shown().is_none() {
+                failures.push(format!("{what}: no page was drawn"));
+            }
             sum.add(&d);
             chrome += c;
             cases += 1;
@@ -667,11 +811,20 @@ mod imp {
 
         let mut shell =
             headless_shell(Some(exe.clone()), 900.0, 600.0, 1.0).map_err(|e| e.to_string())?;
+        // What the window keeps of the page framebuffer, for this shell.
+        let mut page = PageState::default();
         shell.open_tab(Some(local("shop")));
-        step(ctx, &mut shell, 1.0, "shop 900x600@1", failures)?;
+        step(ctx, &mut shell, &mut page, 1.0, "shop 900x600@1", failures)?;
         let whole = page_area(&shell, 1.0);
         shell.toggle_devtools();
-        step(ctx, &mut shell, 1.0, "shop, devtools open", failures)?;
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "shop, devtools open",
+            failures,
+        )?;
         let narrow = page_area(&shell, 1.0);
         if narrow.2 >= whole.2 || narrow.0 + narrow.2 >= 900 {
             failures.push(format!(
@@ -682,25 +835,37 @@ mod imp {
         step(
             ctx,
             &mut shell,
+            &mut page,
             1.0,
             "shop, devtools, an op outlined",
             failures,
         )?;
         shell.zoom_step(1);
-        step(ctx, &mut shell, 1.0, "shop, devtools, zoom 110 %", failures)?;
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "shop, devtools, zoom 110 %",
+            failures,
+        )?;
         shell.zoom_step(1);
-        step(ctx, &mut shell, 1.0, "shop, devtools, zoom 125 %", failures)?;
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "shop, devtools, zoom 125 %",
+            failures,
+        )?;
 
         // A page that paints everywhere it can name.
         let dir = std::env::temp_dir().join(format!("vy-gl-compose-{}", std::process::id()));
-        let red = red_page(&dir)?;
-        let tab = shell.open_tab(Some(Source::File {
-            path: red,
-            draft: None,
-        }));
+        let tab = shell.open_tab(Some(solid_page(&dir, "red", 0xFF00_00FF)?));
         let d = step(
             ctx,
             &mut shell,
+            &mut page,
             1.0,
             "a page painting past its canvas",
             failures,
@@ -733,10 +898,26 @@ mod imp {
 
         // Another window, at scale 1.5.
         let mut shell = headless_shell(Some(exe), 600.0, 400.0, 1.5).map_err(|e| e.to_string())?;
+        // What the window keeps of the page framebuffer, for this shell.
+        let mut page = PageState::default();
         shell.open_tab(Some(local("text")));
-        step(ctx, &mut shell, 1.5, "text 600x400@1.5", failures)?;
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.5,
+            "text 600x400@1.5",
+            failures,
+        )?;
         shell.toggle_devtools();
-        step(ctx, &mut shell, 1.5, "text @1.5, devtools open", failures)?;
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.5,
+            "text @1.5, devtools open",
+            failures,
+        )?;
         shell.shutdown();
         Ok(format!(
             "window     {cases} compositions of a shell (devtools, zoom, scale 1.5, a page painting past its canvas): {chrome} chrome pixels byte for byte the CPU composition's; page area {:.3} % of pixels differ at all, {:.3} % by more than {CHANNEL_DELTA}, max {}",
@@ -899,6 +1080,7 @@ mod imp {
         // The window's composition (SPEC-9.6.1).
         lines.push(presents_the_page_inside_its_area(ctx, &mut failures)?);
         lines.push(composes_the_shell_window(ctx, &mut failures)?);
+        lines.push(shows_no_page_for_a_refused_list(ctx, &mut failures)?);
         Ok(Outcome { lines, failures })
     }
 

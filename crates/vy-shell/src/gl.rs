@@ -29,6 +29,25 @@ use winit::window::{Window, WindowAttributes};
 /// Which page the page framebuffer holds (`PageLayer::version`).
 pub type PageVersion = (u32, u64, u32, u32, u32, u64);
 
+/// What [`GlContext::compose`] knows of the page framebuffer between
+/// frames; the default is an empty framebuffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageState {
+    /// The page last handed to the pipeline.
+    version: Option<PageVersion>,
+    /// True when the framebuffer holds that page's picture. False when
+    /// its list was refused: the framebuffer then still holds an earlier
+    /// picture, of this tab or of another, which is not shown.
+    shows: bool,
+}
+
+impl PageState {
+    /// The page the framebuffer's picture is of, when it is shown.
+    pub fn shown(&self) -> Option<PageVersion> {
+        self.version.filter(|_| self.shows)
+    }
+}
+
 /// A current GL context on a window, with the pipeline built on it.
 pub struct GlContext {
     /// The functions, loaded from the context.
@@ -58,24 +77,28 @@ impl GlContext {
     /// [`GlContext::swap`]: the shell's frame (transparent where the page
     /// shows, [`Shell::set_page_layer`]) over the page, which is drawn
     /// into its framebuffer first when its [`PageVersion`] is not the one
-    /// `drawn` names. The page is cut to the page area: nothing of it
-    /// shows outside (SPEC-9.6.1). `changed` is the rows of the frame
-    /// (top down, `y0..y1`) that differ from the last one composited here.
+    /// `page` names. The page is cut to the page area: nothing of it
+    /// shows outside (SPEC-9.6.1). A page whose list the reference
+    /// refuses is not shown at all, as on the CPU path: what the
+    /// framebuffer holds then is an earlier picture, perhaps another
+    /// tab's (granskning 0011:3). `changed` is the rows of the frame (top
+    /// down, `y0..y1`) that differ from the last one composited here.
     /// `Err`: leave the GL path.
     pub fn compose(
         &mut self,
         shell: &mut Shell,
         changed: Option<(u32, u32)>,
-        drawn: &mut Option<PageVersion>,
+        page: &mut PageState,
     ) -> Result<(), GlError> {
         shell.frame();
         let mut at = None;
         let mut report = None;
+        let mut refused = None;
         if let Some(layer) = shell.page_layer() {
             let p = layer.place;
-            if *drawn != Some(layer.version) {
+            if page.version != Some(layer.version) {
                 let before = layer.raster.path();
-                match layer.raster.render_gl(
+                page.shows = match layer.raster.render_gl(
                     &self.gl,
                     &mut self.raster,
                     layer.list,
@@ -85,21 +108,33 @@ impl GlContext {
                     layer.text,
                     layer.images,
                 ) {
-                    Ok(r) => report = Some((p.tab, r, before)),
-                    // A list the reference refuses too: nothing to show.
-                    Err(GlError::Render(_)) => {}
+                    Ok(r) => {
+                        report = Some((p.tab, r, before));
+                        true
+                    }
+                    // A list the reference refuses too: nothing to show,
+                    // now or until the page changes.
+                    Err(GlError::Render(e)) => {
+                        refused = Some((p.tab, e.to_string()));
+                        false
+                    }
                     Err(e) => return Err(e),
-                }
-                *drawn = Some(layer.version);
+                };
+                page.version = Some(layer.version);
             }
-            at = Some(PageAt {
-                x: p.at.0,
-                y: p.at.1,
-                clip: p.clip,
-            });
+            if page.shows {
+                at = Some(PageAt {
+                    x: p.at.0,
+                    y: p.at.1,
+                    clip: p.clip,
+                });
+            }
         }
         if let Some((tab, r, before)) = report {
             shell.page_drawn(tab, r, before);
+        }
+        if let Some((tab, why)) = refused {
+            shell.page_not_drawn(tab, &why);
         }
         self.raster.present(&self.gl, shell.frame(), changed, at)
     }

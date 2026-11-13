@@ -2207,6 +2207,15 @@ impl Shell {
         }
     }
 
+    /// The page of [`Shell::page_layer`] could not be drawn: its display
+    /// list is refused, as the reference refuses it. Logged in the tab as
+    /// when the shell draws the page itself; the window shows no page.
+    pub fn page_not_drawn(&mut self, tab: TabId, why: &str) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab) {
+            tab.log(format!("[host] display list not rendered: {why}"));
+        }
+    }
+
     /// True when the composited frame changed since it was last taken.
     pub fn needs_redraw(&self) -> bool {
         self.frame_dirty

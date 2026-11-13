@@ -57,8 +57,8 @@ struct App {
     shell: Option<Shell>,
     /// The GL path while it works.
     gpu: Option<gpu::Gpu>,
-    /// The page version the GL framebuffer holds.
-    gpu_page: Option<gpu::Version>,
+    /// What the GL page framebuffer holds.
+    gpu_page: gpu::Page,
     proxy: EventLoopProxy<UserEvent>,
     /// The AccessKit adapter (SPEC-10.2.1), made before the window shows.
     adapter: Option<accesskit_winit::Adapter>,
@@ -217,7 +217,7 @@ impl App {
     fn leave_gpu(&mut self, why: String) {
         eprintln!("vy-shell: GL failed ({why}); presenting on the CPU");
         self.gpu = None;
-        self.gpu_page = None;
+        self.gpu_page = gpu::Page::default();
         self.presented = Presented::default();
         if let Some(shell) = self.shell.as_mut() {
             shell.set_page_layer(false);
@@ -647,8 +647,8 @@ mod gpu {
     use winit::window::{Window, WindowAttributes};
 
     pub type Gpu = crate::gl::GlContext;
-    /// See `PageLayer::version`.
-    pub type Version = crate::gl::PageVersion;
+    /// What the page framebuffer holds.
+    pub type Page = crate::gl::PageState;
 
     /// The window, with a GL context when one can be made.
     pub fn open(
@@ -684,11 +684,10 @@ mod gpu {
         g: &mut Gpu,
         shell: &mut Shell,
         presented: &mut Presented,
-        drawn: &mut Option<Version>,
+        page: &mut Page,
     ) -> Result<(), String> {
         let changed = presented.update(shell.frame()).map(|a| (a.y0, a.y1));
-        g.compose(shell, changed, drawn)
-            .map_err(|e| e.to_string())?;
+        g.compose(shell, changed, page).map_err(|e| e.to_string())?;
         g.swap().map_err(|e| e.to_string())
     }
 }
@@ -702,7 +701,7 @@ mod gpu {
     use winit::window::{Window, WindowAttributes};
 
     pub enum Gpu {}
-    pub type Version = ();
+    pub type Page = ();
 
     pub fn open(
         el: &ActiveEventLoop,
@@ -725,7 +724,7 @@ mod gpu {
         g: &mut Gpu,
         _: &mut Shell,
         _: &mut Presented,
-        _: &mut Option<Version>,
+        _: &mut Page,
     ) -> Result<(), String> {
         match *g {}
     }
@@ -754,7 +753,7 @@ pub fn run(sources: Vec<Source>) -> Result<(), String> {
         exe,
         shell: None,
         gpu: None,
-        gpu_page: None,
+        gpu_page: gpu::Page::default(),
         proxy,
         adapter: None,
         a11y_active: false,
