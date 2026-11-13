@@ -9,7 +9,7 @@ Granskningssidan skrivs av en annan agent. Sessionen kan startas om: läget stå
 
 | Punkt | Läge | Commits |
 | --- | --- | --- |
-| 1 Kompileringscachen i skalet | klar; release-mätningen görs om sist | `f46daac` (`spec:` SPEC-9.4.2), `1d8b7a2`, `2339f12` (noteringar) |
+| 1 Kompileringscachen i skalet | klar; release-mätningen står under *Slutmätningar* | `f46daac` (`spec:` SPEC-9.4.2), `1d8b7a2`, `2339f12` (noteringar) |
 | 2 Parallella sidladdningar | klar | `b362580` |
 | 3 `widgets`-hjälptexten | klar | `daf0fe1` (`golden:`) |
 | 4 Textfältets kod delad mellan radlägena | klar | `7d73fe7` |
@@ -135,8 +135,8 @@ deserialiserade.
 `vy-shell` i release (Linux x86_64, strippad, receptet ur `tools/build_release.sh` med
 `repro_env.sh`, byggd ur en ögonblicksbild av `2339f12`): **24 572 200 byte** (SHA-256
 `9b9e6c89…abfa0e83`), 47 888 mer än `bc22baa` (24 524 312). Marginal mot 25 000 000: 427 800 byte
-(1,7 %). Träffhalvan av `spec_13_1_4_compile_time` i release hann inte köras före en omstart av
-servern; den mäts om sist tillsammans med slutstorleken (se *Slutmätningar*).
+(1,7 %). Träffhalvan av `spec_13_1_4_compile_time` i release mättes sist, tillsammans med
+slutstorleken (se *Slutmätningar*).
 
 ### Mutationskontroller (punkt 1)
 
@@ -238,6 +238,51 @@ funktionsordning när koden kompileras i `vy-sdk` i stället för i sidans crate
 textfältet alls och flyttar sig ändå 57 byte). Ett försök att hålla läget konstant ända in i
 `paint` med två stängningar ändrade inget för `form` och gjorde `widgets` 218 byte större; det är
 inte kvar.
+
+## Slutmätningar (release, `624ff27`)
+
+Byggt ur en ögonblicksbild av commiten (`git archive`) i den egna byggkatalogen med releasens recept
+(`tools/repro_env.sh`, `cargo build --release --locked --target x86_64-unknown-linux-gnu`), utan
+den ospårade `.cargo/config.toml`. Maskinen delades med en annan agent (last 1,0–1,9).
+
+| Mått | Värde |
+| --- | --- |
+| `vy-shell` (strippad, standardfunktionerna) | **24 591 912 byte**, SHA-256 `fcbce1fd…ac27e4f62` |
+| ökning mot `bc22baa` (24 524 312) | +67 600 (punkt 1: +47 888, punkt 2: +19 712) |
+| marginal mot 25 000 000 (SPEC-12.3.1) | **408 088 byte (1,6 %)**; `spec_12_3_1_size_budget` grönt i release |
+| `vy-cli` | 20 191 904 byte |
+| `spec_13_1_4_compile_time` (release) | grönt: `hello` kallt P95 17,5 ms (≤ 60); träff längs skalets väg P95 0,25–0,57 ms för alla 13 moduler (0 ms i hela millisekunder; `widgets` 0,57, `studio` 0,52, `hello` 0,25) |
+| `vy-cli bench --only compile --runs 30` | träff P50 0,11–0,48 ms, P95 0,16–0,59 ms; kallt över 60 ms i P95 för `widgets` (118), `studio` (107), `form` (64), `dashboard` (62) vid den här lasten |
+| A/B kall kompilering, `widgets` före/efter punkt 4 (3 × 40 körningar) | P50 104–114 → 88–92 ms (median 108 → 90, −17 %); P95 135–152 → 112–126 ms |
+| A/B kall kompilering, `form` | P50 53–58 → 54–57 ms: oförändrat inom bruset |
+
+Träffmätningen är huvudprocessens uppslag (nyckeln ur modulens byte, läsning, hashkontroll) och
+kodning av ramen, plus den tid en riktig, låst flikprocess rapporterar för att ta modulen ur
+koden. Rörets kopiering av koden mellan processerna (0,1–0,5 MB) mäts inte för sig.
+
+Kall kompilering av de största modulerna ligger kvar över 60 ms på den här maskinen (SPEC-13.1.4
+talar om 300 KB); det är cachen som gör återbesöken gratis, och punkt 4 som gör `widgets` 17 %
+snabbare kall.
+
+## Grindar på HEAD
+
+Från arbetskopians rot, i den egna byggkatalogen med `CARGO_INCREMENTAL=0`, efter varje kodcommit
+(dokumentcommits: fmt och spec_trace):
+
+| Grind | Utfall |
+| --- | --- |
+| `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` | rena |
+| `tools/build_modules.sh` + `check-abi target/wasm/hello.wasm` + `tools/test_modules.sh` | 13 moduler, ABI 1.0 OK |
+| `cargo test --workspace` | **412 gröna, 0 röda, 2 ignorerade** (`spec_13_2_1_raster_budget`, `spec_13_1_1_cold_start`); `bc22baa` hade 403 / 2 |
+| `python3 tools/spec_trace.py` | 141/141 (SPEC-9.4.2 ny) |
+| `vy-cli conformance` | **64/64 à 0,000 %**; enda ändrade filer under `conformance/` är de tre `widgets`-träden i `daf0fe1` |
+| `check-cross --workspace --all-targets` | Windows och macOS rena (efter punkt 1 och efter punkt 4) |
+| GL-testet (`xvfb-run … VY_GL_REQUIRED=1 cargo test -p vy-shell --test gl`) | grönt med llvmpipe på HEAD |
+| ABI 1.0 | `crates/vy-abi` och `docs/ABI-1.0.md` orörda; `SPEC.md` har en ny rad, SPEC-9.4.2, inget i §5 eller bilaga A och C |
+| Nya beroenden | inga (`Cargo.lock` och varje `Cargo.toml` orörda) |
+
+Nya tester mot `bc22baa`: +9 (vy-runtime +1: tre cachetester ersätter två; vy-shell +5 i
+`code_cache.rs`, +1 i `page.rs`, +1 i `tests/fuzz_regressions.rs`; vy-proto +1).
 
 ## Beslut
 
