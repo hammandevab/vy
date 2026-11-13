@@ -64,3 +64,102 @@ fn spec_9_7_1_the_build_flags_are_kept_from_git_bash() {
         "what was listed stays listed"
     );
 }
+
+/// A workflow under `.github/workflows/`, as text.
+fn workflow(name: &str) -> String {
+    let path = root().join(".github/workflows").join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The lines of a workflow that are not comments.
+fn code(workflow: &str) -> String {
+    workflow
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The names of a workflow's jobs, in order: the keys two spaces in
+/// after the line `jobs:`.
+fn jobs(workflow: &str) -> Vec<&str> {
+    let (_, after) = workflow.split_once("\njobs:\n").expect("a jobs: key");
+    after
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   ") && !l.starts_with("  #"))
+        .filter_map(|l| l.trim().strip_suffix(':'))
+        .collect()
+}
+
+/// The text of job `name`: from its key to the next job's.
+fn job<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let start = workflow
+        .find(&format!("\n  {name}:\n"))
+        .unwrap_or_else(|| panic!("no job {name}"));
+    let body = &workflow[start + 1..];
+    let end = body
+        .match_indices("\n  ")
+        .map(|(i, _)| i + 1)
+        .find(|i| {
+            let line = body[*i..].lines().next().unwrap_or("");
+            *i > 0 && !line.starts_with("   ") && !line.starts_with("  #") && line.ends_with(':')
+        })
+        .unwrap_or(body.len());
+    &body[..end]
+}
+
+/// The steps of a job: each from its `      - ` to the next.
+fn steps(job: &str) -> Vec<&str> {
+    let mut starts: Vec<usize> = job
+        .match_indices("\n      - ")
+        .map(|(i, _)| i + 1)
+        .collect();
+    starts.push(job.len());
+    starts.windows(2).map(|w| &job[w[0]..w[1]]).collect()
+}
+
+/// SPEC-12.3.1, SPEC-9.7.1 (granskning 0012:2): the size cap stops a
+/// release on the day it is made, and the binaries of two platforms had
+/// never been built by the workflow. A manual run with `dry_run` is the
+/// rehearsal: it builds, measures, sums and writes the recipe as a
+/// release does, and skips the one job that publishes.
+#[test]
+fn spec_12_3_1_a_release_can_be_rehearsed() {
+    let release = workflow("release.yml");
+    let text = code(&release);
+    let (_, inputs) = text
+        .split_once("  workflow_dispatch:\n    inputs:\n")
+        .unwrap();
+    let inputs = inputs.split_once("\n\n").unwrap().0;
+    let (_, dry_run) = inputs
+        .split_once("      dry_run:\n")
+        .expect("a dry_run input");
+    assert!(dry_run.contains("type: boolean") && dry_run.contains("default: false"));
+
+    assert_eq!(
+        jobs(&text)[..5],
+        ["version", "binaries", "site", "sums", "release"]
+    );
+    // Only the release itself is left out of a rehearsal.
+    for name in jobs(&text) {
+        let job = job(&text, name);
+        let skipped = job.contains("if: ${{ !inputs.dry_run }}");
+        assert_eq!(skipped, name == "release", "{name}");
+    }
+    // The size check and the sums are in jobs a rehearsal runs.
+    assert!(job(&text, "binaries").contains("over SPEC-12.3.1's 25000000"));
+    let sums = job(&text, "sums");
+    assert!(sums.contains("needs: [version, binaries, site]"));
+    assert!(sums.contains("> SHA256SUMS") && sums.contains("> BUILD.md"));
+    assert!(sums.contains("name: vy-sums"), "kept as an artifact");
+    // The release publishes what that job made and makes nothing itself.
+    let publish = job(&text, "release");
+    assert!(publish.contains("needs: [version, sums]"));
+    let steps = steps(publish);
+    assert_eq!(steps.len(), 2, "download and publish");
+    assert!(steps[0].contains("actions/download-artifact@"));
+    assert!(steps[1].contains("softprops/action-gh-release@"));
+    for file in ["dist/*.zip", "dist/SHA256SUMS", "dist/BUILD.md"] {
+        assert!(steps[1].contains(file), "{file}");
+    }
+}

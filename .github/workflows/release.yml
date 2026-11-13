@@ -13,6 +13,10 @@
 #   BUILD.md                    byggreceptet: commit, SOURCE_DATE_EPOCH, maskiner,
 #                               verktygskedja, kommandon (ur tools/BUILD.md.in)
 #
+# En manuell körning med `dry_run` är en generalrepetition: allt byggs, mäts mot SPEC-12.3.1,
+# signeras och summeras som i en release, och SHA256SUMS och BUILD.md blir en artefakt, men
+# jobbet `release` hoppas över: ingen tagg och ingen release skapas.
+#
 # Bygget är reproducerbart (SPEC-9.7.1): samma commit på samma klass av maskin ger samma
 # binärer, oavsett katalog, användare och tid (tools/repro_env.sh), och zip-filerna skrivs
 # med fasta tider och rättigheter (tools/release_files.py). CI:s jobb `repro` bygger två
@@ -39,6 +43,11 @@ on:
         description: "Version att släppa, t.ex. v0.1.0 (taggen skapas på den valda commiten om den saknas)"
         required: true
         type: string
+      dry_run:
+        description: "Generalrepetition: bygg, mät, signera och summera allt, men skapa ingen tagg och ingen release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -355,7 +364,9 @@ jobs:
           path: vy-site-*.zip
           if-no-files-found: error
 
-  release:
+  # Everything a release attaches, gathered and summed: also in a dry run,
+  # where this job's artifact is what there is to look at.
+  sums:
     needs: [version, binaries, site]
     runs-on: ubuntu-latest
     steps:
@@ -374,6 +385,25 @@ jobs:
           python3 ../tools/release_files.py build-md ../tools/BUILD.md.in vy-*.build > BUILD.md
           cat SHA256SUMS BUILD.md
           ls -l
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vy-sums
+          path: |
+            dist/SHA256SUMS
+            dist/BUILD.md
+          if-no-files-found: error
+
+  # Skipped in a dry run (`inputs` is empty for a tag push, so a tag
+  # always releases).
+  release:
+    needs: [version, sums]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
