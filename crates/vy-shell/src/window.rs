@@ -308,6 +308,20 @@ impl ApplicationHandler<UserEvent> for App {
         let data_dir = data_dir().unwrap_or_else(|| scratch_dir("data"));
         let config = Config {
             exe: Some(self.exe.clone()),
+            // The compilation cache is on on every platform, Windows
+            // included (granskning 0014:4, spec-fråga 62; decided by the
+            // coordinator on the owner's delegation). An entry is keyed
+            // by the module's own bytes and filled only by a tab process
+            // loaded with them, before any code of the page runs: a
+            // poisoned entry can only come from a module that breaks out
+            // while it is compiled, and it only runs again for that same
+            // module, which could repeat its break-out at every visit
+            // without a cache. An entry never outlives the client version
+            // that kept it (granskning 0014:1). That Windows's default
+            // sandbox lets a tab process read files and reach the network
+            // is a property of that sandbox, which strict mode closes,
+            // not of the cache: the code runs in the same tab process
+            // with or without it.
             code_cache: Some(crate::paths::code_cache_dir(&data_dir)),
             data_dir,
             headless: false,
