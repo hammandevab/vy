@@ -215,18 +215,10 @@ fn cat(parts: &[&str]) -> String {
 }
 
 /// `n` in decimal.
-fn number(mut n: usize) -> String {
-    let mut digits = [0u8; 20];
-    let mut len = 0;
-    loop {
-        digits[len] = b'0' + (n % 10) as u8;
-        len += 1;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    digits[..len].iter().rev().map(|d| *d as char).collect()
+fn number(n: usize) -> String {
+    let mut s = String::new();
+    vy_sdk::num::push_int(&mut s, n as i64);
+    s
 }
 
 /// The style a run of a block is set in.
@@ -477,19 +469,6 @@ impl Page {
         }
     }
 
-    /// `text` centred in `r`.
-    fn centred(f: &mut Frame, r: Rect, style: StyleId, text: &str) -> Result<(), VyError> {
-        let size = text_measure(style, 0.0, text)?;
-        f.text(
-            r.x + (r.w - size.w) / 2.0,
-            r.y + (r.h - size.h) / 2.0,
-            0.0,
-            style,
-            text,
-        )?;
-        Ok(())
-    }
-
     fn draw_tabs(&self, f: &mut Frame, l: &Layout) -> Result<(), VyError> {
         let p = self.theme.palette;
         for (i, name) in ["Skriv", "Läs"].iter().enumerate() {
@@ -500,7 +479,7 @@ impl Page {
                 f.rect(r.inset(-ui::RING), 8.0 + ui::RING, p.ring)?;
             }
             f.rect(r, 8.0, if on { CARD } else { TAB_OFF })?;
-            Self::centred(f, r, if on { self.tab_on } else { self.tab }, name)?;
+            f.text_centred(r, if on { self.tab_on } else { self.tab }, name)?;
             if on {
                 let bar = Rect::new(r.x + 12.0, r.bottom() - 4.0, (r.w - 24.0).max(0.0), 3.0);
                 f.rect(bar, 1.5, p.accent)?;

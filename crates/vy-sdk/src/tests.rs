@@ -7,6 +7,7 @@ use crate::heap::{Grow, Heap, ALIGN, HEADER, PAGE};
 use crate::mock::{self, Op};
 use crate::prelude::*;
 use crate::{api, arena, math};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::alloc::Layout;
@@ -1000,4 +1001,110 @@ fn spec_6_3_1_math_rounds_like_std_and_snaps_to_device_pixels() {
     assert_eq!(math::snap(1.0, 2.0), 1.0);
     assert_eq!(math::snap(3.3, 0.0), 3.3, "no scale: unchanged");
     assert_eq!(math::snap(3.3, f32::NAN), 3.3);
+}
+
+/// SPEC-2.1.5 (m5-examples, SDK-luckor): numbers become text by integer
+/// arithmetic alone, so a page that writes a count, a score or a price
+/// does not need `core::fmt` (about 4 KB of wasm): `push_int` writes any
+/// `i64`, `push_decimal` a fixed-point value with every decimal and the
+/// separator the page's language uses. The same text as `format!` gives.
+#[test]
+fn spec_2_1_5_numbers_as_text_without_fmt() {
+    use crate::num::{push_decimal, push_int};
+    let int = |v: i64| {
+        let mut s = String::new();
+        push_int(&mut s, v);
+        s
+    };
+    for v in [
+        0,
+        1,
+        -1,
+        9,
+        10,
+        -10,
+        12_345,
+        -987_654_321,
+        i64::from(i32::MIN),
+        i64::MAX,
+        i64::MIN,
+    ] {
+        assert_eq!(int(v), format!("{v}"));
+    }
+    let mut s = String::from("Poäng: ");
+    push_int(&mut s, 40);
+    assert_eq!(s, "Poäng: 40", "appended, not replaced");
+
+    let dec = |v: i64, decimals: u32, point: char| {
+        let mut s = String::new();
+        push_decimal(&mut s, v, decimals, point);
+        s
+    };
+    assert_eq!(dec(1995, 2, ','), "19,95");
+    assert_eq!(dec(1500, 2, ','), "15,00", "every decimal is written");
+    assert_eq!(dec(5, 2, '.'), "0.05");
+    assert_eq!(dec(-5, 2, '.'), "-0.05");
+    assert_eq!(dec(0, 3, '.'), "0.000");
+    assert_eq!(dec(-1, 1, ','), "-0,1");
+    assert_eq!(dec(42, 0, ','), "42", "no decimals: an integer");
+    assert_eq!(dec(-42, 0, ','), "-42");
+    assert_eq!(dec(i64::MAX, 18, '.'), "9.223372036854775807");
+    assert_eq!(dec(i64::MIN, 18, '.'), "-9.223372036854775808");
+    assert_eq!(dec(7, 40, '.'), "0.000000000000000007", "at most 18");
+    // As `format!` writes a float that has that many decimals exactly.
+    for (v, text) in [(125i64, "1.25"), (-30_050, "-300.50"), (99, "0.99")] {
+        assert_eq!(dec(v, 2, '.'), text);
+        assert_eq!(format!("{:.2}", v as f64 / 100.0), text);
+    }
+    // A float goes through `math::round`.
+    let third = crate::math::round(100.0 / 3.0 * 100.0) as i64;
+    assert_eq!(dec(third, 2, ','), "33,33");
+}
+
+/// SPEC-5.2.4, SPEC-5.2.5 (m5-examples, SDK-luckor): `Frame::text_centred`
+/// measures one line and draws it in the middle of a rectangle, the
+/// `text_measure` + `dl_text` every page with a control of its own wrote
+/// by hand; it returns the text's size, draws unwrapped, lets a text
+/// wider than the rectangle stick out equally on both sides, and passes
+/// the host's refusal on.
+#[test]
+fn spec_5_2_4_text_centred() {
+    mock::reset();
+    let s = text_style(Font::Sans, 20.0, 400, Color::rgb(0, 0, 0)).unwrap();
+    // 20 px text: 12 px a character, 25 px a line.
+    let r = Rect::new(100.0, 50.0, 200.0, 45.0);
+    let mut f = Frame::begin();
+    let size = f.text_centred(r, s, "Hej!").unwrap();
+    assert_eq!((size.w, size.h), (48.0, 25.0));
+    let wide = f
+        .text_centred(Rect::new(0.0, 0.0, 24.0, 25.0), s, "Bredare")
+        .unwrap();
+    assert_eq!(wide.w, 84.0);
+    assert_eq!(
+        f.text_centred(r, StyleId(99), "x"),
+        Err(VyError::Style),
+        "an unknown style is the host's refusal"
+    );
+    assert_eq!(f.end(), Ok(2));
+    mock::with(|h| {
+        assert_eq!(
+            h.frame_ops(),
+            [
+                Op::Text {
+                    x: 176.0,
+                    y: 60.0,
+                    max_w: 0.0,
+                    style_id: s.0,
+                    text: "Hej!".into()
+                },
+                Op::Text {
+                    x: -30.0,
+                    y: 0.0,
+                    max_w: 0.0,
+                    style_id: s.0,
+                    text: "Bredare".into()
+                }
+            ]
+        );
+    });
 }

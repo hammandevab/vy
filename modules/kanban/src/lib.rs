@@ -860,19 +860,6 @@ impl Page {
         )
     }
 
-    /// `text` centred in `r`.
-    fn centred(f: &mut Frame, r: Rect, style: StyleId, text: &str) -> Result<(), VyError> {
-        let size = text_measure(style, 0.0, text)?;
-        f.text(
-            r.x + (r.w - size.w) / 2.0,
-            r.y + (r.h - size.h) / 2.0,
-            0.0,
-            style,
-            text,
-        )?;
-        Ok(())
-    }
-
     /// A card's face at `r`: border, surface, title and delete button.
     fn draw_face(&self, f: &mut Frame, r: Rect, card: &Card) -> Result<(), VyError> {
         f.rect(r, 8.0, CARD_EDGE)?;
@@ -885,7 +872,8 @@ impl Page {
             self.s.card,
             &card.title,
         )?;
-        Self::centred(f, del_rect(r), self.s.glyph, "×")
+        f.text_centred(del_rect(r), self.s.glyph, "×")?;
+        Ok(())
     }
 
     /// The cards of column `c` inside its scroll viewport, with their nodes.
@@ -928,7 +916,7 @@ impl Page {
                 if focus_del {
                     self.ring(f, del_rect(r), 6.0)?;
                     f.rect(del_rect(r), 6.0, CARD)?;
-                    Self::centred(f, del_rect(r), self.s.glyph, "×")?;
+                    f.text_centred(del_rect(r), self.s.glyph, "×")?;
                 }
             }
             // A dragged card's node is where the card floats.
@@ -989,7 +977,7 @@ impl Page {
                 self.ring(f, lane.add, ui::RADIUS)?;
             }
             f.rect(lane.add, ui::RADIUS, t.palette.accent)?;
-            Self::centred(f, lane.add, self.s.plus, "+")?;
+            f.text_centred(lane.add, self.s.plus, "+")?;
             let label = format!("Lägg till kort i {}", NAMES[c]);
             f.sem.node_with_id(id, Role::Button, lane.add, &label)?;
             Ok(())
@@ -1014,7 +1002,7 @@ impl Page {
             let n = self.board.cols[c].len();
             let label = format!("{name} {n}");
             let style = if on { self.s.tab_on } else { self.s.tab };
-            Self::centred(f, r, style, &label)?;
+            f.text_centred(r, style, &label)?;
             if on {
                 let bar = Rect::new(r.x + 12.0, r.bottom() - 4.0, (r.w - 24.0).max(0.0), 3.0);
                 f.rect(bar, 1.5, self.theme.palette.accent)?;

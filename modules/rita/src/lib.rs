@@ -199,18 +199,10 @@ fn cat(parts: &[&str]) -> String {
 }
 
 /// `n` in decimal.
-fn number(mut n: usize) -> String {
-    let mut digits = [0u8; 20];
-    let mut len = 0;
-    loop {
-        digits[len] = b'0' + (n % 10) as u8;
-        len += 1;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    digits[..len].iter().rev().map(|d| *d as char).collect()
+fn number(n: usize) -> String {
+    let mut s = String::new();
+    vy_sdk::num::push_int(&mut s, n as i64);
+    s
 }
 
 impl Page {
@@ -634,19 +626,6 @@ impl Page {
         }
     }
 
-    /// `text` centred in `r`.
-    fn centred(f: &mut Frame, r: Rect, style: StyleId, text: &str) -> Result<(), VyError> {
-        let size = text_measure(style, 0.0, text)?;
-        f.text(
-            r.x + (r.w - size.w) / 2.0,
-            r.y + (r.h - size.h) / 2.0,
-            0.0,
-            style,
-            text,
-        )?;
-        Ok(())
-    }
-
     /// A filled circle around `c`.
     fn dot(f: &mut Frame, c: Point, radius: f32, color: Color) -> Result<(), VyError> {
         let r = Rect::new(c.0 - radius, c.1 - radius, 2.0 * radius, 2.0 * radius);
@@ -678,7 +657,7 @@ impl Page {
                     (p.surface, self.s.key)
                 };
                 plate(f, false, fill)?;
-                Self::centred(f, r, style, "Sudd")?;
+                f.text_centred(r, style, "Sudd")?;
             }
             K_UNDO | K_REDO => {
                 let (glyph, steps) = if i == K_UNDO {
@@ -692,11 +671,11 @@ impl Page {
                 } else {
                     self.s.glyph
                 };
-                Self::centred(f, r, style, glyph)?;
+                f.text_centred(r, style, glyph)?;
             }
             K_CLEAR => {
                 plate(f, false, p.surface)?;
-                Self::centred(f, r, self.s.key, "Rensa")?;
+                f.text_centred(r, self.s.key, "Rensa")?;
             }
             i if i >= K_PEN => {
                 plate(f, self.pen == i - K_PEN, p.surface)?;

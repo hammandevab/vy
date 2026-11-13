@@ -669,7 +669,11 @@ med namn: `use vy_sdk::{fetch_begin, fetch_poll, fetch_read, Method, state_get, 
   `RIGHT`, `UP`, `DOWN`.
 - Text: `text_style(Font::Sans | Serif | Mono | Ui | Emoji | Resource(i), size_px, weight,
   color) -> StyleId` (vikt 1–1000, 400 normal, 700 fet), `text_measure(style, max_w, text) ->
-  Size { w, h }`, `text_caret(style, text, byte_offset) -> (x, y)`.
+  Size { w, h }`, `text_caret(style, text, byte_offset) -> (x, y)`;
+  `f.text_centred(r, style, text)` ritar en rad mitt i en rektangel.
+- Tal som text utan `format!` (som kostar modulen omkring 4 KB): `vy_sdk::num::push_int(&mut s,
+  v)` och `push_decimal(&mut s, v, decimaler, ',')` för fixtal (`1995` med två decimaler blir
+  `19,95`).
 - Färg och geometri: `Color::rgb(r, g, b)`, `Color::rgba(r, g, b, a)`; `Rect::new(x, y, w, h)`
   med `right()`, `bottom()`, `contains(x, y)`, `inset(d)`, `offset(dx, dy)`;
   `vy_sdk::math::{floor, round, ceil, snap}`.

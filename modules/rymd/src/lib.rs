@@ -161,18 +161,10 @@ fn cat(parts: &[&str]) -> String {
 }
 
 /// `n` in decimal.
-fn number(mut n: u32) -> String {
-    let mut digits = [0u8; 10];
-    let mut len = 0;
-    loop {
-        digits[len] = b'0' + (n % 10) as u8;
-        len += 1;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    digits[..len].iter().rev().map(|d| *d as char).collect()
+fn number(n: u32) -> String {
+    let mut s = String::new();
+    vy_sdk::num::push_int(&mut s, n as i64);
+    s
 }
 
 /// A solid's colour in light `shade`, 0 to 1.
@@ -350,19 +342,6 @@ impl Page {
         }
     }
 
-    /// `text` centred in `r`.
-    fn centred(f: &mut Frame, r: Rect, style: StyleId, text: &str) -> Result<(), VyError> {
-        let size = text_measure(style, 0.0, text)?;
-        f.text(
-            r.x + (r.w - size.w) / 2.0,
-            r.y + (r.h - size.h) / 2.0,
-            0.0,
-            style,
-            text,
-        )?;
-        Ok(())
-    }
-
     /// The stars: one small rectangle each, on whole device pixels.
     fn draw_stars(&self, f: &mut Frame, l: &Layout) -> Result<(), VyError> {
         let scale = self.window.scale;
@@ -434,7 +413,7 @@ impl Page {
             f.rect(r.inset(1.0), ui::RADIUS - 1.0, p.surface)?;
         }
         let style = if on { self.s.key_on } else { self.s.key };
-        Self::centred(f, r, style, NAMES[i])?;
+        f.text_centred(r, style, NAMES[i])?;
         let chosen = if on { self.theme.words.selected } else { "" };
         f.sem
             .node_with_id(id, Role::Button, r, &cat(&[NAMES[i], chosen]))?;

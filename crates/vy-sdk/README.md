@@ -17,6 +17,8 @@ egen kontroll.
   33:e klippet (SPEC-6.1.4), text över 65 535 byte (SPEC-9.3.2) – så sidan ser felet före loggen.
   `Frame::text` returnerar `Size` (bredd och höjd, SPEC-5.2.4); `Frame::clip_push(r, radius)` och
   `Frame::clipped(r, radius, |f| …)` klipper till en rektangel med hörnradie (SPEC-5.2.3).
+  `Frame::text_centred(r, style, text)` mäter en rad och ritar den mitt i `r`: etiketten på en
+  knapp, flik, cell eller bricka som sidan ritar själv.
 - `Frame::sem` bygger det semantiska trädet medan du ritar (SPEC-10.1.1): `node(Role::Heading, r, text)`
   för varje nod (ett sätt, SPEC-2.1.1), `node_with_id` för ett id sidan väljer, `begin`/`end` eller
   `f.group(Role::Main, …, |f| …)` för nästning.
@@ -27,6 +29,10 @@ egen kontroll.
   `layout()`-funktion som räknar ut rektanglarna ur fönstret, så att `event` träfftestar och `frame`
   ritar samma rektanglar – se nedan. `vy_sdk::math` har `floor`, `round`, `ceil` och `snap(v, scale)`
   (närmaste fysiska pixelgräns) för 1 px-linjer; `core` saknar dem och SDK:t drar inte in `libm`.
+- `vy_sdk::num` skriver tal som text utan `core::fmt`, som kostar en modul omkring 4 KB:
+  `push_int(&mut s, -1250)` lägger till ett heltal, `push_decimal(&mut s, 1995, 2, ',')` ett
+  fixtal med alla sina decimaler (`19,95`). Bara heltalsaritmetik, så samma tal ger samma text
+  hos varje värd. Komponenterna i `ui` använder dem; `ui::Slider` drar alltså inte in `format!`.
 - `Event` avkodar `vy_event` enligt bilaga A (med `PointerLeave`); `event::key` har de vanligaste
   USB HID-koderna. Tab når aldrig en sida – värden gör `FOCUS` av den; Enter och Escape kommer
   som `KeyDown`. `dt_ms` i `App::frame` är tiden sedan föregående frame och 0 efter start och

@@ -4,9 +4,10 @@ use super::{focus_of, ring, Input, Response, Theme};
 use crate::api::text_measure;
 use crate::event::{button, key, Event};
 use crate::frame::Frame;
+use crate::num::push_int;
 use crate::sem::{NodeId, Role};
 use crate::{math, Rect, VyError};
-use alloc::format;
+use alloc::string::String;
 
 /// Diameter of the knob.
 pub const KNOB: f32 = 20.0;
@@ -192,16 +193,21 @@ impl Slider {
         }
         f.rect(knob, KNOB / 2.0, p.accent)?;
         f.rect(knob.inset(3.0), KNOB / 2.0 - 3.0, p.surface)?;
-        let value = format!("{}", self.value);
-        let vw = text_measure(theme.text, 0.0, &value)?.w;
+        // By hand, so that a slider does not bring `core::fmt` into a page.
+        let mut text = String::with_capacity(label.len() + 13);
+        text.push_str(label);
+        text.push_str(": ");
+        let at = text.len();
+        push_int(&mut text, i64::from(self.value));
+        let value = &text[at..];
+        let vw = text_measure(theme.text, 0.0, value)?.w;
         f.text(
             r.right() - vw,
             r.y + (r.h - theme.line_h) / 2.0,
             0.0,
             theme.text,
-            &value,
+            value,
         )?;
-        let text = format!("{label}: {value}");
         f.sem.node_with_id(self.id, Role::Slider, r, &text)?;
         Ok(())
     }

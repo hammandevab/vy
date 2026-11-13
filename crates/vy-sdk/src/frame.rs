@@ -10,6 +10,7 @@
 //! returns its status, SPEC-5.2.3) is not counted as an opcode either, so
 //! `vy_frame` reports exactly what the list holds (SPEC-5.1.2).
 
+use crate::api::text_measure;
 use crate::error::{check, check64, VyError};
 use crate::raw::{self, pl};
 use crate::sem::Sem;
@@ -179,6 +180,22 @@ impl Frame {
             w: from_x100((packed >> 32) as i32),
             h: from_x100(packed as i32),
         })
+    }
+
+    /// One line of `text` in the middle of `r`, across and down: measured
+    /// with `text_measure`, drawn unwrapped with [`Frame::text`]; returns
+    /// its size. A text wider than `r` sticks out equally on both sides.
+    /// For the label of a control a page draws itself: a button, a tab, a
+    /// cell, a badge.
+    pub fn text_centred(&mut self, r: Rect, style: StyleId, text: &str) -> Result<Size, VyError> {
+        let size = text_measure(style, 0.0, text)?;
+        self.text(
+            r.x + (r.w - size.w) / 2.0,
+            r.y + (r.h - size.h) / 2.0,
+            0.0,
+            style,
+            text,
+        )
     }
 
     /// `dl_image`: draw resource `id` fitted into `r` (SPEC-5.2.3). Id 0 is

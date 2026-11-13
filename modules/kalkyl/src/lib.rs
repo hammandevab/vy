@@ -599,19 +599,6 @@ impl Page {
         }
     }
 
-    /// `text` centred in `r`.
-    fn centred(f: &mut Frame, r: Rect, style: StyleId, text: &str) -> Result<(), VyError> {
-        let size = text_measure(style, 0.0, text)?;
-        f.text(
-            r.x + (r.w - size.w) / 2.0,
-            r.y + (r.h - size.h) / 2.0,
-            0.0,
-            style,
-            text,
-        )?;
-        Ok(())
-    }
-
     /// A frame of `t` logical pixels just inside `r`.
     fn outline(f: &mut Frame, r: Rect, t: f32, color: Color) -> Result<(), VyError> {
         f.rect(Rect::new(r.x, r.y, r.w, t), 0.0, color)?;
@@ -660,7 +647,7 @@ impl Page {
         let x = r.right() - CELL_PAD - cell.width;
         match cell.value {
             Value::Num(_) if cell.width > room => {
-                Self::centred(f, r, style, "#####")?;
+                f.text_centred(r, style, "#####")?;
             }
             Value::Num(v) if cell.decimals < 6 => {
                 let shorter = format_decimals(v, u32::from(cell.decimals));
@@ -669,7 +656,9 @@ impl Page {
             Value::Num(_) => {
                 f.text(x, y, 0.0, style, cell.shown())?;
             }
-            Value::Fault(_) => Self::centred(f, r, self.s.fault, cell.shown())?,
+            Value::Fault(_) => {
+                f.text_centred(r, self.s.fault, cell.shown())?;
+            }
             Value::Text => {
                 // A long text runs over the empty cells to its right.
                 let needs = ceil((cell.width + 2.0 * CELL_PAD) / CELL_W) as usize;
@@ -767,7 +756,7 @@ impl Page {
                 f.rect(r, 0.0, HEAD_ON)?;
             }
             let mut letter = [0u8; 4];
-            Self::centred(f, r, self.s.head, col_name(col).encode_utf8(&mut letter))?;
+            f.text_centred(r, self.s.head, col_name(col).encode_utf8(&mut letter))?;
             let x = snap(r.right(), scale) - line;
             f.rect(
                 Rect::new(x, top.y + 5.0, line, COL_HEAD_H - 10.0),
@@ -782,7 +771,7 @@ impl Page {
             if (sr0..=sr1).contains(&row) {
                 f.rect(r, 0.0, HEAD_ON)?;
             }
-            Self::centred(f, r, self.s.head, &number(row + 1))?;
+            f.text_centred(r, self.s.head, &number(row + 1))?;
         }
         // The corner, the lines along the headers and the gutters.
         f.rect(Rect::new(0.0, top.y, ROW_HEAD_W, COL_HEAD_H), 0.0, HEAD)?;
@@ -860,7 +849,7 @@ impl Page {
         let selected = self.range_name();
         f.rect(l.name, 6.0, p.border)?;
         f.rect(l.name.inset(1.0), 5.0, p.surface)?;
-        Self::centred(f, l.name, self.s.name, &selected)?;
+        f.text_centred(l.name, self.s.name, &selected)?;
         f.sem
             .node(Role::Text, l.name, &cat(&["Markerat: ", &selected]))?;
         // Each of the three fields has its name as the `text` node before

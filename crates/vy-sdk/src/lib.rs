@@ -30,6 +30,7 @@ pub mod frame;
 pub mod math;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
+pub mod num;
 mod raw;
 pub mod sem;
 pub mod ui;
