@@ -9,10 +9,10 @@ Granskningssidan skrivs av en annan agent. Sessionen kan startas om: läget stå
 
 | Punkt | Läge | Commits |
 | --- | --- | --- |
-| 1 Kompileringscachen i skalet | implementerad, grindarna körs | `f46daac` (`spec:` SPEC-9.4.2), följande |
-| 2 Parallella sidladdningar | ej påbörjad | – |
+| 1 Kompileringscachen i skalet | klar; release-mätningen görs om sist | `f46daac` (`spec:` SPEC-9.4.2), `1d8b7a2`, `2339f12` (noteringar) |
+| 2 Parallella sidladdningar | klar | `b362580` |
 | 3 `widgets`-hjälptexten | ej påbörjad | – |
-| 4 Textfältets kod delad mellan radlägena | ej påbörjad | – |
+| 4 Textfältets kod delad mellan radlägena | utkast utanför arbetskopian (`/tmp/m5p/textbox.rs`) | – |
 
 ## Punkt 1 – kompileringscachen i skalet (SPEC-13.1.4, SPEC-9.4.2)
 
@@ -129,6 +129,59 @@ deserialiserade.
 | `spec_11_2_1_messages_round_trip`, `spec_11_2_2_bad_frames_are_errors`, `spec_9_3_2_main_process_holds_tab_messages_to_the_caps` | vy-shell `ipc.rs` | 15 `ToTab`- och 16 `ToShell`-varianter; en träff bär ingen kod; 64 MB-taket åt båda håll |
 | `fuzz_ipc_corpus_has_the_code_cache` | vy-shell `tests/fuzz_regressions.rs` | fyra nya frön i `fuzz/corpus/ipc/`, mutationer panikar inte |
 | `spec_13_1_4_compile_time` | vy-cli | träffhalvan mäter skalets väg i release (`bench::cache_hit_times`) |
+
+### Storlek efter punkt 1
+
+`vy-shell` i release (Linux x86_64, strippad, receptet ur `tools/build_release.sh` med
+`repro_env.sh`, byggd ur en ögonblicksbild av `2339f12`): **24 572 200 byte** (SHA-256
+`9b9e6c89…abfa0e83`), 47 888 mer än `bc22baa` (24 524 312). Marginal mot 25 000 000: 427 800 byte
+(1,7 %). Träffhalvan av `spec_13_1_4_compile_time` i release hann inte köras före en omstart av
+servern; den mäts om sist tillsammans med slutstorleken (se *Slutmätningar*).
+
+### Mutationskontroller (punkt 1)
+
+Tre skydd stängdes av ett i taget i en provbyggnad och testerna föll som de ska: uppspelningens
+filter för kodramar (`spec_9_4_2_recordings_hold_no_code`), borttagningen av posten när
+flikprocessen dör (`spec_13_1_4_unusable_code_is_dropped_and_compiled`) och villkoret att svaret
+bara räknas medan laddningen är obesvarad (`spec_9_4_2_code_is_kept_under_the_main_process_key`).
+
+## Punkt 2 – sidladdningar parallellt mellan origins (SPEC-7.4.5, granskning 0009:2)
+
+**Före.** En laddartråd ägde den enda `Fetcher`. Sidladdningar och live-omladdningens kontroller
+kördes i tur och ordning, så en origins hängande DNS-uppslag (upp till 6 s) eller långsamma server
+höll varje annan fliks sida.
+
+**Nu.**
+
+- **`vy_proto::Fetcher` delas mellan trådar.** `fetch` och `revalidate` tar `&self`. Blobcachen,
+  HTTP-cachen och nyckelförrådet ligger bakom var sitt lås som hålls runt en läsning eller skrivning
+  och aldrig över en nätverksförfrågan. Hämtningar av **samma origin turas om** (`Fetcher::turn`:
+  en mängd upptagna origins och en villkorsvariabel): hela hämtningen med sitt förtroendebeslut –
+  pinnar, efterträdare, logghuvud – görs av en hämtning i taget per origin, så två samtidiga första
+  besök ger ett DNS-uppslag, en hämtning av nyckelfilen och en pin; den andra väntar och finner
+  origin pinnad. Hämtningar av olika origins väntar inte på varandra. `Fetcher::waiting()` säger hur
+  många som väntar på sin tur (test och felsökning). `blobs()` och `keys()` ger ett lås i stället
+  för en referens: titta och släpp, aldrig över en hämtning.
+- **Skalets laddare är en pool** (`page.rs`): `LOADER_WORKERS` = 4 trådar över en gemensam kö. En
+  arbetare tar det äldsta jobbet vars origin ingen annan arbetare håller på med; jobb för samma
+  origin körs alltså ett i taget i den ordning de begärdes och **tar aldrig en andra arbetare**
+  (annars kunde fyra flikar mot en hängande origin ta hela poolen), jobb för olika origins körs sida
+  vid sida. En lokal fil har ingen origin och väntar aldrig. När skalet stängs släpps det som
+  väntar i kön; arbetarna slutar när deras pågående jobb är klart. Sidornas egna anrop går som förr
+  på en tråd per flik.
+- **Gräns.** Fyra olika origins som alla hänger samtidigt tar ändå hela poolen tills deras
+  tidsgränser löpt ut (DNS 6 s, HTTP 30 s). Poolen är avsiktligt liten och fast.
+
+**Tester (hållna svar, inga tider).**
+
+| Test | Var | Visar |
+| --- | --- | --- |
+| `spec_7_4_5_first_visits_at_once_pin_once` | vy-proto | första besöket hålls i sitt DNS-uppslag; ett andra besök av samma origin väntar på sin tur (`waiting() == 1`) utan eget uppslag; en annan origin hämtas, betros och pinnas under tiden; efter släppet: båda betrodda, ett uppslag, en nyckelfil, en pin |
+| `spec_7_4_5_page_loads_do_not_wait_for_other_origins` | vy-shell `page.rs` | origin A:s server håller sin sida, fem sidor till för A köar (fler än arbetarna); origin B:s sida och live-kontroll besvaras ändå; efter släppet kommer A:s sex sidor i begärd ordning |
+
+Mutationskontroll: utan turordningen gör det andra besöket ett eget DNS-uppslag och vy-proto-testet
+faller; utan köns origin-regel tar A:s jobb alla arbetare och skaltestet faller (B hålls).
+Befintliga `spec_5_2_7_requests_do_not_wait_for_other_tabs` är oförändrat grönt.
 
 ## Beslut
 
