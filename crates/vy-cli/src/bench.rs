@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 use vy_abi::event as kind;
 use vy_render::TextEngine;
 use vy_runtime::{Options, Runtime};
+use vy_shell::code_cache::CodeCache;
 use vy_shell::ipc::{LoadRequest, ToShell, ToTab};
 use vy_shell::process::{channel_sink, spawn_process, Inbound};
 
@@ -232,10 +233,12 @@ fn compile_times(mods: &[(String, Vec<u8>)], sel: &Selection<'_>) -> Vec<Row> {
         }
         let id = format!("compile-hit.{name}");
         if sel.wants(&id) {
-            if let Ok(samples) = cache_hit_times(wasm, sel.runs) {
+            let samples =
+                conformance::tab_executable().and_then(|exe| cache_hit_times(&exe, wasm, sel.runs));
+            if let Ok(samples) = samples {
                 rows.push(time_row(
                     id,
-                    format!("kompileringscache-träff {name}: modulen ur cachen"),
+                    format!("kompileringscache-träff {name}: modulen ur skalets cache"),
                     "SPEC-13.1.4",
                     Some(CACHE_HIT_BUDGET_MS),
                     samples,
@@ -250,35 +253,95 @@ fn compile_times(mods: &[(String, Vec<u8>)], sel: &Selection<'_>) -> Vec<Row> {
 /// under one.
 pub const CACHE_HIT_BUDGET_MS: f64 = 1.0;
 
-/// The time [`Runtime::load`] spends getting the compiled module when the
-/// compilation cache holds it, `runs` times: one load writes the entry,
-/// then each read-only load takes it from there (SPEC-13.1.4).
-pub(crate) fn cache_hit_times(wasm: &[u8], runs: usize) -> Result<Vec<Duration>> {
+/// What a compilation-cache hit costs along the shell's path (SPEC-13.1.4,
+/// SPEC-9.4.2), `runs` times. A tab process of `exe`, locked down as the
+/// shell's are, is loaded with `wasm` once with the cache on and nothing
+/// to offer: it compiles, and its code goes into a `CodeCache` as the
+/// shell keeps it. Each run is then a load of the same module in that
+/// process: the main process's part (the key from the module's bytes, the
+/// entry read and checked, the frame for the tab) timed here, plus what
+/// the tab process reports getting the module from that code took. A load
+/// the tab compiled after all is an error, so the samples are hits only.
+pub(crate) fn cache_hit_times(exe: &Path, wasm: &[u8], runs: usize) -> Result<Vec<Duration>> {
     let dir = std::env::temp_dir().join(format!(
         "vy-bench-code-{}-{}",
         std::process::id(),
         vy_runtime::hex(&vy_runtime::sha256(wasm)[..8])
     ));
-    let hash = vy_runtime::sha256(wasm);
-    let load = |cache: vy_runtime::CompileCache| {
-        let options = Options {
-            compile_cache: cache,
-            ..Options::default()
-        };
-        Runtime::load(wasm, &hash, options).map_err(|e| anyhow!("{e}"))
-    };
     let result = (|| {
-        load(vy_runtime::CompileCache::ReadWrite(dir.clone()))?;
-        (0..runs)
+        let cache = CodeCache::open(&dir)
+            .ok_or_else(|| anyhow!("{}: not a private directory", dir.display()))?;
+        let (sink, inbox) = mpsc::channel();
+        let conn = spawn_process(exe, 1, channel_sink(sink), None, None)?;
+        // One load: the tab's word on its module, then the load's answer.
+        let load = |offer: &ToTab| -> Result<(bool, u32, Vec<u8>)> {
+            let request = LoadRequest {
+                sha256: vy_runtime::sha256(wasm),
+                wasm: wasm.to_vec(),
+                memory_max_pages: vy_runtime::DEFAULT_MEMORY_MAX_PAGES,
+                capabilities: 0,
+                resources: Vec::new(),
+                storage: Vec::new(),
+                storage_quota_bytes: 1 << 20,
+                net_origins: Vec::new(),
+                random: vy_runtime::RandomSource::default(),
+                width: 1024,
+                height: 640,
+                scale: 1.0,
+                clock_ms: 0,
+                clipboard: None,
+            };
+            conn.send(offer);
+            conn.send(&ToTab::Load(Box::new(request)));
+            let mut said = None;
+            loop {
+                match inbox.recv_timeout(Duration::from_secs(60)) {
+                    Ok((
+                        _,
+                        Inbound::Message(ToShell::Code {
+                            cached,
+                            micros,
+                            code,
+                        }),
+                    )) => said = Some((cached, micros, code)),
+                    Ok((_, Inbound::Message(ToShell::Loaded { ok: true, .. }))) => {
+                        return said.ok_or_else(|| anyhow!("the tab said nothing of its module"));
+                    }
+                    Ok((_, Inbound::Message(ToShell::Loaded { error, .. }))) => {
+                        return Err(anyhow!("tab: {error}"));
+                    }
+                    Ok((_, Inbound::Message(_))) => {}
+                    Ok((_, Inbound::Gone { error })) => {
+                        return Err(anyhow!("tab gone: {error:?}"));
+                    }
+                    Err(_) => return Err(anyhow!("tab silent")),
+                }
+            }
+        };
+        let (code, pending) = cache.offer(wasm).send();
+        let (cached, _, compiled) = load(&ToTab::CodeCache { code })?;
+        if cached || compiled.is_empty() {
+            return Err(anyhow!("the first load did not hand over compiled code"));
+        }
+        cache.settle(pending, false, compiled);
+        cache.flush();
+        let samples = (0..runs)
             .map(|_| {
-                let rt = load(vy_runtime::CompileCache::ReadOnly(dir.clone()))?;
-                let stats = rt.load_stats();
-                if stats.source != vy_runtime::CompileSource::CacheHit {
+                let t = Instant::now();
+                let (code, _) = cache.offer(wasm).send();
+                let offer = ToTab::CodeCache { code };
+                let frame = offer.encode();
+                let main = t.elapsed();
+                drop(frame);
+                let (cached, micros, _) = load(&offer)?;
+                if !cached {
                     return Err(anyhow!("the compilation cache missed"));
                 }
-                Ok(stats.module_time)
+                Ok(main + Duration::from_micros(u64::from(micros)))
             })
-            .collect()
+            .collect();
+        conn.shutdown();
+        samples
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result

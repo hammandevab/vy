@@ -15,7 +15,10 @@ pub mod host;
 mod rng;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
-pub use compile_cache::{CompileCache, CompileSource, LoadStats, COMPILE_CACHE_CAP_BYTES};
+pub use compile_cache::{
+    CodeKey, CodeStore, CompileCache, CompileSource, LoadStats, PutError, COMPILE_CACHE_CAP_BYTES,
+    MAX_CODE_BYTES, MAX_CODE_PER_MODULE_BYTE,
+};
 pub use host::{
     origin_of, plain_http_allowed, CannedResponse, Capabilities, FetchRequest, Link, LogEntry,
     LogSource, Navigation, SemNode, Storage, DEFAULT_STORAGE_QUOTA_BYTES, NET_BYTES_PER_MINUTE,
@@ -213,9 +216,10 @@ pub struct Options {
     /// True when the host carries out `navigate` (SPEC-5.2.10); the
     /// headless host answers `E_DENIED`.
     pub navigation: bool,
-    /// Where compiled machine code is kept between loads (SPEC-13.1.4):
-    /// off by default, so headless rendering keeps nothing on disk; the
-    /// client's main process writes, a tab process only reads.
+    /// How the compiled machine code is got (SPEC-13.1.4): compiled every
+    /// time by default, so headless rendering keeps no state; in the
+    /// client the main process holds the cache and hands a tab process
+    /// the code it has for the module ([`CompileCache::Host`]).
     pub compile_cache: CompileCache,
 }
 
@@ -299,30 +303,13 @@ fn verify(wasm: &[u8], expected_sha256: &[u8; 32]) -> Result<AbiReport, Error> {
     Ok(report)
 }
 
-/// Compile `wasm` into the compilation cache at `dir` unless a good entry
-/// is there (SPEC-13.1.4): what the client's main process does with a
-/// module it fetched, so a tab process that may only read the cache
-/// ([`CompileCache::ReadOnly`]) finds the code. The hash and the ABI are
-/// checked first, as [`Runtime::load`] checks them; nothing runs.
-pub fn precompile(
-    dir: &std::path::Path,
-    wasm: &[u8],
-    expected_sha256: &[u8; 32],
-) -> Result<LoadStats, Error> {
-    verify(wasm, expected_sha256)?;
-    compile_cache::module(
-        engine(),
-        wasm,
-        expected_sha256,
-        &CompileCache::ReadWrite(dir.to_path_buf()),
-    )
-    .map(|(_, stats)| stats)
-}
-
 /// One loaded, verified module instance.
 pub struct Runtime {
     store: Store<Host>,
     load_stats: LoadStats,
+    /// The serialized module of a load that compiled under
+    /// [`CompileCache::Host`], until the host takes it.
+    code: Option<Vec<u8>>,
     exports: Exports,
     initialized: bool,
     suspended: bool,
@@ -357,7 +344,11 @@ impl Runtime {
     /// yet; call [`Runtime::init`].
     ///
     /// A hash mismatch is reported before the bytes are even parsed (SPEC-9.4.1).
-    pub fn load(wasm: &[u8], expected_sha256: &[u8; 32], options: Options) -> Result<Self, Error> {
+    pub fn load(
+        wasm: &[u8],
+        expected_sha256: &[u8; 32],
+        mut options: Options,
+    ) -> Result<Self, Error> {
         let report = verify(wasm, expected_sha256)?;
         let pages = options.memory_max_pages;
         if pages == 0 || pages > limits::MAX_MEMORY_PAGES {
@@ -372,8 +363,8 @@ impl Runtime {
         }
 
         let engine = engine();
-        let (module, load_stats) =
-            compile_cache::module(engine, wasm, expected_sha256, &options.compile_cache)?;
+        let cache = std::mem::take(&mut options.compile_cache);
+        let (module, load_stats, code) = compile_cache::module(engine, wasm, cache)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size((u64::from(pages) * WASM_PAGE_BYTES) as usize)
             .memories(1)
@@ -400,6 +391,7 @@ impl Runtime {
         Ok(Self {
             store,
             load_stats,
+            code,
             exports,
             initialized: false,
             suspended: false,
@@ -425,6 +417,14 @@ impl Runtime {
     /// How the compiled module was obtained and what it cost (SPEC-13.1.4).
     pub fn load_stats(&self) -> LoadStats {
         self.load_stats
+    }
+
+    /// The serialized compiled module, once, after a load that compiled
+    /// under [`CompileCache::Host`]: what the host process keeps in its
+    /// [`CodeStore`] for the next load of the same module (SPEC-9.4.2).
+    /// `None` after a cache hit and without a host cache.
+    pub fn take_code(&mut self) -> Option<Vec<u8>> {
+        self.code.take()
     }
 
     fn exports(instance: &Instance, store: &mut Store<Host>) -> Result<Exports, Error> {

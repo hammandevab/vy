@@ -3580,6 +3580,11 @@ fn cached_load(bytes: &[u8], cache: CompileCache) -> Runtime {
     Runtime::load(bytes, &sha256(bytes), opts).unwrap()
 }
 
+/// A load as a tab process does it: offered `code` by the host.
+fn hosted_load(bytes: &[u8], code: Option<Vec<u8>>) -> Runtime {
+    cached_load(bytes, CompileCache::Host { code })
+}
+
 /// The first two frames of a loaded module, for comparing instances.
 fn two_frames(mut rt: Runtime) -> Vec<Vec<u8>> {
     rt.init(120, 60, 1.0).unwrap();
@@ -3588,39 +3593,47 @@ fn two_frames(mut rt: Runtime) -> Vec<Vec<u8>> {
     vec![a, b]
 }
 
-/// SPEC-13.1.4: the client's main process compiles a module once and
-/// writes the machine code to its cache; every later load, its own or a
-/// tab's that may only read, takes the code from there instead of
-/// compiling, and the module draws exactly what a compiled one draws. The
-/// default is no cache, which writes nothing.
+/// SPEC-13.1.4: a runtime whose host holds the cache compiles a module it
+/// is offered no code for and keeps the serialized module for the host;
+/// the host's store keeps it, and a later load offered that code takes the
+/// module from it instead of compiling and draws exactly what a compiled
+/// one draws. The default is no cache, which keeps nothing.
 #[test]
 fn spec_13_1_4_compile_cache_hit_skips_compilation() {
     let bytes = drawing_module();
     let dir = cache_dir("hit");
-    let off = cached_load(&bytes, CompileCache::Off);
+    let mut off = cached_load(&bytes, CompileCache::Off);
     assert_eq!(off.load_stats().source, CompileSource::Compiled);
-    assert!(!off.load_stats().written);
+    assert_eq!(off.take_code(), None, "Off keeps nothing");
     let reference = two_frames(off);
-    assert!(
-        entries(&dir).is_empty() && !dir.exists(),
-        "Off touches nothing"
-    );
+    assert!(!dir.exists(), "Off touches nothing");
 
-    let first = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
+    let mut first = hosted_load(&bytes, None);
     assert_eq!(first.load_stats().source, CompileSource::Compiled);
-    assert!(first.load_stats().written);
-    assert_eq!(entries(&dir).len(), 1);
+    assert!(!first.load_stats().refused);
+    let code = first.take_code().expect("the serialized module");
+    assert_eq!(first.take_code(), None, "handed over once");
     assert_eq!(two_frames(first), reference);
 
-    for cache in [
-        CompileCache::ReadWrite(dir.clone()),
-        CompileCache::ReadOnly(dir.clone()),
-    ] {
-        let rt = cached_load(&bytes, cache.clone());
+    let store = CodeStore::open(&dir).expect("a private directory");
+    let key = CodeKey::of(&bytes);
+    assert_eq!(store.get(&key), None);
+    store.put(&key, bytes.len(), &code).unwrap();
+    assert_eq!(entries(&dir).len(), 1);
+    assert_eq!(
+        store.size(),
+        std::fs::metadata(&entries(&dir)[0]).unwrap().len()
+    );
+
+    for _ in 0..2 {
+        let offered = store.get(&key).expect("the entry");
+        assert_eq!(offered, code);
+        let mut rt = hosted_load(&bytes, Some(offered));
         let stats = rt.load_stats();
-        assert_eq!(stats.source, CompileSource::CacheHit, "{cache:?}");
-        assert!(!stats.written);
-        assert_eq!(two_frames(rt), reference, "{cache:?}");
+        assert_eq!(stats.source, CompileSource::CacheHit);
+        assert!(!stats.refused);
+        assert_eq!(rt.take_code(), None, "a hit has nothing new to keep");
+        assert_eq!(two_frames(rt), reference);
     }
     assert_eq!(entries(&dir).len(), 1, "a hit writes nothing");
 
@@ -3634,47 +3647,59 @@ fn spec_13_1_4_compile_cache_hit_skips_compilation() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// SPEC-13.1.4 and the threat in docs/notes/m4-perf.md: a tab process
-/// that may only read the cache never writes it, a damaged or truncated
-/// entry is a miss (and the writer replaces it), another module's entry is
-/// never taken, and a directory others may write is not used at all.
+/// SPEC-9.4.2, SPEC-13.1.4 and the threat in docs/notes/m5-polish.md: a
+/// key is made from the module's bytes alone, so another module finds
+/// nothing of this one's; code that does not deserialize (garbage, a
+/// truncated artifact) is refused, the module is compiled after all and
+/// the load says so; a damaged, truncated or oversized file is a miss and
+/// is removed; code over the size caps is not kept; and a directory group
+/// or others may write holds no store at all.
 #[test]
-fn compile_cache_trusts_only_the_writer() {
+fn spec_9_4_2_code_store_keeps_bytes_under_module_keys() {
     let bytes = drawing_module();
     let other = budget_module();
     let dir = cache_dir("trust");
-
-    // Read-only: no directory made, nothing written.
-    let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
-    assert_eq!(rt.load_stats().source, CompileSource::Compiled);
-    assert!(!rt.load_stats().written && !dir.exists());
-
-    // The main process precompiles; the hash is checked first.
-    let wrong = sha256(b"not the module");
-    assert!(matches!(
-        precompile(&dir, &bytes, &wrong),
-        Err(Error::HashMismatch { .. })
-    ));
-    assert!(entries(&dir).is_empty());
-    let stats = precompile(&dir, &bytes, &sha256(&bytes)).unwrap();
-    assert!(stats.written);
-    assert_eq!(
-        precompile(&dir, &bytes, &sha256(&bytes)).unwrap().source,
-        CompileSource::CacheHit
+    let store = CodeStore::open(&dir).unwrap();
+    let key = CodeKey::of(&bytes);
+    assert_eq!(key, CodeKey::of(&bytes), "the same bytes, the same key");
+    assert_ne!(key, CodeKey::of(&other));
+    let mut one_more = bytes.clone();
+    one_more.push(0);
+    assert_ne!(key, CodeKey::of(&one_more));
+    let name = key.file_name();
+    assert!(
+        name.len() == 64 + ".code".len()
+            && name.ends_with(".code")
+            && name[..64].bytes().all(|b| b.is_ascii_hexdigit()),
+        "a file name and nothing else: {name}"
     );
+
+    let code = hosted_load(&bytes, None).take_code().unwrap();
+    store.put(&key, bytes.len(), &code).unwrap();
+    assert_eq!(store.get(&CodeKey::of(&other)), None, "another module");
     let reference = two_frames(cached_load(&bytes, CompileCache::Off));
-    let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
-    assert_eq!(rt.load_stats().source, CompileSource::CacheHit);
-    assert_eq!(two_frames(rt), reference);
 
-    // Another module finds nothing of this one's.
-    let rt = cached_load(&other, CompileCache::ReadOnly(dir.clone()));
-    assert_eq!(rt.load_stats().source, CompileSource::Compiled);
+    // Code that is not a serialized module: refused, compiled, said.
+    for bad in [
+        b"not machine code".to_vec(),
+        code[..code.len() / 2].to_vec(),
+        Vec::new(),
+    ] {
+        let mut rt = hosted_load(&bytes, Some(bad));
+        let stats = rt.load_stats();
+        assert_eq!(stats.source, CompileSource::Compiled);
+        assert!(stats.refused);
+        assert_eq!(rt.take_code().as_ref(), Some(&code), "and offers its own");
+        assert_eq!(two_frames(rt), reference);
+    }
 
-    // A flipped payload byte, then a truncated file: misses; read-only
-    // leaves them, the writer replaces them.
+    // A flipped byte, a truncated file, a bare header, no code at all:
+    // misses, and the file is gone.
     let entry = entries(&dir).pop().unwrap();
     let good = std::fs::read(&entry).unwrap();
+    assert_eq!(&good[..8], b"VYCODE01");
+    assert_eq!(good[8..40], sha256(&code));
+    assert_eq!(good[40..], code[..]);
     let mut flipped = good.clone();
     let last = flipped.len() - 1;
     flipped[last] ^= 0x40;
@@ -3682,31 +3707,108 @@ fn compile_cache_trusts_only_the_writer() {
         flipped,
         good[..good.len() / 2].to_vec(),
         b"VYCODE01".to_vec(),
+        good[..40].to_vec(),
+        Vec::new(),
     ] {
         std::fs::write(&entry, &damaged).unwrap();
-        let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
-        assert_eq!(rt.load_stats().source, CompileSource::Compiled);
-        assert_eq!(two_frames(rt), reference);
-        assert_eq!(
-            std::fs::read(&entry).unwrap(),
-            damaged,
-            "read-only never writes"
-        );
-        let rt = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
-        assert!(rt.load_stats().written);
-        let rt = cached_load(&bytes, CompileCache::ReadOnly(dir.clone()));
-        assert_eq!(rt.load_stats().source, CompileSource::CacheHit);
+        assert_eq!(store.get(&key), None);
+        assert!(!entry.exists(), "a damaged entry is removed");
     }
+    store.put(&key, bytes.len(), &code).unwrap();
+    assert_eq!(store.get(&key).as_ref(), Some(&code));
+    store.remove(&key);
+    assert_eq!(store.get(&key), None);
 
-    // A directory group or others may write is not trusted.
+    // The size caps: none, 256 bytes per module byte, 64 MB.
+    assert_eq!(store.put(&key, bytes.len(), &[]), Err(PutError::Empty));
+    let per_byte = vec![1u8; 10 * MAX_CODE_PER_MODULE_BYTE + 1];
+    assert_eq!(store.put(&key, 10, &per_byte), Err(PutError::TooLarge));
+    assert_eq!(store.put(&key, 10, &per_byte[..per_byte.len() - 1]), Ok(()));
+    let huge = vec![1u8; MAX_CODE_BYTES + 1];
+    assert_eq!(
+        store.put(&key, usize::MAX, &huge),
+        Err(PutError::TooLarge),
+        "whatever the module's size"
+    );
+    assert_eq!(
+        store.get(&key).map(|c| c.len()),
+        Some(10 * MAX_CODE_PER_MODULE_BYTE),
+        "a refused put leaves the entry"
+    );
+    // An entry over the cap that got there some other way is not read.
+    let mut oversized = b"VYCODE01".to_vec();
+    oversized.extend_from_slice(&sha256(&huge));
+    oversized.extend_from_slice(&huge);
+    std::fs::write(&entry, &oversized).unwrap();
+    assert_eq!(store.get(&key), None);
+    assert!(!entry.exists());
+
+    // A directory group or others may write is not trusted, before or
+    // after the store was opened.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        store.put(&key, bytes.len(), &code).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let rt = cached_load(&bytes, CompileCache::ReadWrite(dir.clone()));
-        assert_eq!(rt.load_stats().source, CompileSource::Compiled);
-        assert!(!rt.load_stats().written);
+        assert!(CodeStore::open(&dir).is_none());
+        assert_eq!(store.get(&key), None);
+        assert_eq!(
+            store.put(&key, bytes.len(), &code),
+            Err(PutError::NotPrivate)
+        );
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(store.get(&key).as_ref(), Some(&code), "left untouched");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SPEC-13.1.4: the store stays within its cap: a put that takes it over
+/// removes the entries used longest ago, where reading an entry counts as
+/// using it; the temporary file of an interrupted write is cleared away
+/// once it is old.
+#[test]
+fn spec_13_1_4_code_store_evicts_least_recently_used() {
+    let dir = cache_dir("lru");
+    let entry = |n: u8| (CodeKey::of(&[n]), vec![n; 1000]);
+    // Room for two entries of 1000 bytes and their 40-byte headers.
+    let store = CodeStore::open(&dir).unwrap().with_cap(2 * 1040);
+    let age = |key: &CodeKey, secs: u64| {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join(key.file_name()))
+            .unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .unwrap();
+    };
+    let (a, code_a) = entry(1);
+    let (b, code_b) = entry(2);
+    let (c, code_c) = entry(3);
+    store.put(&a, 1000, &code_a).unwrap();
+    store.put(&b, 1000, &code_b).unwrap();
+    assert_eq!(store.size(), 2 * 1040);
+    // `a` was written an hour ago and `b` half an hour ago; then `a` is read.
+    age(&a, 3600);
+    age(&b, 1800);
+    assert_eq!(store.get(&a).as_ref(), Some(&code_a));
+    let stale = dir.join(".interrupted.tmp");
+    let fresh = dir.join(".in-progress.tmp");
+    std::fs::write(&stale, b"half an entry").unwrap();
+    std::fs::write(&fresh, b"half an entry").unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&stale)
+        .unwrap();
+    f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+    store.put(&c, 1000, &code_c).unwrap();
+    assert_eq!(store.get(&b), None, "the least recently used is gone");
+    assert_eq!(store.get(&a).as_ref(), Some(&code_a));
+    assert_eq!(store.get(&c).as_ref(), Some(&code_c));
+    assert_eq!(store.size(), 2 * 1040);
+    assert!(!stale.exists() && fresh.exists());
+    // An entry larger than the whole cap does not stay.
+    let (d, code_d) = (CodeKey::of(&[4]), vec![4; 4000]);
+    store.put(&d, 4000, &code_d).unwrap();
+    assert!(store.size() <= 2 * 1040);
     let _ = std::fs::remove_dir_all(&dir);
 }

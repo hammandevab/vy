@@ -306,6 +306,7 @@ impl ApplicationHandler<UserEvent> for App {
         let data_dir = data_dir().unwrap_or_else(|| scratch_dir("data"));
         let config = Config {
             exe: crate::process::self_exe().ok(),
+            code_cache: Some(crate::paths::code_cache_dir(&data_dir)),
             data_dir,
             headless: false,
             opener: Box::new(SystemOpener),

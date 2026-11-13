@@ -26,6 +26,13 @@ pub fn data_dir() -> Option<PathBuf> {
     Some(base.join("vy"))
 }
 
+/// Where the compilation cache keeps compiled code under the client's
+/// directory (SPEC-13.1.4): `cache/code`, beside `vy-proto`'s caches.
+/// Removing the directory clears the cache; it is made again when needed.
+pub fn code_cache_dir(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("cache").join("code")
+}
+
 /// A directory of its own under the temporary directory, for a run that
 /// must not touch the user's files (screenshots, tests).
 pub fn scratch_dir(tag: &str) -> PathBuf {

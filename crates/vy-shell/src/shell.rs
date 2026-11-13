@@ -14,6 +14,7 @@ use crate::a11y;
 use crate::address::{AddressField, Edit};
 use crate::chrome::{self, Layout, PageView, Rect, Styles, TabInfo, View};
 use crate::clipboard::{self, ClipboardBackend};
+use crate::code_cache::{CodeCache, Pending, Settled};
 use crate::compose::{blend, blit, clear, fill_blend, physical};
 use crate::devtools::{self, Command, Pane};
 use crate::external::{is_external, Opener};
@@ -101,6 +102,10 @@ pub struct Config {
     pub clipboard: Box<dyn ClipboardBackend>,
     /// Wakes the UI thread.
     pub waker: Waker,
+    /// Where compiled code of modules is kept between loads (SPEC-13.1.4,
+    /// SPEC-9.4.2): a directory of the user's own. `None` is no cache:
+    /// every load compiles, as a screenshot and the conformance suite do.
+    pub code_cache: Option<PathBuf>,
 }
 
 /// The pointer the window should show.
@@ -221,6 +226,19 @@ struct Tab {
     /// A loaded page waiting to start because a process let go of for its
     /// origin has not answered with its storage yet (SPEC-5.2.9).
     parked: Option<Box<LoadedPage>>,
+    /// The compilation cache's part in the tab's load (SPEC-9.4.2): the
+    /// key the main process made for the module it sent, and what the
+    /// tab reported back. `None` when the cache is off for the load.
+    code: Option<CodeLoad>,
+}
+
+/// A load the compilation cache is on for.
+struct CodeLoad {
+    /// The main process's key for the module, and whether code was offered.
+    pending: Pending,
+    /// What the tab said, once: from the cache or compiled, and the
+    /// microseconds it took.
+    reported: Option<(bool, u32)>,
 }
 
 impl Tab {
@@ -278,6 +296,7 @@ impl Tab {
             check_pending: false,
             sandbox: None,
             parked: None,
+            code: None,
         }
     }
 
@@ -492,6 +511,11 @@ pub struct Shell {
     /// next check is due on the shell's clock.
     live_reload: bool,
     next_live_check: i64,
+    /// The compilation cache, when there is one (SPEC-13.1.4).
+    code_cache: Option<CodeCache>,
+    /// The next page's process is a stand-in that never answers.
+    #[cfg(test)]
+    stall_next: bool,
 }
 
 impl Shell {
@@ -511,6 +535,7 @@ impl Shell {
         };
         let mut chrome_text = TextEngine::new();
         let styles = Styles::register(&mut chrome_text);
+        let code_cache = config.code_cache.as_deref().and_then(CodeCache::open);
         let mut shell = Self {
             config,
             inbox_rx,
@@ -552,6 +577,9 @@ impl Shell {
             devtools: None,
             live_reload: false,
             next_live_check: 0,
+            code_cache,
+            #[cfg(test)]
+            stall_next: false,
         };
         shell.relayout();
         Ok(shell)
@@ -648,6 +676,22 @@ impl Shell {
     /// thread-backed tab.
     pub fn tab_sandbox(&self, id: TabId) -> Option<crate::sandbox::Report> {
         self.tab(id).and_then(|t| t.sandbox.clone())
+    }
+
+    /// How tab `id`'s process got the compiled module of its page, as it
+    /// reported before the page ran (SPEC-13.1.4): true when it took it
+    /// from the code the cache offered, false when it compiled, and the
+    /// microseconds that took. `None` when the cache is off for the load
+    /// or nothing has been reported.
+    pub fn tab_code(&self, id: TabId) -> Option<(bool, u32)> {
+        self.tab(id)
+            .and_then(|t| t.code.as_ref())
+            .and_then(|c| c.reported)
+    }
+
+    /// The compilation cache, when the shell has one.
+    pub fn code_cache(&self) -> Option<&CodeCache> {
+        self.code_cache.as_ref()
     }
 
     /// A tab's state, for tests and the status line.
@@ -1053,6 +1097,7 @@ impl Shell {
             tab.check_pending = false;
             tab.sandbox = None;
             tab.parked = None;
+            tab.code = None;
         }
         self.unpark();
         if Some(id) == self.active_tab() {
@@ -1169,7 +1214,7 @@ impl Shell {
             Incoming::Tab(id, _, Inbound::Message(m)) => self.tab_message(id, m),
             Incoming::Tab(id, _, Inbound::Gone { error }) => {
                 let active = Some(id) == self.active_tab();
-                if let Some(tab) = self.tab_mut(id) {
+                if let Some(tab) = find_tab(&mut self.tabs, id) {
                     let status = tab
                         .conn
                         .as_mut()
@@ -1196,6 +1241,15 @@ impl Shell {
                         }
                         self.frame_dirty = true;
                         return;
+                    }
+                    // A process that died with cached code in it, or
+                    // before it said whether it took the code offered:
+                    // that entry is not offered again.
+                    if let (Some(cache), Some(code)) = (&self.code_cache, &tab.code) {
+                        if code.pending.offered() && code.reported.is_none_or(|(cached, _)| cached)
+                        {
+                            cache.forget(&code.pending);
+                        }
                     }
                     let reason = match (error, status) {
                         (Some(e), _) => format!("Flikprocessen försvann: {e}"),
@@ -1294,7 +1348,6 @@ impl Shell {
         };
         let page_rect = self.layout.page;
         let scale = self.scale;
-        let exe = self.config.exe.clone();
         let (clock_ms, random) = if self.config.headless {
             (self.clock_headless, RandomSource::default())
         } else {
@@ -1332,11 +1385,14 @@ impl Shell {
         };
         let generation = self.tab(id).map_or(0, |t| t.generation);
         let record = self.tab(id).and_then(|t| t.record.clone());
-        let forward = self.sink_for(generation);
-        let conn = match &exe {
-            Some(exe) => process::spawn_process(exe, id, forward, record.as_deref(), None),
-            None => process::spawn_thread(id, forward),
+        // The compilation cache (SPEC-13.1.4): the key is made here, from
+        // the bytes about to be sent. Not under a recording, whose file
+        // must hold no machine code and replay the same anywhere.
+        let offer = match (&self.code_cache, &record) {
+            (Some(cache), None) => Some(cache.offer(&page.wasm)),
+            _ => None,
         };
+        let conn = self.spawn_tab(id, generation, record.as_deref());
         // The Windows job's commit limit follows the page's memory_max
         // (SPEC-9.3.1); elsewhere this does nothing.
         if let Ok(c) = &conn {
@@ -1396,6 +1452,14 @@ impl Shell {
                     clock_ms,
                     clipboard: Some(Vec::new()),
                 };
+                tab.code = offer.map(|offer| {
+                    let (code, pending) = offer.send();
+                    conn.send(&ToTab::CodeCache { code });
+                    CodeLoad {
+                        pending,
+                        reported: None,
+                    }
+                });
                 conn.send(&ToTab::Load(Box::new(request)));
                 tab.conn = Some(conn);
                 tab.state = State::Loading;
@@ -1585,6 +1649,11 @@ impl Shell {
                     tab.focus = node;
                 }
             }
+            ToShell::Code {
+                cached,
+                micros,
+                code,
+            } => self.code_reported(id, cached, micros, code),
             ToShell::Stopped { reason } => {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.state = State::Stopped(reason);
@@ -1598,6 +1667,71 @@ impl Shell {
                 self.frame_dirty = true;
             }
         }
+    }
+
+    /// The process for tab `id`'s page: the tab executable, or a thread of
+    /// this process when there is none (tests).
+    fn spawn_tab(
+        &mut self,
+        id: TabId,
+        generation: u64,
+        record: Option<&std::path::Path>,
+    ) -> std::io::Result<TabConnection> {
+        let forward = self.sink_for(generation);
+        #[cfg(test)]
+        if std::mem::take(&mut self.stall_next) {
+            return process::stalled(id, forward).map(|(conn, _)| conn);
+        }
+        match &self.config.exe {
+            Some(exe) => process::spawn_process(exe, id, forward, record, None),
+            None => process::spawn_thread(id, forward),
+        }
+    }
+
+    /// Tab `id`'s process says how it got the compiled module of its load
+    /// (SPEC-13.1.4): from the code the cache offered, or compiled, with
+    /// the code to keep. It counts once per load, while the load is
+    /// unanswered (no code of the page has run in the process yet), and
+    /// only when the main process turned the cache on for that load; the
+    /// key the code is kept under is the one made in [`Shell::start_page`]
+    /// from the module bytes sent, never anything in the report
+    /// (SPEC-9.4.2).
+    fn code_reported(&mut self, id: TabId, cached: bool, micros: u32, code: Vec<u8>) {
+        let Some(tab) = find_tab(&mut self.tabs, id) else {
+            return;
+        };
+        let pending = match (&self.code_cache, &mut tab.code) {
+            (Some(_), Some(load)) if tab.state == State::Loading && load.reported.is_none() => {
+                load.reported = Some((cached, micros));
+                load.pending.clone()
+            }
+            _ => {
+                tab.log(
+                    "[host] compiled code ignored: it counts once per load, before the load is answered, when the compilation cache is on for it"
+                        .into(),
+                );
+                return;
+            }
+        };
+        let Some(cache) = &self.code_cache else {
+            return;
+        };
+        let ms = f64::from(micros) / 1000.0;
+        tab.log(match cache.settle(pending, cached, code) {
+            Settled::Hit => {
+                format!("[host info] module code: from the compilation cache ({ms:.1} ms)")
+            }
+            Settled::Kept => {
+                format!("[host info] module code: compiled ({ms:.1} ms) and kept for the next load")
+            }
+            Settled::Compiled => format!("[host info] module code: compiled ({ms:.1} ms)"),
+            Settled::Refused => format!(
+                "[host warn] module code: the cached code was not usable and is dropped; compiled ({ms:.1} ms)"
+            ),
+            Settled::Ignored => {
+                "[host] module code: report ignored: a cache hit without code offered".into()
+            }
+        });
     }
 
     /// The sandbox report of tab `id`'s process (SPEC-9.1.3), or `None` when
@@ -3676,6 +3810,12 @@ impl Shell {
 
 #[cfg(test)]
 impl Shell {
+    /// The next page started gets a stand-in for a process that never
+    /// answers (`process::stalled`): its load stays unanswered.
+    pub(crate) fn stall_next_tab(&mut self) {
+        self.stall_next = true;
+    }
+
     /// A new tab whose process is a stand-in that never answers or leaves
     /// until it is killed (`process::stalled`), running a page of its own
     /// origin as far as the shell knows; and the cell that holds the

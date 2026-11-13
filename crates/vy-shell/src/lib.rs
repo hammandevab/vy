@@ -1069,6 +1069,7 @@ mod tests {
                 opener: Box::new(RecordingOpener::default()),
                 clipboard: Box::new(MemoryClipboard::new()),
                 waker: Waker::none(),
+                code_cache: None,
             },
             800.0,
             600.0,
