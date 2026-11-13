@@ -61,6 +61,10 @@ SPEC-8.2.4, kräver ingen capability). Hjulet rullar raderna, Skift+hjul kolumne
 
 **Capabilities:** `ime` för formelfältet, `storage` för cellernas källtext.
 
+**Gränser:** en omräkning görs i steg om lika mycket arbete, ett per frame, så ett stort blad räknas
+över flera frames medan statusraden visar "räknar…" och cellerna behåller sina förra värden (en ny
+formel visar `…`). En formel läser högst två hela blad genom sina områden; fler ger `#FEL`.
+
 ## Ritbord (`rita`)
 
 **Visar:** frihandsstreck som förenklas (Ramer–Douglas–Peucker) och ritas som en `PATH` per streck,

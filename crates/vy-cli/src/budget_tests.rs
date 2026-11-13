@@ -48,7 +48,8 @@ fn root() -> PathBuf {
 /// draft's memory cap, every capability the draft requests granted, the
 /// headless clock.
 struct Page {
-    name: &'static str,
+    /// The module, and after [`Page::on`] the data it was started on.
+    name: String,
     rt: Runtime,
     /// Fuel of the costliest frame so far, and what led to it.
     worst: (u64, String),
@@ -102,7 +103,7 @@ impl Page {
         rt.init(width, height, 1.0)
             .map_err(|e| format!("vy_init at {width} x {height}: {e}"))?;
         let mut page = Self {
-            name,
+            name: name.to_string(),
             rt,
             worst: (0, String::new()),
         };
@@ -110,9 +111,15 @@ impl Page {
         Ok(page)
     }
 
+    /// The same page, named in every failure with what it was started on.
+    fn on(mut self, case: &str) -> Self {
+        self.name = format!("{} on {case}", self.name);
+        self
+    }
+
     /// Run the frames the page asks for (at most eight: some pages
-    /// animate) and hold each to the budget.
-    fn frames(&mut self, after: &str) {
+    /// animate) and hold each to the budget; how many ran.
+    fn frames(&mut self, after: &str) -> u32 {
         let mut ran = 0;
         while self.rt.wants_frame() && ran < 8 {
             self.rt
@@ -134,6 +141,7 @@ impl Page {
             "{}: suspended after {after}",
             self.name
         );
+        ran
     }
 
     fn event(&mut self, what: &str, kind: i32, a: i32, b: i32, c: i32, d: i32) {
@@ -423,8 +431,9 @@ fn hostile_markdown() -> Vec<(String, String)> {
 /// saved.
 fn skriv_on(case: &str, text: &[u8], width: u32, height: u32) -> (u64, String) {
     let fail = |e: String| -> Page { panic!("skriv on {case}: {e}") };
-    let mut page =
-        Page::load_with("skriv", width, height, stored("skriv", text)).unwrap_or_else(fail);
+    let mut page = Page::load_with("skriv", width, height, stored("skriv", text))
+        .unwrap_or_else(fail)
+        .on(case);
     let tabs: Vec<SemNode> = page
         .rt
         .semantic_tree()
@@ -456,7 +465,9 @@ fn skriv_on(case: &str, text: &[u8], width: u32, height: u32) -> (u64, String) {
     }
     // What the page saved now is what the next visit starts on.
     let saved = page.rt.take_storage();
-    let mut again = Page::load_with("skriv", width, height, saved).unwrap_or_else(fail);
+    let mut again = Page::load_with("skriv", width, height, saved)
+        .unwrap_or_else(fail)
+        .on(case);
     again.resize(width, height + 50);
     if again.worst.0 > page.worst.0 {
         again.worst
@@ -501,4 +512,192 @@ fn spec_5_3_3_skriv_starts_on_any_text_it_saved() {
         skriv_on(&format!("random bytes {n}"), &blob, 800, 600);
     }
     skriv_on("an empty note", b"", 800, 600);
+}
+
+/// `kalkyl`'s stored form (`Sheet::encode`): a format byte, then for each
+/// cell its index (column + 26 × row, two bytes), the length of its
+/// source (one byte) and the source.
+fn sheet_blob(cells: &[(usize, usize, &str)]) -> Vec<u8> {
+    let mut out = vec![1u8];
+    for (col, row, src) in cells {
+        out.extend_from_slice(&((col + 26 * row) as u16).to_le_bytes());
+        out.push(src.len() as u8);
+        out.extend_from_slice(src.as_bytes());
+    }
+    out
+}
+
+/// Every cell of the sheet for which `source` gives one, row by row.
+fn sheet_of(source: impl Fn(usize, usize) -> Option<String>) -> Vec<u8> {
+    let mut cells = Vec::new();
+    for row in 0..100 {
+        for col in 0..26 {
+            if let Some(src) = source(col, row) {
+                cells.push((col, row, src));
+            }
+        }
+    }
+    let cells: Vec<(usize, usize, &str)> =
+        cells.iter().map(|(c, r, s)| (*c, *r, s.as_str())).collect();
+    sheet_blob(&cells)
+}
+
+/// The name of cell `i`, counted row by row: `B3`.
+fn cell_name(i: usize) -> String {
+    format!("{}{}", (b'A' + (i % 26) as u8) as char, i / 26 + 1)
+}
+
+impl Page {
+    /// Run frames until the page asks for no more, each within the
+    /// budget; how many it took.
+    fn settle(&mut self, after: &str) -> u32 {
+        let mut ran = 0;
+        while self.rt.wants_frame() {
+            ran += self.frames(after);
+            assert!(
+                ran < 1000,
+                "{}: still asking for frames after {after}",
+                self.name
+            );
+        }
+        ran
+    }
+
+    /// True when the last frame's tree has a node with this text.
+    fn shows(&self, text: &str) -> bool {
+        self.rt.semantic_tree().iter().any(|n| n.text == text)
+    }
+}
+
+/// Open `kalkyl` on `blob` as its stored sheet and use it: the frames it
+/// asks for until the sheet is calculated, a cell changed, another size,
+/// and a reload on what it saved. Returns the page after the first
+/// recalculation, for the caller to look at.
+fn kalkyl_on(case: &str, blob: &[u8], width: u32, height: u32) -> (u64, String) {
+    let fail = |e: String| -> Page { panic!("kalkyl on {case}: {e}") };
+    let mut page = Page::load_with("kalkyl", width, height, stored("kalkyl", blob))
+        .unwrap_or_else(fail)
+        .on(case);
+    page.settle("the stored sheet");
+    let calculating = |page: &Page| {
+        page.rt
+            .semantic_tree()
+            .iter()
+            .any(|n| n.text.contains("räknar"))
+    };
+    assert!(
+        !calculating(&page),
+        "{case}: calculated when the frames end"
+    );
+    // A press on a cell in the grid, a number typed and Enter: the sheet
+    // is recalculated, a step in the event and a step a frame.
+    page.click(200.0, 200.0);
+    page.text("12,5");
+    page.key(vy_abi::key::ENTER, 0);
+    page.settle("a cell changed");
+    assert!(!calculating(&page), "{case}: calculated after the change");
+    page.resize(width + 300, height + 200);
+    page.event("the wheel", kind::SCROLL, 0, 60_000, 0, 0);
+    page.settle("scrolling");
+    let saved = page.rt.take_storage();
+    let mut again = Page::load_with("kalkyl", width, height, saved)
+        .unwrap_or_else(fail)
+        .on(case);
+    again.settle("the sheet it saved");
+    if again.worst.0 > page.worst.0 {
+        again.worst
+    } else {
+        page.worst
+    }
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013:2): `kalkyl` saves the sheet
+/// before it is calculated, so a sheet it could not calculate within a
+/// call stopped it at every visit: 100 numbers and 2 500 sums of them,
+/// and 200 formulas that each sum the whole sheet (3.6 KB stored), both
+/// aborted `vy_init` at the hard limit. A recalculation is now a step of
+/// bounded work in each frame until it is done, formulas are kept as
+/// their text (1 260 formulas of 200 bytes as trees were more memory
+/// than the page may have: a trap), and are first read through by the
+/// steps too. Whatever sheet is stored, the page starts, calculates it
+/// and keeps every frame within the budget.
+#[test]
+fn spec_5_3_3_kalkyl_starts_on_any_sheet_it_saved() {
+    let sums = sheet_of(|col, _| {
+        Some(if col == 0 {
+            "1,5".into()
+        } else {
+            "=SUMMA(A1:A100)".into()
+        })
+    });
+    let tangle = sheet_of(|col, row| (row * 26 + col < 200).then(|| "=SUMMA(A1:Z100)".into()));
+    assert_eq!(tangle.len(), 3601, "the review's 3.6 KB");
+    let chain = sheet_of(|col, row| {
+        let i = row * 26 + col;
+        Some(if i == 2599 {
+            "1".into()
+        } else {
+            format!("={}+1", cell_name(i + 1))
+        })
+    });
+    let widest = format!("=SUMMA({})", ["B1:Z100"; 24].join(";"));
+    let nested = format!("={}1{}", "(".repeat(99), ")".repeat(99));
+    let terms = format!("=1{}", "+1".repeat(99));
+    let minus = format!("={}1", "-".repeat(198));
+    let dense = |src: &str| {
+        let src = src.to_string();
+        sheet_of(move |col, row| (row * 26 + col < 1260).then(|| src.clone()))
+    };
+    let sheets: Vec<(&str, Vec<u8>)> = vec![
+        ("100 numbers and 2 500 sums of them", sums),
+        ("200 sums of the whole sheet", tangle),
+        (
+            "2 600 sums of the whole sheet",
+            sheet_of(|_, _| Some("=SUMMA(A1:Z100)".into())),
+        ),
+        ("a chain through every cell", chain),
+        (
+            "a column of formulas that read the sheet 24 times",
+            sheet_of(|col, _| Some(if col == 0 { widest.clone() } else { "1".into() })),
+        ),
+        (
+            "2 600 numbers",
+            sheet_of(|col, row| Some(format!("{},{row}", col * row))),
+        ),
+        ("1 260 formulas of 99 nested brackets", dense(&nested)),
+        ("1 260 formulas of 100 terms", dense(&terms)),
+        ("1 260 formulas of 198 minus signs", dense(&minus)),
+        (
+            "1 260 formulas that do not parse",
+            dense(&"=SUMMA(".repeat(28)),
+        ),
+        ("1 260 divisions by zero", dense("=1/0+SUMMA(A1:Z2)")),
+    ];
+    let mut worst = (0, String::new());
+    for (case, blob) in &sheets {
+        assert!(blob.len() <= 256 * 1024, "{case}: within the quota");
+        for (width, height) in [(1024, 720), (1600, 1000)] {
+            let (fuel, after) = kalkyl_on(case, blob, width, height);
+            if fuel > worst.0 {
+                worst = (fuel, format!("{case} at {width} x {height}, after {after}"));
+            }
+        }
+    }
+    eprintln!(
+        "kalkyl on hostile sheets: costliest frame {} fuel, {}",
+        worst.0, worst.1
+    );
+
+    // What the two sheets of the review come to once they are calculated.
+    let mut page = Page::load_with("kalkyl", 1024, 720, stored("kalkyl", &sheets[0].1)).unwrap();
+    assert!(
+        page.shows("2600 celler · räknar…"),
+        "the first frame says so"
+    );
+    assert!(page.settle("the sums") > 20, "over many frames");
+    assert!(page.shows("B1: 150") && page.shows("Z100: 150"));
+    assert!(page.shows("2600 celler"));
+    let mut page = Page::load_with("kalkyl", 1024, 720, stored("kalkyl", &sheets[1].1)).unwrap();
+    page.settle("the tangle");
+    assert!(page.shows("A1: #CIRKEL") && page.shows("R8: #CIRKEL"));
 }

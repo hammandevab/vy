@@ -195,7 +195,7 @@ fn recalculation_is_dependency_ordered() {
     s.recalc();
     assert_eq!(s.get(0).unwrap().shown(), "2600");
     assert_eq!(s.get(CELLS - 2).unwrap().shown(), "2");
-    assert!(!s.overloaded);
+    assert!(!s.calculating());
     // One change at the far end reaches the first cell.
     s.set(CELLS - 1, "0,5");
     s.recalc();
@@ -211,30 +211,145 @@ fn recalculation_is_dependency_ordered() {
     assert_eq!(shown(&s, "B15"), "1240");
 }
 
-/// A sheet whose formulas read more cells than a recalculation may visit
-/// gives up with `#FEL` instead of running until the host stops the page.
+/// SPEC-5.3.3 (granskning 0013:2): a recalculation is a pass that stops
+/// after about as much work as a step is given and goes on in the next,
+/// so no sheet takes more than a step's worth of a call into the page.
+/// The work is every cell looked at and every byte of formula read: the
+/// first reading of a new formula, the walk over what the formulas read
+/// with what it does on a cycle, and their evaluation. A step does not
+/// interrupt the evaluation of one formula, and a formula may read the
+/// sheet twice over through its ranges, no more. However the pass is cut
+/// into steps, the values are the ones a single pass gives.
 #[test]
-fn a_tangled_sheet_gives_up_instead_of_hanging() {
-    let mut s = Sheet::new();
+fn a_recalculation_goes_on_in_steps_of_bounded_work() {
+    const STEP: u32 = RECALC_STEP;
+    // Stepped to the end: the steps taken and the most work one did.
+    let stepped = |s: &mut Sheet, budget: u32| -> (u32, u64) {
+        let (mut steps, mut most) = (0, 0);
+        loop {
+            let before = s.work;
+            let done = s.step(budget);
+            steps += 1;
+            most = most.max(s.work - before);
+            assert!(steps < 1_000_000, "the pass does not end");
+            if done {
+                assert!(!s.calculating());
+                return (steps, most);
+            }
+            assert!(s.calculating());
+        }
+    };
+    let labels = |s: &Sheet| -> Vec<String> {
+        s.filled()
+            .map(|i| s.get(i).unwrap().label.clone())
+            .collect()
+    };
+    // The most a step goes over its budget: one formula of 200 bytes
+    // that reads the sheet twice.
+    let over = u64::from(40 + 4 * MAX_SRC as u32 + sheet::MAX_RANGE_CELLS);
+
+    // The review's first sheet: a hundred numbers and 2 500 sums of them.
+    let mut sums = Sheet::new();
     for row in 0..ROWS {
-        for col in 23..COLS {
-            s.set(index(col, row), "=SUMMA(A1:W100)");
+        sums.set(index(0, row), "1,5");
+        for col in 1..COLS {
+            sums.set(index(col, row), "=SUMMA(A1:A100)");
         }
     }
-    s.set(at("A1"), "1");
-    s.recalc();
-    assert!(s.overloaded);
-    assert_eq!(shown(&s, "Z100"), "#FEL");
-    assert_eq!(shown(&s, "A1"), "1");
-    // With fewer of them the same formulas are fine.
-    for row in 0..ROWS {
-        for col in 23..COLS - 1 {
-            s.set(index(col, row), "");
-        }
+    assert!(sums.calculating());
+    assert_eq!(shown(&sums, "Z100"), "…", "no value before its pass");
+    let (steps, most) = stepped(&mut sums, STEP);
+    // Read through: 2 600 cells and 2 500 × 4 × 14 bytes. Walked: 2 500
+    // × (100 cells + 4) and 2 600 cells. Evaluated: 2 500 × (40 + 4 × 14
+    // + 100 cells).
+    assert_eq!(sums.work, 142_600 + 262_600 + 490_000);
+    assert_eq!(steps, 45);
+    assert!(most <= u64::from(STEP) + over, "{most} units in one step");
+    assert_eq!(shown(&sums, "B1"), "150");
+    assert_eq!(shown(&sums, "Z100"), "150");
+    let whole = labels(&sums);
+    // One number changed: the pass again (the formulas are not new), the
+    // new sums at its end and the old ones until then.
+    let before = sums.work;
+    sums.set(at("A1"), "101,5");
+    assert_eq!(shown(&sums, "Z100"), "150", "the old value meanwhile");
+    assert!(!sums.step(STEP));
+    stepped(&mut sums, STEP);
+    assert_eq!(sums.work - before, 2_600 + 262_600 + 490_000);
+    assert_eq!(shown(&sums, "Z100"), "250");
+    sums.set(at("A1"), "1,5");
+    stepped(&mut sums, 7);
+    assert_eq!(
+        labels(&sums),
+        whole,
+        "seven units a step give the same sheet"
+    );
+
+    // The review's second sheet: 200 formulas that each sum the whole
+    // sheet, themselves included. Every one is on a cycle, found without
+    // a search of the stack for every formula read.
+    let mut tangle = Sheet::new();
+    for i in 0..200 {
+        tangle.set(i, "=SUMMA(A1:Z100)");
     }
-    s.recalc();
-    assert!(!s.overloaded);
-    assert_eq!(shown(&s, "Z100"), "1");
+    let (steps, most) = stepped(&mut tangle, STEP);
+    assert_eq!(
+        tangle.work,
+        (2_600 + 200 * 56) + (200 * 2_604 + 2_600) + 200 * 40
+    );
+    assert_eq!(steps, 28);
+    assert!(most <= u64::from(STEP) + over, "{most}");
+    assert!(tangle
+        .filled()
+        .all(|i| tangle.get(i).unwrap().shown() == "#CIRKEL"));
+    // The whole sheet of them: 6.8 million cells looked at, a step at a
+    // time, and the walk's stack is a few bytes a formula.
+    let mut full = Sheet::new();
+    for i in 0..CELLS {
+        full.set(i, "=SUMMA(A1:Z100)");
+    }
+    let (steps, most) = stepped(&mut full, STEP);
+    assert!((340..360).contains(&steps), "{steps}");
+    assert!(most <= u64::from(STEP) + over, "{most}");
+    assert_eq!(shown(&full, "M50"), "#CIRKEL");
+
+    // One formula is evaluated whole, so it may read the sheet twice over
+    // and no more: a third range makes it `#FEL`, and what reads it too.
+    let mut wide = Sheet::new();
+    wide.set(at("A1"), "=SUMMA(B1:Z100;B1:Z100)+SUMMA(C1:D100)");
+    wide.set(at("A2"), "=SUMMA(B1:Z100;B1:Z100;C1:Z100)");
+    wide.set(at("A3"), "=A2+1");
+    wide.set(at("B1"), "2");
+    wide.set(at("C7"), "3");
+    let (steps, most) = stepped(&mut wide, STEP);
+    assert_eq!(shown(&wide, "A1"), "13");
+    assert_eq!(shown(&wide, "A2"), "#FEL");
+    assert_eq!(shown(&wide, "A3"), "#FEL");
+    // Read through, walked (5 200 cells of ranges) and evaluated (5 200
+    // again) in one step.
+    assert_eq!(steps, 1);
+    assert!((2 * 5_200..u64::from(STEP)).contains(&most), "{most}");
+
+    // A sheet of formulas that are all text to read: 1 260 of 200 bytes,
+    // what the quota of 256 KB holds. Reading them through is counted.
+    let mut dense = Sheet::new();
+    let terms = format!("=1{}", "+1".repeat(99));
+    for i in 0..1260 {
+        dense.set(i, &terms);
+    }
+    let (steps, most) = stepped(&mut dense, STEP);
+    assert_eq!(dense.work, 2 * (1260 * 4 * 199) + 2 * 2_600 + 1260 * 44);
+    assert!((100..110).contains(&steps), "{steps}");
+    assert!(most <= u64::from(STEP) + over, "{most}");
+    assert_eq!(shown(&dense, "A1"), "100");
+
+    // What the sample costs: one step, a small part of it.
+    let mut sample = Sheet::sample();
+    let before = sample.work;
+    sample.set(at("B4"), "40000");
+    assert!(sample.step(STEP));
+    assert!(sample.work - before < 7_000, "{}", sample.work - before);
+    assert_eq!(shown(&sample, "E4"), "106500");
 }
 
 #[test]
@@ -243,8 +358,12 @@ fn the_stored_form_round_trips() {
     let bytes = s.encode();
     let sources: usize = s.filled().map(|i| s.src(i).len()).sum();
     assert_eq!(bytes.len(), 1 + 3 * s.count() + sources);
-    let back = Sheet::decode(&bytes).unwrap();
+    let mut back = Sheet::decode(&bytes).unwrap();
     assert_eq!(back.count(), s.count());
+    // A sheet that was read has its formulas still to calculate.
+    assert!(back.calculating());
+    assert_eq!(back.get(at("E4")).unwrap().label, "E4: …");
+    back.recalc();
     for i in s.filled() {
         assert_eq!(back.src(i), s.src(i));
         assert_eq!(back.get(i).unwrap().label, s.get(i).unwrap().label);
@@ -667,9 +786,14 @@ fn storage_persists_and_its_absence_is_shown() {
     p.select((6, 0), false);
     type_text(&mut p, "=SUMMA(B4:D4)/3");
     press(&mut p, key::ENTER);
-    let again = init(800.0, 600.0);
+    // The stored sheet is read by `init` and calculated by the first
+    // frame, before it is drawn.
+    let mut again = init(800.0, 600.0);
+    assert_eq!(again.note(), "51 celler · räknar…");
+    mock::run_frame(&mut again, 0).unwrap();
     assert_eq!(value(&again, "G1"), "33000");
     assert_eq!(again.note(), "51 celler");
+    mock::with(|h| assert_eq!(h.frame_requests, 0, "done in one step"));
 
     let mut p = page(800.0, 600.0, false);
     assert_eq!(p.note(), "50 celler · sparas inte");

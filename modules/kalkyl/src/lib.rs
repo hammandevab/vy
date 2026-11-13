@@ -27,6 +27,13 @@
 //!   (SPEC-8.2.4); pasted text arrives as `TEXT_INPUT` in the bar.
 //! - **Storage** of every cell's source after each change (SPEC-5.2.9);
 //!   without the capability the page says "sparas inte".
+//! - **A frame budget kept whatever the sheet is** (SPEC-5.3.3). The
+//!   sheet is saved before it is calculated, so one the page could not
+//!   calculate within a call would stop it at every visit. A
+//!   recalculation is therefore done in steps of a fixed amount of work
+//!   ([`RECALC_STEP`]), one in the event that changed the sheet and one a
+//!   frame after that until it is done; meanwhile the cells show the
+//!   values they had and the status line says "räknar…".
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
@@ -66,6 +73,14 @@ const CELL_PAD: f32 = 6.0;
 /// Room for the scroll bars right of and below the cells.
 const GUTTER: f32 = 12.0;
 const KEY: &str = "kalkyl";
+/// Units of the sheet's work one step of a recalculation does; a cell
+/// looked at is a unit. Measured in vy-runtime (`budget_tests` in vy-cli)
+/// a unit is 40 to 90 units of fuel, whatever the sheet, so a step is at
+/// most 1.8 ms of the 8 ms a frame has (SPEC-5.3.3), and 2.4 ms when it
+/// ends with a formula that reads the sheet twice over; drawing a full
+/// sheet takes up to 2.8 ms of the rest. The sample sheet is 6 900 units;
+/// 2 500 sums of a column of a hundred numbers are 900 000, 45 frames.
+const RECALC_STEP: u32 = 20_000;
 const F2: i32 = 0x3B;
 const DOUBLE_MS: i64 = 400;
 
@@ -313,7 +328,7 @@ impl Page {
         if changed {
             let text = String::from(self.bar.text());
             self.sheet.set(i, &text);
-            self.sheet.recalc();
+            self.sheet.step(RECALC_STEP);
             self.save();
         }
         self.load_bar();
@@ -332,7 +347,7 @@ impl Page {
             }
         }
         if changed {
-            self.sheet.recalc();
+            self.sheet.step(RECALC_STEP);
             self.save();
         }
         self.load_bar();
@@ -400,8 +415,8 @@ impl Page {
 
     fn note(&self) -> String {
         let mut s = cat(&[&number(self.sheet.count()), " celler"]);
-        if self.sheet.overloaded {
-            s.push_str(" · för många beroenden");
+        if self.sheet.calculating() {
+            s.push_str(" · räknar…");
         }
         if !self.stored {
             s.push_str(" · sparas inte");
@@ -967,6 +982,10 @@ impl App for Page {
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
+        // A recalculation under way goes on a step a frame.
+        if !self.sheet.step(RECALC_STEP) {
+            request_frame();
+        }
         let l = self.layout();
         let window = Rect::new(0.0, 0.0, self.window.width, self.window.height);
         f.rect(window, 0.0, PAGE)?;

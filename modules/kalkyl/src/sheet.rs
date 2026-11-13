@@ -2,6 +2,18 @@
 //! recalculation and number formatting. Nothing here touches the host, so
 //! the same code runs in the native tests.
 //!
+//! Recalculation is a pass that can stop anywhere and go on later
+//! ([`Sheet::step`]): a sheet is saved before it is calculated, so one
+//! that took longer to calculate than a call into the page may run would
+//! stop the page at every visit (granskning 0013:2). Every cell a pass
+//! looks at is a unit of work, a step does about as many units as it is
+//! given, and until the pass is done the cells show the values they had.
+//!
+//! A formula is kept as its text and evaluated straight from it, with the
+//! rectangles it reads noted beside it for the walk: 256 KB of stored
+//! formulas parsed into trees would be more memory than the page may have,
+//! and a page out of memory stops as surely as one out of time.
+//!
 //! Numbers are fixed-point, a whole number of 10⁻⁸ in an `i64`: decimal
 //! input is exact (`0,1 + 0,2` is `0,3`), every operation is integer
 //! arithmetic, and a number is formatted by this module, so no result
@@ -22,11 +34,12 @@ pub const CELLS: usize = COLS * ROWS;
 pub const ONE: i64 = 100_000_000;
 /// Longest source of a cell, in bytes.
 pub const MAX_SRC: usize = 200;
-/// Cells a recalculation may visit through ranges before it gives up:
-/// 2 600 formulas that each sum the whole sheet would otherwise run for
-/// seconds inside one event. A million visits is a couple of hundred
-/// whole-sheet sums, about 30 ms of logical time.
-const WORK_MAX: u32 = 1_000_000;
+/// Most cells one formula may read through its ranges: the sheet twice
+/// over. A formula is evaluated in one go, so this is what bounds the
+/// longest stretch of a recalculation that cannot stop; 200 bytes could
+/// otherwise name the whole sheet 24 times. A formula that asks for more
+/// is `#FEL`.
+pub const MAX_RANGE_CELLS: u32 = 2 * CELLS as u32;
 const FORMAT: u8 = 1;
 
 /// Why a formula has no value.
@@ -38,6 +51,8 @@ pub enum Fault {
     Cycle,
     /// Division by zero.
     DivZero,
+    /// A formula no recalculation has reached yet.
+    Pending,
 }
 
 impl Fault {
@@ -47,6 +62,7 @@ impl Fault {
             Fault::Error => "#FEL",
             Fault::Cycle => "#CIRKEL",
             Fault::DivZero => "#DIV/0",
+            Fault::Pending => "…",
         }
     }
 }
@@ -91,30 +107,23 @@ impl Func {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum Expr {
-    Num(i64),
-    Ref(u16),
-    Neg(Box<Expr>),
-    Bin(u8, Box<Expr>, Box<Expr>),
-    Call(Func, Vec<Arg>),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum Arg {
-    Value(Expr),
-    /// A rectangle of cells: top-left and bottom-right index.
-    Range(u16, u16),
-}
-
 /// One non-empty cell.
 #[derive(Clone, Debug)]
 pub struct Cell {
     /// What was typed.
     pub src: String,
-    /// The parsed formula of a source that starts with `=` and parses.
-    formula: Option<Expr>,
+    /// True for a source that starts with `=`.
     is_formula: bool,
+    /// True once a recalculation has read the formula through: `parses`,
+    /// `reads` and `cost` say what it found.
+    checked: bool,
+    /// True for a formula that parses; one that does not is `#FEL`.
+    parses: bool,
+    /// The rectangles of cells the formula reads, in the order it reads
+    /// them; a single cell is a rectangle of one.
+    reads: Vec<(u16, u16)>,
+    /// What evaluating the formula costs, in units of work.
+    cost: u32,
     /// The value after the last recalculation.
     pub value: Value,
     /// The cell's name and what it shows, `B3: 1250`: the text of its
@@ -134,12 +143,55 @@ impl Cell {
         &self.label[self.shown_at..]
     }
 
+    /// Read a formula through without evaluating it: whether it parses,
+    /// which rectangles it reads and what evaluating it will cost.
+    /// Returns the work that was.
+    fn check(&mut self) -> u32 {
+        let body = self.src.as_bytes().get(1..).unwrap_or(&[]);
+        let read_through = PARSE_COST * body.len() as u32;
+        let (mut reads, mut cost) = (Vec::new(), EVAL_COST + read_through);
+        let mut check = Parser {
+            s: body,
+            i: 0,
+            from: From::Check {
+                reads: &mut reads,
+                cost: &mut cost,
+            },
+        };
+        let in_ranges: u32 = {
+            let parsed = check.formula().is_some();
+            let cells = |&(a, b): &(u16, u16)| Rectangle::of(a, b).cells();
+            self.parses = parsed;
+            reads.iter().filter(|r| r.0 != r.1).map(cells).sum()
+        };
+        if in_ranges > MAX_RANGE_CELLS {
+            self.parses = false;
+        }
+        if !self.parses {
+            reads.clear();
+            cost = EVAL_COST;
+        }
+        self.reads = reads;
+        self.cost = cost;
+        self.checked = true;
+        read_through
+    }
+
+    /// Write the label again, in the string it already has. A
+    /// recalculation relabels thousands of cells; a string that had to
+    /// move for each would leave as many holes in the heap, and the SDK's
+    /// allocator looks through the holes below a block every time it
+    /// frees one.
     fn relabel(&mut self, index: usize) {
-        self.label = name(index);
+        self.label.clear();
+        if let Value::Text = self.value {
+            self.label.reserve_exact(self.src.len() + 8);
+        }
+        push_name(&mut self.label, index);
         self.label.push_str(": ");
         self.shown_at = self.label.len();
         match self.value {
-            Value::Num(v) => self.label.push_str(&format_number(v)),
+            Value::Num(v) => push_decimals(&mut self.label, v, 6),
             Value::Text => self.label.push_str(&self.src),
             Value::Fault(f) => self.label.push_str(f.text()),
         }
@@ -164,11 +216,16 @@ pub fn col_name(col: usize) -> char {
 
 /// A cell's name, `B3`.
 pub fn name(index: usize) -> String {
-    let (col, row) = col_row(index);
     let mut s = String::new();
-    s.push(col_name(col));
-    push_u64(&mut s, row as u64 + 1);
+    push_name(&mut s, index);
     s
+}
+
+/// Append a cell's name.
+fn push_name(s: &mut String, index: usize) {
+    let (col, row) = col_row(index);
+    s.push(col_name(col));
+    push_u64(s, row as u64 + 1);
 }
 
 /// Append `v` in decimal.
@@ -197,6 +254,13 @@ pub fn format_number(v: i64) -> String {
 /// [`format_number`] with at most `decimals` decimals (0 to 6), for a
 /// cell too narrow for all six.
 pub fn format_decimals(v: i64, decimals: u32) -> String {
+    let mut s = String::new();
+    push_decimals(&mut s, v, decimals);
+    s
+}
+
+/// Append what [`format_decimals`] gives.
+fn push_decimals(s: &mut String, v: i64, decimals: u32) {
     let decimals = decimals.min(6);
     let a = v.unsigned_abs();
     let one = ONE as u64;
@@ -208,11 +272,10 @@ pub fn format_decimals(v: i64, decimals: u32) -> String {
         int += 1;
         frac -= limit;
     }
-    let mut s = String::new();
     if v < 0 && (int != 0 || frac != 0) {
         s.push('-');
     }
-    push_u64(&mut s, int);
+    push_u64(s, int);
     if frac != 0 {
         s.push(',');
         let mut digits = [b'0'; 6];
@@ -226,7 +289,6 @@ pub fn format_decimals(v: i64, decimals: u32) -> String {
             s.push(*d as char);
         }
     }
-    s
 }
 
 /// The number a cell's text is, when it is one: digits with an optional
@@ -240,6 +302,7 @@ pub fn parse_number(text: &str) -> Option<i64> {
     let mut p = Parser {
         s: digits.as_bytes(),
         i: 0,
+        from: From::Cells(&[]),
     };
     let v = p.number()?;
     (p.i == p.s.len()).then_some(if negative { -v } else { v })
@@ -259,11 +322,85 @@ fn narrow(v: i128) -> Result<i64, Fault> {
     i64::try_from(v).map_err(|_| Fault::Error)
 }
 
-/// A recursive-descent parser over a formula's bytes. A source is at
-/// most [`MAX_SRC`] bytes, which bounds the nesting and the recursion.
+/// What a part of a formula comes to: a number, or the first fault met.
+type Val = Result<i64, Fault>;
+
+/// Where a formula's cells come from.
+enum From<'a> {
+    /// The sheet: the formula is being evaluated.
+    Cells(&'a [Option<Box<Cell>>]),
+    /// Nowhere: the formula is being checked when it is put into its
+    /// cell. Every cell reads as 0, and the rectangles it names are noted
+    /// with what reading them will cost.
+    Check {
+        reads: &'a mut Vec<(u16, u16)>,
+        cost: &'a mut u32,
+    },
+}
+
+/// The arguments of a call so far.
+struct Agg {
+    sum: i64,
+    n: i64,
+    min: i64,
+    max: i64,
+    /// The first fault among them, which is then the call's value.
+    fault: Option<Fault>,
+}
+
+impl Agg {
+    fn take(&mut self, v: Val) {
+        if self.fault.is_some() {
+            return;
+        }
+        match v.and_then(|v| Ok((v, self.sum.checked_add(v).ok_or(Fault::Error)?))) {
+            Ok((v, sum)) => {
+                self.sum = sum;
+                self.n += 1;
+                self.min = self.min.min(v);
+                self.max = self.max.max(v);
+            }
+            Err(f) => self.fault = Some(f),
+        }
+    }
+
+    fn finish(self, func: Func) -> Val {
+        if let Some(f) = self.fault {
+            return Err(f);
+        }
+        Ok(match func {
+            Func::Sum => self.sum,
+            Func::Count => self.n.checked_mul(ONE).ok_or(Fault::Error)?,
+            Func::Avg if self.n == 0 => return Err(Fault::DivZero),
+            Func::Avg => narrow(div_round(i128::from(self.sum), i128::from(self.n)))?,
+            Func::Min | Func::Max if self.n == 0 => 0,
+            Func::Min => self.min,
+            Func::Max => self.max,
+        })
+    }
+}
+
+/// `a op b` in fixed point; a fault on the left comes before one on the
+/// right.
+fn bin(op: u8, a: Val, b: Val) -> Val {
+    let (a, b) = (a?, b?);
+    match op {
+        b'+' => a.checked_add(b).ok_or(Fault::Error),
+        b'-' => a.checked_sub(b).ok_or(Fault::Error),
+        b'*' => narrow(div_round(i128::from(a) * i128::from(b), i128::from(ONE))),
+        _ if b == 0 => Err(Fault::DivZero),
+        _ => narrow(div_round(i128::from(a) * i128::from(ONE), i128::from(b))),
+    }
+}
+
+/// A recursive-descent parser over a formula's bytes that evaluates as it
+/// goes: `None` for a source that is no formula, else its value. A source
+/// is at most [`MAX_SRC`] bytes, which bounds the nesting and the
+/// recursion, and nothing is built on the heap.
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    from: From<'a>,
 }
 
 impl Parser<'_> {
@@ -343,7 +480,14 @@ impl Parser<'_> {
         Some(index(usize::from(col.to_ascii_uppercase() - b'A'), row - 1) as u16)
     }
 
-    fn expr(&mut self) -> Option<Expr> {
+    /// The whole formula: an expression and nothing after it.
+    fn formula(&mut self) -> Option<Val> {
+        let v = self.expr()?;
+        self.ws();
+        (self.i == self.s.len()).then_some(v)
+    }
+
+    fn expr(&mut self) -> Option<Val> {
         let mut left = self.term()?;
         loop {
             self.ws();
@@ -351,11 +495,11 @@ impl Parser<'_> {
                 return Some(left);
             };
             self.i += 1;
-            left = Expr::Bin(op, Box::new(left), Box::new(self.term()?));
+            left = bin(op, left, self.term()?);
         }
     }
 
-    fn term(&mut self) -> Option<Expr> {
+    fn term(&mut self) -> Option<Val> {
         let mut left = self.unary()?;
         loop {
             self.ws();
@@ -363,16 +507,17 @@ impl Parser<'_> {
                 return Some(left);
             };
             self.i += 1;
-            left = Expr::Bin(op, Box::new(left), Box::new(self.unary()?));
+            left = bin(op, left, self.unary()?);
         }
     }
 
-    fn unary(&mut self) -> Option<Expr> {
+    fn unary(&mut self) -> Option<Val> {
         self.ws();
         match self.peek()? {
             b'-' => {
                 self.i += 1;
-                Some(Expr::Neg(Box::new(self.unary()?)))
+                let v = self.unary()?;
+                Some(v.and_then(|v| v.checked_neg().ok_or(Fault::Error)))
             }
             b'+' => {
                 self.i += 1;
@@ -382,15 +527,15 @@ impl Parser<'_> {
         }
     }
 
-    fn primary(&mut self) -> Option<Expr> {
+    fn primary(&mut self) -> Option<Val> {
         let b = self.peek()?;
         if b == b'(' {
             self.i += 1;
-            let e = self.expr()?;
-            return self.eat(b')').then_some(e);
+            let v = self.expr()?;
+            return self.eat(b')').then_some(v);
         }
         if b.is_ascii_digit() {
-            return self.number().map(Expr::Num);
+            return self.number().map(Ok);
         }
         let start = self.i;
         while self.peek().is_some_and(|b| b.is_ascii_alphabetic()) {
@@ -399,32 +544,59 @@ impl Parser<'_> {
         if self.i > start && self.peek() == Some(b'(') {
             let func = Func::named(&self.s[start..self.i])?;
             self.i += 1;
-            return Some(Expr::Call(func, self.args()?));
+            return self.call(func);
         }
         self.i = start;
-        self.cell().map(Expr::Ref)
+        let cell = self.cell()?;
+        Some(self.read(cell))
     }
 
-    /// The arguments of a call, after its `(`: values and ranges
-    /// separated by `;` (or `,` where it is not a decimal comma).
-    fn args(&mut self) -> Option<Vec<Arg>> {
-        let mut args = Vec::new();
+    /// The value of the cell a formula names: an empty cell is 0, a text
+    /// is no number, a fault is the formula's fault too.
+    fn read(&mut self, i: u16) -> Val {
+        match &mut self.from {
+            From::Check { reads, cost } => {
+                reads.push((i, i));
+                **cost += 1;
+                Ok(0)
+            }
+            From::Cells(cells) => match cells.get(usize::from(i)).and_then(|c| c.as_deref()) {
+                None => Ok(0),
+                Some(cell) => match cell.value {
+                    Value::Num(v) => Ok(v),
+                    Value::Text => Err(Fault::Error),
+                    Value::Fault(f) => Err(f),
+                },
+            },
+        }
+    }
+
+    /// A call, after its `(`: values and ranges separated by `;` (or `,`
+    /// where it is not a decimal comma), taken in as they are read.
+    fn call(&mut self, func: Func) -> Option<Val> {
+        let mut agg = Agg {
+            sum: 0,
+            n: 0,
+            min: i64::MAX,
+            max: i64::MIN,
+            fault: None,
+        };
         if self.eat(b')') {
-            return Some(args);
+            return Some(agg.finish(func));
         }
         loop {
             self.ws();
             let start = self.i;
-            let arg = match self.range() {
-                Some(range) => range,
+            match self.range() {
+                Some((a, b)) => self.read_range(&mut agg, a, b),
                 None => {
                     self.i = start;
-                    Arg::Value(self.expr()?)
+                    let v = self.expr()?;
+                    agg.take(v);
                 }
-            };
-            args.push(arg);
+            }
             if self.eat(b')') {
-                return Some(args);
+                return Some(agg.finish(func));
             }
             if !(self.eat(b';') || self.eat(b',')) {
                 return None;
@@ -432,7 +604,8 @@ impl Parser<'_> {
         }
     }
 
-    fn range(&mut self) -> Option<Arg> {
+    /// A rectangle of cells, `B4:D8`: its top-left and bottom-right.
+    fn range(&mut self) -> Option<(u16, u16)> {
         let a = usize::from(self.cell()?);
         if !self.eat(b':') {
             return None;
@@ -440,37 +613,151 @@ impl Parser<'_> {
         self.ws();
         let b = usize::from(self.cell()?);
         let ((ac, ar), (bc, br)) = (col_row(a), col_row(b));
-        Some(Arg::Range(
+        Some((
             index(ac.min(bc), ar.min(br)) as u16,
             index(ac.max(bc), ar.max(br)) as u16,
         ))
     }
+
+    /// The numbers of a rectangle into a call; texts and empty cells are
+    /// passed over.
+    fn read_range(&mut self, agg: &mut Agg, a: u16, b: u16) {
+        let r = Rectangle::of(a, b);
+        match &mut self.from {
+            From::Check { reads, cost } => {
+                reads.push((a, b));
+                **cost += r.cells();
+            }
+            From::Cells(cells) => {
+                if agg.fault.is_some() {
+                    return;
+                }
+                // The loop every sum spends its time in: plain variables.
+                let (mut sum, mut n, mut min, mut max) = (agg.sum, agg.n, agg.min, agg.max);
+                'rows: for row in r.r0..r.r0 + r.h {
+                    let first = index(r.c0, row);
+                    let Some(line) = cells.get(first..first + r.w) else {
+                        break;
+                    };
+                    for cell in line {
+                        let Some(cell) = cell.as_deref() else {
+                            continue;
+                        };
+                        match cell.value {
+                            Value::Text => {}
+                            Value::Num(v) => {
+                                let Some(with) = sum.checked_add(v) else {
+                                    agg.fault = Some(Fault::Error);
+                                    break 'rows;
+                                };
+                                sum = with;
+                                n += 1;
+                                min = min.min(v);
+                                max = max.max(v);
+                            }
+                            Value::Fault(f) => {
+                                agg.fault = Some(f);
+                                break 'rows;
+                            }
+                        }
+                    }
+                }
+                (agg.sum, agg.n, agg.min, agg.max) = (sum, n, min, max);
+            }
+        }
+    }
 }
 
-/// The formula after the `=`, or `None` when it does not parse.
-fn parse_formula(body: &str) -> Option<Expr> {
-    let mut p = Parser {
-        s: body.as_bytes(),
-        i: 0,
-    };
-    let e = p.expr()?;
-    p.ws();
-    (p.i == p.s.len()).then_some(e)
+/// A range as columns and rows.
+#[derive(Clone, Copy)]
+struct Rectangle {
+    c0: usize,
+    r0: usize,
+    /// Columns across.
+    w: usize,
+    /// Rows down.
+    h: usize,
 }
 
-/// The cells of a range, row by row.
-fn range_cells(a: u16, b: u16) -> impl Iterator<Item = usize> {
-    let ((c0, r0), (c1, r1)) = (col_row(usize::from(a)), col_row(usize::from(b)));
-    (r0..=r1).flat_map(move |r| (c0..=c1).map(move |c| index(c, r)))
+impl Rectangle {
+    fn of(a: u16, b: u16) -> Self {
+        let ((c0, r0), (c1, r1)) = (col_row(usize::from(a)), col_row(usize::from(b)));
+        Self {
+            c0,
+            r0,
+            w: c1 + 1 - c0,
+            h: r1 + 1 - r0,
+        }
+    }
+
+    fn cells(self) -> u32 {
+        (self.w * self.h) as u32
+    }
+
+    /// The cell at `pos`, counting row by row.
+    fn at(self, pos: usize) -> usize {
+        index(self.c0 + pos % self.w, self.r0 + pos / self.w)
+    }
+}
+
+/// Units of work the evaluation of any formula costs before its text and
+/// its ranges are counted: finding it, and writing its value and label.
+const EVAL_COST: u32 = 40;
+/// Units of work for a byte of a formula's text, read through once when
+/// the formula is new and once for every evaluation.
+const PARSE_COST: u32 = 4;
+/// Units of work for the walk to enter and leave a formula.
+const WALK_COST: u32 = 4;
+
+const NEW: u8 = 0;
+const OPEN: u8 = 1;
+const DONE: u8 = 2;
+/// Set with `DONE` for a formula on a cycle.
+const CYCLIC: u8 = 4;
+
+/// A formula the walk is inside: which of its rectangles it has come to
+/// and how far into it.
+#[derive(Clone, Copy, Debug)]
+struct Walk {
+    cell: u16,
+    /// Index into the cell's `reads`.
+    item: u16,
+    /// Position in that rectangle.
+    pos: u16,
+    /// The shallowest formula still open that this one, or one it reads,
+    /// reads back to: at most this formula's own depth when it is on a
+    /// cycle.
+    reach: u16,
+}
+
+/// A recalculation under way: a depth-first walk over what the formulas
+/// read, which puts them in an order where each comes after what it reads
+/// and finds the cycles, then their evaluation in that order.
+#[derive(Clone, Debug)]
+struct Pass {
+    /// `NEW`, `OPEN` or `DONE` per cell, with `CYCLIC`.
+    state: Vec<u8>,
+    /// The depth in `stack` of each `OPEN` cell.
+    depth: Vec<u16>,
+    stack: Vec<Walk>,
+    /// The next cell to look for a formula not yet read through.
+    unchecked: usize,
+    /// The next cell a walk may start from.
+    start: usize,
+    order: Vec<u16>,
+    /// How many of `order` have their value.
+    evaluated: usize,
 }
 
 /// 26 × 100 cells, most of them empty.
 #[derive(Clone, Debug)]
 pub struct Sheet {
     cells: Vec<Option<Box<Cell>>>,
-    /// True when the last recalculation gave up (see [`WORK_MAX`]); the
-    /// formulas it did not get to show `#FEL`.
-    pub overloaded: bool,
+    /// True when a cell changed since the last pass began.
+    stale: bool,
+    pass: Option<Box<Pass>>,
+    /// Units of work every [`Sheet::step`] so far has done.
+    pub work: u64,
 }
 
 impl Default for Sheet {
@@ -484,7 +771,9 @@ impl Sheet {
     pub fn new() -> Self {
         Self {
             cells: vec![None; CELLS],
-            overloaded: false,
+            stale: false,
+            pass: None,
+            work: 0,
         }
     }
 
@@ -553,30 +842,36 @@ impl Sheet {
 
     /// Put `src` into a cell: empty clears it, a leading `=` makes it a
     /// formula, a number is a number and anything else a text. The values
-    /// are stale until [`Sheet::recalc`].
+    /// are stale until the recalculation this starts is done
+    /// ([`Sheet::step`]); a new formula shows `…` until then.
     pub fn set(&mut self, index: usize, src: &str) {
         let src = src.trim();
         let src = &src[..src.floor_char_boundary(MAX_SRC)];
+        self.stale = true;
         if src.is_empty() || index >= CELLS {
             if let Some(cell) = self.cells.get_mut(index) {
                 *cell = None;
             }
             return;
         }
-        let (formula, is_formula, value) = match src.strip_prefix('=') {
-            Some(body) => (parse_formula(body), true, Value::Fault(Fault::Error)),
-            None => (
-                None,
-                false,
-                parse_number(src).map_or(Value::Text, Value::Num),
-            ),
+        let (is_formula, value) = if src.starts_with('=') {
+            (true, Value::Fault(Fault::Pending))
+        } else {
+            (false, parse_number(src).map_or(Value::Text, Value::Num))
         };
         let mut cell = Cell {
             src: String::from(src),
-            formula,
             is_formula,
+            // A formula is read through by the recalculation, a step at a
+            // time: a stored sheet may hold 256 KB of them.
+            checked: false,
+            parses: false,
+            reads: Vec::new(),
+            cost: EVAL_COST,
             value,
-            label: String::new(),
+            // Room for a formula's name and any value it usually gets
+            // (`Z100: #CIRKEL`), so that relabelling does not move it.
+            label: String::with_capacity(if is_formula { 16 } else { 0 }),
             shown_at: 0,
             width: -1.0,
             decimals: 6,
@@ -585,194 +880,204 @@ impl Sheet {
         self.cells[index] = Some(Box::new(cell));
     }
 
-    fn is_formula(&self, index: usize) -> bool {
-        self.get(index).is_some_and(|c| c.is_formula)
+    /// True while the cells may show values from before the last change:
+    /// a recalculation is due or under way.
+    pub fn calculating(&self) -> bool {
+        self.stale || self.pass.is_some()
     }
 
-    /// The formula cells `e` reads, ranges included.
-    fn deps(&self, e: &Expr, out: &mut Vec<u16>, work: &mut u32) {
-        match e {
-            Expr::Num(_) => {}
-            Expr::Ref(i) => {
-                if self.is_formula(usize::from(*i)) {
-                    out.push(*i);
-                }
-            }
-            Expr::Neg(a) => self.deps(a, out, work),
-            Expr::Bin(_, a, b) => {
-                self.deps(a, out, work);
-                self.deps(b, out, work);
-            }
-            Expr::Call(_, args) => {
-                for arg in args {
-                    match arg {
-                        Arg::Value(e) => self.deps(e, out, work),
-                        Arg::Range(a, b) => {
-                            for i in range_cells(*a, *b) {
-                                *work += 1;
-                                if self.is_formula(i) {
-                                    out.push(i as u16);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn number_at(&self, index: usize) -> Result<Option<i64>, Fault> {
-        match self.get(index).map(|c| c.value) {
-            None | Some(Value::Text) => Ok(None),
-            Some(Value::Num(v)) => Ok(Some(v)),
-            Some(Value::Fault(f)) => Err(f),
-        }
-    }
-
-    fn eval(&self, e: &Expr, work: &mut u32) -> Result<i64, Fault> {
-        Ok(match e {
-            Expr::Num(v) => *v,
-            Expr::Ref(i) => match self.get(usize::from(*i)).map(|c| c.value) {
-                None => 0,
-                Some(Value::Num(v)) => v,
-                Some(Value::Text) => return Err(Fault::Error),
-                Some(Value::Fault(f)) => return Err(f),
-            },
-            Expr::Neg(a) => self.eval(a, work)?.checked_neg().ok_or(Fault::Error)?,
-            Expr::Bin(op, a, b) => {
-                let (a, b) = (self.eval(a, work)?, self.eval(b, work)?);
-                match op {
-                    b'+' => a.checked_add(b).ok_or(Fault::Error)?,
-                    b'-' => a.checked_sub(b).ok_or(Fault::Error)?,
-                    b'*' => narrow(div_round(i128::from(a) * i128::from(b), i128::from(ONE)))?,
-                    _ if b == 0 => return Err(Fault::DivZero),
-                    _ => narrow(div_round(i128::from(a) * i128::from(ONE), i128::from(b)))?,
-                }
-            }
-            Expr::Call(func, args) => {
-                let (mut sum, mut n) = (0i64, 0i64);
-                let (mut min, mut max) = (i64::MAX, i64::MIN);
-                let mut take = |v: i64| -> Result<(), Fault> {
-                    sum = sum.checked_add(v).ok_or(Fault::Error)?;
-                    n += 1;
-                    min = min.min(v);
-                    max = max.max(v);
-                    Ok(())
-                };
-                for arg in args {
-                    match arg {
-                        Arg::Value(e) => take(self.eval(e, work)?)?,
-                        Arg::Range(a, b) => {
-                            for i in range_cells(*a, *b) {
-                                *work += 1;
-                                if *work > WORK_MAX {
-                                    return Err(Fault::Error);
-                                }
-                                if let Some(v) = self.number_at(i)? {
-                                    take(v)?;
-                                }
-                            }
-                        }
-                    }
-                }
-                match func {
-                    Func::Sum => sum,
-                    Func::Count => n.checked_mul(ONE).ok_or(Fault::Error)?,
-                    Func::Avg if n == 0 => return Err(Fault::DivZero),
-                    Func::Avg => narrow(div_round(i128::from(sum), i128::from(n)))?,
-                    Func::Min | Func::Max if n == 0 => 0,
-                    Func::Min => min,
-                    Func::Max => max,
-                }
-            }
-        })
-    }
-
-    /// Calculate every formula, each after the formulas it reads: a
-    /// depth-first walk over the dependencies with its own stack (a chain
-    /// of 2 600 cells must not overflow the module's), which also finds
-    /// the cycles. A formula on a cycle is `#CIRKEL`, and so is one that
-    /// reads it.
+    /// Calculate every formula now, however long it takes: for a sheet
+    /// known to be small, and for tests. The page calls [`Sheet::step`].
     pub fn recalc(&mut self) {
-        const NEW: u8 = 0;
-        const OPEN: u8 = 1;
-        const DONE: u8 = 2;
-        let mut state = vec![NEW; CELLS];
-        let mut cyclic = vec![false; CELLS];
-        let mut order: Vec<u16> = Vec::new();
-        let mut work = 0u32;
-        let deps_of = |sheet: &Sheet, i: u16, work: &mut u32| {
-            let mut deps = Vec::new();
-            if let Some(e) = sheet.get(usize::from(i)).and_then(|c| c.formula.as_ref()) {
-                sheet.deps(e, &mut deps, work);
-            }
-            deps
+        while !self.step(u32::MAX) {}
+    }
+
+    /// Carry the recalculation on by about `budget` units of work; true
+    /// when every formula has its value.
+    ///
+    /// A pass first reads through the formulas that are new, then walks
+    /// what the formulas read, depth first, with its own stack (a chain through 2 600 cells must not overflow the
+    /// module's): that puts each formula after the formulas it reads and
+    /// finds the cycles. Then it evaluates them in that order. A formula
+    /// on a cycle is `#CIRKEL`, and so is one that reads it. Every cell
+    /// the walk looks at, every formula it enters or leaves and every
+    /// part and range cell of a formula it evaluates is a unit of work,
+    /// so a step costs in proportion to its budget whatever the sheet is;
+    /// only the evaluation of one formula is not interrupted (at most the
+    /// ranges 200 bytes of source can name: 24 times the sheet). A change
+    /// to the sheet starts the pass over.
+    pub fn step(&mut self, budget: u32) -> bool {
+        if self.stale {
+            self.stale = false;
+            self.pass = Some(Box::new(Pass {
+                state: vec![NEW; CELLS],
+                depth: vec![0; CELLS],
+                stack: Vec::new(),
+                unchecked: 0,
+                start: 0,
+                order: Vec::new(),
+                evaluated: 0,
+            }));
+        }
+        let Some(mut pass) = self.pass.take() else {
+            return true;
         };
-        let mut stack: Vec<(u16, Vec<u16>, usize)> = Vec::new();
-        for start in 0..CELLS {
-            if !self.is_formula(start) || state[start] != NEW || work > WORK_MAX {
-                continue;
+        let mut work = 0u32;
+        let done = self.check(&mut pass, budget, &mut work)
+            && self.walk(&mut pass, budget, &mut work)
+            && self.evaluate(&mut pass, budget, &mut work);
+        self.work += u64::from(work);
+        if !done {
+            self.pass = Some(pass);
+        }
+        done
+    }
+
+    /// The start of a pass: every formula put into its cell since the
+    /// last one is read through; true when none is left.
+    fn check(&mut self, pass: &mut Pass, budget: u32, work: &mut u32) -> bool {
+        while pass.unchecked < CELLS {
+            if *work >= budget {
+                return false;
             }
-            state[start] = OPEN;
-            stack.push((start as u16, deps_of(self, start as u16, &mut work), 0));
-            while let Some(top) = stack.last_mut() {
-                let Some(&dep) = top.1.get(top.2) else {
-                    state[usize::from(top.0)] = DONE;
-                    order.push(top.0);
-                    stack.pop();
+            *work += 1;
+            if let Some(cell) = self.cells[pass.unchecked].as_deref_mut() {
+                if cell.is_formula && !cell.checked {
+                    *work += cell.check();
+                }
+            }
+            pass.unchecked += 1;
+        }
+        true
+    }
+
+    /// The walk of a pass; true when every formula is in `order`.
+    fn walk(&self, pass: &mut Pass, budget: u32, work: &mut u32) -> bool {
+        let formula_at = |i: usize| self.cells[i].as_deref().filter(|c| c.is_formula);
+        loop {
+            if *work >= budget {
+                return false;
+            }
+            let depth = pass.stack.len();
+            let Some(top) = pass.stack.last_mut() else {
+                // The next formula no walk has reached.
+                while pass.start < CELLS
+                    && (pass.state[pass.start] != NEW || formula_at(pass.start).is_none())
+                {
+                    pass.start += 1;
+                    *work += 1;
+                    if *work >= budget {
+                        return false;
+                    }
+                }
+                if pass.start == CELLS {
+                    return true;
+                }
+                pass.state[pass.start] = OPEN;
+                pass.depth[pass.start] = 0;
+                pass.stack.push(Walk {
+                    cell: pass.start as u16,
+                    item: 0,
+                    pos: 0,
+                    reach: u16::MAX,
+                });
+                *work += WALK_COST;
+                continue;
+            };
+            let own = depth - 1;
+            let reads = formula_at(usize::from(top.cell)).map_or(&[][..], |c| &c.reads);
+            let Some(&(a, b)) = reads.get(usize::from(top.item)) else {
+                // Everything it reads is in order: so is the formula.
+                let cyclic = usize::from(top.reach) <= own;
+                let (cell, reach) = (usize::from(top.cell), top.reach);
+                pass.state[cell] = if cyclic { DONE | CYCLIC } else { DONE };
+                pass.order.push(cell as u16);
+                pass.stack.pop();
+                if let Some(parent) = pass.stack.last_mut() {
+                    parent.reach = parent.reach.min(reach);
+                }
+                continue;
+            };
+            // On through the rectangle to the next formula in it.
+            let r = Rectangle::of(a, b);
+            let mut entered = None;
+            while u32::from(top.pos) < r.cells() && *work < budget {
+                let i = r.at(usize::from(top.pos));
+                top.pos += 1;
+                *work += 1;
+                if formula_at(i).is_none() {
                     continue;
-                };
-                top.2 += 1;
-                match state[usize::from(dep)] {
-                    NEW if work <= WORK_MAX => {
-                        state[usize::from(dep)] = OPEN;
-                        stack.push((dep, deps_of(self, dep, &mut work), 0));
+                }
+                match pass.state[i] {
+                    NEW => {
+                        entered = Some(i);
+                        break;
                     }
-                    OPEN => {
-                        // Everything from `dep` up the stack is on the cycle.
-                        let from = stack.iter().position(|s| s.0 == dep).unwrap_or(0);
-                        for s in &stack[from..] {
-                            cyclic[usize::from(s.0)] = true;
-                        }
-                    }
+                    // It reads a formula that is still open: both, and
+                    // everything between them on the stack, are on a cycle.
+                    OPEN => top.reach = top.reach.min(pass.depth[i]),
                     _ => {}
                 }
             }
+            if u32::from(top.pos) >= r.cells() {
+                top.item += 1;
+                top.pos = 0;
+            }
+            if let Some(i) = entered {
+                *work += WALK_COST;
+                pass.state[i] = OPEN;
+                pass.depth[i] = depth as u16;
+                pass.stack.push(Walk {
+                    cell: i as u16,
+                    item: 0,
+                    pos: 0,
+                    reach: u16::MAX,
+                });
+            }
         }
-        self.overloaded = work > WORK_MAX;
-        for &i in &order {
+    }
+
+    /// The end of a pass; true when every formula has its value.
+    fn evaluate(&mut self, pass: &mut Pass, budget: u32, work: &mut u32) -> bool {
+        while let Some(&i) = pass.order.get(pass.evaluated) {
             let index = usize::from(i);
-            let formula = self.cells[index].as_mut().and_then(|c| c.formula.take());
-            let value = match &formula {
-                _ if self.overloaded => Value::Fault(Fault::Error),
-                _ if cyclic[index] => Value::Fault(Fault::Cycle),
-                None => Value::Fault(Fault::Error),
-                Some(e) => match self.eval(e, &mut work) {
-                    Ok(v) => Value::Num(v),
-                    Err(f) => Value::Fault(f),
-                },
+            let cyclic = pass.state[index] & CYCLIC != 0;
+            // A formula on a cycle is not evaluated, only labelled.
+            let cost = match self.cells[index].as_deref() {
+                Some(cell) if !cyclic => cell.cost,
+                _ => EVAL_COST,
             };
-            self.overloaded |= work > WORK_MAX;
+            // One formula is never cut short, but it does not begin in a
+            // step that has no room for it unless the step is empty.
+            if *work > 0 && work.saturating_add(cost) > budget {
+                return false;
+            }
+            *work = work.saturating_add(cost);
+            pass.evaluated += 1;
+            let value = match self.cells[index].as_deref() {
+                _ if cyclic => Value::Fault(Fault::Cycle),
+                Some(cell) if cell.parses => {
+                    let mut eval = Parser {
+                        s: &cell.src.as_bytes()[1..],
+                        i: 0,
+                        from: From::Cells(&self.cells),
+                    };
+                    match eval.formula() {
+                        Some(Ok(v)) => Value::Num(v),
+                        Some(Err(f)) => Value::Fault(f),
+                        None => Value::Fault(Fault::Error),
+                    }
+                }
+                _ => Value::Fault(Fault::Error),
+            };
             if let Some(cell) = self.cells[index].as_mut() {
-                cell.formula = formula;
                 if cell.value != value {
                     cell.value = value;
                     cell.relabel(index);
                 }
             }
         }
-        // Formulas the walk never reached (it gave up) have no value.
-        if self.overloaded {
-            for (index, cell) in self.cells.iter_mut().enumerate() {
-                match cell {
-                    Some(cell) if cell.is_formula && state[index] != DONE => {
-                        cell.value = Value::Fault(Fault::Error);
-                        cell.relabel(index);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        true
     }
 
     /// The stored form: a format byte, then per non-empty cell its index
@@ -789,8 +1094,9 @@ impl Sheet {
         out
     }
 
-    /// The sheet a stored value describes, calculated; `None` for
-    /// anything else.
+    /// The sheet a stored value describes, its formulas waiting for a
+    /// recalculation ([`Sheet::step`]): reading a sheet costs in proportion
+    /// to its bytes, whatever its formulas are. `None` for anything else.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (&format, mut rest) = bytes.split_first()?;
         if format != FORMAT {
@@ -807,7 +1113,6 @@ impl Sheet {
             sheet.set(i, core::str::from_utf8(src).ok()?);
             rest = tail;
         }
-        sheet.recalc();
         Some(sheet)
     }
 }
