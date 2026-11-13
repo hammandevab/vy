@@ -1,0 +1,11 @@
+{
+  "abi": "1.0",
+  "name": "Tavlan",
+  "summary": "Exempelsida: en tavla med tre kolumner. Korten dras med pekaren mellan och inom kolumnerna eller flyttas med piltangenterna, byter namn med dubbelklick eller Enter och sparas med state_put efter varje ändring. Under 640 px visas en kolumn i taget bakom flikar. Begär ime för textfälten (SPEC-10.4.2) och storage; utan storage sparas tavlan inte.",
+  "lang": "sv",
+  "memory_max": 64,
+  "published": "2026-11-12",
+  "capabilities": {"ime": {}, "storage": {"quota_kb": 16}},
+  "fallback": "# Tavlan\n\nEn tavla med kolumnerna Att göra, Pågår och Klart. Sidan kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/kanban"
+}

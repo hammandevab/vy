@@ -1,0 +1,11 @@
+{
+  "abi": "1.0",
+  "name": "Ritbord",
+  "summary": "Exempelsida: ett ritbord för frihand. Ett drag med pekaren blir ett förenklat streck som ritas som en mjuk kurva; åtta färger, tre pennor, ett sudd som tar bort de streck det rör, ångra och gör om (även Ctrl+Z och Ctrl+Y) och rensa med en fråga först. Ritningen hålls under 2 500 punkter så att varje frame ryms i budgeten. Begär storage; utan den sparas ritningen inte.",
+  "lang": "sv",
+  "memory_max": 64,
+  "published": "2026-11-12",
+  "capabilities": {"storage": {"quota_kb": 64}},
+  "fallback": "# Ritbord\n\nEtt ritbord för frihand. Sidan kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/rita"
+}

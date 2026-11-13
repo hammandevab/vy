@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 12, "w": 62.7, "h": 25, "text": "Rymd"},
+    {"id": 3, "parent_id": 1, "role": 10, "role_name": "image", "x": 0, "y": 0, "w": 536, "h": 600, "text": "3D-scen: torus med 200 ytor, 600 partiklar"},
+    {"id": 4, "parent_id": 1, "role": 16, "role_name": "region", "x": 536, "y": 0, "w": 264, "h": 600, "text": "Inställningar"},
+    {"id": 5, "parent_id": 4, "role": 1, "role_name": "text", "x": 552, "y": 16, "w": 32.75, "h": 16.25, "text": "Form"},
+    {"id": -10, "parent_id": 4, "role": 4, "role_name": "button", "x": 552, "y": 42, "w": 232, "h": 36, "text": "Ikosaeder"},
+    {"id": -11, "parent_id": 4, "role": 4, "role_name": "button", "x": 552, "y": 84, "w": 232, "h": 36, "text": "Torus (vald)"},
+    {"id": -12, "parent_id": 4, "role": 4, "role_name": "button", "x": 552, "y": 126, "w": 232, "h": 36, "text": "Kub"},
+    {"id": -20, "parent_id": 4, "role": 6, "role_name": "checkbox", "x": 552, "y": 176, "w": 232, "h": 36, "text": "Trådmodell"},
+    {"id": -21, "parent_id": 4, "role": 6, "role_name": "checkbox", "x": 552, "y": 212, "w": 232, "h": 36, "text": "Rotera (markerad)"},
+    {"id": 6, "parent_id": 4, "role": 1, "role_name": "text", "x": 552, "y": 263.875, "w": 53.73, "h": 16.25, "text": "Partiklar"},
+    {"id": -22, "parent_id": 4, "role": 23, "role_name": "slider", "x": 552, "y": 282, "w": 232, "h": 36, "text": "Partiklar: 600"},
+    {"id": 7, "parent_id": 4, "role": 1, "role_name": "text", "x": 552, "y": 334, "w": 126.6, "h": 16.25, "text": "Ritoperationer: 820"},
+    {"id": 8, "parent_id": 4, "role": 1, "role_name": "text", "x": 552, "y": 356, "w": 89.98, "h": 16.25, "text": "Bildtid: 16 ms"},
+    {"id": 9, "parent_id": 4, "role": 1, "role_name": "text", "x": 552, "y": 394, "w": 223.27, "h": 65, "text": "Dra i scenen för att vrida och rulla för att zooma. Piltangenterna vrider, Page Up och Page Down zoomar, Home återställer."}
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "abi": "1.0",
+  "name": "Block",
+  "summary": "Exempelsida: ett pusselspel med fallande block i en brunn på 10 × 20 rutor. Sju former ur en påse om sju, rotation med väggsparkar, håll, skuggbit, mjukt och hårt släpp, rader som blinkar och försvinner, nivåer som går fortare. Spelet går i fasta steg om 16 ms ur dt_ms, pausar när fliken göms och spelas med tangenter eller knapparna på sidan. Begär storage för bästa poäng; utan den sparas den inte.",
+  "lang": "sv",
+  "memory_max": 64,
+  "published": "2026-11-12",
+  "capabilities": {"storage": {"quota_kb": 1}},
+  "fallback": "# Block\n\nEtt pusselspel med fallande block. Sidan kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/block"
+}

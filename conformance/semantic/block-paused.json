@@ -1,0 +1,21 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 800, "h": 600, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 152, "y": 14, "w": 80, "h": 25, "text": "Block"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 461.44, "y": 12, "w": 186.56, "h": 16.25, "text": "Pausat. Tryck Fortsätt eller P."},
+    {"id": 4, "parent_id": 1, "role": 10, "role_name": "image", "x": 152, "y": 52, "w": 260, "h": 520, "text": "Spelplan 10 × 20, 10 rutor fyllda, faller: T"},
+    {"id": 5, "parent_id": 1, "role": 1, "role_name": "text", "x": 428, "y": 53, "w": 132, "h": 91, "text": "Nästa: S"},
+    {"id": 6, "parent_id": 1, "role": 1, "role_name": "text", "x": 428, "y": 155, "w": 132, "h": 91, "text": "Håll: O"},
+    {"id": 7, "parent_id": 1, "role": 1, "role_name": "text", "x": 428, "y": 260, "w": 220, "h": 24, "text": "Poäng 282"},
+    {"id": 8, "parent_id": 1, "role": 1, "role_name": "text", "x": 428, "y": 284, "w": 220, "h": 24, "text": "Nivå 1"},
+    {"id": 9, "parent_id": 1, "role": 1, "role_name": "text", "x": 428, "y": 308, "w": 220, "h": 24, "text": "Rader 1"},
+    {"id": 10, "parent_id": 1, "role": 1, "role_name": "text", "x": 428, "y": 332, "w": 220, "h": 24, "text": "Bästa 282"},
+    {"id": -10, "parent_id": 1, "role": 4, "role_name": "button", "x": 428, "y": 436, "w": 68, "h": 40, "text": "Vänster"},
+    {"id": -11, "parent_id": 1, "role": 4, "role_name": "button", "x": 580, "y": 436, "w": 68, "h": 40, "text": "Höger"},
+    {"id": -12, "parent_id": 1, "role": 4, "role_name": "button", "x": 504, "y": 436, "w": 68, "h": 40, "text": "Rotera"},
+    {"id": -13, "parent_id": 1, "role": 4, "role_name": "button", "x": 428, "y": 484, "w": 106, "h": 40, "text": "Ned"},
+    {"id": -14, "parent_id": 1, "role": 4, "role_name": "button", "x": 542, "y": 484, "w": 106, "h": 40, "text": "Släpp"},
+    {"id": -15, "parent_id": 1, "role": 4, "role_name": "button", "x": 428, "y": 532, "w": 106, "h": 40, "text": "Håll"},
+    {"id": -16, "parent_id": 1, "role": 4, "role_name": "button", "x": 542, "y": 532, "w": 106, "h": 40, "text": "Fortsätt"}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 1280, "h": 800, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 342, "y": 14, "w": 80, "h": 25, "text": "Block"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 704.83, "y": 12, "w": 233.17, "h": 16.25, "text": "Inte startat. Tryck Starta eller Enter."},
+    {"id": 4, "parent_id": 1, "role": 10, "role_name": "image", "x": 342, "y": 52, "w": 360, "h": 720, "text": "Spelplan 10 × 20, 0 rutor fyllda"},
+    {"id": 5, "parent_id": 1, "role": 1, "role_name": "text", "x": 718, "y": 53, "w": 132, "h": 91, "text": "Nästa: O"},
+    {"id": 6, "parent_id": 1, "role": 1, "role_name": "text", "x": 718, "y": 155, "w": 132, "h": 91, "text": "Håll: tom"},
+    {"id": 7, "parent_id": 1, "role": 1, "role_name": "text", "x": 718, "y": 260, "w": 220, "h": 24, "text": "Poäng 0"},
+    {"id": 8, "parent_id": 1, "role": 1, "role_name": "text", "x": 718, "y": 284, "w": 220, "h": 24, "text": "Nivå 1"},
+    {"id": 9, "parent_id": 1, "role": 1, "role_name": "text", "x": 718, "y": 308, "w": 220, "h": 24, "text": "Rader 0"},
+    {"id": 10, "parent_id": 1, "role": 1, "role_name": "text", "x": 718, "y": 332, "w": 220, "h": 24, "text": "Bästa 0"},
+    {"id": -10, "parent_id": 1, "role": 4, "role_name": "button", "x": 718, "y": 636, "w": 68, "h": 40, "text": "Vänster"},
+    {"id": -11, "parent_id": 1, "role": 4, "role_name": "button", "x": 870, "y": 636, "w": 68, "h": 40, "text": "Höger"},
+    {"id": -12, "parent_id": 1, "role": 4, "role_name": "button", "x": 794, "y": 636, "w": 68, "h": 40, "text": "Rotera"},
+    {"id": -13, "parent_id": 1, "role": 4, "role_name": "button", "x": 718, "y": 684, "w": 106, "h": 40, "text": "Ned"},
+    {"id": -14, "parent_id": 1, "role": 4, "role_name": "button", "x": 832, "y": 684, "w": 106, "h": 40, "text": "Släpp"},
+    {"id": -15, "parent_id": 1, "role": 4, "role_name": "button", "x": 718, "y": 732, "w": 106, "h": 40, "text": "Håll"},
+    {"id": -16, "parent_id": 1, "role": 4, "role_name": "button", "x": 832, "y": 732, "w": 106, "h": 40, "text": "Starta"}
+  ]
+}

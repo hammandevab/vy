@@ -1,0 +1,11 @@
+{
+  "abi": "1.0",
+  "name": "Kalkylark",
+  "summary": "Exempelsida: ett kalkylark med 26 kolumner och 100 rader. Formler med + - * /, parenteser, cellreferenser, områden och SUMMA, MEDEL, MIN, MAX och ANTAL räknas om i beroendeordning; cirklar visas som #CIRKEL. Bara cellerna i bild ritas. Enter bekräftar och går ned, Tab höger, Ctrl+C kopierar det markerade under kopieringsgesten. Begär ime för formelfältet (SPEC-10.4.2) och storage; utan storage sparas bladet inte.",
+  "lang": "sv",
+  "memory_max": 96,
+  "published": "2026-11-12",
+  "capabilities": {"ime": {}, "storage": {"quota_kb": 256}},
+  "fallback": "# Kalkylark\n\nEtt kalkylark med formler. Sidan kräver en Vy-klient.",
+  "source_url": "https://github.com/hammandevab/vy/tree/main/modules/kalkyl"
+}

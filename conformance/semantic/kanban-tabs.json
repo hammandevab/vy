@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 400, "h": 700, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 14, "w": 120, "h": 28, "text": "Tavlan"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 346.14, "y": 21, "w": 37.86, "h": 16.25, "text": "6 kort"},
+    {"id": -10, "parent_id": 1, "role": 20, "role_name": "tab", "x": 16, "y": 56, "w": 118.666664, "h": 40, "text": "Att göra, 3 kort"},
+    {"id": -11, "parent_id": 1, "role": 20, "role_name": "tab", "x": 140.66666, "y": 56, "w": 118.666664, "h": 40, "text": "Pågår, 2 kort (vald)"},
+    {"id": -12, "parent_id": 1, "role": 20, "role_name": "tab", "x": 265.3333, "y": 56, "w": 118.666664, "h": 40, "text": "Klart, 1 kort"},
+    {"id": 4, "parent_id": 1, "role": 21, "role_name": "tabpanel", "x": 16, "y": 104, "w": 368, "h": 580, "text": "Pågår"},
+    {"id": 5, "parent_id": 4, "role": 2, "role_name": "heading", "x": 30, "y": 116, "w": 340, "h": 20, "text": "Pågår"},
+    {"id": 6, "parent_id": 4, "role": 1, "role_name": "text", "x": 103.71, "y": 118, "w": 34.95, "h": 16, "text": "2 kort"},
+    {"id": -1006, "parent_id": 4, "role": 4, "role_name": "button", "x": 26, "y": 150, "w": 348, "h": 37.5, "text": "Bygg exempelsidorna"},
+    {"id": -1007, "parent_id": 4, "role": 4, "role_name": "button", "x": 346, "y": 154, "w": 24, "h": 24, "text": "Ta bort: Bygg exempelsidorna"},
+    {"id": -1008, "parent_id": 4, "role": 4, "role_name": "button", "x": 36, "y": 102, "w": 348, "h": 37.5, "text": "Granska budgeten för 2027 (flyttas)"},
+    {"id": -1009, "parent_id": 4, "role": 4, "role_name": "button", "x": 36, "y": 102, "w": 0, "h": 0, "text": "Ta bort: Granska budgeten för 2027"},
+    {"id": -21, "parent_id": 4, "role": 5, "role_name": "textbox", "x": 26, "y": 638, "w": 304, "h": 36, "text": ""},
+    {"id": -31, "parent_id": 4, "role": 4, "role_name": "button", "x": 338, "y": 638, "w": 36, "h": 36, "text": "Lägg till kort i Pågår"}
+  ]
+}

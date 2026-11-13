@@ -1,0 +1,25 @@
+[package]
+name = "rita"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Vy example page: a freehand drawing canvas with smoothed strokes, an eraser, undo and redo, and storage"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vy-sdk = { path = "../../crates/vy-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

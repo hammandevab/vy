@@ -897,6 +897,620 @@ events = [                                                      # enbart tangent
   {kind = "key_down", code = 40},                               # Enter: sparat
 ]
 
+# kanban: exempelsidan Tavlan (modules/kanban) – tre kolumner med kort som dras med pekaren
+# eller flyttas med piltangenterna. Ett kort är en button-nod med ett id som följer kortet, så
+# värdens fokus sitter kvar när det flyttas (SPEC-10.3.2); Enter eller dubbelklick gör samma nod
+# till ett textfält. Efter ett släpp glider kortet på plats på 160 ms (request_frame), så fallen
+# anger `frames` själva. Manifestet begär ime (textfälten, SPEC-10.4.2) och storage (tavlan sparas
+# efter varje ändring, SPEC-5.2.9).
+
+[[case]]
+name = "kanban-1280x800@1"
+module = "kanban"
+width = 1280
+height = 800
+scale = 1
+semantic = "kanban"
+capabilities = ["ime", "storage"]
+
+[[case]]
+name = "kanban-800x600@1-dragging"                 # mitt i en dragning: kortet i luften, luckan där det hamnar
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 120, y = 121},       # första kortet i Att göra: fokus, tryck
+  {kind = "pointer_move", x = 400, y = 180, buttons = 1},   # längre än 4 px: kortet lyfts
+  {kind = "pointer_move", x = 420, y = 150, buttons = 1},   # över Pågår, mellan första och andra kortet
+]
+
+[[case]]
+name = "kanban-800x600@1-moved"
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+frames = 80
+semantic = "kanban-moved"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 120, y = 121},       # dra första kortet till Pågår, plats 2
+  {kind = "pointer_move", x = 400, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 420, y = 150, buttons = 1},
+  {kind = "pointer_up", x = 420, y = 150},         # släpp: kortet glider på plats (11 frames)
+  {kind = "pointer_down", x = 650, y = 554},       # fältet i Klart: fokus, ime_begin
+  {kind = "text_input", text = "Fira med tårta och en lång titel som bryts på två rader"},
+  {kind = "key_down", code = 40},                   # Enter: nytt kort sist i Klart, sparas
+  {kind = "key_down", code = 43},                   # Tab: knappen Lägg till
+  {kind = "key_down", code = 43},                   # Tab: första kortet i Att göra
+  {kind = "key_down", code = 79},                   # pil höger: kortet till Pågår, fokus följer med
+  {kind = "key_down", code = 81},                   # pil ned: ett steg ned i kolumnen
+  {kind = "key_down", code = 40},                   # Enter: kortets nod blir ett textfält
+  {kind = "text_input", text = "Boka lokalen"},    # titeln är markerad: ersätts
+  {kind = "key_down", code = 40},                   # Enter: nytt namn, noden är en knapp igen
+]
+
+[[case]]
+name = "kanban-800x600@1-reloaded"                 # dubbelklick byter namn, pilarna flyttar; en ny instans läser tavlan
+module = "kanban"
+width = 800
+height = 600
+scale = 1
+frames = 80
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 120, y = 121},
+  {kind = "pointer_up", x = 120, y = 121},
+  {kind = "pointer_down", x = 120, y = 121},       # andra trycket inom 400 ms: redigera
+  {kind = "pointer_up", x = 120, y = 121},
+  {kind = "text_input", text = "Skriv nyhetsbrevet"},
+  {kind = "key_down", code = 40},                   # Enter: sparas
+  {kind = "key_down", code = 79},                   # pil höger x2: kortet till Klart
+  {kind = "key_down", code = 79},
+  {kind = "suspend"},
+  {kind = "reinit"},                                # ny instans med samma lagring (SPEC-5.2.9)
+]
+
+[[case]]
+name = "kanban-400x700@2-tabs"                     # under 640 px: en kolumn i taget bakom flikar
+module = "kanban"
+width = 400
+height = 700
+scale = 2
+semantic = "kanban-tabs"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 200, y = 76},        # fliken Pågår
+  {kind = "pointer_up", x = 200, y = 76},
+  {kind = "pointer_down", x = 150, y = 214},       # andra kortet lyfts ...
+  {kind = "pointer_move", x = 250, y = 150, buttons = 1},
+  {kind = "pointer_move", x = 320, y = 80, buttons = 1},    # ... och hålls över fliken Klart
+]
+
+# kalkyl: exempelsidan Kalkylark (modules/kalkyl) – 26 × 100 celler, formler och omräkning i
+# beroendeordning. Cellerna är cell-noder och kan inte ha värdens fokus (SPEC-10.3.2): utan fokus
+# tar rutnätet tangenterna. Formelfältet är ett textfält mellan fälten för cellerna bredvid, tre
+# nod-id i en ring, så Tab (värdens tangent, SPEC-10.3.1) bekräftar och går höger. Manifestet begär
+# ime (formelfältet, SPEC-10.4.2) och storage (bladet sparas efter varje ändring, SPEC-5.2.9).
+
+[[case]]
+name = "kalkyl-1280x800@1"
+module = "kalkyl"
+width = 1280
+height = 800
+scale = 1
+semantic = "kalkyl"
+capabilities = ["ime", "storage"]
+
+[[case]]
+name = "kalkyl-960x640@1-formulas"
+module = "kalkyl"
+width = 960
+height = 640
+scale = 1
+semantic = "kalkyl-formulas"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 640, y = 205},       # G4: rutnätet tar tangenterna
+  {kind = "pointer_up", x = 640, y = 205},
+  {kind = "text_input", text = "=E4-E10"},         # skrivs i cellen
+  {kind = "key_down", code = 40},                   # Enter: 49613,75, ned till G5
+  {kind = "text_input", text = "=G4/0"},
+  {kind = "key_down", code = 40},                   # #DIV/0
+  {kind = "text_input", text = "=G7+1"},
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "=G6*2"},
+  {kind = "key_down", code = 40},                   # G6 och G7 läser varandra: #CIRKEL
+  {kind = "text_input", text = "=SUMMA(B4:D4"},
+  {kind = "key_down", code = 40},                   # parentesen saknas: #FEL
+  {kind = "key_down", code = 43},                   # Tab: formelfältet får fokus
+  {kind = "text_input", text = "=MEDEL(B6:D6)"},
+  {kind = "key_down", code = 43},                   # Tab: bekräftar G9 och går höger till H9
+  {kind = "text_input", text = "Tab går åt höger"},
+  {kind = "key_down", code = 43},                   # Tab: bekräftar H9, I9
+  {kind = "pointer_down", x = 160, y = 205},       # B4 ...
+  {kind = "pointer_move", x = 352, y = 309, buttons = 1},   # ... dras till D8: summan i statusraden
+  {kind = "pointer_up", x = 352, y = 309},
+]
+
+[[case]]
+name = "kalkyl-800x600@1-reloaded"                 # ett ändrat värde räknas om, sparas och läses av en ny instans
+module = "kalkyl"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 160, y = 205},       # B4
+  {kind = "pointer_up", x = 160, y = 205},
+  {kind = "text_input", text = "40000"},
+  {kind = "key_down", code = 40},                   # Enter: summorna följer med, bladet sparas
+  {kind = "suspend"},
+  {kind = "reinit"},                                # ny instans med samma lagring (SPEC-5.2.9)
+  {kind = "scroll", dy = 78},                       # tre rader ned: rubrikerna ligger kvar
+  {kind = "scroll", dy = 2, lines = true, modifiers = 1},   # Skift+hjul: två kolumner åt höger
+]
+
+[[case]]
+name = "kalkyl-400x700@2-typing"                   # enbart tangentbord, mitt i en inmatning i cellen
+module = "kalkyl"
+width = 400
+height = 700
+scale = 2
+semantic = "kalkyl-typing"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "key_down", code = 81}, {kind = "key_down", code = 81}, {kind = "key_down", code = 81},
+  {kind = "key_down", code = 81},                   # pil ned x4: A5
+  {kind = "key_down", code = 79}, {kind = "key_down", code = 79}, {kind = "key_down", code = 79},
+  {kind = "key_down", code = 79}, {kind = "key_down", code = 79},   # pil höger x5: F5, bladet följer med
+  {kind = "text_input", text = "=SUMMA(B5:D5)*12"},   # skrivs i cellen, ännu inte bekräftad
+]
+
+# rita: exempelsidan Ritbord (modules/rita) – frihand med förenklade streck ritade som mjuka
+# kurvor med PATH. Verktygen är knappar med tillståndet i texten; pappret är en image-nod med antalet
+# streck. Ritningen hålls under 2 500 punkter (SPEC-5.3.3). Manifestet begär storage (ritningen
+# sparas efter varje ändring, SPEC-5.2.9). Inga textfält, ingen ime.
+
+[[case]]
+name = "rita-1280x800@1"
+module = "rita"
+width = 1280
+height = 800
+scale = 1
+semantic = "rita"
+capabilities = ["storage"]
+
+[[case]]
+name = "rita-800x600@1-drawn"                      # sex streck och en prick i fyra färger och tre pennor; sudd och ångra
+module = "rita"
+width = 800
+height = 600
+scale = 1
+frames = 200
+semantic = "rita-drawn"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 146, y = 64},                 # gul
+  {kind = "pointer_down", x = 437, y = 64},                 # bred penna
+  {kind = "pointer_down", x = 665, y = 190},
+  {kind = "pointer_move", x = 659, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 235, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 575, y = 190, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 145, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 659, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 665, y = 190, buttons = 1},
+  {kind = "pointer_up", x = 665, y = 190},
+  {kind = "pointer_down", x = 184, y = 64},                 # grön
+  {kind = "pointer_down", x = 60, y = 470},
+  {kind = "pointer_move", x = 140, y = 455, buttons = 1},
+  {kind = "pointer_move", x = 220, y = 468, buttons = 1},
+  {kind = "pointer_move", x = 300, y = 452, buttons = 1},
+  {kind = "pointer_move", x = 380, y = 466, buttons = 1},
+  {kind = "pointer_move", x = 460, y = 450, buttons = 1},
+  {kind = "pointer_move", x = 540, y = 464, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 448, buttons = 1},
+  {kind = "pointer_move", x = 700, y = 462, buttons = 1},
+  {kind = "pointer_move", x = 740, y = 452, buttons = 1},
+  {kind = "pointer_up", x = 740, y = 452},
+  {kind = "pointer_down", x = 222, y = 64},                 # blå
+  {kind = "pointer_down", x = 349, y = 64},                 # tunn penna
+  {kind = "pointer_down", x = 150, y = 200},
+  {kind = "pointer_move", x = 180, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 210, y = 200, buttons = 1},
+  {kind = "pointer_move", x = 240, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 270, y = 200, buttons = 1},
+  {kind = "pointer_up", x = 270, y = 200},
+  {kind = "pointer_down", x = 70, y = 64},                  # röd
+  {kind = "pointer_down", x = 393, y = 64},                 # mellanpenna
+  {kind = "pointer_down", x = 300, y = 452},
+  {kind = "pointer_move", x = 300, y = 350, buttons = 1},
+  {kind = "pointer_move", x = 420, y = 350, buttons = 1},
+  {kind = "pointer_move", x = 420, y = 452, buttons = 1},
+  {kind = "pointer_up", x = 420, y = 452},
+  {kind = "pointer_down", x = 285, y = 355},
+  {kind = "pointer_move", x = 360, y = 290, buttons = 1},
+  {kind = "pointer_move", x = 435, y = 355, buttons = 1},
+  {kind = "pointer_up", x = 435, y = 355},
+  {kind = "pointer_down", x = 32, y = 64},                  # svart
+  {kind = "pointer_down", x = 345, y = 410},
+  {kind = "pointer_up", x = 345, y = 410},
+  {kind = "pointer_down", x = 497, y = 64},                 # sudd på
+  {kind = "pointer_down", x = 360, y = 270},
+  {kind = "pointer_move", x = 360, y = 300, buttons = 1},
+  {kind = "pointer_up", x = 360, y = 300},
+  {kind = "key_down", code = 29, modifiers = 2},  # Ctrl+Z: taket är tillbaka
+  {kind = "pointer_down", x = 32, y = 64},                  # svart: pennan igen
+]
+
+[[case]]
+name = "rita-800x600@1-confirm"                    # Rensa frågar först: dialogen ensam i Tab-ordningen
+module = "rita"
+width = 800
+height = 600
+scale = 1
+frames = 60
+semantic = "rita-confirm"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 60, y = 470},
+  {kind = "pointer_move", x = 140, y = 455, buttons = 1},
+  {kind = "pointer_move", x = 220, y = 468, buttons = 1},
+  {kind = "pointer_move", x = 300, y = 452, buttons = 1},
+  {kind = "pointer_move", x = 380, y = 466, buttons = 1},
+  {kind = "pointer_move", x = 460, y = 450, buttons = 1},
+  {kind = "pointer_move", x = 540, y = 464, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 448, buttons = 1},
+  {kind = "pointer_move", x = 700, y = 462, buttons = 1},
+  {kind = "pointer_move", x = 740, y = 452, buttons = 1},
+  {kind = "pointer_up", x = 740, y = 452},
+  {kind = "pointer_down", x = 751, y = 64},        # Rensa: dialogen öppnas, verktygen lämnar trädet
+  {kind = "key_down", code = 43},                   # Tab: dialogens knapp Rensa
+]
+
+[[case]]
+name = "rita-400x700@2-eraser"                     # smalt: verktygen på två rader; suddet hålls nere över ett streck
+module = "rita"
+width = 400
+height = 700
+scale = 2
+frames = 60
+semantic = "rita-eraser"
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 260, y = 64},        # lila
+  {kind = "pointer_down", x = 40, y = 200},
+  {kind = "pointer_move", x = 100, y = 170, buttons = 1},
+  {kind = "pointer_move", x = 160, y = 210, buttons = 1},
+  {kind = "pointer_move", x = 220, y = 180, buttons = 1},
+  {kind = "pointer_move", x = 280, y = 220, buttons = 1},
+  {kind = "pointer_move", x = 340, y = 190, buttons = 1},
+  {kind = "pointer_up", x = 340, y = 190},
+  {kind = "pointer_down", x = 108, y = 64},        # orange
+  {kind = "pointer_down", x = 123, y = 104},       # bred penna
+  {kind = "pointer_down", x = 60, y = 300},
+  {kind = "pointer_move", x = 150, y = 330, buttons = 1},
+  {kind = "pointer_move", x = 250, y = 300, buttons = 1},
+  {kind = "pointer_move", x = 340, y = 330, buttons = 1},
+  {kind = "pointer_up", x = 340, y = 330},
+  {kind = "pointer_down", x = 183, y = 104},       # sudd på
+  {kind = "pointer_down", x = 150, y = 150},       # suddet ned ...
+  {kind = "pointer_move", x = 150, y = 205, buttons = 1},   # ... och över det lila strecket: det är märkt
+]
+
+[[case]]
+name = "rita-500x400@1-reloaded"                   # en ny instans läser ritningen; pappret skalas till ett mindre fönster
+module = "rita"
+width = 800
+height = 600
+scale = 1
+frames = 60
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 222, y = 64},        # blå
+  {kind = "pointer_down", x = 665, y = 190},
+  {kind = "pointer_move", x = 659, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 235, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 229, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 212, buttons = 1},
+  {kind = "pointer_move", x = 575, y = 190, buttons = 1},
+  {kind = "pointer_move", x = 581, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 598, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 620, y = 145, buttons = 1},
+  {kind = "pointer_move", x = 642, y = 151, buttons = 1},
+  {kind = "pointer_move", x = 659, y = 168, buttons = 1},
+  {kind = "pointer_move", x = 665, y = 190, buttons = 1},
+  {kind = "pointer_up", x = 665, y = 190},
+  {kind = "pointer_down", x = 70, y = 64},         # röd
+  {kind = "pointer_down", x = 285, y = 355},
+  {kind = "pointer_move", x = 360, y = 290, buttons = 1},
+  {kind = "pointer_move", x = 435, y = 355, buttons = 1},
+  {kind = "pointer_up", x = 435, y = 355},
+  {kind = "suspend"},
+  {kind = "reinit"},                                # ny instans med samma lagring (SPEC-5.2.9)
+  {kind = "resize", width = 500, height = 400, scale = 1},
+]
+
+# skriv: exempelsidan Anteckningar (modules/skriv) – Markdown i ett flerradigt textfält och en
+# förhandsvisning som sidan bryter och sätter själv. Länkarna registreras med link_register varje
+# frame (SPEC-5.2.10) och är link-noder som Tab når. Manifestet begär ime (textfältet, SPEC-10.4.2)
+# och storage (texten sparas efter varje ändring, SPEC-5.2.9).
+
+[[case]]
+name = "skriv-1280x800@1"
+module = "skriv"
+width = 1280
+height = 800
+scale = 1
+semantic = "skriv"
+capabilities = ["ime", "storage"]
+
+[[case]]
+name = "skriv-800x600@1-typed"
+module = "skriv"
+width = 800
+height = 600
+scale = 1
+semantic = "skriv-typed"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 200, y = 300},       # textfältet: fokus, ime_begin
+  {kind = "key_down", code = 77, modifiers = 2},   # Ctrl+End: markören sist
+  {kind = "key_down", code = 40},                   # Enter x2: ny rad, nytt stycke
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "## Nytt stycke"},
+  {kind = "key_down", code = 40},
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "Skrivet i **fältet** till vänster, och förhandsvisningen följer med till *slutet*."},
+  {kind = "key_down", code = 43},                   # Tab: första länken, rullas i bild
+  {kind = "key_down", code = 43},                   # Tab: andra länken
+]
+
+[[case]]
+name = "skriv-800x600@1-reloaded"                  # en ny text ersätter exemplet, sparas och läses av en ny instans
+module = "skriv"
+width = 800
+height = 600
+scale = 1
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 200, y = 300},
+  {kind = "key_down", code = 4, modifiers = 2},    # Ctrl+A: allt markerat
+  {kind = "text_input", text = "# Inköp"},        # ersätter exemplet
+  {kind = "key_down", code = 40},
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "1. Mjölk"},
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "2. **Kaffe**, det mörka"},
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "3. Bröd från [bageriet](https://bageriet.example)"},
+  {kind = "key_down", code = 40},
+  {kind = "key_down", code = 40},
+  {kind = "text_input", text = "> Glöm inte `kassen`."},
+  {kind = "suspend"},
+  {kind = "reinit"},                                # ny instans med samma lagring (SPEC-5.2.9)
+]
+
+[[case]]
+name = "skriv-400x700@2-read"                      # under 720 px: flikarna Skriv och Läs
+module = "skriv"
+width = 400
+height = 700
+scale = 2
+semantic = "skriv-read"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "pointer_down", x = 300, y = 70},        # fliken Läs
+]
+
+# block: exempelsidan Block (modules/block) – ett pusselspel med fallande block i fasta steg om
+# 16 ms (SPEC-5.1.2). Medan spelet pågår begär varje frame nästa (SPEC-5.2.2), så varje händelse
+# efter starten har after_frames och fallen anger `frames`: 1 + summan + de frames som körs efter
+# sista händelsen. Bitarnas ordning kommer ur värdens random (SPEC-5.2.11), som huvudlöst ger
+# O J Z L S I T i första påsen. Manifestet begär storage (bästa poäng, SPEC-5.2.9).
+
+[[case]]
+name = "block-1280x800@1"
+module = "block"
+width = 1280
+height = 800
+scale = 1
+semantic = "block"
+capabilities = ["storage"]
+
+[[case]]
+name = "block-800x600@1-clearing"                  # sex bitar lagda med tangenterna; nedersta raden är full och blinkar
+module = "block"
+width = 800
+height = 600
+scale = 1
+frames = 38
+semantic = "block-clearing"
+capabilities = ["storage"]
+events = [
+  {kind = "key_down", code = 40},  # Enter: spelet startar, O faller
+  {kind = "key_down", code = 6, after_frames = 2},  # C: O läggs i håll, J faller
+  {kind = "key_down", code = 79, after_frames = 2},  # J ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 5–7
+  {kind = "key_down", code = 79, after_frames = 2},  # Z ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå J
+  {kind = "key_down", code = 79, after_frames = 2},  # L fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 8–10
+  {kind = "key_down", code = 79, after_frames = 2},  # S fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå L
+  {kind = "key_down", code = 80, after_frames = 2},  # I tre steg vänster ...
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: nedersta raden är full och blinkar
+]
+
+[[case]]
+name = "block-800x600@1-paused"                    # samma spel vidare: raden försvinner, nästa bit roteras och släpps mjukt, fliken göms
+module = "block"
+width = 800
+height = 600
+scale = 1
+frames = 85
+semantic = "block-paused"
+capabilities = ["storage"]
+events = [
+  {kind = "key_down", code = 40},  # Enter: spelet startar, O faller
+  {kind = "key_down", code = 6, after_frames = 2},  # C: O läggs i håll, J faller
+  {kind = "key_down", code = 79, after_frames = 2},  # J ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 5–7
+  {kind = "key_down", code = 79, after_frames = 2},  # Z ett steg höger ...
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå J
+  {kind = "key_down", code = 79, after_frames = 2},  # L fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: kolumn 8–10
+  {kind = "key_down", code = 79, after_frames = 2},  # S fyra steg höger ...
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 79, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps ovanpå L
+  {kind = "key_down", code = 80, after_frames = 2},  # I tre steg vänster ...
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 44, after_frames = 2},  # ... och släpps: nedersta raden är full och blinkar
+  {kind = "key_down", code = 80, after_frames = 30},  # raden är borta (18 steg), T faller: ett steg vänster
+  {kind = "key_down", code = 82, after_frames = 2},  # pil upp: T roteras
+  {kind = "key_down", code = 81, after_frames = 2},  # pil ned hålls: mjukt släpp ...
+  {kind = "key_up", code = 81, after_frames = 12},  # ... i tolv steg
+  {kind = "visibility", visible = false, after_frames = 3},  # fliken göms: spelet pausar
+  {kind = "visibility", visible = true},  # och visas igen: pausat tills spelaren fortsätter
+]
+
+[[case]]
+name = "block-400x700@2-buttons"                   # smalt: knapparna i en rad under brunnen, spelat med pekaren
+module = "block"
+width = 400
+height = 700
+scale = 2
+frames = 55
+capabilities = ["storage"]
+events = [
+  {kind = "pointer_down", x = 345, y = 568},  # Starta
+  {kind = "pointer_up", x = 345, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 33, y = 568, after_frames = 4},  # vänsterknappen hålls: ett steg, sedan upprepning
+  {kind = "pointer_up", x = 33, y = 568, after_frames = 20},  # släpps efter tjugo frames: två steg till
+  {kind = "pointer_down", x = 207, y = 568, after_frames = 2},  # Släpp: O längst till vänster
+  {kind = "pointer_up", x = 207, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 115, y = 568, after_frames = 3},  # Rotera: J står upp
+  {kind = "pointer_up", x = 115, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 74, y = 568, after_frames = 2},  # höger
+  {kind = "pointer_up", x = 74, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 268, y = 568, after_frames = 2},  # Håll: J läggs undan, Z faller
+  {kind = "pointer_up", x = 268, y = 568, after_frames = 1},
+  {kind = "pointer_down", x = 156, y = 568, after_frames = 2},  # nedknappen hålls: mjukt släpp
+]
+
+# rymd: exempelsidan Rymd (modules/rymd) – en 3D-scen ritad i mjukvara: en kropp som vrids,
+# projiceras, belyses yta för yta och ritas bakifrån som fyllda PATH-ytor (SPEC-C.1.2) över ett
+# stjärnfält med parallax. Egen sinus och cosinus med heltalsvinklar, så bilden är densamma på
+# varje maskin (SPEC-2.1.5). Med "Rotera" på begär varje frame nästa (SPEC-5.2.2) redan från den
+# första, så varje händelse har after_frames och fallen anger `frames`: 1 + summan + de frames som
+# körs efter sista händelsen. Inga capabilities.
+
+[[case]]
+name = "rymd-1280x800@1"
+module = "rymd"
+width = 1280
+height = 800
+scale = 1
+semantic = "rymd"
+
+[[case]]
+name = "rymd-800x600@1-torus"                      # torus vald, vriden med pekaren, zoomad med hjulet, 600 partiklar
+module = "rymd"
+width = 800
+height = 600
+scale = 1
+frames = 17
+semantic = "rymd-torus"
+events = [
+  {kind = "pointer_down", x = 668, y = 102, after_frames = 2},  # Torus
+  {kind = "pointer_up", x = 668, y = 102, after_frames = 1},
+  {kind = "pointer_down", x = 240, y = 280, after_frames = 2},  # scenen tas ...
+  {kind = "pointer_move", x = 255, y = 300, buttons = 1, after_frames = 1},  # ... och dras åt höger och nedåt
+  {kind = "pointer_move", x = 270, y = 320, buttons = 1, after_frames = 1},
+  {kind = "pointer_up", x = 270, y = 320, after_frames = 1},  # släppt: kroppen roterar själv igen
+  {kind = "scroll", dy = -2, lines = true, after_frames = 2},  # hjulet två rader: två zoomsteg in
+  {kind = "pointer_down", x = 685, y = 300, after_frames = 2},  # reglaget: 600 partiklar
+  {kind = "pointer_up", x = 685, y = 300, after_frames = 1},
+]
+
+[[case]]
+name = "rymd-800x600@1-wire"                       # bara tangenter: trådmodell, vridning, zoom, rotationen av
+module = "rymd"
+width = 800
+height = 600
+scale = 1
+frames = 14
+semantic = "rymd-wire"
+events = [
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Ikosaeder
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Torus
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Kub
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Trådmodell
+  {kind = "key_down", code = 44, after_frames = 1},  # mellanslag: trådmodell på
+  {kind = "key_down", code = 80, after_frames = 1},  # pil vänster två gånger: tio grader
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 82, after_frames = 1},  # pil upp: fem grader
+  {kind = "key_down", code = 75, after_frames = 1},  # Page Up: ett zoomsteg in
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Rotera
+  {kind = "key_down", code = 44, after_frames = 1},  # mellanslag: rotationen av, sidan vilar (SPEC-6.2.2)
+]
+
+[[case]]
+name = "rymd-400x700@2-cube"                       # smalt: inställningarna under scenen; kub, 800 partiklar, vriden och utzoomad
+module = "rymd"
+width = 400
+height = 700
+scale = 2
+frames = 17
+events = [
+  {kind = "pointer_down", x = 326, y = 564, after_frames = 2},  # Kub
+  {kind = "pointer_up", x = 326, y = 564, after_frames = 1},
+  {kind = "pointer_down", x = 200, y = 648, after_frames = 2},  # reglaget tas mitt på ...
+  {kind = "pointer_move", x = 330, y = 648, buttons = 1, after_frames = 1},  # ... och dras till slutet: 800 partiklar
+  {kind = "pointer_up", x = 330, y = 648, after_frames = 1},
+  {kind = "pointer_down", x = 200, y = 300, after_frames = 2},  # scenen dras åt vänster och nedåt
+  {kind = "pointer_move", x = 170, y = 340, buttons = 1, after_frames = 1},
+  {kind = "pointer_up", x = 170, y = 340, after_frames = 1},
+  {kind = "scroll", dy = 120, after_frames = 1},  # hjulet 120 px: tre zoomsteg ut
+]
+
+[[case]]
+name = "rymd-960x640@1.5-torus-wire"               # skala 1,5: torus som trådmodell, stjärnorna på hela pixlar
+module = "rymd"
+width = 960
+height = 640
+scale = 1.5
+frames = 9
+events = [
+  {kind = "pointer_down", x = 828, y = 102, after_frames = 2},  # Torus
+  {kind = "pointer_up", x = 828, y = 102, after_frames = 1},
+  {kind = "pointer_down", x = 720, y = 194, after_frames = 1},  # Trådmodell
+  {kind = "pointer_up", x = 720, y = 194, after_frames = 1},
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i

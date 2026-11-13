@@ -1,0 +1,24 @@
+{
+  "nodes": [
+    {"id": 1, "parent_id": 0, "role": 15, "role_name": "main", "x": 0, "y": 0, "w": 400, "h": 700, "text": ""},
+    {"id": 2, "parent_id": 1, "role": 2, "role_name": "heading", "x": 16, "y": 11, "w": 100, "h": 25, "text": "Ritbord"},
+    {"id": 3, "parent_id": 1, "role": 1, "role_name": "text", "x": 331.99, "y": 17, "w": 52.01, "h": 16.25, "text": "1 streck"},
+    {"id": 4, "parent_id": 1, "role": 16, "role_name": "region", "x": 16, "y": 48, "w": 368, "h": 72, "text": "Verktyg"},
+    {"id": -10, "parent_id": 4, "role": 4, "role_name": "button", "x": 16, "y": 48, "w": 32, "h": 32, "text": "Färg: svart"},
+    {"id": -11, "parent_id": 4, "role": 4, "role_name": "button", "x": 54, "y": 48, "w": 32, "h": 32, "text": "Färg: röd"},
+    {"id": -12, "parent_id": 4, "role": 4, "role_name": "button", "x": 92, "y": 48, "w": 32, "h": 32, "text": "Färg: orange"},
+    {"id": -13, "parent_id": 4, "role": 4, "role_name": "button", "x": 130, "y": 48, "w": 32, "h": 32, "text": "Färg: gul"},
+    {"id": -14, "parent_id": 4, "role": 4, "role_name": "button", "x": 168, "y": 48, "w": 32, "h": 32, "text": "Färg: grön"},
+    {"id": -15, "parent_id": 4, "role": 4, "role_name": "button", "x": 206, "y": 48, "w": 32, "h": 32, "text": "Färg: blå"},
+    {"id": -16, "parent_id": 4, "role": 4, "role_name": "button", "x": 244, "y": 48, "w": 32, "h": 32, "text": "Färg: lila"},
+    {"id": -17, "parent_id": 4, "role": 4, "role_name": "button", "x": 282, "y": 48, "w": 32, "h": 32, "text": "Färg: rosa"},
+    {"id": -18, "parent_id": 4, "role": 4, "role_name": "button", "x": 16, "y": 88, "w": 38, "h": 32, "text": "Penna: tunn"},
+    {"id": -19, "parent_id": 4, "role": 4, "role_name": "button", "x": 60, "y": 88, "w": 38, "h": 32, "text": "Penna: mellan"},
+    {"id": -20, "parent_id": 4, "role": 4, "role_name": "button", "x": 104, "y": 88, "w": 38, "h": 32, "text": "Penna: bred (vald)"},
+    {"id": -21, "parent_id": 4, "role": 4, "role_name": "button", "x": 154, "y": 88, "w": 58, "h": 32, "text": "Sudd (på)"},
+    {"id": -22, "parent_id": 4, "role": 4, "role_name": "button", "x": 224, "y": 88, "w": 36, "h": 32, "text": "Ångra (2 steg)"},
+    {"id": -23, "parent_id": 4, "role": 4, "role_name": "button", "x": 266, "y": 88, "w": 36, "h": 32, "text": "Gör om (inget)"},
+    {"id": -24, "parent_id": 4, "role": 4, "role_name": "button", "x": 308, "y": 88, "w": 66, "h": 32, "text": "Rensa ritningen"},
+    {"id": 5, "parent_id": 1, "role": 10, "role_name": "image", "x": 16, "y": 132, "w": 368, "h": 245.33334, "text": "Ritning med 1 streck"}
+  ]
+}
