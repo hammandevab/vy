@@ -486,6 +486,149 @@ fn spec_5_2_6_textbox_ime() {
     assert_eq!(tb.text(), "Hejかな!");
 }
 
+/// SPEC-5.2.6 (granskning 0010:5): a press in the field while text is
+/// being composed drops the composition and tells the host with `ime_end`,
+/// so the input method does not go on and leave its text at the new
+/// caret; the field still has the focus, and the next frame opens
+/// composition over it again. `set_text` does the same. Without a
+/// composition a press makes no call, and a field the host refused
+/// `ime_begin` makes none either.
+#[test]
+fn spec_5_2_6_textbox_press_ends_the_composition_in_the_host() {
+    let t = theme();
+    mock::with(|h| h.caps.ime = true);
+    let r = Rect::new(0.0, 0.0, 300.0, 40.0);
+    let area = Some((0.0, 0.0, 300.0, 40.0));
+    let mut tb = TextBox::new(-1).with_text("Hej");
+    send(&mut tb, focus(-1, true), r, &t);
+    let compose = Event::ImeCompose {
+        text: "かな",
+        caret: 6,
+    };
+    let underlined = |tb: &mut TextBox| {
+        let (ops, _) = drawn(|f| tb.draw(f, r, &t, BARE, ""));
+        ops.iter().any(|o| matches!(o, Op::Rect { h: 1.0, .. }))
+    };
+
+    // No composition: a press moves the caret and the host hears nothing.
+    send(&mut tb, down(12.0 + CW, 20.0), r, &t);
+    assert_eq!(tb.caret(), 1);
+    mock::with(|h| assert_eq!(h.ime_rect, area));
+
+    send(&mut tb, compose, r, &t);
+    assert!(underlined(&mut tb));
+    let (resp, taken) = send(&mut tb, down(12.0 + 3.0 * CW + 30.0, 20.0), r, &t);
+    assert_eq!((resp, taken, tb.caret()), (Response::Redraw, true, 3));
+    mock::with(|h| assert_eq!(h.ime_rect, None, "the host was told: ime_end"));
+    assert!(tb.focused());
+    assert!(!underlined(&mut tb), "the composition is gone");
+    mock::with(|h| assert_eq!(h.ime_rect, area, "and the frame opened it again"));
+    assert_eq!(tb.text(), "Hej", "nothing was committed");
+    send(&mut tb, typed("!"), r, &t);
+    assert_eq!(tb.text(), "Hej!", "typing goes on at the new caret");
+
+    // The page replacing the text during a composition: the same.
+    send(&mut tb, compose, r, &t);
+    tb.set_text("Nytt");
+    mock::with(|h| assert_eq!(h.ime_rect, None));
+    assert!(!underlined(&mut tb));
+    mock::with(|h| assert_eq!(h.ime_rect, area));
+
+    // Losing the focus during a composition ends it once and for all.
+    send(&mut tb, compose, r, &t);
+    send(&mut tb, focus(-1, false), r, &t);
+    assert!(!underlined(&mut tb));
+    mock::with(|h| assert_eq!(h.ime_rect, None, "not opened again without focus"));
+
+    // A host that refused `ime_begin` has no composition to end: nothing
+    // but the focus's own pair of calls is made (and logged as refused).
+    mock::with(|h| {
+        h.caps.ime = false;
+        h.refusals.clear();
+    });
+    send(&mut tb, focus(-1, true), r, &t);
+    send(&mut tb, compose, r, &t);
+    send(&mut tb, down(12.0, 20.0), r, &t);
+    assert!(!underlined(&mut tb));
+    mock::with(|h| assert_eq!(h.refusals, ["ime_begin: E_DENIED"]));
+}
+
+/// SPEC-5.2.6 (granskning 0010:5): composed text takes the selection's
+/// place from its first character, as the committed text will: the
+/// selected text is removed (the value changes) and the composition is
+/// shown where it was, not beside it.
+#[test]
+fn spec_5_2_6_textbox_composition_replaces_the_selection() {
+    let t = theme();
+    mock::with(|h| h.caps.ime = true);
+    let r = Rect::new(0.0, 0.0, 300.0, 40.0);
+    let mut tb = TextBox::new(-1).with_text("Hej du");
+    send(&mut tb, focus(-1, true), r, &t);
+    tb.select(1..3);
+    let compose = Event::ImeCompose {
+        text: "ö",
+        caret: 2,
+    };
+    assert_eq!(send(&mut tb, compose, r, &t), (Response::Changed, true));
+    assert_eq!((tb.text(), tb.caret()), ("H du", 1));
+    assert!(tb.selection().is_empty());
+    let (ops, sem) = drawn(|f| tb.draw(f, r, &t, BARE, ""));
+    let shown: Vec<&str> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, ["Hö du"], "the composition where the selection was");
+    assert!(ops
+        .iter()
+        .any(|o| matches!(*o, Op::Rect { x, w, h: 1.0, .. } if near(x, 12.0 + CW) && near(w, CW))));
+    assert_eq!(sem[0].text, "H du");
+    // The next step of the same composition changes nothing more, and an
+    // emptied composition (the input method's own cancel) removes nothing.
+    assert_eq!(send(&mut tb, compose, r, &t).0, Response::Redraw);
+    tb.select(0..1);
+    let cancelled = Event::ImeCompose { text: "", caret: 0 };
+    assert_eq!(send(&mut tb, cancelled, r, &t).0, Response::Redraw);
+    assert_eq!(tb.text(), "H du");
+    tb.select(1..1);
+    send(&mut tb, typed("ö"), r, &t);
+    assert_eq!(tb.text(), "Hö du");
+}
+
+/// SPEC-5.1.6, SPEC-6.4.3 (granskning 0010:5): the line and paragraph
+/// separators U+2028 and U+2029 are line breaks, like `\n`: the host
+/// breaks the line at them, so a one-line field that kept them would show
+/// two lines. Typed, pasted or set, each becomes a space in a one-line
+/// field and a line break in a multi-line one.
+#[test]
+fn spec_5_1_6_textbox_line_separators_are_line_breaks() {
+    let t = theme();
+    let r = Rect::new(0.0, 0.0, 300.0, 40.0);
+    let mut tb = focused(r, &t);
+    send(&mut tb, typed("a\u{2028}b\u{2029}c"), r, &t);
+    assert_eq!(tb.text(), "a b c");
+    tb.set_text("rad\u{2028}\u{2029}slut\u{2028}");
+    assert_eq!(tb.text(), "rad  slut ");
+    assert!(!tb.text().contains(['\u{2028}', '\u{2029}', '\n']));
+    let (ops, _) = drawn(|f| tb.draw(f, r, &t, BARE, ""));
+    let lines = ops.iter().filter(|o| matches!(o, Op::Text { .. })).count();
+    assert_eq!(lines, 1);
+
+    let mut note = TextBox::multiline(-2).with_text("a\u{2028}b\u{2029}c\r\nd");
+    assert_eq!(note.text(), "a\nb\nc\nd");
+    let (ops, _) = drawn(|f| note.draw(f, Rect::new(0.0, 0.0, 300.0, 120.0), &t, BARE, ""));
+    let lines: Vec<&str> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["a", "b", "c", "d"], "a paragraph each");
+}
+
 /// SPEC-6.4.3, SPEC-5.2.5: a multi-line field wraps at word boundaries
 /// (spaces stay at the end of their line, a word wider than the line is
 /// broken), keeps line breaks, inserts one on Enter, moves between lines

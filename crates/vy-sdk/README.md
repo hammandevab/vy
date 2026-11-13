@@ -185,7 +185,11 @@ let value: &str = self.name.text();               // set_text, select_all, selec
 ```
 
 Höjden `ui::CONTROL_H` (40) passar en rad. Ett flerradsfält bryter vid ordgränser, Enter ger ny rad,
-och hjulet rullar det när pekaren är över.
+och hjulet rullar det när pekaren är över. Radbrytningar i inmatad text – `\n`, `\r\n`, `\r` och
+radskiljarna U+2028 och U+2029 – blir ett mellanslag i ett enradsfält och en ny rad i ett
+flerradsfält. Text som komponeras visas understruken vid markören, i markeringens ställe om det
+finns en; ett tryck i fältet eller `set_text` under en komposition avslutar den också hos värden
+(`ime_end`), och nästa frame öppnar den igen.
 
 ### Button
 

@@ -65,7 +65,11 @@ struct Field {
     scroll_x: f32,
     scroll_y: f32,
     preferred_x: Option<f32>,
+    /// Where the host has composition open for the field, when it has.
     ime: Option<Rect>,
+    /// True after the field ended a composition in the host while keeping
+    /// the focus: the next frame opens composition again.
+    ime_reopen: bool,
     last_copy: Option<Result<(), VyError>>,
     revision: u64,
     wrap: Wrap,
@@ -111,10 +115,13 @@ impl<'a> Label<'a> {
 /// - **Typing** arrives as `TEXT_INPUT` (SPEC-5.1.6) and replaces the
 ///   selection; Ctrl+V comes the same way, the host delivers the clipboard
 ///   as text (SPEC-8.2.4). `IME_COMPOSE` shows the composition underlined
-///   at the caret until the text is committed. The field opens composition
-///   with `ime_begin` over its rectangle when it gains the host's focus and
-///   closes it with `ime_end` when it loses it (SPEC-5.2.6), so the page's
-///   manifest must request `ime` (SPEC-10.4.2).
+///   at the caret, in the selection's place when there is one, until the
+///   text is committed. The field opens composition with `ime_begin` over
+///   its rectangle when it gains the host's focus and closes it with
+///   `ime_end` when it loses it (SPEC-5.2.6), so the page's manifest must
+///   request `ime` (SPEC-10.4.2). A press in the field, or `set_text`,
+///   while text is being composed drops the composition and ends it in
+///   the host too; the next frame opens composition again.
 /// - **Keys** while focused: arrows (Ctrl/Cmd: by word), Home/End (Ctrl:
 ///   whole text), Up/Down between lines, Backspace/Delete (Ctrl: a word),
 ///   Shift with any movement extends the selection, Ctrl+A selects all,
@@ -312,6 +319,7 @@ impl Field {
             scroll_y: 0.0,
             preferred_x: None,
             ime: None,
+            ime_reopen: false,
             last_copy: None,
             revision: 0,
             wrap: Wrap::default(),
@@ -322,9 +330,25 @@ impl Field {
         self.text.clear();
         self.caret = 0;
         self.anchor = 0;
-        self.compose.clear();
+        self.cancel_composition();
         self.insert(text, multi);
         self.edited();
+    }
+
+    /// Drop the text being composed, here and in the host: without the
+    /// `ime_end` the input method would go on with a composition the
+    /// field no longer shows, and commit it wherever the caret is by
+    /// then. The field keeps the focus, so the next frame opens
+    /// composition again (`draw`); a frame apart, so the host sees it end.
+    fn cancel_composition(&mut self) {
+        if self.compose.is_empty() {
+            return;
+        }
+        self.compose.clear();
+        if self.ime.take().is_some() {
+            let _ = ime_end();
+            self.ime_reopen = true;
+        }
     }
 
     fn selection(&self) -> Range<usize> {
@@ -350,9 +374,11 @@ impl Field {
     }
 
     /// Insert `s` at the caret, replacing the selection; `\r\n` and a lone
-    /// `\r` are one line break, a line break becomes a space in a one-line
-    /// field, other control characters are dropped, and what does not fit
-    /// `max_len` is cut. False when nothing changed.
+    /// `\r` are one line break, as are the line and paragraph separators
+    /// U+2028 and U+2029 (the host breaks the line at them too); a line
+    /// break becomes a space in a one-line field, other control characters
+    /// are dropped, and what does not fit `max_len` is cut. False when
+    /// nothing changed.
     fn insert(&mut self, s: &str, multi: bool) -> bool {
         let sel = self.selection();
         let room = self
@@ -363,8 +389,8 @@ impl Field {
         while let Some(c) = chars.next() {
             let c = match c {
                 '\r' if chars.peek() == Some(&'\n') => continue,
-                '\n' | '\r' if multi => '\n',
-                '\n' | '\r' | '\t' => ' ',
+                '\n' | '\r' | '\u{2028}' | '\u{2029}' if multi => '\n',
+                '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\t' => ' ',
                 c if c.is_control() => continue,
                 c => c,
             };
@@ -634,6 +660,7 @@ impl Field {
             // Always paired with the `ime_begin` of the focus: without
             // `ime` the host refuses both and logs it (SPEC-5.3.1).
             self.ime = None;
+            self.ime_reopen = false;
             let _ = ime_end();
         }
         Response::Redraw
@@ -739,7 +766,8 @@ impl Field {
                     return Response::Nothing;
                 }
                 ui.take();
-                self.compose.clear();
+                // The caret moves: a composition in progress is over.
+                self.cancel_composition();
                 let o = self.offset_at(x, y, r, theme, multi);
                 self.dragging = true;
                 self.move_to(o, modifiers.shift());
@@ -798,12 +826,19 @@ impl Field {
             }
             Event::ImeCompose { text, caret } if self.focused => {
                 ui.take();
+                // The composition takes the selection's place from its
+                // first character, as the committed text will.
+                let replaced = !text.is_empty() && self.delete(self.selection()).changed();
                 self.compose.clear();
                 self.compose.push_str(text);
                 let caret = usize::try_from(caret).unwrap_or(0).min(text.len());
                 self.compose_caret = text.floor_char_boundary(caret);
                 self.reveal = true;
-                Response::Redraw
+                if replaced {
+                    Response::Changed
+                } else {
+                    Response::Redraw
+                }
             }
             _ => Response::Nothing,
         };
@@ -858,9 +893,11 @@ impl Field {
         f.rect(r, RADIUS, if self.focused { p.accent } else { p.border })?;
         let inner = r.inset(line);
         f.rect(inner, (RADIUS - line).max(0.0), p.surface)?;
-        // The field moved (resize, scroll): composition follows it.
-        if let Some(at) = self.ime {
-            if at != r && ime_begin(r).is_ok() {
+        // The field moved (resize, scroll): composition follows it. After
+        // the field ended a composition itself, it opens again here.
+        if self.ime.is_some_and(|at| at != r) || self.ime_reopen {
+            self.ime_reopen = false;
+            if ime_begin(r).is_ok() {
                 self.ime = Some(r);
             }
         }
