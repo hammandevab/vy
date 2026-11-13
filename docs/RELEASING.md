@@ -39,6 +39,9 @@ osignerade binärens hash, under `vy-<version>-<mål>.unsigned/`; det är den et
 **Zip-filerna.** `tools/release_files.py zip` skriver posterna sorterade, med tiden
 `SOURCE_DATE_EPOCH` (commitens tid), läge 0755 för binärerna och 0644 för resten, utan extra fält.
 Komprimeringen är Pythons zlib, så zip-filens byte beror också på den; filerna i den gör det inte.
+Det gäller alla tre sorterna: målzipparna, sajtzippen och konformanszippen
+(`tools/package_conformance.sh`) skrivs av samma skrivare, så ingen av dem beror på byggarens
+umask, klocka eller tidszon.
 
 **Hur.** `tools/repro_env.sh`, som `build_release.sh` och `build_modules.sh` läser in, sätter:
 

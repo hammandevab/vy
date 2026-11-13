@@ -17,9 +17,11 @@
 #   tools/package_conformance.sh <version> [out-dir]      out-dir defaults to target
 #
 # The layout is the repository's, so `vy-cli conformance --root vy-conformance-<version>` runs the
-# suite as is (vy-cli comes with the release's vy-<version>-<target>.zip). Files are sorted, their
-# times set to the last commit's (SOURCE_DATE_EPOCH if set) and zip stores no extra attributes, so
-# the same tree gives the same zip (SPEC-9.7.1).
+# suite as is (vy-cli comes with the release's vy-<version>-<target>.zip). The zip is written by
+# tools/release_files.py, like every other zip of a release: entries sorted, all with the last
+# commit's time (SOURCE_DATE_EPOCH if set) and mode 0644, no directory entries and no extra
+# fields. The same tree gives the same zip whatever the builder's umask, clock and time zone
+# (SPEC-9.7.1), with the same Python (zlib).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,6 +31,10 @@ out=${2:-target}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 0)}
+py=python3
+command -v python3 > /dev/null 2>&1 || py=python
+# GNU coreutils, or the shasum of macOS: the same "<hash>  <path>" lines.
+if command -v sha256sum > /dev/null 2>&1; then sum="sha256sum"; else sum="shasum -a 256"; fi
 
 tools/build_modules.sh > /dev/null
 
@@ -83,12 +89,11 @@ whether the semantic tree matched; the exit code is 0 only when every case passe
 client's headless shell. SHA256SUMS lists every file of the suite.
 EOF
 
-find "$stage" -exec touch -h -d "@$epoch" {} +
 (cd "$stage" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | sed 's|^\./||' \
-  | xargs sha256sum > SHA256SUMS)
-touch -d "@$epoch" "$stage/SHA256SUMS"
+  | xargs $sum > SHA256SUMS)
 
+# The one zip writer of a release: it takes neither modes nor times from the files.
 rm -f "$out/$name.zip"
-(cd "$tmp" && find "$name" -type f | LC_ALL=C sort | TZ=UTC zip -X -q "$out/$name.zip" -@)
+SOURCE_DATE_EPOCH=$epoch "$py" tools/release_files.py zip "$tmp" "$out/$name.zip"
 printf '%s: %s cases, %s modules, %s bytes\n' "$out/$name.zip" "$cases" "$modules" \
   "$(wc -c < "$out/$name.zip" | tr -d ' ')"
