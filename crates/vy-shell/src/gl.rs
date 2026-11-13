@@ -11,6 +11,7 @@
 //! a panic anywhere in the setup, ours or a library's ([`guarded`];
 //! granskning 0011:1).
 
+use crate::shell::Shell;
 use glutin::config::{Config, ConfigTemplateBuilder, GlConfig};
 use glutin::context::{
     ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext,
@@ -20,10 +21,13 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, Surface, SurfaceAttributesBuilder, WindowSurface};
 use glutin_winit::{DisplayBuilder, GlWindow};
 use std::num::NonZeroU32;
-use vy_render::gl::{GlError, GlRaster};
+use vy_render::gl::{GlError, GlRaster, PageAt};
 use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::HasWindowHandle;
 use winit::window::{Window, WindowAttributes};
+
+/// Which page the page framebuffer holds (`PageLayer::version`).
+pub type PageVersion = (u32, u64, u32, u32, u32, u64);
 
 /// A current GL context on a window, with the pipeline built on it.
 pub struct GlContext {
@@ -48,6 +52,56 @@ impl GlContext {
         self.surface
             .swap_buffers(&self.context)
             .map_err(|e| GlError::Draw(format!("swap: {e}")))
+    }
+
+    /// Composite the window on the default framebuffer, to be shown by
+    /// [`GlContext::swap`]: the shell's frame (transparent where the page
+    /// shows, [`Shell::set_page_layer`]) over the page, which is drawn
+    /// into its framebuffer first when its [`PageVersion`] is not the one
+    /// `drawn` names. The page is cut to the page area: nothing of it
+    /// shows outside (SPEC-9.6.1). `changed` is the rows of the frame
+    /// (top down, `y0..y1`) that differ from the last one composited here.
+    /// `Err`: leave the GL path.
+    pub fn compose(
+        &mut self,
+        shell: &mut Shell,
+        changed: Option<(u32, u32)>,
+        drawn: &mut Option<PageVersion>,
+    ) -> Result<(), GlError> {
+        shell.frame();
+        let mut at = None;
+        let mut report = None;
+        if let Some(layer) = shell.page_layer() {
+            let p = layer.place;
+            if *drawn != Some(layer.version) {
+                let before = layer.raster.path();
+                match layer.raster.render_gl(
+                    &self.gl,
+                    &mut self.raster,
+                    layer.list,
+                    p.width,
+                    p.height,
+                    p.scale,
+                    layer.text,
+                    layer.images,
+                ) {
+                    Ok(r) => report = Some((p.tab, r, before)),
+                    // A list the reference refuses too: nothing to show.
+                    Err(GlError::Render(_)) => {}
+                    Err(e) => return Err(e),
+                }
+                *drawn = Some(layer.version);
+            }
+            at = Some(PageAt {
+                x: p.at.0,
+                y: p.at.1,
+                clip: p.clip,
+            });
+        }
+        if let Some((tab, r, before)) = report {
+            shell.page_drawn(tab, r, before);
+        }
+        self.raster.present(&self.gl, shell.frame(), changed, at)
     }
 
     /// One line for the log.

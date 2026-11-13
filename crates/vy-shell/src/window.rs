@@ -643,13 +643,12 @@ fn to_xrgb_area(img: &RgbaImage, out: &mut [u32], area: Area) {
 mod gpu {
     use super::Presented;
     use crate::shell::Shell;
-    use vy_render::gl::{GlError, PageAt};
     use winit::event_loop::ActiveEventLoop;
     use winit::window::{Window, WindowAttributes};
 
     pub type Gpu = crate::gl::GlContext;
     /// See `PageLayer::version`.
-    pub type Version = (u32, u64, u32, u32, u32, u64);
+    pub type Version = crate::gl::PageVersion;
 
     /// The window, with a GL context when one can be made.
     pub fn open(
@@ -687,41 +686,8 @@ mod gpu {
         presented: &mut Presented,
         drawn: &mut Option<Version>,
     ) -> Result<(), String> {
-        let changed = presented.update(shell.frame());
-        let mut at = None;
-        let mut report = None;
-        if let Some(layer) = shell.page_layer() {
-            let p = layer.place;
-            if *drawn != Some(layer.version) {
-                let before = layer.raster.path();
-                match layer.raster.render_gl(
-                    &g.gl,
-                    &mut g.raster,
-                    layer.list,
-                    p.width,
-                    p.height,
-                    p.scale,
-                    layer.text,
-                    layer.images,
-                ) {
-                    Ok(r) => report = Some((p.tab, r, before)),
-                    // A list the reference refuses too: nothing to show.
-                    Err(GlError::Render(_)) => {}
-                    Err(e) => return Err(e.to_string()),
-                }
-                *drawn = Some(layer.version);
-            }
-            at = Some(PageAt {
-                x: p.at.0,
-                y: p.at.1,
-                clip: p.clip,
-            });
-        }
-        if let Some((tab, r, before)) = report {
-            shell.page_drawn(tab, r, before);
-        }
-        g.raster
-            .present(&g.gl, shell.frame(), changed.map(|a| (a.y0, a.y1)), at)
+        let changed = presented.update(shell.frame()).map(|a| (a.y0, a.y1));
+        g.compose(shell, changed, drawn)
             .map_err(|e| e.to_string())?;
         g.swap().map_err(|e| e.to_string())
     }

@@ -1151,6 +1151,41 @@ impl GlRaster {
         })
     }
 
+    /// The window as composited: the `width` × `height` pixels of the
+    /// default framebuffer that [`GlRaster::present`] draws a frame of
+    /// that size on, read back before they are shown (for the tests of
+    /// `present`; after a swap the content is not defined). The alpha
+    /// read is the framebuffer's own, 255 where it has none.
+    pub fn read_window(&self, gl: &glow::Context, width: u32, height: u32) -> RgbaImage {
+        let (w, h) = (width as usize, height as usize);
+        let mut data = vec![0u8; w * h * 4];
+        // SAFETY: `gl` is current; `data` holds w × h RGBA texels.
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            gl.read_pixels(
+                0,
+                0,
+                w as i32,
+                h as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut data)),
+            );
+        }
+        // GL rows run bottom up; the window's top down.
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            out[y * w * 4..(y + 1) * w * 4]
+                .copy_from_slice(&data[(h - 1 - y) * w * 4..(h - y) * w * 4]);
+        }
+        RgbaImage {
+            width,
+            height,
+            data: out,
+        }
+    }
+
     /// Put a frame drawn on the CPU into the page framebuffer (a frame
     /// the pipeline does not draw, [`GlError::Unsupported`]).
     pub fn upload_page(&mut self, gl: &glow::Context, img: &RgbaImage) -> Result<(), GlError> {
