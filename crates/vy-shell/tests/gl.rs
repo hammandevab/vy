@@ -3,7 +3,9 @@
 //! random display lists and every frame of every reference page through a
 //! script of hovers, clicks, scrolls and keys, each drawn by
 //! `Renderer::render_gl`, read back and compared pixel by pixel with
-//! `vy_render::render`. The tolerance asserted is SPEC-11.3.2's.
+//! `vy_render::render`. The tolerance asserted is SPEC-11.3.2's, both
+//! halves: at most 3 % of a frame's pixels more than 2 levels off, and no
+//! pixel more than 64 levels off.
 //!
 //! SPEC-9.6.1 in the GL window (granskning 0011:2): the composition the
 //! window shows, read back from the default framebuffer. `GlRaster::present`
@@ -39,18 +41,21 @@ mod imp {
 
     /// SPEC-11.3.2's tolerance: a pixel differs when a channel is more than
     /// [`CHANNEL_DELTA`] from the reference's; at most [`DIFFERING_SHARE`] of
-    /// the pixels of a frame may (measured with Mesa llvmpipe: the reference
-    /// pages at most 0.25 %, the frame of SPEC-13.2.1 0.15 %, random lists
-    /// 2.0 %; the differences are anti-aliased edges and blending rounding).
+    /// the pixels of a frame may (measured with Mesa llvmpipe: the pages
+    /// at most 0.32 %, the frame of SPEC-13.2.1 0.15 %, thin strokes
+    /// 0.89 %, random lists 2.03 %; the differences are anti-aliased edges
+    /// and blending rounding), and none by more than [`MAX_DELTA`].
     const CHANNEL_DELTA: u8 = 2;
     /// See [`CHANNEL_DELTA`].
     const DIFFERING_SHARE: f64 = 0.03;
-    /// The most any channel of any pixel may be off (granskning 0011:4):
-    /// a quarter of the range. An anti-aliased edge drawn by area or
-    /// distance instead of by sampling is off by a part of one pixel's
-    /// coverage (measured with Mesa llvmpipe: at most 41 levels in any
-    /// class of input); more than this is a shape drawn where the
-    /// reference draws none, on however few pixels.
+    /// SPEC-11.3.2's bound on any one pixel (granskning 0011:4): no
+    /// channel is more than this from the reference's, a quarter of the
+    /// range. An anti-aliased edge drawn by area or distance instead of
+    /// by sampling is off by a part of one pixel's coverage (measured
+    /// with Mesa llvmpipe: at most 41 levels in any class of input); more
+    /// than this is a shape drawn where the reference draws none, on
+    /// however few pixels, which the share of [`DIFFERING_SHARE`] alone
+    /// would let through.
     const MAX_DELTA: u8 = 64;
     /// The hidden window's size in physical pixels: at least the largest
     /// window composited in the SPEC-9.6.1 checks.
@@ -675,6 +680,12 @@ mod imp {
                 d.max
             ));
         }
+        if d.max > MAX_DELTA {
+            failures.push(format!(
+                "{what}: a pixel of the page area is {} levels off, more than {MAX_DELTA}",
+                d.max
+            ));
+        }
         Ok((d, chrome))
     }
 
@@ -1010,7 +1021,7 @@ mod imp {
                     d.max
                 ));
             }
-            if class == "strokes" && d.max > MAX_DELTA {
+            if d.max > MAX_DELTA {
                 failures.push(format!(
                     "{class} {what}: the pixel at {:?} is {} levels off, more than {MAX_DELTA}",
                     d.max_at, d.max
