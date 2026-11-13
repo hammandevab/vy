@@ -289,3 +289,6 @@ utanför `vy_frame` går inte att skriva från Rust (SPEC-5.3.2). Texten i en `T
 Mockens textmodell är fast (varje tecken `storlek × 0,6` brett, rader `storlek × 1,25` höga); pixlar
 kommer bara från `vy-cli render` och konformanssviten. `mock::as_copy_gesture(|| …)` kör en händelse
 så som värden levererar Ctrl+C: `clipboard_write` lyckas då utan capability (SPEC-8.2.4).
+Mocken räknar inget bränsle, men `MockHost::text_bytes` räknar de byte text sidan lämnat till
+`text_measure`, `text_caret` och `dl_text`, som värden debiterar per byte (SPEC-5.3.3): en layout
+som mäter samma text om och om igen syns där, och ett test kan sätta ett tak för den.

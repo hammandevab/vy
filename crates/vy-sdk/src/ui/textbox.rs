@@ -950,18 +950,30 @@ fn fnv1a(s: &str) -> u64 {
 /// `width`: spaces stay at the end of the line they follow, and a word
 /// wider than the line is broken after the last character that fits.
 fn wrap_paragraph(style: StyleId, width: f32, p: &str) -> Result<Vec<(usize, usize)>, VyError> {
+    wrap_with(width, p, &|s| text_measure(style, 0.0, s).map(|z| z.w))
+}
+
+/// [`wrap_paragraph`] over any measure of a string's width. What is
+/// measured is in the order of the paragraph's length, however long its
+/// words are: each word once, each token with its spaces once, and for a
+/// word broken over several lines a few prefixes of about a line each
+/// (the host charges every measured byte, SPEC-5.3.3).
+fn wrap_with(
+    width: f32,
+    p: &str,
+    measure: &impl Fn(&str) -> Result<f32, VyError>,
+) -> Result<Vec<(usize, usize)>, VyError> {
     let mut lines = Vec::new();
     if p.is_empty() || width <= 0.0 {
         lines.push((0, p.len()));
         return Ok(lines);
     }
-    let measure = |s: &str| text_measure(style, 0.0, s).map(|z| z.w);
     let (mut start, mut line_w, mut i) = (0usize, 0.0f32, 0usize);
     while i < p.len() {
         let word_end = p[i..].find(' ').map_or(p.len(), |n| i + n);
         let rest = &p[word_end..];
         let token_end = word_end + rest.len() - rest.trim_start_matches(' ').len();
-        let word_w = if word_end > i {
+        let mut word_w = if word_end > i {
             measure(&p[i..word_end])?
         } else {
             0.0
@@ -972,11 +984,28 @@ fn wrap_paragraph(style: StyleId, width: f32, p: &str) -> Result<Vec<(usize, usi
             line_w = 0.0;
         }
         if i == start && word_w > width {
-            let k = fit_prefix(p, i, word_end, width, &measure)?;
-            lines.push((i, k));
-            start = k;
-            i = k;
-            continue;
+            // Wider than the line: a line of it at a time until the rest
+            // fits. The first line's length is guessed from the word's
+            // width, each later one from the line before it.
+            let mut hint = ((word_end - i) as f32 * width / word_w) as usize;
+            loop {
+                let (k, w) = fit_prefix(p, i, word_end, width, hint, measure)?;
+                if k == word_end && w <= width {
+                    word_w = w;
+                    break;
+                }
+                lines.push((i, k));
+                hint = k - i;
+                start = k;
+                i = k;
+                if k == word_end {
+                    break;
+                }
+            }
+            if i == word_end {
+                // Not even its last character fitted: it has its own line.
+                continue;
+            }
         }
         line_w += if token_end == word_end {
             word_w
@@ -990,30 +1019,74 @@ fn wrap_paragraph(style: StyleId, width: f32, p: &str) -> Result<Vec<(usize, usi
 }
 
 /// The end of the longest prefix of `p[i..end]` no wider than `width`, at
-/// least one character.
+/// least one character, with that prefix's width; `i < end`.
+///
+/// A prefix never gets narrower by growing, so there is one such end. It
+/// is looked for around `hint` bytes, where the caller expects it: a step
+/// of one character first, doubling while the answer lies further away,
+/// then by bisection between the last prefix that fitted and the first
+/// that did not. No prefix measured is more than about twice the answer,
+/// so finding it costs in the order of the line, not of the word.
 fn fit_prefix(
     p: &str,
     i: usize,
     end: usize,
     width: f32,
+    hint: usize,
     measure: &impl Fn(&str) -> Result<f32, VyError>,
-) -> Result<usize, VyError> {
-    let bounds: Vec<usize> = p[i..end]
-        .char_indices()
-        .skip(1)
-        .map(|(o, _)| i + o)
-        .chain(core::iter::once(end))
-        .collect();
-    let (mut lo, mut hi) = (0, bounds.len());
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if measure(&p[i..bounds[mid]])? <= width {
-            lo = mid + 1;
+) -> Result<(usize, f32), VyError> {
+    let first = p.ceil_char_boundary(i + 1);
+    let mut at = p.floor_char_boundary(i + hint).clamp(first, end);
+    let mut w = measure(&p[i..at])?;
+    let mut step = 1;
+    // `lo` fits, `hi` does not.
+    let (mut lo, mut lo_w, mut hi);
+    if w <= width {
+        (lo, lo_w) = (at, w);
+        loop {
+            if lo == end {
+                return Ok((lo, lo_w));
+            }
+            at = p.ceil_char_boundary((lo + step).min(end));
+            w = measure(&p[i..at])?;
+            if w > width {
+                hi = at;
+                break;
+            }
+            (lo, lo_w) = (at, w);
+            step *= 2;
+        }
+    } else {
+        hi = at;
+        loop {
+            if hi == first {
+                return Ok((hi, w));
+            }
+            at = p.floor_char_boundary(hi.saturating_sub(step)).max(first);
+            w = measure(&p[i..at])?;
+            if w <= width {
+                (lo, lo_w) = (at, w);
+                break;
+            }
+            hi = at;
+            step *= 2;
+        }
+    }
+    loop {
+        let mut mid = p.floor_char_boundary(lo + (hi - lo) / 2);
+        if mid <= lo {
+            mid = p.ceil_char_boundary(lo + 1);
+        }
+        if mid >= hi {
+            return Ok((lo, lo_w));
+        }
+        w = measure(&p[i..mid])?;
+        if w <= width {
+            (lo, lo_w) = (mid, w);
         } else {
             hi = mid;
         }
     }
-    Ok(bounds[lo.saturating_sub(1)])
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -586,3 +586,245 @@ fn spec_6_4_3_textbox_rewrap_matches_fresh_wrap() {
         "aaa bbb\nccc\nsame\nsame\nddd eee fff ggg!\nx y z"
     );
 }
+
+/// The wrapping `wrap_with` replaced, kept as the definition of where
+/// lines break: for a word wider than the line it bisects the whole rest
+/// of the word, measuring a prefix of that length at each step, for every
+/// line (quadratic in the word, granskning 0010:1).
+fn wrap_exhaustive(
+    width: f32,
+    p: &str,
+    measure: &impl Fn(&str) -> Result<f32, VyError>,
+) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
+    if p.is_empty() || width <= 0.0 {
+        lines.push((0, p.len()));
+        return lines;
+    }
+    let (mut start, mut line_w, mut i) = (0usize, 0.0f32, 0usize);
+    while i < p.len() {
+        let word_end = p[i..].find(' ').map_or(p.len(), |n| i + n);
+        let rest = &p[word_end..];
+        let token_end = word_end + rest.len() - rest.trim_start_matches(' ').len();
+        let word_w = if word_end > i {
+            measure(&p[i..word_end]).unwrap()
+        } else {
+            0.0
+        };
+        if i > start && line_w + word_w > width {
+            lines.push((start, i));
+            start = i;
+            line_w = 0.0;
+        }
+        if i == start && word_w > width {
+            let bounds: Vec<usize> = p[i..word_end]
+                .char_indices()
+                .skip(1)
+                .map(|(o, _)| i + o)
+                .chain(core::iter::once(word_end))
+                .collect();
+            let (mut lo, mut hi) = (0, bounds.len());
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if measure(&p[i..bounds[mid]]).unwrap() <= width {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            let k = bounds[lo.saturating_sub(1)];
+            lines.push((i, k));
+            start = k;
+            i = k;
+            continue;
+        }
+        line_w += if token_end == word_end {
+            word_w
+        } else {
+            measure(&p[i..token_end]).unwrap()
+        };
+        i = token_end;
+    }
+    lines.push((start, p.len()));
+    lines
+}
+
+/// xorshift64*, as the headless host's `random`: the same paragraphs in
+/// every run.
+fn next(state: &mut u64) -> u64 {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
+/// SPEC-6.4.3 (granskning 0010:1): the lines break exactly where the
+/// exhaustive search breaks them, for words far wider than the line, in
+/// characters of one to four bytes and of every width (none, narrow,
+/// wide), at widths from less than a character to more than the
+/// paragraph.
+#[test]
+fn spec_6_4_3_textbox_wrap_breaks_where_the_exhaustive_search_does() {
+    // Width models: the mock's (every character the same), and one where
+    // a character's width depends on the character, some having none.
+    let fixed = |s: &str| -> Result<f32, VyError> { Ok(s.chars().count() as f32 * CW) };
+    let varied = |s: &str| -> Result<f32, VyError> {
+        Ok(s.chars()
+            .map(|c| match c {
+                'i' | 'l' | '.' => 3.25,
+                'W' | 'M' => 14.5,
+                '\u{301}' | '\u{200B}' => 0.0,
+                c if c.len_utf8() >= 3 => 16.0,
+                ' ' => 4.0,
+                _ => 8.75,
+            })
+            .sum())
+    };
+    let alphabet: Vec<char> = "ilW.Mabcåäö\u{301}\u{200B}語\u{10348} ".chars().collect();
+    let mut seed = 0x5EED_5EED_0000_0001u64;
+    let mut paragraphs: Vec<String> = [
+        "",
+        " ",
+        "a",
+        "abc",
+        "   abc   ",
+        "aaa bbb ccc ddd",
+        "abcdefghijklmnop",
+        "ab  abcdefghijklmnopqrstuvwxyz  yz ",
+        "語語語語語語語語語語語語語語語語語語語語",
+    ]
+    .iter()
+    .map(|s| String::from(*s))
+    .collect();
+    paragraphs.push("W".repeat(700));
+    paragraphs.push("i".repeat(300) + &"W".repeat(300) + &"i".repeat(300));
+    paragraphs.push("\u{10348}".repeat(200));
+    paragraphs.push("e\u{301}".repeat(150));
+    for n in 0..120 {
+        // Mostly long words: a space once in forty characters or never.
+        let len = 1 + (next(&mut seed) % 400) as usize;
+        let spaces = n % 3 > 0;
+        let p: String = (0..len)
+            .map(|_| {
+                let c = alphabet[(next(&mut seed) % alphabet.len() as u64) as usize];
+                if c == ' ' && (!spaces || !next(&mut seed).is_multiple_of(3)) {
+                    'W'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        paragraphs.push(p);
+    }
+    let widths = [1.0, 9.6, 10.0, 28.8, 50.0, 96.0, 100.5, 333.0, 2000.0, 1e7];
+    for p in &paragraphs {
+        for width in widths {
+            let got = wrap_with(width, p, &fixed).unwrap();
+            assert_eq!(
+                got,
+                wrap_exhaustive(width, p, &fixed),
+                "fixed widths, {width} px: {p:?}"
+            );
+            let got = wrap_with(width, p, &varied).unwrap();
+            assert_eq!(
+                got,
+                wrap_exhaustive(width, p, &varied),
+                "varied widths, {width} px: {p:?}"
+            );
+        }
+    }
+    // A width no character fits: one character a line, and (as before) an
+    // empty line after a paragraph that ends with such a character.
+    assert_eq!(
+        wrap_with(5.0, "ab c", &fixed).unwrap(),
+        [(0, 1), (1, 2), (2, 3), (3, 4), (4, 4)]
+    );
+    // A failing measure is the caller's error, not a panic.
+    let refused = |_: &str| -> Result<f32, VyError> { Err(VyError::Arg) };
+    assert_eq!(wrap_with(50.0, "abc", &refused), Err(VyError::Arg));
+}
+
+/// SPEC-5.3.3, SPEC-6.4.3 (granskning 0010:1): the host charges a frame
+/// for every byte of text it shapes, so wrapping must not measure a long
+/// word over and over. A word of 4 096 bytes without a space is measured
+/// a few times its own length, however many lines it breaks into and
+/// whatever its characters' widths, and a field holding it draws, takes a
+/// press and is resized at a cost in the order of its text.
+#[test]
+fn spec_5_3_3_textbox_wrap_measures_in_the_order_of_the_text() {
+    use core::cell::Cell;
+    let measured = Cell::new(0usize);
+    let fixed = |s: &str| -> Result<f32, VyError> {
+        measured.set(measured.get() + s.len());
+        Ok(s.chars().count() as f32 * CW)
+    };
+    // Lines of a few characters and of many, and one-, two- and four-byte
+    // characters: the search starts where the line before ended.
+    for (word, width) in [
+        ("W".repeat(4096), 48.0),
+        ("W".repeat(4096), 480.0),
+        ("å".repeat(2048), 100.0),
+        ("\u{10348}".repeat(1024), 300.0),
+    ] {
+        measured.set(0);
+        let lines = wrap_with(width, &word, &fixed).unwrap();
+        assert!(lines.len() > 8, "{} lines", lines.len());
+        assert!(
+            measured.get() <= 4 * word.len(),
+            "{} bytes measured for a word of {} at {width} px",
+            measured.get(),
+            word.len()
+        );
+    }
+    // Widths that change along the word: narrow, then wide, then narrow
+    // characters, so the guess from the line before is wrong twice.
+    let varied = |s: &str| -> Result<f32, VyError> {
+        measured.set(measured.get() + s.len());
+        Ok(s.chars().map(|c| if c == 'i' { 3.0 } else { 15.0 }).sum())
+    };
+    let word = "i".repeat(1500) + &"W".repeat(1096) + &"i".repeat(1500);
+    measured.set(0);
+    wrap_with(300.0, &word, &varied).unwrap();
+    assert!(measured.get() <= 4 * word.len(), "{}", measured.get());
+    // Ordinary text: every word and every token once, as before.
+    let prose = "ord och mellanslag ".repeat(200);
+    measured.set(0);
+    wrap_with(300.0, &prose, &fixed).unwrap();
+    assert!(measured.get() <= 2 * prose.len(), "{}", measured.get());
+
+    // The field itself against the mock, which counts the bytes of every
+    // `text_measure`, `text_caret` and `dl_text`.
+    let t = theme();
+    let r = Rect::new(0.0, 0.0, 24.0 + 40.0 * CW, 100.0);
+    let word = "W".repeat(4096);
+    let mut tb = TextBox::multiline(-1).with_text(&word);
+    let cost = |f: &mut dyn FnMut()| {
+        let before = mock::with(|h| h.text_bytes);
+        f();
+        mock::with(|h| h.text_bytes) - before
+    };
+    let first = cost(&mut || {
+        drawn(|f| tb.draw(f, r, &t, ""));
+    });
+    assert_eq!(tb.field.wrap.lines.len(), 103, "40 characters a line");
+    assert!(first <= 4 * 4096, "the first frame shaped {first} bytes");
+    let again = cost(&mut || {
+        drawn(|f| tb.draw(f, r, &t, ""));
+    });
+    assert!(again <= 400, "an unchanged field wraps nothing: {again}");
+    send(&mut tb, focus(-1, true), r, &t);
+    let press = cost(&mut || {
+        send(&mut tb, down(100.0, 50.0), r, &t);
+    });
+    assert!(press <= 400, "a press reads one line: {press}");
+    let narrower = Rect::new(0.0, 0.0, 24.0 + 25.0 * CW, 100.0);
+    let resized = cost(&mut || {
+        drawn(|f| tb.draw(f, narrower, &t, ""));
+    });
+    assert!(resized <= 4 * 4096, "a resize shaped {resized} bytes");
+    let typed_cost = cost(&mut || {
+        send(&mut tb, typed("x"), narrower, &t);
+        drawn(|f| tb.draw(f, narrower, &t, ""));
+    });
+    assert!(typed_cost <= 4 * 4096, "a keystroke shaped {typed_cost}");
+}

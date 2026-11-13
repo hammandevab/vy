@@ -185,6 +185,11 @@ pub struct MockHost {
     /// host delivered: `clipboard_write` then succeeds without capability
     /// `clipboard` (SPEC-8.2.4). Set it with [`as_copy_gesture`].
     pub copy_gesture: bool,
+    /// Bytes of text handed to `text_measure`, `text_caret` and `dl_text`
+    /// so far. The host charges a frame for every byte it shapes
+    /// (SPEC-5.3.3), so a test can bound what a layout costs: the mock
+    /// counts no fuel, but text measured over and over shows here.
+    pub text_bytes: u64,
     dl_open: bool,
     op_count: u32,
     clip_depth: u32,
@@ -426,6 +431,7 @@ impl MockHost {
                 return i64::from(c);
             }
         };
+        self.text_bytes += text.len() as u64;
         let (tw, th) = self.measure(style, w, text);
         self.op_count += 1;
         self.ops.push(Op::Text {
@@ -541,6 +547,7 @@ impl MockHost {
         };
         match Self::text_arg(bytes, limits::MAX_TEXT_BYTES) {
             Ok(text) => {
+                self.text_bytes += text.len() as u64;
                 let (w, h) = self.measure(style, max_w, text);
                 pack(w, h)
             }
@@ -567,6 +574,7 @@ impl MockHost {
             self.refuse("text_caret", err::E_ARG);
             return i64::from(err::E_ARG);
         }
+        self.text_bytes += text.len() as u64;
         let off = (byte_offset as usize).min(text.len());
         let before = &text[..text.floor_char_boundary(off)];
         let line = before.rsplit('\n').next().unwrap_or("");
