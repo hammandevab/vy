@@ -135,3 +135,29 @@ har fått nummer 68–70. Alla står i `docs/BUILD-NOTES.md`.
 11. **m5/examples** slås ihop sist, när koordinatorn säger till: modulernas `Cargo.lock` mot 0.3.0
     (`--locked`), filhuvudet i `release.yml` ("de tolv paketen" blir arton om alla sex har utkast),
     och kopieringsgesten om något av dess fall använder Ctrl+C/X.
+
+## m5/examples (sist, på koordinatorns besked)
+
+| Commit | Vad | Grindar efteråt |
+| --- | --- | --- |
+| `b6525bc` Slå ihop m5/examples | `1d60050`, 21 commits: sex exempelsidor (`kanban`, `kalkyl`, `rita`, `skriv`, `block`, `rymd`) med utkast, 27 nya fall, 19 nya träd, `docs/EXEMPEL.md`. **Ingen konflikt**, inte heller i `cases.toml` (spårets avsnitt låg före skalfallen, våra ändringar i widgets-avsnittet). De sex modulernas `Cargo.lock` (0.1.0 → 0.3.0, `cargo update --workspace --offline`) ligger i merge-commiten och inte i ett eget commit: utan dem faller modulbygget med `--locked`, och då vore merge-commiten röd | 403 / 2, spec 140/140, 19 moduler, **91/91 à 0,000 %**, GL grönt, cross rent |
+| (denna) docs: arton paket | `release.yml`:s filhuvud och `docs/RELEASING.md` säger arton paket (19 utkast utom Studio); RELEASING får raden för `vy-conformance-<version>.zip`. README:s statusavsnitt (M2.5, "elva referenssidor") är historiskt och lämnat | fmt, spec, YAML |
+
+Kontrollerat utan commit:
+
+- **Guldbilderna byte för byte.** `vy-cli conformance --update` i det sammanslagna trädet skrev alla 91
+  bilder och träd, och `git status` visade ingen ändring: de 27 nya fallen är identiska med m5/examples.
+- **Kopieringsgesten.** Inget nytt fall skriptar Ctrl+C eller Ctrl+X: `block` använder C (6) utan
+  modifierare för "håll", vilket inte är en gest, och inget nytt fall beviljar `clipboard`. Inga nya
+  träd påverkas av konformansens minnesurklipp.
+- **`tools/publish_site.sh target/site-test`** (release-`vy-cli` och `vy-publish`, 12 min 53 s, ingen
+  nyckel): "18 packages, 18 previews"; Studio hoppas över; de sex nya har paket och 1280 × 800-förhandsbilder.
+- **8 ms-kontrollen i `vy-publish build`** (SPEC-13.4.1, i samma körning): dyraste frame `kanban`
+  294 947, `kalkyl` 114 223, `rita` 440 830, `skriv` 203 359, `block` 101 023, `rymd` 91 800 bränsle
+  av 8 000 000; ingen behövde `--allow-slow`.
+
+Öppet från m5/examples (`notes/m5-examples.md`): SDK-luckorna (ikonknapp, publik fokusring,
+`TextBox::adopt_focus`/`set_id`, dragning, tvåaxlig `ScrollView`, `math::{sqrt, sin, cos}`,
+växlingsknapp, dialog, text i flera stilar), 1.x-frågorna om ett behållet lager för banor och en kursiv
+roll, guldbilderna bara körda på Linux, och att CLAUDE.md:s strukturlista inte nämner exempelsidorna
+eller `docs/EXEMPEL.md`.

@@ -4,9 +4,9 @@
 # fäster allt vid en GitHub Release med genererade noteringar:
 #
 #   vy-<version>-<target>.zip   binärerna, studio.vyp bredvid vy-dev + LICENSE
-#   vy-site-<version>.zip       de tolv paketen (ett per utkast i conformance/manifests),
-#                               dev.key.pub och previews/ (utan Studio, som bara körs
-#                               lokalt av vy-dev)
+#   vy-site-<version>.zip       de arton paketen (ett per utkast i conformance/manifests
+#                               utom Studio, som bara körs lokalt av vy-dev), dev.key.pub
+#                               och previews/
 #   vy-conformance-<version>.zip  konformanssviten för andra klienter (SPEC-12.1.2,
 #                               tools/package_conformance.sh)
 #   SHA256SUMS                  SHA-256 för varje zip och varje fil i dem (SPEC-9.7.1)
