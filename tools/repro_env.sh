@@ -15,6 +15,14 @@
 #            there to embed a path; see docs/RELEASING.md)
 #   SOURCE_DATE_EPOCH
 #            the commit's time unless already set: the timestamp of every zip entry
+#   MSYS2_ENV_CONV_EXCL
+#            Git Bash on Windows rewrites what looks like a POSIX path in the environment
+#            of a native program: `=/vy`, `=/cargo`, `=/target` and the `/Brepro` that
+#            tools/build_release.sh adds would become paths under Git's own directory, the
+#            remapping would name the builder's machine and the link would fail. The flag
+#            variables are listed here, after any already listed, and reach cargo as written.
+#            The other values set here have nothing to rewrite: SOURCE_DATE_EPOCH is a
+#            number, and CFLAGS is not set on Windows.
 #
 # Cargo's own hashes do not see these flags (RUSTFLAGS are not part of -C metadata).
 
@@ -56,6 +64,7 @@ for m in "${repro_maps[@]}"; do
 done
 export CARGO_ENCODED_RUSTFLAGS=${repro_flags%"$repro_sep"}
 unset RUSTFLAGS
+export MSYS2_ENV_CONV_EXCL="${MSYS2_ENV_CONV_EXCL:+$MSYS2_ENV_CONV_EXCL;}CARGO_ENCODED_RUSTFLAGS;CFLAGS"
 if [ -z "$exe" ]; then
   export CFLAGS="${CFLAGS:+$CFLAGS }${repro_cflags# }"
 fi

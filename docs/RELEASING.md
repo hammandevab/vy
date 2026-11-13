@@ -53,6 +53,10 @@ umask, klocka eller tidszon.
   utom under MSVC, där `build_release.sh` i stället länkar med `/Brepro` (MSVC:s länkare skriver
   annars tiden i PE-huvudet).
 - `SOURCE_DATE_EPOCH`: commitens tid, om den inte redan är satt.
+- `MSYS2_ENV_CONV_EXCL`: `CARGO_ENCODED_RUSTFLAGS` och `CFLAGS`, efter det som redan stod där. Git
+  Bash på Windows skriver annars om det som ser ut som en POSIX-sökväg i miljön till ett nativt
+  program: `/Brepro` och ommappningens mål `/vy`, `/cargo` och `/target` skulle bli sökvägar under
+  Gits egen katalog.
 
 Modulerna behöver en sak till: varje modul är en egen cargo-arbetsyta, och för sökvägsberoenden
 utanför arbetsytan (`crates/vy-sdk`, `crates/vy-abi`) hashar cargo den absoluta sökvägen in i
