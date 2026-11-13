@@ -2,7 +2,9 @@
 # headless och jämförs med golden/<name>.png; högst 0,1 % pixlar får avvika.
 # Ett fall med `semantic` jämför även det semantiska trädet med semantic/<semantic>.json
 # (SPEC-10.2.3). Guldbyte: `cargo run -p vy-cli -- conformance --update` i ett eget
-# commit med prefixet `golden:`.
+# commit med prefixet `golden:`. Varje frame i ett fall mäts mot budgeten på 8 ms (SPEC-5.3.3):
+# ett fall med en frame över den underkänns om det inte självt har en `budget`-händelse
+# (SPEC-12.2.4); `conformance --stats` visar vad varje fall kostar.
 #
 # Formatet är en delmängd av TOML: strängar är "…" utan escapes eller literalsträngar '…' (som
 # får innehålla " men inte ', för inspelade JSON-svar); [[case]]-tabeller med name, module, width, height,

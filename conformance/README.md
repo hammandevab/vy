@@ -42,6 +42,19 @@ Vid avvikelse skrivs den faktiska bilden till `golden/<namn>.png.new` (ignoreras
 Ett guldbyte (`cargo run -p vy-cli -- conformance --update`) är ett eget commit med `golden:` som
 prefix och en motivering i PR:en.
 
+**Budget (SPEC-12.2.4).** Varje frame i ett modulfall mäts i bränsle, och bildens rasterisering i
+arbetsenheter, mot budgeten på 8 ms (8 000 000 bränsle, SPEC-5.3.3). Ett fall där någon frame går
+över, eller där rasteriseringen avbryts, underkänns – också med `--update`, som då inte skriver
+någon guldbild. Undantaget är ett fall som självt skriptar en `budget`-händelse: det handlar om
+överskridandet. Gränsen höjs aldrig för ett falls skull; det är sidan som rättas.
+`cargo run -p vy-cli -- conformance --stats [fallprefix..]` skriver under varje fall antalet
+frames, den dyraste framen (nummer, bränsle, andel av budgeten), sista framens bränsle,
+rasteriseringens andel av sin budget och minnet i wasm-sidor, och sist körningens dyraste frame.
+Med ett eller flera prefix körs bara de fall vars namn börjar så. Skalfall mäts inte: modulen körs
+där i en flikprocess som sviten inte ser in i. `vy-publish build` och `vy-dev build` kör sidan utan
+händelser (SPEC-13.4.1), så en frame efter inmatning mäts bara här: en sida med textfält, listor
+eller sparad data ska ha ett fall med sin värsta indata.
+
 ## Running the suite against another client
 
 The suite defines a Vy client (SPEC-12.1.2), and it is published with every release as
@@ -88,6 +101,11 @@ with the draft's quota; `reinit` starts a new instance with the old instance's s
 **Pass and fail.** A case passes when its image has the golden's size and at most 0.1 % of its
 pixels differ from `conformance/golden/<name>.png`, a pixel differing when any of its four channels
 does (SPEC-12.2.2), and, when the case names a tree, the JSON equals
-`conformance/semantic/<semantic>.json` exactly. A page whose tree has `textbox` nodes must belong to
+`conformance/semantic/<semantic>.json` exactly. A case also fails when one of its frames is over
+the 8 ms budget of SPEC-5.3.3, or when rasterizing its image stops at that budget, unless the case
+scripts a `budget` event (SPEC-12.2.4). This project's host measures a frame in fuel, 8 000 000 a
+frame: about one unit per wasm instruction and 32 per byte of text, path or node it handles in an
+import; `vy-cli conformance --stats` prints the costliest frame of every case. Another client holds
+the frames to its own measure of 8 ms. A page whose tree has `textbox` nodes must belong to
 a draft that requests `ime` (SPEC-10.4.2). Shell cases (`shell = true`) compare the whole window
 with this client's chrome; another client skips them or supplies its own goldens for them.

@@ -13,7 +13,7 @@ fn usage() -> ExitCode {
          vy-cli check-abi <module.wasm>\n  \
          vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--grant cap,..]\n           \
          [--resource <file> [--resource-size WxH]].. [--dump-semantic <json>]\n  \
-         vy-cli conformance [--update] [--root <dir>]\n  \
+         vy-cli conformance [--update] [--stats] [--root <dir>] [case-prefix..]   (--stats: what each case's frames cost, SPEC-12.2.4)\n  \
          vy-cli abi-dump      (the frozen ABI 1.0 listing, docs/ABI-1.0.md)\n  \
          vy-cli bench [--runs N] [--only <row-prefix>] [--json] [--compare <baseline.json>] [--root <dir>]   (SPEC §13, headless; --compare: SPEC-12.2.3)"
     );
@@ -265,9 +265,10 @@ fn find_root(explicit: Option<&str>) -> Result<PathBuf> {
 }
 
 fn conformance(args: &[String]) -> Result<ExitCode> {
-    let a = Args::parse(args, &["root"], &["update"])?;
+    let a = Args::parse(args, &["root"], &["update", "stats"])?;
     let root = find_root(a.value("root"))?;
-    let results = vy_cli::conformance::run(&root, a.has("update"))?;
+    let results = vy_cli::conformance::run(&root, a.has("update"), &a.positional)?;
+    let stats = a.has("stats");
     let mut failed = 0;
     for r in &results {
         let diff = r
@@ -286,6 +287,27 @@ fn conformance(args: &[String]) -> Result<ExitCode> {
                 println!("FAIL  {:<24} {p}", r.name);
             }
         }
+        if stats {
+            match &r.stats {
+                Some(s) => println!("      {s}"),
+                None => println!("      not measured (a shell case, or it did not run)"),
+            }
+        }
+    }
+    if stats {
+        // The costliest frame of the run, against the budget every frame
+        // is held to (SPEC-12.2.4).
+        let worst = results
+            .iter()
+            .filter_map(|r| r.stats.as_ref().map(|s| (s.worst.1, s.worst.0, &r.name)))
+            .max();
+        if let Some((fuel, frame, name)) = worst {
+            println!(
+                "costliest frame: {name} frame {frame}, {fuel} fuel of {} ({:.0} %)",
+                vy_runtime::FRAME_BUDGET_FUEL,
+                fuel as f64 * 100.0 / vy_runtime::FRAME_BUDGET_FUEL as f64
+            );
+        }
     }
     if a.has("update") {
         println!("{} golden image(s) written", results.len());
@@ -293,7 +315,10 @@ fn conformance(args: &[String]) -> Result<ExitCode> {
     Ok(if failed == 0 {
         ExitCode::SUCCESS
     } else {
-        println!("{failed} of {} case(s) failed (SPEC-12.2.2)", results.len());
+        println!(
+            "{failed} of {} case(s) failed (SPEC-12.2.2, SPEC-12.2.4)",
+            results.len()
+        );
         ExitCode::FAILURE
     })
 }

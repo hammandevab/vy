@@ -1,4 +1,4 @@
-//! Conformance suite runner (SPEC-12.1.2, SPEC-12.2.2).
+//! Conformance suite runner (SPEC-12.1.2, SPEC-12.2.2, SPEC-12.2.4).
 //!
 //! `conformance/cases.toml` lists cases; each renders a module at a size and
 //! scale and compares the pixels with `conformance/golden/<name>.png`. A case
@@ -6,15 +6,17 @@
 //! capabilities to the headless host, declare canned responses for
 //! `fetch_begin`, and replay input and host events before the final frame,
 //! so focus, hover, scroll, paused, reflowed, persisted and delivered
-//! states are testable.
+//! states are testable. Every frame a case runs is measured in fuel, and
+//! the rasterization of its image in work units: a case over the 8 ms
+//! budget of SPEC-5.3.3 fails unless it scripts the breach itself.
 
-use crate::{render, CannedResponse, RenderRequest, ScriptedEvent, Step};
+use crate::{render, CannedResponse, RenderOutput, RenderRequest, ScriptedEvent, Step};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use vy_manifest::{mime_for_path, CapabilityRequests, Draft, Manifest, ResourceInput, SigningKey};
 use vy_render::{diff_ratio, Resource, RgbaImage};
-use vy_runtime::{Capabilities, SemNode};
+use vy_runtime::{Capabilities, SemNode, FRAME_BUDGET_FUEL, FUEL_PER_MS};
 use vy_shell::page::{LoadedPage, Source};
 
 /// Largest accepted fraction of differing pixels (0.1 %, SPEC-12.2.2).
@@ -744,6 +746,103 @@ pub fn load_case_package(root: &Path, case: &Case) -> Result<CasePackage> {
     })
 }
 
+/// What the frames of a module case cost (SPEC-12.2.4): what
+/// `vy-cli conformance --stats` prints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaseStats {
+    /// Frames run.
+    pub frames: u32,
+    /// The costliest frame: its number, from 1, and its fuel, the host's
+    /// work in imports included (SPEC-5.3.3).
+    pub worst: (u32, u64),
+    /// Fuel of the last frame, the one in the image.
+    pub last: u64,
+    /// Work units charged for rasterizing the image.
+    pub raster_units: u64,
+    /// The rasterizer's budget for the image, in the same units.
+    pub raster_budget: u64,
+    /// True when the rasterization stopped at its budget, the rest of the
+    /// display list undrawn.
+    pub raster_truncated: bool,
+    /// Linear memory after the last step, in wasm pages.
+    pub memory_pages: u64,
+    /// True when the case scripts a `budget` event: the breach is what it
+    /// is about, so its frames are measured but not held to the budget.
+    pub scripts_breach: bool,
+}
+
+impl CaseStats {
+    /// The stats of a case's run.
+    pub fn of(case: &Case, out: &RenderOutput) -> Self {
+        let worst = out
+            .frame_stats
+            .iter()
+            .enumerate()
+            // The first of equally costly frames.
+            .max_by_key(|(i, f)| (f.fuel, std::cmp::Reverse(*i)))
+            .map_or((0, 0), |(i, f)| (i as u32 + 1, f.fuel));
+        Self {
+            frames: out.frames_run,
+            worst,
+            last: out.frame_stats.last().map_or(0, |f| f.fuel),
+            raster_units: out.raster.units,
+            raster_budget: out.raster.budget,
+            raster_truncated: out.raster.truncated,
+            memory_pages: out.memory_pages,
+            scripts_breach: case.events.iter().any(|s| s.event == ScriptedEvent::Budget),
+        }
+    }
+
+    /// SPEC-12.2.4: what is wrong with the case's cost, if anything. A
+    /// frame over the 8 ms budget in fuel, or an image whose rasterization
+    /// the budget cut short, fails the case unless it scripts a `budget`
+    /// event.
+    pub fn over_budget(&self) -> Option<String> {
+        if self.scripts_breach {
+            return None;
+        }
+        let (frame, fuel) = self.worst;
+        if fuel > FRAME_BUDGET_FUEL {
+            return Some(format!(
+                "frame {frame} used {fuel} fuel ({:.1} ms of logical time), over the budget of {FRAME_BUDGET_FUEL} ({} ms, SPEC-5.3.3, SPEC-12.2.4)",
+                fuel as f64 / FUEL_PER_MS as f64,
+                FRAME_BUDGET_FUEL / FUEL_PER_MS
+            ));
+        }
+        if self.raster_truncated {
+            return Some(format!(
+                "rasterizing the image stopped at its budget of {} work units (SPEC-5.3.3, SPEC-12.2.4)",
+                self.raster_budget
+            ));
+        }
+        None
+    }
+}
+
+impl std::fmt::Display for CaseStats {
+    /// One line: frames, the costliest and the last frame in fuel, the
+    /// rasterization as a share of its budget, the memory.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raster = if self.raster_budget == 0 {
+            0.0
+        } else {
+            self.raster_units as f64 * 100.0 / self.raster_budget as f64
+        };
+        write!(
+            f,
+            "frames {:>3}  costliest {:>8} fuel (frame {}, {:.0} % of the budget)  last {:>8}  raster {:.0} %{}  memory {} pages",
+            self.frames,
+            self.worst.1,
+            self.worst.0,
+            self.worst.1 as f64 * 100.0 / FRAME_BUDGET_FUEL as f64,
+            self.last,
+            raster,
+            if self.raster_truncated { " (cut short)" } else { "" },
+            self.memory_pages,
+        )
+    }
+}
+
 /// Outcome of one case.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaseResult {
@@ -753,6 +852,10 @@ pub struct CaseResult {
     pub diff: Option<f64>,
     /// Semantic tree matched, or `None` when the case has none.
     pub semantic_ok: Option<bool>,
+    /// What the case's frames cost; `None` for a shell case (the module
+    /// runs in a tab process the runner does not see into) and for a case
+    /// that did not run to its image.
+    pub stats: Option<CaseStats>,
     /// What went wrong, if anything.
     pub problem: Option<String>,
 }
@@ -764,16 +867,22 @@ impl CaseResult {
     }
 }
 
-/// Run every case. With `update`, goldens and semantic trees are rewritten
+/// Run every case, or with `only` the cases whose name starts with one of
+/// its prefixes. With `update`, goldens and semantic trees are rewritten
 /// instead of compared (a golden change is its own `golden:` commit).
-pub fn run(root: &Path, update: bool) -> Result<Vec<CaseResult>> {
+pub fn run(root: &Path, update: bool, only: &[String]) -> Result<Vec<CaseResult>> {
     let cases = load_cases(root)?;
     if cases.is_empty() {
         bail!("{CASES_FILE} lists no cases");
     }
     let mut results = Vec::new();
     for case in &cases {
-        results.push(run_case(root, case, update));
+        if only.is_empty() || only.iter().any(|p| case.name.starts_with(p.as_str())) {
+            results.push(run_case(root, case, update));
+        }
+    }
+    if results.is_empty() {
+        bail!("no case in {CASES_FILE} starts with {}", only.join(" or "));
     }
     Ok(results)
 }
@@ -783,6 +892,7 @@ fn run_case(root: &Path, case: &Case, update: bool) -> CaseResult {
         name: case.name.clone(),
         diff: None,
         semantic_ok: None,
+        stats: None,
         problem: None,
     };
     match run_case_inner(root, case, update, &mut result) {
@@ -938,17 +1048,30 @@ fn run_case_inner(root: &Path, case: &Case, update: bool, result: &mut CaseResul
         clipboard: Some(&[]),
     };
     let out = render(&req)?;
+    let stats = CaseStats::of(case, &out);
+    let over = stats.over_budget();
+    result.stats = Some(stats);
     if let Some(problem) = ime_requirement(&out.semantic, &manifest.capabilities) {
         bail!("{problem}");
     }
-    compare_golden(
+    // A case over the budget has no golden to write: the page is what
+    // needs to change (SPEC-12.2.4).
+    if let (true, Some(over)) = (update, &over) {
+        bail!("{over}");
+    }
+    let compared = compare_golden(
         root,
         case,
         update,
         result,
         &out.image,
         Some(&out.semantic_json),
-    )
+    );
+    match (over, compared) {
+        (None, compared) => compared,
+        (Some(over), Ok(())) => bail!("{over}"),
+        (Some(over), Err(e)) => bail!("{over}; {e:#}"),
+    }
 }
 
 /// Compare (or, with `update`, write) the golden image and, when the case
@@ -1028,6 +1151,12 @@ mod tests {
             .unwrap()
     }
 
+    /// The whole suite, run once for the tests that judge all of it.
+    fn suite() -> &'static [CaseResult] {
+        static SUITE: std::sync::OnceLock<Vec<CaseResult>> = std::sync::OnceLock::new();
+        SUITE.get_or_init(|| run(&root(), false, &[]).unwrap())
+    }
+
     /// A canned body can be a TOML literal string, `'…'`, which holds the
     /// `"`, `{`, `,` and `#` of a JSON answer; a `'` inside `"…"` is text.
     #[test]
@@ -1058,9 +1187,9 @@ events = [{kind = "text_input", text = "it's"}]   # a comment with ' and "
     /// SPEC-12.2.2: every case renders within 0.1 % of its golden image.
     #[test]
     fn spec_12_2_2_pixel_diff_gate() {
-        let results = run(&root(), false).unwrap();
+        let results = suite();
         assert!(results.len() >= 4, "{results:?}");
-        for r in &results {
+        for r in results {
             assert!(
                 r.ok(),
                 "{}: {}",
@@ -1078,14 +1207,195 @@ events = [{kind = "text_input", text = "it's"}]   # a comment with ' and "
         assert!(diff_ratio(&a, &b) > MAX_DIFF_RATIO);
     }
 
+    /// A module whose frame spins `a × 100 000` times round a loop after a
+    /// `KEY_DOWN` with code `a`: a frame as costly as the case asks for.
+    fn spinning_module() -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(module
+                (import "vy" "dl_begin" (func $dl_begin (result i32)))
+                (import "vy" "dl_end" (func $dl_end (result i32)))
+                (memory (export "memory") 1)
+                (global $spin (mut i32) (i32.const 0))
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32)
+                    (local $i i32)
+                    (drop (call $dl_begin))
+                    (block (loop
+                        (br_if 1 (i32.ge_u (local.get $i) (global.get $spin)))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br 0)))
+                    (drop (call $dl_end))
+                    i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const {key_down}))
+                        (then (global.set $spin (i32.mul (local.get 1) (i32.const 100000)))))
+                    i32.const 1)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+            key_down = vy_abi::event::KEY_DOWN
+        ))
+        .unwrap()
+    }
+
     /// SPEC-12.2.4: the suite measures every frame of every module case
     /// against the 8 ms budget of SPEC-5.3.3; a case with a frame over it,
     /// in fuel or in rasterization, fails unless the case itself scripts
-    /// the breach with a `budget` event.
+    /// the breach with a `budget` event. `vy-publish build` and
+    /// `vy-dev build` run a page without input (SPEC-13.4.1), so the suite
+    /// is where a frame after events is measured.
     #[test]
-    #[ignore = "M5: fuel accounting in the conformance runner (granskning 0010:2)"]
     fn spec_12_2_4_every_frame_is_held_to_the_budget() {
-        unimplemented!("fuel accounting in the conformance runner (SPEC-12.2.4)");
+        // The suite itself: every module case is measured and none is
+        // over; the one case about a breach scripts it; shell cases run
+        // the module in a tab process and are not measured.
+        let cases = load_cases(&root()).unwrap();
+        let mut breaches = 0;
+        for (case, r) in cases.iter().zip(suite()) {
+            assert_eq!(case.name, r.name);
+            assert!(r.ok(), "{}: {:?}", r.name, r.problem);
+            let Some(stats) = &r.stats else {
+                assert!(case.shell, "{} was not measured", r.name);
+                continue;
+            };
+            assert!(!case.shell);
+            assert!(stats.frames >= 1 && stats.worst.0 >= 1 && stats.worst.0 <= stats.frames);
+            assert!(stats.last <= stats.worst.1 && stats.last > 0);
+            assert!(stats.raster_budget > 0 && stats.memory_pages > 0);
+            if stats.scripts_breach {
+                breaches += 1;
+                continue;
+            }
+            assert!(
+                stats.worst.1 <= FRAME_BUDGET_FUEL && !stats.raster_truncated,
+                "{}: {stats}",
+                r.name
+            );
+            assert_eq!(stats.over_budget(), None);
+        }
+        assert_eq!(breaches, 1, "game-800x600@1-budget scripts its breach");
+
+        // A scratch suite with a module that spins as long as its case
+        // asks: within the budget, over it, and over it by its own script.
+        let scratch = std::env::temp_dir().join(format!("vy-cli-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(scratch.join("conformance/manifests")).unwrap();
+        fs::create_dir_all(scratch.join("target/wasm")).unwrap();
+        fs::write(scratch.join("target/wasm/spin.wasm"), spinning_module()).unwrap();
+        fs::copy(
+            root().join("conformance/manifests/hello.json"),
+            scratch.join("conformance/manifests/spin.json"),
+        )
+        .unwrap();
+        let key = |code: i32| {
+            Step::from(ScriptedEvent::KeyDown {
+                code,
+                modifiers: 0,
+                repeat: false,
+            })
+        };
+        let case = |name: &str, events: Vec<Step>| Case {
+            name: name.into(),
+            module: "spin".into(),
+            width: 64,
+            height: 64,
+            scale: 1.0,
+            frames: 1 + events.len() as u32,
+            semantic: None,
+            capabilities: Capabilities::default(),
+            events,
+            fetch: Vec::new(),
+            resources: Vec::new(),
+            shell: false,
+            address: None,
+        };
+        let golden = |name: &str| scratch.join(format!("conformance/golden/{name}.png"));
+
+        let calm = case("spin-calm", vec![key(2)]);
+        let r = run_case(&scratch, &calm, true);
+        assert!(r.ok(), "{:?}", r.problem);
+        let stats = r.stats.unwrap();
+        assert_eq!((stats.frames, stats.worst.0), (2, 2), "{stats}");
+        assert!(
+            stats.worst.1 > 200_000 && stats.worst.1 < FRAME_BUDGET_FUEL,
+            "{stats}"
+        );
+        assert!(run_case(&scratch, &calm, false).ok());
+
+        // Over the budget: the case fails, in comparison and in update,
+        // and update writes no golden for it.
+        let heavy = case("spin-heavy", vec![key(20)]);
+        for update in [false, true] {
+            let r = run_case(&scratch, &heavy, update);
+            let problem = r.problem.clone().unwrap_or_default();
+            assert!(
+                problem.contains("frame 2 used") && problem.contains("SPEC-12.2.4"),
+                "update {update}: {r:?}"
+            );
+            let stats = r.stats.unwrap();
+            assert_eq!(stats.worst.0, 2);
+            assert!(stats.worst.1 > FRAME_BUDGET_FUEL, "{stats}");
+            assert!(!golden("spin-heavy").exists());
+        }
+        // With its golden in place it still fails, on the budget alone.
+        fs::copy(golden("spin-calm"), golden("spin-heavy")).unwrap();
+        let r = run_case(&scratch, &heavy, false);
+        assert_eq!(r.diff, Some(0.0));
+        assert!(r.problem.unwrap().starts_with("frame 2 used"));
+
+        // The same frame in a case that scripts a breach: measured, and
+        // passed.
+        let scripted = case(
+            "spin-scripted",
+            vec![key(20), Step::from(ScriptedEvent::Budget)],
+        );
+        let r = run_case(&scratch, &scripted, true);
+        assert!(r.ok(), "{:?}", r.problem);
+        let stats = r.stats.unwrap();
+        assert!(stats.scripts_breach && stats.worst.1 > FRAME_BUDGET_FUEL);
+
+        // Past the hard limit the frame is aborted and the case has no
+        // image at all.
+        let stuck = case("spin-stuck", vec![key(200)]);
+        let r = run_case(&scratch, &stuck, false);
+        assert!(r.problem.as_deref().unwrap().contains("frame 2"), "{r:?}");
+        assert_eq!(r.stats, None);
+
+        // An image the rasterizer could not finish fails the same way.
+        let cut = CaseStats {
+            raster_truncated: true,
+            ..stats.clone()
+        };
+        assert_eq!(cut.over_budget(), None, "scripted");
+        let cut = CaseStats {
+            scripts_breach: false,
+            worst: (1, 1000),
+            ..cut
+        };
+        assert!(cut.over_budget().unwrap().contains("rasterizing"));
+        assert!(format!("{cut}").contains("(cut short)"));
+
+        // `run` takes name prefixes: only those cases run.
+        fs::write(
+            scratch.join(CASES_FILE),
+            "[[case]]\nname = \"spin-calm\"\nmodule = \"spin\"\nwidth = 64\nheight = 64\nevents = [{kind = \"key_down\", code = 2}]\n\n[[case]]\nname = \"spin-heavy\"\nmodule = \"spin\"\nwidth = 64\nheight = 64\nevents = [{kind = \"key_down\", code = 20}]\n",
+        )
+        .unwrap();
+        let all = run(&scratch, false, &[]).unwrap();
+        assert_eq!(
+            all.iter().map(CaseResult::ok).collect::<Vec<_>>(),
+            [true, false]
+        );
+        let only = run(&scratch, false, &["spin-c".into()]).unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].name, "spin-calm");
+        let line = format!("{}", only[0].stats.as_ref().unwrap());
+        assert!(
+            line.starts_with("frames   2  costliest ") && line.contains("fuel (frame 2, "),
+            "{line}"
+        );
+        assert!(run(&scratch, false, &["nothing".into()]).is_err());
+        let _ = fs::remove_dir_all(&scratch);
     }
 
     /// SPEC-12.1.2, SPEC-12.1.1: the suite is what defines a client, so it

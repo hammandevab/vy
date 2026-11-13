@@ -14,7 +14,7 @@ use vy_abi::event as kind;
 use vy_render::RgbaImage;
 use vy_runtime::{Capabilities, LogEntry, Options, Runtime, SemNode, Storage};
 
-pub use vy_runtime::{check_abi_bytes, AbiReport, CannedResponse, Resource};
+pub use vy_runtime::{check_abi_bytes, AbiReport, CannedResponse, FrameStats, Resource};
 
 /// An input or host event replayed before the final frame (SPEC-5.1.3,
 /// SPEC-A.2.1), in logical pixels: what a conformance case needs to reach a
@@ -340,6 +340,12 @@ pub struct RenderOutput {
     pub logs: Vec<LogEntry>,
     /// Frames actually run: 1 to `RenderRequest::frames` (SPEC-6.2.1).
     pub frames_run: u32,
+    /// What each of those frames cost, in the order they ran and across a
+    /// `reinit` (SPEC-5.3.3): fuel with the host's share of it, and
+    /// whether the runtime counted the frame as over the budget.
+    pub frame_stats: Vec<FrameStats>,
+    /// The instance's linear memory after the last step, in wasm pages.
+    pub memory_pages: u64,
     /// True when the module was force-suspended by the budget (SPEC-5.3.3).
     pub suspended: bool,
     /// The host's clipboard after the last step, when it has one
@@ -373,8 +379,8 @@ pub(crate) struct Driven {
     pub height: u32,
     /// Scale after any `resize`.
     pub scale: f32,
-    /// Frames run.
-    pub frames_run: u32,
+    /// What each frame run cost, in order.
+    pub frame_stats: Vec<FrameStats>,
     /// Logs of instances replaced by a `reinit`.
     pub earlier_logs: Vec<LogEntry>,
 }
@@ -396,7 +402,7 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         width,
         height,
         scale,
-        frames_run,
+        frame_stats,
         mut earlier_logs,
     } = drive(req)?;
     let (pw, ph) = physical(width, height, scale);
@@ -416,7 +422,9 @@ pub fn render(req: &RenderRequest<'_>) -> Result<RenderOutput> {
         semantic_json: rt.semantic_tree_json(),
         semantic: rt.semantic_tree().to_vec(),
         logs: earlier_logs,
-        frames_run,
+        frames_run: frame_stats.len() as u32,
+        frame_stats,
+        memory_pages: rt.memory_pages(),
         suspended: rt.is_suspended(),
         clipboard: rt.clipboard().map(<[u8]>::to_vec),
     })
@@ -454,21 +462,21 @@ pub(crate) fn drive(req: &RenderRequest<'_>) -> Result<Driven> {
     let mut rt = load(Storage::new())?;
     rt.init(width, height, scale).map_err(|e| anyhow!("{e}"))?;
     let mut display_list = Vec::new();
-    let mut frames_run = 0;
+    let mut frame_stats: Vec<FrameStats> = Vec::new();
     let mut earlier_logs: Vec<LogEntry> = Vec::new();
     let mut run_frames =
         |rt: &mut Runtime, display_list: &mut Vec<u8>, cap: Option<u32>| -> Result<()> {
             let mut ran = 0;
-            while frames_run < req.frames
+            while (frame_stats.len() as u32) < req.frames
                 && rt.wants_frame()
                 && !rt.is_suspended()
                 && cap.is_none_or(|c| ran < c)
             {
                 *display_list = rt
                     .frame()
-                    .map_err(|e| anyhow!("frame {}: {e}", frames_run + 1))?
+                    .map_err(|e| anyhow!("frame {}: {e}", frame_stats.len() + 1))?
                     .to_vec();
-                frames_run += 1;
+                frame_stats.push(rt.last_frame());
                 ran += 1;
             }
             Ok(())
@@ -520,14 +528,14 @@ pub(crate) fn drive(req: &RenderRequest<'_>) -> Result<Driven> {
             }
         }
     }
-    debug_assert!(frames_run >= 1, "init wants the first frame");
+    debug_assert!(!frame_stats.is_empty(), "init wants the first frame");
     Ok(Driven {
         rt,
         display_list,
         width,
         height,
         scale,
-        frames_run,
+        frame_stats,
         earlier_logs,
     })
 }
