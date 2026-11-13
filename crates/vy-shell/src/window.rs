@@ -173,11 +173,11 @@ impl App {
     /// present is converted (as much as the buffer's age needs) and
     /// handed to the window system as damage; a frame that changed
     /// nothing is presented whole, for an expose.
-    fn present(&mut self) {
+    fn present(&mut self, el: &ActiveEventLoop) {
         if let (Some(g), Some(shell)) = (self.gpu.as_mut(), self.shell.as_mut()) {
             match gpu::present(g, shell, &mut self.presented, &mut self.gpu_page) {
                 Ok(()) => return,
-                Err(e) => self.leave_gpu(e),
+                Err(e) => self.leave_gpu(el, e),
             }
         }
         let (Some(shell), Some(surface)) = (self.shell.as_mut(), self.surface.as_mut()) else {
@@ -213,22 +213,48 @@ impl App {
 
 impl App {
     /// Leave the GL path for the CPU path, for good: the shell draws the
-    /// page into its frame again and `softbuffer` presents it.
-    fn leave_gpu(&mut self, why: String) {
+    /// page into its frame again and `softbuffer` presents it. When the
+    /// window cannot be given a CPU surface either there is nothing left
+    /// to draw it with: the client says so and ends, as it does when that
+    /// happens at startup, instead of standing with its last picture
+    /// (granskning 0011:5). The pages' storage is saved on the way.
+    fn leave_gpu(&mut self, el: &ActiveEventLoop, why: String) {
         eprintln!("vy-shell: GL failed ({why}); presenting on the CPU");
         self.gpu = None;
         self.gpu_page = gpu::Page::default();
         self.presented = Presented::default();
-        if let Some(shell) = self.shell.as_mut() {
-            shell.set_page_layer(false);
-            shell.set_raster_path(format!(
-                "GL failed ({why}); {}",
-                vy_render::Renderer::new(vy_render::RasterPath::Fast).describe()
-            ));
-        }
         if let Some(window) = &self.window {
             self.surface = cpu_surface(window);
         }
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        if let Err(e) = fall_back_to_cpu(shell, &why, self.surface.is_some()) {
+            eprintln!("vy-shell: {e}; exiting");
+            if let Some(shell) = self.shell.take() {
+                shell.shutdown();
+            }
+            el.exit();
+        }
+    }
+}
+
+/// The shell's part of leaving the GL path: it draws the page into its
+/// own frame again, and every tab's log says why and what draws now.
+/// `Err` when the window has no CPU surface to show that frame on
+/// (`cpu_surface`): then nothing can.
+fn fall_back_to_cpu(shell: &mut Shell, why: &str, cpu_surface: bool) -> Result<(), String> {
+    shell.set_page_layer(false);
+    shell.set_raster_path(format!(
+        "GL failed ({why}); {}",
+        vy_render::Renderer::new(vy_render::RasterPath::Fast).describe()
+    ));
+    if cpu_surface {
+        Ok(())
+    } else {
+        Err(format!(
+            "GL failed ({why}) and the window has no surface for the CPU path either"
+        ))
     }
 }
 
@@ -422,7 +448,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.present();
+                self.present(el);
                 return;
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -800,6 +826,64 @@ mod tests {
         );
         let exe = std::path::PathBuf::from("/proc/self/exe");
         assert_eq!(tab_exe(Ok(exe.clone())), Ok(exe));
+    }
+
+    /// SPEC-11.3.2 (granskning 0011:5): leaving the GPU path hands the
+    /// page to the software path, or says that nothing can draw. A shell
+    /// in layer mode (the window draws the page, the frame is transparent
+    /// there) composites the page into its own frame again, opaque, and
+    /// the tab's log says why; without a CPU surface for the window the
+    /// answer is the message the client ends with.
+    #[test]
+    fn spec_11_3_2_leaving_gl_draws_on_the_cpu_or_says_why_not() {
+        use crate::headless::{headless_shell, settle};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hello = root.join("target/wasm/hello.wasm");
+        assert!(hello.is_file(), "run tools/build_modules.sh");
+        let mut shell = headless_shell(None, 320.0, 240.0, 1.0).unwrap();
+        let tab = shell.open_tab(Some(Source::File {
+            path: hello,
+            draft: None,
+        }));
+        settle(&mut shell, 1, Duration::from_secs(60)).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        shell.set_page_layer(true);
+        let page = shell.layout().page;
+        let at = |img: &RgbaImage| {
+            let (x, y) = (
+                (page.x + page.w / 2.0) as u32,
+                (page.y + page.h / 2.0) as u32,
+            );
+            img.data[((y * img.width + x) * 4 + 3) as usize]
+        };
+        assert_eq!(
+            at(shell.frame()),
+            0,
+            "the page area is the window's to draw"
+        );
+
+        assert_eq!(
+            fall_back_to_cpu(&mut shell, "the GL context was lost", true),
+            Ok(())
+        );
+        assert!(shell.needs_redraw());
+        assert_eq!(at(shell.frame()), 255, "the shell draws the page again");
+        assert!(shell.page_layer().is_none());
+        assert!(
+            shell
+                .tab_logs(tab)
+                .iter()
+                .any(|l| l
+                    .contains("GL failed (the GL context was lost); raster: fast software path")),
+            "{:?}",
+            shell.tab_logs(tab)
+        );
+        let why = fall_back_to_cpu(&mut shell, "swap: no surface", false).unwrap_err();
+        assert!(
+            why.contains("swap: no surface") && why.contains("no surface for the CPU path"),
+            "{why}"
+        );
+        shell.shutdown();
     }
 
     /// SPEC-13.2.2, SPEC-9.6.1: the window converts and sends what changed

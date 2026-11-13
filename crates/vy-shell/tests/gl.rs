@@ -1010,8 +1010,21 @@ mod imp {
     }
 
     fn run(ctx: &mut GlContext) -> Result<Outcome, String> {
-        let mut lines = vec![format!("GL: {}", ctx.raster.version())];
+        let mut lines = vec![format!(
+            "GL: {}; a context lost to a graphics reset is {}",
+            ctx.raster.version(),
+            if ctx.notices_loss() {
+                "noticed (reset notification)"
+            } else {
+                "not noticed unless GL reports an error"
+            }
+        )];
         let mut failures = Vec::new();
+        // Granskning 0011:5: the context this test draws on is whole, and
+        // asking says so.
+        if let Err(e) = ctx.alive() {
+            failures.push(format!("a live context is reported lost: {e}"));
+        }
         let mut budget = None;
         let mut check = |class: &str, d: &Diff, what: &str| {
             if d.share() > DIFFERING_SHARE {
@@ -1184,6 +1197,9 @@ mod imp {
         lines.push(presents_the_page_inside_its_area(ctx, &mut failures)?);
         lines.push(composes_the_shell_window(ctx, &mut failures)?);
         lines.push(shows_no_page_for_a_refused_list(ctx, &mut failures)?);
+        if let Err(e) = ctx.alive() {
+            failures.push(format!("after all of it the context is reported lost: {e}"));
+        }
         Ok(Outcome { lines, failures })
     }
 
