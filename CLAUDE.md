@@ -90,9 +90,12 @@ crates/vy-serve      statisk server: paket, nycklar, index, HTML-reserv
 crates/vy-dev        new, build, serve – projektmallen och utvecklingsservern för Studio
 modules/hello        referensmodul 0 – text och en rektangel
 modules/studio       Studio – sidan som kör en agent mot ett projekt, lokalt genom vy-dev
+modules/widgets      referenssida 12 – alla komponenter i vy_sdk::ui
+modules/{kanban,kalkyl,rita,skriv,block,rymd}  exempelsidorna (docs/EXEMPEL.md)
 conformance/         guldbilder, förväntade semantiska träd och manifestutkast per modul
 tools/               spec_trace.py, build_modules.sh, test_modules.sh
 docs/SDK.md          guiden till vy-sdk och vy_sdk::ui, med en hel exempelsida
+docs/EXEMPEL.md      de sex exempelsidorna och hur de körs lokalt
 docs/reviews/        granskningssidor, en per PR
 docs/notes/          byggagentens noteringar per gren
 ```

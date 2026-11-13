@@ -141,7 +141,7 @@ har fått nummer 68–70. Alla står i `docs/BUILD-NOTES.md`.
 | Commit | Vad | Grindar efteråt |
 | --- | --- | --- |
 | `b6525bc` Slå ihop m5/examples | `1d60050`, 21 commits: sex exempelsidor (`kanban`, `kalkyl`, `rita`, `skriv`, `block`, `rymd`) med utkast, 27 nya fall, 19 nya träd, `docs/EXEMPEL.md`. **Ingen konflikt**, inte heller i `cases.toml` (spårets avsnitt låg före skalfallen, våra ändringar i widgets-avsnittet). De sex modulernas `Cargo.lock` (0.1.0 → 0.3.0, `cargo update --workspace --offline`) ligger i merge-commiten och inte i ett eget commit: utan dem faller modulbygget med `--locked`, och då vore merge-commiten röd | 403 / 2, spec 140/140, 19 moduler, **91/91 à 0,000 %**, GL grönt, cross rent |
-| (denna) docs: arton paket | `release.yml`:s filhuvud och `docs/RELEASING.md` säger arton paket (19 utkast utom Studio); RELEASING får raden för `vy-conformance-<version>.zip`. README:s statusavsnitt (M2.5, "elva referenssidor") är historiskt och lämnat | fmt, spec, YAML |
+| `dfe7d2c` docs: arton paket | `release.yml`:s filhuvud och `docs/RELEASING.md` säger arton paket (19 utkast utom Studio); RELEASING får raden för `vy-conformance-<version>.zip`. README:s statusavsnitt (M2.5, "elva referenssidor") är historiskt och lämnat | fmt, spec, YAML |
 
 Kontrollerat utan commit:
 
@@ -153,11 +153,72 @@ Kontrollerat utan commit:
 - **`tools/publish_site.sh target/site-test`** (release-`vy-cli` och `vy-publish`, 12 min 53 s, ingen
   nyckel): "18 packages, 18 previews"; Studio hoppas över; de sex nya har paket och 1280 × 800-förhandsbilder.
 - **8 ms-kontrollen i `vy-publish build`** (SPEC-13.4.1, i samma körning): dyraste frame `kanban`
-  294 947, `kalkyl` 114 223, `rita` 440 830, `skriv` 203 359, `block` 101 023, `rymd` 91 800 bränsle
-  av 8 000 000; ingen behövde `--allow-slow`.
+  114 223, `kalkyl` 352 296, `rita` 82 521, `skriv` 463 523, `block` 116 998, `rymd` 440 830 bränsle
+  av 8 000 000; ingen behövde `--allow-slow`. (Rättat: den första versionen av den här raden parade
+  ihop varje sidas `module:`-rad med nästa sidas `frames:`-rad; `vy-publish build` skriver `frames:`
+  först.)
 
 Öppet från m5/examples (`notes/m5-examples.md`): SDK-luckorna (ikonknapp, publik fokusring,
 `TextBox::adopt_focus`/`set_id`, dragning, tvåaxlig `ScrollView`, `math::{sqrt, sin, cos}`,
 växlingsknapp, dialog, text i flera stilar), 1.x-frågorna om ett behållet lager för banor och en kursiv
 roll, guldbilderna bara körda på Linux, och att CLAUDE.md:s strukturlista inte nämner exempelsidorna
 eller `docs/EXEMPEL.md`.
+
+## m5/polish (sist, på koordinatorns besked)
+
+| Commit | Vad | Grindar efteråt |
+| --- | --- | --- |
+| `3fbcf36` Slå ihop m5/polish | `b26ea99`, 9 commits på `bc22baa`: kompileringscachen i skalet (`spec:` SPEC-9.4.2, `CompileCache::Host`, `CodeStore`/`CodeKey`, `vy-shell/src/code_cache.rs`, IPC-ramarna `ToTab::CodeCache` 15 och `ToShell::Code` 79), parallella sidladdningar (`Fetcher` med `&self`, fyra laddararbetare, ordning per origin), `widgets`-hjälptexten (tre träd) och textfältets delade `Field` i `vy-sdk`. **Ingen konflikt** | 412 / 2, spec **141/141**, 19 moduler, 91/91 à 0,000 %, GL grönt, clippy och check-cross rena |
+| (denna) docs: CLAUDE.md och läget | strukturlistan får `modules/widgets`, exempelsidorna och `docs/EXEMPEL.md`; det här avsnittet och *Läget inför v0.3.0* | fmt, spec |
+
+Kontrollerat:
+
+- **Guldbilderna.** `conformance --update` på `3fbcf36` ändrade ingen fil under `conformance/`; de enda
+  ändringarna mot `dfe7d2c` är m5/polish:s tre `widgets*.json`. Textfältets omskrivning ändrar
+  modulernas byte men inga pixlar eller träd, också i `kanban`, `kalkyl` och `skriv`.
+- **check-cross** efter att varje crates `lib.rs` rörts (så att allt kontrollerades om): Windows och
+  macOS rena, också parallella laddningar och kodcachen.
+- **GL-testet** täcker nu 195 sidframes (alla 19 sidor); värsta frame `rymd` 800 × 600 med 0,387 % över
+  2 nivåer, största avvikelse 133 (en kantpixel), inom SPEC-11.3.2:s 3 %.
+- **8 ms-kontrollen** (`vy-publish build` för alla arton publicerade utkast, debug, bränslet är
+  oberoende av profilen): dyraste frame `skriv` 463 457, `rymd` 440 830, `document` 354 674, `kalkyl`
+  352 719, `list` 294 947, `widgets` 263 175 … `hello` 19 346 av 8 000 000; ingen över, ingen behövde
+  `--allow-slow`.
+
+| Modul (byte, `tools/build_modules.sh`) | Före m5/polish (`dfe7d2c`) | Efter (`3fbcf36`) |
+| --- | --- | --- |
+| `form` | 30 547 | 30 627 |
+| `kanban` | 54 267 | 54 647 |
+| `kalkyl` | 61 149 | 61 340 |
+| `skriv` | 60 895 | 61 502 |
+| `widgets` | 64 482 | **55 493** |
+
+Sidor med bara enradsfält växer med 0,3–1,0 %; `widgets`, som har båda radlägena, krymper med 14 %.
+
+**Klienten** (`tools/build_release.sh x86_64-unknown-linux-gnu`, `.cargo/config.toml` åt sidan och
+tillbaka): `vy-shell` **24 591 912 byte**, samma som m5/polish mätte på sin gren, **marginal 408 088
+(1,6 %)**; `spec_12_3_1_size_budget` i release grönt. Kodcachen och laddararbetarna kostar 67 600 byte
+mot `e309115`. Tokentestet i samma körning: största enheten vy-shell 216 698 tokens (marginal
+183 302), hela kodbasen 1 162 441.
+
+## Läget inför v0.3.0
+
+**Grönt på Linux x86_64** (`3fbcf36` och senare dokumentcommits): fmt, clippy `-D warnings`,
+`cargo test --workspace` 412 gröna, 0 röda, 2 ignorerade (`spec_13_2_1_raster_budget` för CPU-vägen och
+`spec_13_1_1_cold_start`, som kräver fönster), `spec_trace.py` 141/141, 19 moduler med ABI 1.0 och egna
+tester, konformans 91/91 à 0,000 %, GL-vägen mot referensen under Mesa llvmpipe, storleken
+(24 591 912 av 25 000 000) och tokentaket per crate i release, `publish_site.sh` (arton paket, Studio
+utelämnad), versionskontrollen för `v0.3.0`.
+
+**Bara typkontrollerat eller okört:** allt på Windows och macOS (`check-cross` rent; fönstret, GL och
+reserven, sandlådan, kodcachen och storleken är okörda där); CI-jobben `repro`, `size` och GL-steget,
+och `release.yml` med `build_release.sh`, `SHA256SUMS`, `BUILD.md`, konformanszippen och kodsigneringen
+har inte körts på GitHub; guldbilderna är bara körda på Linux.
+
+**Ägaren:** (1) mät SPEC-13.2.1 på referensmaskinen med GPU-drivet OpenGL (`VY_GL_REQUIRED=1
+VY_GL_BUDGET=1 cargo test --release -p vy-shell --test gl`); (2) köp och lägg in secrets för
+kodsigneringen (`docs/RELEASING.md`), eller släpp osignerat; (3) beställ den externa
+sandlådegranskningen (M4); (4) avgör spec-frågorna 56–65 och 68–70 (`docs/BUILD-NOTES.md`); (5) kör M5:s
+grind (koordinatorn); (6) tagga `v0.3.0` på integrationens slutcommit, så att `vy-dev new` hittar
+taggen den pinnar, och se att första releasekörningen, `repro` på macOS och Windows och `size` går
+igenom. Marginalen mot 25 MB är 1,6 %: nästa större tillägg i skalet måste betala för sig.
