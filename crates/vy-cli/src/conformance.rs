@@ -1078,6 +1078,16 @@ events = [{kind = "text_input", text = "it's"}]   # a comment with ' and "
         assert!(diff_ratio(&a, &b) > MAX_DIFF_RATIO);
     }
 
+    /// SPEC-12.2.4: the suite measures every frame of every module case
+    /// against the 8 ms budget of SPEC-5.3.3; a case with a frame over it,
+    /// in fuel or in rasterization, fails unless the case itself scripts
+    /// the breach with a `budget` event.
+    #[test]
+    #[ignore = "M5: fuel accounting in the conformance runner (granskning 0010:2)"]
+    fn spec_12_2_4_every_frame_is_held_to_the_budget() {
+        unimplemented!("fuel accounting in the conformance runner (SPEC-12.2.4)");
+    }
+
     /// SPEC-12.1.2, SPEC-12.1.1: the suite is what defines a client, so it
     /// must cover what exists: every reference module under `modules/` has
     /// at least two cases (sizes or states) and a semantic tree, every
