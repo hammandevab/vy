@@ -5,9 +5,11 @@
 //! `vy_render::gl`; this module makes the context and presents.
 //!
 //! Every failure here returns the window (when one was made) and a
-//! reason, and the caller goes on with the CPU path: no context, an old
-//! version, a shader that does not compile, a framebuffer that is not
-//! complete (`vy_render::gl::GlRaster::new`).
+//! reason, and the caller goes on with the CPU path: no context, no
+//! configuration, an old version, a shader that does not compile, a
+//! framebuffer that is not complete (`vy_render::gl::GlRaster::new`), or
+//! a panic anywhere in the setup, ours or a library's ([`guarded`];
+//! granskning 0011:1).
 
 use glutin::config::{Config, ConfigTemplateBuilder, GlConfig};
 use glutin::context::{
@@ -57,14 +59,47 @@ impl GlContext {
     }
 }
 
-/// The first config without multisampling, or the first.
-fn pick(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
+/// The first config without multisampling, or the first; `None` when the
+/// display offers none. glutin's EGL answers a search with an iterator
+/// that may be empty, and `DisplayBuilder::build` calls its picker all
+/// the same.
+fn pick(configs: Box<dyn Iterator<Item = Config> + '_>) -> Option<Config> {
     let all: Vec<Config> = configs.collect();
     all.iter()
         .find(|c| c.num_samples() == 0)
         .or(all.first())
         .cloned()
-        .expect("glutin offers at least one config")
+}
+
+/// What [`pick_or_unwind`] unwinds with when there is no configuration.
+struct NoConfig;
+
+/// [`pick`] as `DisplayBuilder::build` wants its picker: one that returns
+/// a config. With none to return it unwinds to [`guarded`] (without the
+/// panic hook: nothing went wrong in the program), which makes it the
+/// reason there is no GL.
+fn pick_or_unwind(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
+    pick(configs).unwrap_or_else(|| std::panic::resume_unwind(Box::new(NoConfig)))
+}
+
+/// Run a step of the GL setup. A panic in it is a reason there is no GL,
+/// as an error is: the client goes on with the CPU path instead of ending
+/// where the fallback is needed.
+fn guarded<T>(step: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)) {
+        Ok(result) => result,
+        Err(payload) if payload.is::<NoConfig>() => {
+            Err("the GL display offers no configuration".into())
+        }
+        Err(payload) => {
+            let what = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "no message".into());
+            Err(format!("the GL setup panicked: {what}"))
+        }
+    }
 }
 
 /// Why there is no GL context, and the window when one was made, so the
@@ -90,14 +125,17 @@ pub fn open(
         return Err(no(None, "VY_NO_GL is set".into()));
     }
     let template = ConfigTemplateBuilder::new().with_transparency(false);
-    let (window, config) = DisplayBuilder::new()
-        .with_window_attributes(Some(attributes))
-        .build(el, template, pick)
-        .map_err(|e| no(None, format!("no GL display: {e}")))?;
+    let built = guarded(|| {
+        DisplayBuilder::new()
+            .with_window_attributes(Some(attributes))
+            .build(el, template, pick_or_unwind)
+            .map_err(|e| format!("no GL display: {e}"))
+    });
+    let (window, config) = built.map_err(|why| no(None, why))?;
     let Some(window) = window else {
         return Err(no(None, "no window from the GL display".into()));
     };
-    match context(&window, &config) {
+    match guarded(|| context(&window, &config)) {
         Ok(c) => Ok((window, c)),
         Err(e) => Err(no(Some(window), e)),
     }
@@ -147,4 +185,35 @@ fn context(window: &Window, config: &Config) -> Result<GlContext, String> {
         context,
         surface,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPEC-11.3.2 (granskning 0011:1): the GPU path hands over to the
+    /// software path at every failure of its setup, and a display that
+    /// offers no configuration is one: the lookup says so instead of
+    /// panicking, the picker glutin calls unwinds to the guard, and the
+    /// guard makes that, and any other panic in the setup, a reason for
+    /// the CPU path.
+    #[test]
+    fn spec_11_3_2_no_gl_configuration_is_a_fallback() {
+        let none = || -> Box<dyn Iterator<Item = Config>> { Box::new(std::iter::empty()) };
+        assert!(pick(none()).is_none());
+        let why = guarded(|| Ok(pick_or_unwind(none()))).err();
+        assert_eq!(
+            why.as_deref(),
+            Some("the GL display offers no configuration")
+        );
+        let why = guarded(|| -> Result<(), String> { panic!("driver fault {}", 7) }).unwrap_err();
+        assert_eq!(why, "the GL setup panicked: driver fault 7");
+        let why = guarded(|| -> Result<(), String> { std::panic::panic_any(7u8) }).unwrap_err();
+        assert_eq!(why, "the GL setup panicked: no message");
+        assert_eq!(guarded(|| Ok::<_, String>(3)), Ok(3));
+        assert_eq!(
+            guarded(|| Err::<(), _>("no GL display: x".to_string())),
+            Err("no GL display: x".into())
+        );
+    }
 }
