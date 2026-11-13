@@ -24,7 +24,8 @@ och `tools/`. Sessionen kan startas om: läget står här och i `git log`.
 | 0011:6 | `bb1c280` | Bara test; koden var rätt. | `spec_11_3_2_damage_draws_what_the_reference_draws` (vy-render) fortsätter efter sina sju redigeringssteg på **samma** `Renderer` med det ett fönster gör utan att listan ändras: ny storlek, tillbaka, ny skala, tillbaka, samma stil-id med andra stilar (annat snitt, annan storlek, vikt och färg), tillbaka, och alla tre på en gång; sedan en redigering i det läget. Varje frame är referensens byte för byte, ny storlek eller skala ritar allt, och en ren stiländring ritas om fast ingen opkod ändrats (> 100 sådana omritningar i de 90 fallen). Mutationer som det gamla testet inte såg: skalan bort ur jämförelsen av duken (faller i skalsteget) och stilen bort ur jämförelsen av opkoder (faller i stilsteget). |
 | tillägg 13 (0013:1–2) | `561375e` | **"Rensa sidans lagring"** i devtools, fliken *Studio*, under *Lagring* bredvid "Rensa cache". Raden namnger originen; en lokal fil har ingen origin och inget sparat, och får ingen knapp. Klienten **frågar först** med samma överlägg över sidytans topp som capability-frågan (`chrome::Ask::ClearStorage`): "Rensa allt som vy://… har sparat? Det går inte att ångra." med **Rensa** och **Avbryt**; Rensa räknas först när frågan stått i `DIALOG_ARM_MS` (700 ms). Rensningen görs i huvudprocessen på originens fil (`storage::save` med tom lagring, SPEC-9.5.2); ingen flikprocess tillfrågas. **Varje flik med den originen laddas om** (en sida som fortfarande kör skulle annars spara sin kopia igen när den släpps), och det de släppta processerna svarar med på vägen ut sparas inte (`Retired::discard`). Loggrad i varje berörd flik och besked i panelen. | `spec_5_2_9_the_user_can_clear_a_pages_storage` (vy-shell): två signerade sidor på var sin loopback-server (betrodda, får `storage`), tre flikar. Origin A sparar 4, origin B 5, en andra A-flik håller 6 i minnet. Avbryt ändrar inget; Rensa direkt räknas inte; efter 700 ms är A:s fil borta, B:s orörd, båda A-flikarna (och bara de) har ny generation, och när de gamla processerna svarat med 4 och 6 är lagringen fortfarande tom; sidan sparar sedan som förr (7). Mutation: utan `discard` kommer det gamla tillbaka och testet faller. `spec_9_6_1_chrome_layout_is_deterministic` (frågans text och knappar, samma platser), `spec_11_4_1_tree_log_recording_studio_panes`. |
 | eget fynd (hittat under tillägg 14) | `2345591` | **Dataförlust som fanns före grenen:** en flikprocess vars sida aldrig startade (laddningen avvisad, eller `vy_init` avbruten) har ingen runtime och svarar på `Shutdown` med en tom lagring; huvudprocessen sparade den, och en tom lagring tar bort originens fil. En sida som låst sig på sin sparade data fick alltså sin data **tyst raderad vid andra omladdningen** (eller när fliken stängdes) och startade tom. Nu sparas ett lagringssvar bara från en process vars sida laddats och vars `vy_init` återvänt (`Tab::started`; för en släppt process `Retired::discard`). Flikprocessens protokoll är orört. | `spec_5_2_9_a_page_that_never_started_does_not_erase_its_storage` (vy-shell): en signerad sida på loopback sparar, laddas om och fastnar i `vy_init`; efter tre omladdningar, stängd flik och stängt fönster finns det sparade kvar och sidan fastnar likadant varje gång. Föll före rättningen ("round 1: … running": sidan startade tom). |
-| tillägg 14 (0013, 0015) | se `git log` (`granskning 0013`, stannad sida) | **Vyn för en stannad sida.** Före: rubriken "Sidan stannade", runtimens engelska rad ("call aborted after 64 ms of logical time (SPEC-5.3.3)") och "Andra flikar påverkas inte. F5 laddar om."; ett `vy_init` som avbröts räknades som en *avvisad* modul och visade manifestets reservtext (eller "Modulen avvisades"). Nu: när skälet är en av klientens egna tidsgränser (ett anrop avbrutet vid den hårda gränsen, eller avstängd efter upprepade budgetöverskridanden) står först vad det betyder på vanlig svenska, sedan runtimens rad i dämpad text, och under dem **Ladda om** och, när sidan har en origin, **Rensa sidans lagring** (som ställer frågan från tillägg 13). Ett `vy_init` som avbröts vid den hårda gränsen är en stannad sida, inte en avvisad modul. Alla andra stopp (fälla, `exit`, försvunnen process) visar sitt skäl som förr, med Ladda om. Igenkänningen görs på runtimens egen text (`vy_runtime::Error::is_over_budget`; flikprocessen är samma bygge), så IPC-ramarna är orörda. | `spec_5_3_3_a_page_stopped_at_the_hard_limit_says_so_and_offers_ways_out` (vy-shell): en signerad sida som fastnar i `vy_init` på sin sparade data visar förklaringen, runtimens rad, båda knapparna och inte reservtexten; Ladda om laddar om (och den fastnar igen, med datan kvar); Rensa sidans lagring frågar, och efter svaret kör sidan. En frame som aldrig återvänder i en lokal fil: samma vy, bara Ladda om; en fälla: skälet, ingen förklaring om tid. `shell::tests::spec_5_3_3_stops_by_the_budget_are_explained`, `spec_5_3_3_an_aborted_call_is_recognised_by_its_text` (vy-runtime). Skärmbild före och efter tagen med `--screenshot`. |
+| tillägg 14 (0013, 0015) | `28e490a` | **Vyn för en stannad sida.** Före: rubriken "Sidan stannade", runtimens engelska rad ("call aborted after 64 ms of logical time (SPEC-5.3.3)") och "Andra flikar påverkas inte. F5 laddar om."; ett `vy_init` som avbröts räknades som en *avvisad* modul och visade manifestets reservtext (eller "Modulen avvisades"). Nu: när skälet är en av klientens egna tidsgränser (ett anrop avbrutet vid den hårda gränsen, eller avstängd efter upprepade budgetöverskridanden) står först vad det betyder på vanlig svenska, sedan runtimens rad i dämpad text, och under dem **Ladda om** och, när sidan har en origin, **Rensa sidans lagring** (som ställer frågan från tillägg 13). Ett `vy_init` som avbröts vid den hårda gränsen är en stannad sida, inte en avvisad modul. Alla andra stopp (fälla, `exit`, försvunnen process) visar sitt skäl som förr, med Ladda om. Igenkänningen görs på runtimens egen text (`vy_runtime::Error::is_over_budget`; flikprocessen är samma bygge), så IPC-ramarna är orörda. | `spec_5_3_3_a_page_stopped_at_the_hard_limit_says_so_and_offers_ways_out` (vy-shell): en signerad sida som fastnar i `vy_init` på sin sparade data visar förklaringen, runtimens rad, båda knapparna och inte reservtexten; Ladda om laddar om (och den fastnar igen, med datan kvar); Rensa sidans lagring frågar, och efter svaret kör sidan. En frame som aldrig återvänder i en lokal fil: samma vy, bara Ladda om; en fälla: skälet, ingen förklaring om tid. `shell::tests::spec_5_3_3_stops_by_the_budget_are_explained`, `spec_5_3_3_an_aborted_call_is_recognised_by_its_text` (vy-runtime). Skärmbild före och efter tagen med `--screenshot`. |
+| tillägg 15 (0012:7) | se `git log` (`granskning 0012:7`) | **Kallstarten med och utan `a11y-linux` är mätt** (talen står under *Kallstart* nedan). `a11y-linux` kostar inget mätbart i någon av de tre starterna: −0,8 %, +0,2 % och +0,5 % vid medianen över 200 omväxlande körningar, mot SPEC-12.2.3:s 5 %. Adaptern skapas därför som förr, när fönstret skapas; ingen kod ändrad. | `tests/cold_start.rs`, `spec_13_1_1_the_clients_processes_start` (vy-shell): startar klientens flikprocess (som skalet startar den, till första display list) och det fönsterlösa skalet (`--screenshot`, start till avslut) på riktiga processer och skriver medianerna; med `VY_COLD_START_A` och `VY_COLD_START_B` jämför den två byggen omväxlande, också fönsterklienten där det finns en display. Ingen budget hävdas (ett debugbygge på en delad maskin säger inget om 150 ms). |
 
 ## Beslut och gränser
 
@@ -64,6 +65,56 @@ och `tools/`. Sessionen kan startas om: läget står här och i `git log`.
 - **Två klientversioner som delar katalog** (en gammal klient igång medan en ny startar) tömmer
   varandras poster vid varje start. Ingen av dem läser den andras kod; det kostar kompileringar.
 
+## Kallstart med och utan `a11y-linux` (tillägg 15, 0012:7)
+
+Två releasebyggen av `vy-shell` från `28e490a`, byggda som `tools/build_release.sh` bygger
+(`tools/repro_env.sh`, `--release --locked --target x86_64-unknown-linux-gnu`):
+
+- **utan**: `--no-default-features --features window,gl`, 22 263 488 byte;
+- **med**: standardfunktionerna (`window`, `gl`, `a11y-linux`), 24 633 000 byte.
+
+Mätt med `tests/cold_start.rs` (`VY_COLD_START_A` = utan, `VY_COLD_START_B` = med): byggena startas
+omväxlande, i omvänd ordning varannan omgång, efter en omgång som inte räknas. Maskinen: 2 vCPU
+(Xeon 2,1 GHz, delad VM), Linux 6.18, Xvfb med Mesa llvmpipe (klienten väljer OpenGL 4.5) och en
+sessionsbuss från `dbus-run-session`. Tre starter:
+
+- **flik**: `vy-shell --tab` startad som skalet startar den (med sandlådan), laddad med `hello`
+  och tickad, tills första display list är tillbaka; det `vy-cli bench` kallar `tab.cold-start`
+  (där med `vy-cli --tab`, som inte har någon fönsterkod alls);
+- **skal**: `vy-shell --screenshot` av `hello`, från start till avslut: huvudprocessen, dess
+  flikprocess, första bilden, komposition och PNG;
+- **fönster**: fönsterklienten från start tills den skriver `vy-shell: presentation: …`, vilket
+  den gör i `resumed` när fönstret, GL-kontexten och AccessKit-adaptern finns och fönstret gjorts
+  synligt (inte första presenterade bilden).
+
+| Start | utan, P50 / P95 (ms) | med, P50 / P95 (ms) | med mot utan, median |
+| --- | --- | --- | --- |
+| flik | 19,0 / 26,5 | 18,9 / 25,9 | −0,8 % |
+| skal | 49,7 / 57,4 | 49,7 / 57,6 | +0,2 % |
+| fönster | 58,6 / 68,9 | 58,9 / 70,9 | +0,5 % |
+
+200 körningar per bygge och start. Fyra kortare körningar dessförinnan gav samma bild och visar
+brusets storlek: utan buss under Xvfb (60 körningar) +1,5 %, +0,7 %, −2,8 %; med buss (100
+körningar, två gånger) −0,8 %, −0,8 %, +0,7 % och −0,4 %, −0,1 %, +0,8 %; utan display och buss
+(60 körningar; bara flik och skal) −2,0 % och +1,0 %. Skillnaden mellan byggena är alltså mindre
+än skillnaden mellan två körningar av samma bygge.
+
+**Varför det inte kostar.** `accesskit_winit::Adapter::with_event_loop_proxy` gör på Linux bara
+`accesskit_unix::Adapter::new`, som första gången startar en tråd med egen exekutor
+(`accesskit_unix` 0.24.1, `context.rs`, `get_or_init_messages`); det är den tråden som ansluter
+till sessionsbussen och frågar `org.a11y.Bus` om tillgänglighet är på. Fönstertråden väntar inte
+på D-Bus. Trädet byggs först när en hjälpteknik ber om det (`InitialTreeRequested`), så det som
+granskningen föreslog som åtgärd, att börja först vid första tillgänglighetsbegäran, är redan hur
+det dyra görs. De 2,4 MB större binären märks inte i starten (sidorna läses in vid behov).
+Flikprocessen och `--screenshot` skapar ingen adapter alls.
+
+**Inte mätt:** ett skrivbord där AT-SPI-bussen finns och en skärmläsare är på. Där registrerar
+adapterns tråd fönstret hos registret och ber om första trädet, och skalet bygger en ögonblicksbild
+per ändrad frame. Det ligger efter att fönstret visats och är arbetet tillgängligheten kräver,
+men det går inte att mäta här: `at-spi2-core` (registret) finns inte på maskinen, bara
+`dbus-daemon`. `spec_13_1_1_cold_start` (150 ms till tomt fönster) är fortfarande ignorerat; talen
+ovan (59–64 ms till visat fönster under Xvfb) är inte den mätningen, men säger var den hamnar.
+
 ## Förslag till `spec:`-commit (inte gjort här)
 
 - **SPEC-9.4.2** räknar upp vad nyckeln görs av: modulens SHA-256, wasmtimes version och motorns
@@ -74,4 +125,47 @@ och `tools/`. Sessionen kan startas om: läget står här och i `git log`.
 
 ## Öppet
 
-(fylls på)
+Inget av det här är rättat på grenen; ägaren eller koordinatorn avgör.
+
+- **SPEC-9.4.2 nämner inte klientversionen** (förslaget ovan). Koden och testerna gör det.
+- **`docs/notes/m5-integration.md`** (rad 182) kallar fortfarande `rymd`s 133 nivåer "en kantpixel".
+  Det var ett fel i GL-vägen (0011:4) och är rättat; filen är inte min att ändra.
+- **Frågan och den stannade sidans knappar nås bara med pekaren och finns inte i
+  tillgänglighetsträdet.** `Shell::a11y_snapshot` bär adressfältet och den körande sidans träd;
+  capability-frågan har aldrig funnits där, och "Rensa sidans lagring"-frågan (tillägg 13) och
+  knapparna "Ladda om" och "Rensa sidans lagring" på en stannad sida (tillägg 14) ärver det. F5
+  laddar om från tangentbordet; frågan går inte att besvara utan pekare. Hör till SPEC-10.2.1.
+- **Ett `vy_init` som fäller eller returnerar fel** räknas fortfarande som en avvisad modul och
+  visar manifestets reservtext. Bara avbrottet vid den hårda gränsen är en stannad sida (tillägg 14).
+- **En panik i klientens egen GL-ritkod under en frame fångas inte** (bara uppsättningen, 0011:1);
+  den avslutar klienten. En drivrutin som tappar kontexten utan avisering och utan GL-fel märks
+  inte heller (se *Beslut och gränser*). En verklig kontextförlust har inte kunnat framkallas här.
+- **GL-vägen är bara körd på Mesa llvmpipe (EGL under Xvfb).** Talen i `docs/notes/m5-gpu.md` och
+  gränsen 64 nivåer är därifrån; en riktig GPU kan ge andra kanter.
+- **Kallstarten med en skärmläsare igång är inte mätt** (se *Kallstart*).
+- **Kompileringscachen på Windows:** de två sakerna under beslutet ovan (en utbrytning som lyckas
+  ibland blir säker tills cachen rensas; ingen ACL läses).
+
+### Bara typkontrollerat – att prova på Windows och macOS
+
+`check-cross` typkontrollerar för `x86_64-pc-windows-msvc` och `aarch64-apple-darwin`; inget av
+det här har körts där.
+
+- **Windows, GL (0011:1, 0011:5):** WGL-kontexten med återställningsavisering
+  (`WGL_ARB_create_context_robustness`), att `glGetGraphicsResetStatus` hittas genom displayens
+  laddare, och ordningen core med, core utan, ES med, ES utan. Loggraden vid start säger vilken
+  kontext det blev och om en tappad kontext märks.
+- **Windows, cachen (0014:1–4):** stämpelfilen `VERSION` och tömningen vid versionsbyte (byte av
+  namn över en befintlig fil); `dir_is_private` prövar bara att katalogen finns och inte är en
+  länk; en post öppnas efter en titt på namnet (`symlink_metadata`), inte med något som motsvarar
+  `O_NOFOLLOW`, så mellan titten och öppningen finns en lucka som inte finns på Unix. Testet
+  `spec_9_4_2_code_store_touches_only_its_own_files` är Unix-bara.
+- **Windows och macOS, start utan egen binär (0014:2):** `window::run` vägrar starta när
+  `current_exe` inte går att läsa. Ska aldrig hända för en installerad klient; meddelandet är
+  `cannot find the client's own executable to start tab processes from: …`.
+- **macOS:** byggs utan `gl`, så 0011 rör den inte. Cachekatalogens kontroller är Unix-vägen
+  (ägare och rättigheter, `O_NOFOLLOW`) och bör bete sig som på Linux, men är inte körda.
+- **Alla tre:** "Rensa sidans lagring", vyn för en stannad sida och rättningen av den raderade
+  lagringen är plattformsoberoende kod i skalets modell och provade headless på Linux.
+- **`tests/cold_start.rs`** mäter fönsterstarten bara där `DISPLAY` eller `WAYLAND_DISPLAY` finns,
+  alltså inte på Windows och macOS; flik och skal mäts överallt.
