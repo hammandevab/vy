@@ -16,8 +16,8 @@ mod rng;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
 pub use compile_cache::{
-    CodeKey, CodeStore, CompileCache, CompileSource, LoadStats, PutError, COMPILE_CACHE_CAP_BYTES,
-    MAX_CODE_BYTES, MAX_CODE_PER_MODULE_BYTE,
+    CodeKey, CodeStore, CompileCache, CompileSource, LoadStats, PutError, CLIENT_VERSION,
+    COMPILE_CACHE_CAP_BYTES, MAX_CODE_BYTES, MAX_CODE_PER_MODULE_BYTE, STAMP_FILE,
 };
 pub use host::{
     origin_of, plain_http_allowed, CannedResponse, Capabilities, FetchRequest, Link, LogEntry,

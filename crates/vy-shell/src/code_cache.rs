@@ -80,6 +80,7 @@ pub enum Settled {
 enum Op {
     Put(CodeKey, usize, Vec<u8>),
     Remove(CodeKey),
+    Clear(Sender<usize>),
     Sync(Sender<()>),
 }
 
@@ -115,6 +116,9 @@ impl CodeCache {
                             }
                         }
                         Op::Remove(key) => writer.remove(&key),
+                        Op::Clear(done) => {
+                            let _ = done.send(writer.clear());
+                        }
                         Op::Sync(done) => {
                             let _ = done.send(());
                         }
@@ -172,6 +176,17 @@ impl CodeCache {
     /// refused, or the process that was running it died.
     pub fn forget(&self, pending: &Pending) {
         let _ = self.ops.send(Op::Remove(pending.key.clone()));
+    }
+
+    /// Remove every entry (devtools, "Rensa cache"), after the writes and
+    /// removals asked for so far, and say how many went. Waits for it:
+    /// when this returns the cache is empty.
+    pub fn clear(&self) -> usize {
+        let (done, wait) = mpsc::channel();
+        if self.ops.send(Op::Clear(done)).is_err() {
+            return 0;
+        }
+        wait.recv().unwrap_or(0)
     }
 
     /// Wait until every write and removal asked for so far is done.
@@ -295,16 +310,23 @@ mod tests {
             .unwrap()
     }
 
+    /// Everything in a cache directory but its version stamp, by name.
     fn entries(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .map(|d| {
                 d.flatten()
                     .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name != vy_runtime::STAMP_FILE)
                     .collect()
             })
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    /// The version stamp of a cache directory.
+    fn stamp(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join(vy_runtime::STAMP_FILE)).unwrap_or_default()
     }
 
     fn logged(shell: &Shell, tab: TabId, what: &str) -> bool {
@@ -344,6 +366,11 @@ mod tests {
             .get(&key)
             .expect("kept under the module's key");
         assert_eq!(entries(&code_dir), [key.file_name()]);
+        assert_eq!(
+            stamp(&code_dir),
+            format!("VYCODE01 {}\n", env!("CARGO_PKG_VERSION")),
+            "the directory is this client version's"
+        );
 
         // A fresh process, the same module: not compiled.
         let b = sh.open_tab(Some(local("hello")));
@@ -610,6 +637,135 @@ mod tests {
         }
         sh.code_cache().unwrap().flush();
         assert!(!file.exists(), "not offered again");
+        sh.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-9.4.2 (granskning 0014:1): kept code does not outlive the
+    /// client version that kept it, and the user can throw it away.
+    ///
+    /// A cache directory another client version kept, holding code for
+    /// the very module that is loaded, is emptied when the client starts,
+    /// and the module compiles. An entry under another version's key that
+    /// turns up while the client runs is never offered: the version is in
+    /// the key. "Rensa cache" in the devtools panel removes every entry;
+    /// a load that was unanswered when the cache was cleared hands over
+    /// nothing that is kept; the next load compiles, and the one after it
+    /// takes the module from the cache as ever. Without a cache the panel
+    /// offers no clearing.
+    #[test]
+    fn spec_9_4_2_the_cache_is_cleared_on_update_and_on_request() {
+        use crate::chrome::DevHit;
+        use crate::devtools::{Command, Pane};
+        let dir = scratch("version");
+        let code_dir = dir.join("code");
+        let exe = shell_exe();
+        let wasm = module("hello");
+        let good = compiled(&wasm);
+        let key = CodeKey::of(&wasm);
+        assert_eq!(
+            vy_runtime::CLIENT_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            "the version in the key is the client's"
+        );
+        let old = "0.0.1";
+        let old_key = CodeKey::of_client(&wasm, old);
+        let kept = CodeStore::open_for(&code_dir, old).unwrap();
+        kept.put(&old_key, wasm.len(), &good).unwrap();
+        assert_eq!(entries(&code_dir), [old_key.file_name()]);
+        assert_eq!(stamp(&code_dir), "VYCODE01 0.0.1\n");
+        let load = |sh: &mut Shell| {
+            let tab = sh.open_tab(Some(local("hello")));
+            settle(sh, 1, TIMEOUT).unwrap();
+            assert_eq!(sh.tab_status(tab), "running");
+            sh.code_cache().unwrap().flush();
+            sh.tab_code(tab).map(|(cached, _)| cached)
+        };
+
+        // The client starts on another version's directory.
+        let mut sh = shell(Some(exe.clone()), &dir, Some(&code_dir));
+        assert!(entries(&code_dir).is_empty(), "emptied at startup");
+        assert_eq!(
+            stamp(&code_dir),
+            format!("VYCODE01 {}\n", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(load(&mut sh), Some(false), "compiled");
+        assert_eq!(entries(&code_dir), [key.file_name()]);
+
+        // Another version's entry beside this version's stamp.
+        let store = sh.code_cache().unwrap().store().clone();
+        std::fs::remove_file(code_dir.join(key.file_name())).unwrap();
+        store.put(&old_key, wasm.len(), &good).unwrap();
+        assert_eq!(load(&mut sh), Some(false), "not offered: compiled");
+        let mut both = vec![key.file_name().to_string(), old_key.file_name().to_string()];
+        both.sort();
+        assert_eq!(entries(&code_dir), both);
+
+        // "Rensa cache", by pointer.
+        sh.toggle_devtools();
+        sh.set_devtools_pane(Pane::Studio);
+        sh.frame();
+        let line = sh
+            .devtools_lines()
+            .iter()
+            .position(|l| l.command == Some(Command::ClearCache))
+            .expect("Rensa cache");
+        let (r, _) = sh
+            .devtools_hits()
+            .into_iter()
+            .find(|(_, h)| *h == DevHit::Line(line))
+            .expect("the line is on the panel");
+        sh.pointer_move(r.x + 3.0, r.y + 3.0);
+        sh.pointer_button(vy_abi::button::PRIMARY, true);
+        sh.pointer_button(vy_abi::button::PRIMARY, false);
+        assert!(entries(&code_dir).is_empty(), "every entry is gone");
+        assert!(!stamp(&code_dir).is_empty(), "the stamp stays");
+        assert!(
+            sh.devtools_lines()
+                .iter()
+                .any(|l| l.text == "Kompileringscachen rensad: 2 poster borttagna."),
+            "{:?}",
+            sh.devtools_lines()
+        );
+
+        // A load under way when the cache is cleared: its code is not kept.
+        sh.stall_next_tab();
+        let slow = sh.open_tab_loaded(page(wasm.clone()));
+        assert_eq!(sh.tab_status(slow), "loading");
+        sh.devtools_run(Command::ClearCache);
+        let generation = sh.tab_generation(slow);
+        sh.handle(Incoming::Tab(
+            slow,
+            generation,
+            Inbound::Message(ToShell::Code {
+                cached: false,
+                micros: 1,
+                code: good.clone(),
+            }),
+        ));
+        sh.code_cache().unwrap().flush();
+        assert!(logged(&sh, slow, "compiled code ignored"));
+        assert!(entries(&code_dir).is_empty());
+        assert!(sh
+            .devtools_lines()
+            .iter()
+            .any(|l| l.text == "Kompileringscachen rensad: 0 poster borttagna."));
+
+        // And on it goes: compiled and kept, then taken from the cache.
+        assert_eq!(load(&mut sh), Some(false));
+        assert_eq!(entries(&code_dir), [key.file_name()]);
+        assert_eq!(load(&mut sh), Some(true));
+        sh.shutdown();
+
+        // No cache, nothing to clear.
+        let mut sh = shell(Some(exe), &dir, None);
+        sh.toggle_devtools();
+        sh.set_devtools_pane(Pane::Studio);
+        assert!(sh
+            .devtools_lines()
+            .iter()
+            .all(|l| l.command != Some(Command::ClearCache)));
+        assert_eq!(sh.clear_code_cache(), None);
         sh.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -11,9 +11,15 @@
 //!   ([`crate::Runtime::take_code`]).
 //! - The **main process** owns the [`CodeStore`]: files of bytes it never
 //!   deserializes. An entry's name is the [`CodeKey`], which the main
-//!   process computes from the module bytes it holds and this build's
+//!   process computes from the module bytes it holds, this build's
 //!   engine (wasmtime's version and every compilation setting of the
-//!   engine in `lib.rs`); nothing a tab process says is part of it.
+//!   engine in `lib.rs`) and the client's version; nothing a tab process
+//!   says is part of it. An entry is therefore never offered by another
+//!   client version than the one that kept it (granskning 0014:1): code
+//!   that got into the store through a fault of the client's own host
+//!   code stops being used when the client is updated, and the directory
+//!   is emptied the first time another version opens it
+//!   ([`CodeStore::open`]).
 //!
 //! **Deserializing trusts the bytes:** `Module::deserialize` maps them as
 //! executable code without validating them, so an entry is native code for
@@ -53,6 +59,17 @@ pub const MAX_CODE_PER_MODULE_BYTE: usize = 256;
 /// How old a temporary file of an interrupted write has to be before it
 /// is cleared away.
 const STALE_TMP: Duration = Duration::from_secs(600);
+/// The version of the client the entries of this build belong to. Every
+/// crate of the workspace carries the one version
+/// (`workspace.package.version`), so the runtime's is the client's;
+/// `vy-shell` has a test that holds the two equal.
+pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The file in a cache directory that says which client version its
+/// entries were kept by ([`CodeStore::open`]). Not an entry: it has no
+/// `.code` in its name.
+pub const STAMP_FILE: &str = "VERSION";
+/// Longest stamp read: a stamp is the format and a version, a few bytes.
+const MAX_STAMP_BYTES: u64 = 256;
 
 /// How a runtime gets the compiled code of its module (SPEC-13.1.4).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -107,18 +124,32 @@ fn engine_tag(engine: &Engine) -> [u8; 8] {
 }
 
 /// The name of a module's entry in a [`CodeStore`] (SPEC-9.4.2): the hex
-/// SHA-256 over the cache format, this build's engine and the SHA-256 of
-/// the module's bytes. Made only from the module bytes the caller holds;
-/// there is no way to make one from a name or a path.
+/// SHA-256 over the cache format, this build's engine, the client's
+/// version and the SHA-256 of the module's bytes. Made only from the
+/// module bytes the caller holds; there is no way to make one from a name
+/// or a path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CodeKey(String);
 
 impl CodeKey {
-    /// The key of the module with exactly these bytes.
+    /// The key of the module with exactly these bytes, in this client
+    /// ([`CLIENT_VERSION`]).
     pub fn of(wasm: &[u8]) -> CodeKey {
+        Self::of_client(wasm, CLIENT_VERSION)
+    }
+
+    /// The key the client of version `client` makes for the module with
+    /// exactly these bytes: what [`CodeKey::of`] is for this build, and
+    /// how the tests name an entry another version kept. Two versions
+    /// never make the same key for a module, so neither finds the other's
+    /// code.
+    pub fn of_client(wasm: &[u8], client: &str) -> CodeKey {
         let mut key = Sha256::new();
         key.update(MAGIC);
         key.update(engine_tag(crate::engine()));
+        // The one field of no fixed length, so with its length.
+        key.update((client.len() as u64).to_le_bytes());
+        key.update(client.as_bytes());
         key.update(sha256(wasm));
         CodeKey(format!("{}.code", crate::hex(&key.finalize())))
     }
@@ -173,6 +204,18 @@ pub fn create_dir(dir: &Path) -> std::io::Result<()> {
     builder.create(dir)
 }
 
+/// How the store makes a file: new, and on Unix the user's alone (0600).
+fn private_file() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
 /// Why [`CodeStore::put`] kept nothing.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PutError {
@@ -209,14 +252,87 @@ pub struct CodeStore {
 
 impl CodeStore {
     /// The store at `dir`, created 0700 when it is missing. `None` when
-    /// the directory cannot be made or is not the user's own (another
-    /// owner, or writable by group or others): then there is no cache.
+    /// the directory cannot be made, is not the user's own (another
+    /// owner, or writable by group or others) or cannot be stamped: then
+    /// there is no cache.
+    ///
+    /// The directory carries the version of the client that keeps its
+    /// entries ([`STAMP_FILE`]). When that is not this client's, or there
+    /// is none, the directory is emptied and stamped anew: no client
+    /// version could find another's entries anyway (the version is in the
+    /// [`CodeKey`]), and what a change of client or of wasmtime left
+    /// unreadable does not lie there until the size cap pushes it out.
     pub fn open(dir: &Path) -> Option<CodeStore> {
+        Self::open_for(dir, CLIENT_VERSION)
+    }
+
+    /// [`CodeStore::open`] as the client of version `client` does it:
+    /// what `open` is for this build, and how the tests leave a directory
+    /// another version kept.
+    pub fn open_for(dir: &Path, client: &str) -> Option<CodeStore> {
         let _ = create_dir(dir);
-        dir_is_private(dir).then(|| CodeStore {
+        if !dir_is_private(dir) {
+            return None;
+        }
+        let store = CodeStore {
             dir: dir.to_path_buf(),
             cap_bytes: COMPILE_CACHE_CAP_BYTES,
-        })
+        };
+        store.stamp(client).then_some(store)
+    }
+
+    /// Make the directory this client's: true when its stamp names
+    /// `client` already, or once everything in it is removed and the
+    /// stamp written. The stamp is the cache format and the version.
+    fn stamp(&self, client: &str) -> bool {
+        let want = format!("{} {client}\n", String::from_utf8_lossy(MAGIC));
+        let path = self.dir.join(STAMP_FILE);
+        let found = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(|m| m.is_file() && m.len() <= MAX_STAMP_BYTES)
+            .and_then(|_| std::fs::read(&path).ok());
+        if found.as_deref() == Some(want.as_bytes()) {
+            return true;
+        }
+        self.clear();
+        // A temporary file and a rename, as for an entry: the stamp is
+        // whole or absent, and a link left under its name is replaced,
+        // never written through.
+        let tmp = self
+            .dir
+            .join(format!(".{STAMP_FILE}.{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let written = private_file()
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(want.as_bytes()))
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written.is_ok()
+    }
+
+    /// Remove every entry, and the temporary files of writes under way or
+    /// interrupted: the cache is empty, as when the directory was made.
+    /// Returns how many entries went. Nothing is done once the directory
+    /// is not private.
+    pub fn clear(&self) -> usize {
+        if !dir_is_private(&self.dir) {
+            return 0;
+        }
+        let Ok(read_dir) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for e in read_dir.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let entry = name.ends_with(".code");
+            if (entry || name.ends_with(".tmp")) && std::fs::remove_file(e.path()).is_ok() {
+                removed += usize::from(entry);
+            }
+        }
+        removed
     }
 
     /// The same store with another total size cap (tests).
@@ -289,14 +405,7 @@ impl CodeStore {
         let tmp = self
             .dir
             .join(format!(".{}.{}.{nanos}.tmp", key.0, std::process::id()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let result = options
+        let result = private_file()
             .open(&tmp)
             .and_then(|mut f| {
                 f.write_all(MAGIC)?;

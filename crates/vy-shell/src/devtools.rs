@@ -6,8 +6,8 @@
 //! mark), "Logg" (the page's log with level and frame number),
 //! "Inspelning" (record the session of a tab process to a file and replay
 //! one; the main process writes and reads the file, the tab process stays
-//! locked down) and "Studio" (live reload of localhost pages and a link to
-//! Studio).
+//! locked down) and "Studio" (live reload of localhost pages, a link to
+//! Studio, and "Rensa cache", which empties the compilation cache).
 //!
 //! Everything here turns what the shell has into lines of text; the shell
 //! does what a line's [`Command`] says, and `chrome::draw_devtools` draws
@@ -84,6 +84,9 @@ pub enum Command {
     ToggleLiveReload,
     /// Open Studio in a new tab.
     OpenStudio,
+    /// Empty the compilation cache: every module compiles at its next
+    /// load (SPEC-9.4.2).
+    ClearCache,
 }
 
 /// One line of a pane.
@@ -403,9 +406,11 @@ pub fn recording_lines(
     out
 }
 
-/// The "Studio" pane.
-pub fn studio_lines(live_reload: bool) -> Vec<Line> {
-    vec![
+/// The "Studio" pane: live reload, the way to Studio, and the client's
+/// compilation cache with the way to empty it (`code_cache`: the client
+/// keeps one in this run). `note` is what the last action here did.
+pub fn studio_lines(live_reload: bool, code_cache: bool, note: &str) -> Vec<Line> {
+    let mut out = vec![
         Line::strong("Studio"),
         Line::button(
             format!(
@@ -421,7 +426,24 @@ pub fn studio_lines(live_reload: bool) -> Vec<Line> {
             format!("Öppna Studio ({STUDIO_ADDRESS})"),
             Command::OpenStudio,
         ),
-    ]
+        Line::plain(""),
+        Line::strong("Cache"),
+    ];
+    if code_cache {
+        out.push(Line::button(
+            "Rensa cache (kompilerad kod)",
+            Command::ClearCache,
+        ));
+        out.push(Line::plain(
+            "    tar bort sparad maskinkod för moduler; sidor kompileras om vid nästa laddning",
+        ));
+    } else {
+        out.push(Line::plain("Ingen kompileringscache i den här körningen."));
+    }
+    if !note.is_empty() {
+        out.push(Line::plain(note));
+    }
+    out
 }
 
 fn file_name(p: &std::path::Path) -> String {
@@ -543,10 +565,19 @@ mod tests {
         assert!(recording_lines(None, false, &[], "")
             .iter()
             .all(|l| l.command.is_none()));
-        let studio = studio_lines(true);
+        let studio = studio_lines(true, true, "Rensat.");
         assert!(studio[1].text.starts_with("[x] Live-omladdning"));
         assert!(studio
             .iter()
             .any(|l| l.command == Some(Command::OpenStudio)));
+        let clear = studio
+            .iter()
+            .find(|l| l.command == Some(Command::ClearCache))
+            .expect("Rensa cache");
+        assert!(clear.text.starts_with("Rensa cache"));
+        assert_eq!(studio.last().unwrap().text, "Rensat.");
+        assert!(studio_lines(false, false, "")
+            .iter()
+            .all(|l| l.command != Some(Command::ClearCache)));
     }
 }

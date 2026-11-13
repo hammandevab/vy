@@ -433,6 +433,8 @@ struct Devtools {
     selected_op: Option<usize>,
     /// What the last recording command did.
     status: String,
+    /// What the last action of the "Studio" pane did ("Rensa cache").
+    note: String,
     /// Hit rectangles from the last draw, in window coordinates.
     hits: Vec<(Rect, chrome::DevHit)>,
     /// The panel as last rasterized: its list and pixels.
@@ -3247,6 +3249,7 @@ impl Shell {
                 scroll: 0,
                 selected_op: None,
                 status: String::new(),
+                note: String::new(),
                 hits: Vec::new(),
                 cache: None,
             }),
@@ -3312,7 +3315,9 @@ impl Shell {
                 &devtools::list_recordings(&self.recordings_dir()),
                 &d.status,
             ),
-            Pane::Studio => devtools::studio_lines(self.live_reload),
+            Pane::Studio => {
+                devtools::studio_lines(self.live_reload, self.code_cache.is_some(), &d.note)
+            }
         }
     }
 
@@ -3338,8 +3343,36 @@ impl Shell {
                     self.open_tab(Some(source));
                 }
             }
+            Command::ClearCache => {
+                let note = match self.clear_code_cache() {
+                    Some(1) => "Kompileringscachen rensad: 1 post borttagen.".into(),
+                    Some(n) => format!("Kompileringscachen rensad: {n} poster borttagna."),
+                    None => "Ingen kompileringscache i den här körningen.".into(),
+                };
+                if let Some(d) = self.devtools.as_mut() {
+                    d.note = note;
+                }
+            }
         }
         self.frame_dirty = true;
+    }
+
+    /// Empty the compilation cache (devtools, "Rensa cache"; granskning
+    /// 0014:1): every kept entry is removed, so every module compiles at
+    /// its next load, and the entries removed are counted. A load that is
+    /// still unanswered was started with the cache as it was: what its
+    /// process reports is no longer counted, so nothing from before the
+    /// clearing comes back. `None` when the shell has no cache. The
+    /// content caches of `vy-proto` (packages, HTTP) and the pinned keys
+    /// are not touched.
+    pub fn clear_code_cache(&mut self) -> Option<usize> {
+        let cache = self.code_cache.as_ref()?;
+        for tab in &mut self.tabs {
+            if tab.code.as_ref().is_some_and(|c| c.reported.is_none()) {
+                tab.code = None;
+            }
+        }
+        Some(cache.clear())
     }
 
     fn set_devtools_status(&mut self, status: String) {

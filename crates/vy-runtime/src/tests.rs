@@ -3762,6 +3762,105 @@ fn spec_9_4_2_code_store_keeps_bytes_under_module_keys() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// SPEC-9.4.2 (granskning 0014:1): kept code does not outlive the client
+/// version that kept it. The client's version is part of the key, so an
+/// entry one version kept is never what another looks up; and a directory
+/// stamped by another version, by none, or with something that is no
+/// stamp is emptied and stamped when the store is opened, while one this
+/// version stamped is left as it is. `clear` empties it on request.
+#[test]
+fn spec_9_4_2_code_does_not_outlive_its_client_version() {
+    let bytes = drawing_module();
+    let dir = cache_dir("version");
+    let code = hosted_load(&bytes, None).take_code().unwrap();
+    let old = "0.0.1";
+    assert_ne!(old, CLIENT_VERSION);
+    let (key, old_key) = (CodeKey::of(&bytes), CodeKey::of_client(&bytes, old));
+    assert_eq!(key, CodeKey::of_client(&bytes, CLIENT_VERSION));
+    assert_ne!(key, old_key, "the client's version is in the key");
+    assert_ne!(old_key, CodeKey::of_client(&bytes, "0.0.10"));
+    let stamp = || std::fs::read_to_string(dir.join(STAMP_FILE)).unwrap();
+
+    // The same directory, an entry under each version's key: each finds
+    // its own and nothing of the other's.
+    let store = CodeStore::open(&dir).unwrap();
+    assert_eq!(stamp(), format!("VYCODE01 {CLIENT_VERSION}\n"));
+    store.put(&old_key, bytes.len(), b"kept by 0.0.1").unwrap();
+    assert_eq!(store.get(&key), None, "another version's entry is no hit");
+    store.put(&key, bytes.len(), &code).unwrap();
+    assert_eq!(store.get(&key).as_ref(), Some(&code));
+    assert_eq!(store.get(&old_key).unwrap(), b"kept by 0.0.1");
+
+    // Opened again by the same version: as it was.
+    let again = CodeStore::open(&dir).unwrap();
+    assert_eq!(again.get(&key).as_ref(), Some(&code));
+    assert_eq!(entries(&dir).len(), 2);
+
+    // A directory another version kept: emptied and stamped, other
+    // files left alone, and filled again from nothing.
+    let other = cache_dir("version-old");
+    let kept = CodeStore::open_for(&other, old).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(other.join(STAMP_FILE)).unwrap(),
+        "VYCODE01 0.0.1\n"
+    );
+    kept.put(&old_key, bytes.len(), &code).unwrap();
+    kept.put(&CodeKey::of_client(&[1], old), 1000, &[1; 1000])
+        .unwrap();
+    std::fs::write(other.join("README"), b"not the cache's").unwrap();
+    assert_eq!(entries(&other).len(), 2);
+    assert_eq!(
+        CodeStore::open_for(&other, old).unwrap().size(),
+        kept.size()
+    );
+    assert_eq!(entries(&other).len(), 2, "its own version leaves it");
+    let now = CodeStore::open(&other).unwrap();
+    assert!(entries(&other).is_empty(), "emptied");
+    assert_eq!(now.size(), 0);
+    assert_eq!(
+        std::fs::read_to_string(other.join(STAMP_FILE)).unwrap(),
+        format!("VYCODE01 {CLIENT_VERSION}\n")
+    );
+    assert!(other.join("README").exists());
+    assert_eq!(now.get(&key), None);
+    now.put(&key, bytes.len(), &code).unwrap();
+
+    // No stamp, an empty one, one of another format, one too long to be
+    // a stamp: emptied each time.
+    let long = "VYCODE01 ".to_string() + &"9".repeat(4000);
+    for bad in [
+        None,
+        Some(""),
+        Some("VYCODE00 0.3.0\n"),
+        Some(long.as_str()),
+    ] {
+        match bad {
+            None => std::fs::remove_file(other.join(STAMP_FILE)).unwrap(),
+            Some(text) => std::fs::write(other.join(STAMP_FILE), text).unwrap(),
+        }
+        let store = CodeStore::open(&other).unwrap();
+        assert!(entries(&other).is_empty(), "{bad:?}");
+        assert_eq!(
+            std::fs::read_to_string(other.join(STAMP_FILE)).unwrap(),
+            format!("VYCODE01 {CLIENT_VERSION}\n")
+        );
+        store.put(&key, bytes.len(), &code).unwrap();
+        assert_eq!(entries(&other).len(), 1);
+    }
+
+    // On request: every entry goes, the stamp and other files stay.
+    let store = CodeStore::open(&other).unwrap();
+    store.put(&CodeKey::of(&[2]), 1000, &[2; 1000]).unwrap();
+    assert_eq!(store.clear(), 2);
+    assert!(entries(&other).is_empty());
+    assert_eq!(store.clear(), 0);
+    assert!(other.join(STAMP_FILE).exists() && other.join("README").exists());
+    assert_eq!(CodeStore::open(&other).unwrap().get(&key), None);
+    for d in [dir, other] {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
 /// SPEC-13.1.4: the store stays within its cap: a put that takes it over
 /// removes the entries used longest ago, where reading an entry counts as
 /// using it; the temporary file of an interrupted write is cleared away
