@@ -24,6 +24,7 @@ mod key {
     pub const END: i32 = 0x4D;
     pub const DOWN: i32 = 0x51;
     pub const UP: i32 = 0x52;
+    pub const Z: i32 = 0x1D;
 }
 
 /// The compiled code of the modules these tests start, by name. A test
@@ -51,8 +52,13 @@ struct Page {
     /// The module, and after [`Page::on`] the data it was started on.
     name: String,
     rt: Runtime,
+    /// The window, logical pixels at scale 1.
+    size: (u32, u32),
     /// Fuel of the costliest frame so far, and what led to it.
     worst: (u64, String),
+    /// The largest share of the rasterizer's budget a frame took, of
+    /// those [`Page::raster`] looked at.
+    raster_worst: f64,
 }
 
 impl Page {
@@ -105,7 +111,9 @@ impl Page {
         let mut page = Self {
             name: name.to_string(),
             rt,
+            size: (width, height),
             worst: (0, String::new()),
+            raster_worst: 0.0,
         };
         page.frames("init");
         Ok(page)
@@ -178,7 +186,29 @@ impl Page {
         self.rt
             .resize(width, height, 1.0)
             .unwrap_or_else(|e| panic!("{}: {what}: {e}", self.name));
+        self.size = (width, height);
         self.frames(&what);
+    }
+
+    /// Rasterize the last frame as the client does and hold it to the
+    /// rasterizer's budget, the other half of SPEC-5.3.3; the share of
+    /// the budget it took.
+    fn raster(&mut self, after: &str) -> f64 {
+        let list = self.rt.display_list().to_vec();
+        let (width, height) = self.size;
+        let (text, images) = self.rt.raster_parts();
+        let report = vy_render::render(&list, width, height, 1.0, text, images)
+            .unwrap_or_else(|e| panic!("{}: the image after {after}: {e}", self.name))
+            .report;
+        assert!(
+            !report.truncated,
+            "{}: rasterizing the frame after {after} stopped at its budget of {} units (SPEC-5.3.3)",
+            self.name,
+            report.budget
+        );
+        let share = report.units as f64 / report.budget as f64;
+        self.raster_worst = self.raster_worst.max(share);
+        share
     }
 
     /// The largest `textbox` node of the last frame.
@@ -700,4 +730,649 @@ fn spec_5_3_3_kalkyl_starts_on_any_sheet_it_saved() {
     let mut page = Page::load_with("kalkyl", 1024, 720, stored("kalkyl", &sheets[1].1)).unwrap();
     page.settle("the tangle");
     assert!(page.shows("A1: #CIRKEL") && page.shows("R8: #CIRKEL"));
+}
+
+// A page must never be able to stop itself with data it saved (granskning
+// 0013, the rule from its findings 1 and 2). What a page reads back from
+// `state_get` is whatever an earlier version of it, or a bug in it, put
+// there: every example page is started here on values it never meant to
+// save, and must start, keep every frame within the budget, and start
+// again on what it saved meanwhile.
+
+/// `count` values a page did not save, each at most `max` bytes: random
+/// bytes; random bytes after `head` (the page's format byte), so that its
+/// decoder gets past the first check; and small numbers after `head`,
+/// which read as plausible counts and lengths.
+fn random_blobs(seed: u64, count: usize, max: usize, head: &[u8]) -> Vec<Vec<u8>> {
+    let mut state = seed;
+    (0..count)
+        .map(|n| {
+            let len = (next(&mut state) % (max as u64 + 1)) as usize;
+            let mut blob: Vec<u8> = (0..len)
+                .map(|_| {
+                    let byte = next(&mut state) as u8;
+                    if n % 3 == 2 {
+                        byte % 7
+                    } else {
+                        byte
+                    }
+                })
+                .collect();
+            if n % 3 != 0 {
+                for (b, h) in blob.iter_mut().zip(head) {
+                    *b = *h;
+                }
+            }
+            blob
+        })
+        .collect()
+}
+
+/// `blob` cut short: at every length below 24 and at every `step`th
+/// after that, as a write that did not finish would leave it.
+fn truncations(blob: &[u8], step: usize) -> Vec<Vec<u8>> {
+    (0..blob.len())
+        .filter(|len| *len < 24 || len % step == 0)
+        .map(|len| blob[..len].to_vec())
+        .collect()
+}
+
+/// The largest value a page with this draft can have saved under `key`:
+/// the quota less the key (SPEC-9.3.2).
+fn quota_of(name: &str, key: &str) -> usize {
+    let draft =
+        fs::read_to_string(root().join(format!("conformance/manifests/{name}.json"))).unwrap();
+    let draft = Draft::from_json(&draft).unwrap();
+    let kb = draft
+        .capabilities
+        .storage
+        .unwrap_or_else(|| panic!("{name} requests storage"))
+        .quota_kb;
+    kb as usize * 1024 - key.len()
+}
+
+impl Page {
+    /// Use the page as someone who knows nothing about it does: Tab to
+    /// something and press Enter, type a letter, Enter again, press and
+    /// drag across the middle, turn the wheel, undo. What that changes,
+    /// the page saves.
+    fn poke(&mut self) {
+        let (w, h) = (self.size.0 as i32 * 100, self.size.1 as i32 * 100);
+        for _ in 0..3 {
+            self.key(vy_abi::key::TAB, 0);
+        }
+        self.key(vy_abi::key::ENTER, 0);
+        self.text("x");
+        self.key(vy_abi::key::ENTER, 0);
+        let (x, y) = (w * 45 / 100, h * 55 / 100);
+        self.event("a press", kind::POINTER_DOWN, x, y, button::PRIMARY, 0);
+        for step in 1..=6 {
+            self.event(
+                "a drag",
+                kind::POINTER_MOVE,
+                x + step * w / 40,
+                y + step * h / 50,
+                button::mask(button::PRIMARY),
+                0,
+            );
+        }
+        let (x, y) = (x + 6 * w / 40, y + 6 * h / 50);
+        self.event("a release", kind::POINTER_UP, x, y, button::PRIMARY, 0);
+        self.event("the wheel", kind::SCROLL, 0, 30_000, 0, 0);
+        self.key(key::Z, modifier::CTRL);
+    }
+}
+
+/// A visit to `name` that starts on `value` under `key`: `vy_init` and
+/// the frames it asks for, a narrow window, some use, a wide window, and
+/// a second visit on what the page saved meanwhile. With `look`, the
+/// frame at each size is rasterized as well and held to that budget.
+/// The costliest frame, what led to it, and the largest share of the
+/// raster budget.
+fn visit(
+    name: &'static str,
+    key: &str,
+    case: &str,
+    value: &[u8],
+    look: bool,
+) -> (u64, String, f64) {
+    let fail = |e: String| -> Page { panic!("{name} on {case}: {e}") };
+    let (width, height) = (1024, 720);
+    let mut page = Page::load_with(name, width, height, stored(key, value))
+        .unwrap_or_else(fail)
+        .on(case);
+    if look {
+        page.raster("the stored value");
+    }
+    page.resize(400, 700);
+    if look {
+        page.raster("a resize");
+    }
+    page.poke();
+    page.resize(1600, 1000);
+    if look {
+        page.raster("some use");
+    }
+    let saved = page.rt.take_storage();
+    let mut again = Page::load_with(name, width, height, saved)
+        .unwrap_or_else(fail)
+        .on(case);
+    again.poke();
+    if look {
+        again.raster("the second visit");
+    }
+    let raster = page.raster_worst.max(again.raster_worst);
+    let (fuel, after) = if again.worst.0 > page.worst.0 {
+        again.worst
+    } else {
+        page.worst
+    };
+    (fuel, after, raster)
+}
+
+/// Visit `name` on each of `values`; the costliest frame of them all.
+fn visits(name: &'static str, key: &str, values: &[(String, Vec<u8>)], look: bool) {
+    let quota = quota_of(name, key);
+    let mut worst = (0, String::new());
+    let mut raster_worst = (0.0, String::new());
+    for (case, value) in values {
+        assert!(value.len() <= quota, "{name} on {case}: within the quota");
+        let (fuel, after, raster) = visit(name, key, case, value, look);
+        if fuel > worst.0 {
+            worst = (fuel, format!("{case}, after {after}"));
+        }
+        if raster > raster_worst.0 {
+            raster_worst = (raster, case.clone());
+        }
+    }
+    eprintln!(
+        "{name} on {} stored values: costliest frame {} fuel, {}; most of the raster budget {:.0} % ({})",
+        values.len(),
+        worst.0,
+        worst.1,
+        raster_worst.0 * 100.0,
+        raster_worst.1
+    );
+}
+
+/// Random values and cuts of `whole` (a value the page could have
+/// saved), named.
+fn unmeant(
+    seed: u64,
+    max: usize,
+    head: &[u8],
+    whole: &[u8],
+    step: usize,
+) -> Vec<(String, Vec<u8>)> {
+    let random = random_blobs(seed, 300, max, head)
+        .into_iter()
+        .enumerate()
+        .map(|(n, blob)| (format!("random value {n} ({} bytes)", blob.len()), blob));
+    let cut = truncations(whole, step)
+        .into_iter()
+        .map(|blob| (format!("a value cut at {} bytes", blob.len()), blob));
+    random.chain(cut).collect()
+}
+
+/// `kanban`'s stored form (`Board::encode`): a format byte, then for each
+/// of the three columns a count and for each card a length and the title.
+fn board_blob(columns: [&[String]; 3]) -> Vec<u8> {
+    let mut out = vec![1u8];
+    for cards in columns {
+        out.push(cards.len() as u8);
+        for title in cards {
+            out.push(title.len() as u8);
+            out.extend_from_slice(title.as_bytes());
+        }
+    }
+    out
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013): `kanban` starts on any
+/// stored value: 300 random ones, a full board cut at every length, the
+/// fullest boards its format can describe, and values of the whole
+/// quota.
+#[test]
+fn spec_5_3_3_kanban_starts_on_any_stored_value() {
+    let titles = |unit: &str, n: usize| -> Vec<String> {
+        (0..n).map(|_| unit.repeat(80 / unit.len())).collect()
+    };
+    let none: &[String] = &[];
+    let wide = titles("W", 60);
+    let full = board_blob([&wide[..20], &wide[20..40], &wide[40..]]);
+    let quota = quota_of("kanban", "tavlan");
+    let mut after_board = board_blob([&wide[..1], none, none]);
+    after_board.resize(quota, 0xFF);
+    let mut values: Vec<(String, Vec<u8>)> = vec![
+        ("60 cards of 80 x W".into(), full.clone()),
+        (
+            "60 cards of 80 x W in one column".into(),
+            board_blob([none, &wide, none]),
+        ),
+        (
+            "60 cards of 20 four-byte characters".into(),
+            board_blob([&titles("\u{10348}", 60), none, none]),
+        ),
+        (
+            "60 cards of 40 one-letter words".into(),
+            board_blob([none, none, &titles("a ", 60)]),
+        ),
+        (
+            "60 cards of line breaks and controls".into(),
+            board_blob([&titles("\n\t\u{2028}\u{7f}\u{0}\u{202e}", 60), none, none]),
+        ),
+        ("61 cards".into(), board_blob([&wide, &wide[..1], none])),
+        (
+            "cards of 255 bytes".into(),
+            board_blob([&vec!["W".repeat(255); 60], none, none]),
+        ),
+        (
+            "a card without a title".into(),
+            board_blob([&[String::new()], none, none]),
+        ),
+        (
+            "a board without cards".into(),
+            board_blob([none, none, none]),
+        ),
+        ("255 cards and no titles".into(), vec![1, 255, 255, 255]),
+        ("a quota of zeros".into(), vec![0; quota]),
+        ("a quota of ones".into(), vec![1; quota]),
+        ("a quota of 0xFF".into(), vec![0xFF; quota]),
+        ("a board and then a quota of 0xFF".into(), after_board),
+    ];
+    visits("kanban", "tavlan", &values, true);
+    values = unmeant(0x7A51_A000_0000_0001, 5000, &[1], &full, 53);
+    assert!(values.len() > 400);
+    visits("kanban", "tavlan", &values, false);
+
+    // The full board is one the page reads.
+    let page = Page::load_with("kanban", 1024, 720, stored("tavlan", &full)).unwrap();
+    assert!(page.shows("60 kort · tavlan är full"));
+}
+
+/// `rita`'s stored form (`ink::encode`): a format byte, the number of
+/// strokes, and for each a byte of colour and pen, the number of points
+/// and the points, each as the zigzag difference from the one before in
+/// groups of seven bits. Points in eighths of a paper unit: the paper is
+/// 9 600 × 6 400.
+fn drawing_blob(strokes: &[(u8, Vec<(i32, i32)>)]) -> Vec<u8> {
+    fn put(out: &mut Vec<u8>, delta: i32) {
+        let mut v = ((delta << 1) ^ (delta >> 31)) as u32;
+        while v >= 0x80 {
+            out.push((v & 0x7F) as u8 | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+    let mut out = vec![1u8];
+    out.extend_from_slice(&(strokes.len() as u16).to_le_bytes());
+    for (tool, points) in strokes {
+        out.push(*tool);
+        out.extend_from_slice(&(points.len() as u16).to_le_bytes());
+        let mut last = (0, 0);
+        for &(x, y) in points {
+            put(&mut out, x - last.0);
+            put(&mut out, y - last.1);
+            last = (x, y);
+        }
+    }
+    out
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013): `rita` starts on any stored
+/// value: 300 random ones, a full drawing cut at every length, the
+/// drawings with the most points and the most ink its format can
+/// describe, and values of the whole quota. The frames are rasterized
+/// too: a drawing costs the rasterizer its ink, and 1 250 lines from
+/// corner to corner, which the page would never take but did read back,
+/// stopped the rasterizer at its budget.
+#[test]
+fn spec_5_3_3_rita_starts_on_any_stored_value() {
+    const WIDEST: u8 = 2;
+    let (w, h) = (9600, 6400);
+    let strokes = |point: &dyn Fn(usize) -> (i32, i32), per: usize| -> Vec<(u8, Vec<(i32, i32)>)> {
+        (0..2500 / per)
+            .map(|s| {
+                (
+                    ((s % 8) as u8) << 2 | WIDEST,
+                    (0..per).map(|i| point(s * per + i)).collect(),
+                )
+            })
+            .collect()
+    };
+    // Corner to corner and back, 2 500 times: thirty times the ink the
+    // page lets anyone draw.
+    let across = drawing_blob(&strokes(&|i| [(0, 0), (w, h), (0, h), (w, 0)][i % 4], 500));
+    let quota = quota_of("rita", "rita");
+    let mut after_drawing = drawing_blob(&[(WIDEST, vec![(100, 100), (9000, 6000)])]);
+    after_drawing.resize(quota, 0);
+    // What the page takes: strokes until their ink (length × width, in
+    // paper units, the length as `ink::distance` has it) reaches
+    // 2 000 000, and the one that takes it there however long it is. A
+    // line from corner to corner with the widest pen is 21 588.
+    let diagonal = |s: usize| {
+        let ends = [[(0, 0), (w, h)], [(0, h), (w, 0)]][s % 2];
+        (WIDEST, ends.to_vec())
+    };
+    let mut fullest: Vec<(u8, Vec<(i32, i32)>)> = (0..92).map(diagonal).collect();
+    fullest.push((
+        WIDEST,
+        (0..500)
+            .map(|i| [(0, 0), (w, h), (0, h), (w, 0)][i % 4])
+            .collect(),
+    ));
+    let fullest = drawing_blob(&fullest);
+    let lines = drawing_blob(&(0..1250).map(diagonal).collect::<Vec<_>>());
+    let mut values: Vec<(String, Vec<u8>)> = vec![
+        ("2 500 points from corner to corner".into(), across.clone()),
+        ("1 250 lines from corner to corner".into(), lines.clone()),
+        (
+            "92 lines and a stroke of 500 points from corner to corner".into(),
+            fullest.clone(),
+        ),
+        (
+            "2 500 points along the top edge".into(),
+            drawing_blob(&strokes(&|i| ((i % 2) as i32 * w, 0), 500)),
+        ),
+        (
+            "2 500 points in one place".into(),
+            drawing_blob(&strokes(&|_| (w / 2, h / 2), 500)),
+        ),
+        (
+            "2 500 points an eighth of a unit apart".into(),
+            drawing_blob(&strokes(&|i| (4800 + (i % 2) as i32, 3200), 500)),
+        ),
+        (
+            "2 500 dots".into(),
+            drawing_blob(&strokes(
+                &|i| ((i % 50) as i32 * 190, (i / 50) as i32 * 128),
+                1,
+            )),
+        ),
+        (
+            "a scribble of 2 500 points".into(),
+            drawing_blob(&{
+                let mut seed = 0x51CA_77E0_0000_0001u64;
+                let at: Vec<(i32, i32)> = (0..2500)
+                    .map(|_| {
+                        (
+                            (next(&mut seed) % 9601) as i32,
+                            (next(&mut seed) % 6401) as i32,
+                        )
+                    })
+                    .collect();
+                strokes(&|i| at[i], 500)
+            }),
+        ),
+        (
+            "a stroke of 501 points".into(),
+            drawing_blob(&[(0, (0..501).map(|i| (i, i)).collect())]),
+        ),
+        (
+            "2 501 points".into(),
+            drawing_blob(&(0..2501).map(|i| (0u8, vec![(i, i)])).collect::<Vec<_>>()),
+        ),
+        (
+            "a stroke without points".into(),
+            drawing_blob(&[(0, Vec::new())]),
+        ),
+        (
+            "a pen that does not exist".into(),
+            drawing_blob(&[(3, vec![(10, 10), (500, 500)])]),
+        ),
+        (
+            "a colour that does not exist".into(),
+            drawing_blob(&[(63 << 2, vec![(10, 10), (500, 500)])]),
+        ),
+        (
+            "a point off the paper".into(),
+            drawing_blob(&[(0, vec![(10, 10), (9601, 10)])]),
+        ),
+        (
+            "a point left of the paper".into(),
+            drawing_blob(&[(0, vec![(-1, 10)])]),
+        ),
+        ("65 535 strokes and no more".into(), vec![1, 0xFF, 0xFF]),
+        ("no strokes".into(), vec![1, 0, 0]),
+        ("a quota of zeros".into(), vec![0; quota]),
+        ("a quota of ones".into(), vec![1; quota]),
+        ("a quota of 0xFF".into(), vec![0xFF; quota]),
+        ("a stroke and then a quota of zeros".into(), after_drawing),
+    ];
+    visits("rita", "rita", &values, true);
+    values = unmeant(0x717A_0000_0000_0001, 3000, &[1, 2, 0], &across, 97);
+    assert!(values.len() > 400);
+    visits("rita", "rita", &values, false);
+
+    // The fullest drawing is one the page reads, the lines are not.
+    let page = Page::load_with("rita", 1024, 720, stored("rita", &fullest)).unwrap();
+    assert!(page.shows("Ritning med 93 streck"));
+    let page = Page::load_with("rita", 1024, 720, stored("rita", &lines)).unwrap();
+    assert!(page.shows("Ritning med 0 streck"));
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013): `block` starts on any stored
+/// value: 300 random ones (four bytes are a best score, anything else is
+/// none), every score with one bit set, and a value of the whole quota.
+#[test]
+fn spec_5_3_3_block_starts_on_any_stored_value() {
+    let quota = quota_of("block", "block");
+    let mut values: Vec<(String, Vec<u8>)> = vec![
+        ("the highest score there is".into(), vec![0xFF; 4]),
+        ("an empty value".into(), Vec::new()),
+        ("three bytes".into(), vec![1, 2, 3]),
+        ("five bytes".into(), vec![1, 2, 3, 4, 5]),
+        ("a quota of 0xFF".into(), vec![0xFF; quota]),
+    ];
+    for bit in 0..32 {
+        values.push((
+            format!("a best score of 2^{bit}"),
+            (1u32 << bit).to_le_bytes().to_vec(),
+        ));
+    }
+    visits("block", "block", &values, true);
+    let mut seed = 0xB10C_0000_0000_0001u64;
+    values = random_blobs(seed, 150, quota, &[])
+        .into_iter()
+        .enumerate()
+        .map(|(n, blob)| (format!("random value {n} ({} bytes)", blob.len()), blob))
+        .collect();
+    for n in 0..150 {
+        let score = next(&mut seed) as u32;
+        values.push((
+            format!("random score {n} ({score})"),
+            score.to_le_bytes().to_vec(),
+        ));
+    }
+    visits("block", "block", &values, false);
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013): `skriv` on values that are
+/// not the texts of `spec_5_3_3_skriv_starts_on_any_text_it_saved`: 300
+/// random ones, texts cut inside a character, and the whole quota of the
+/// constructs that cost it the most.
+#[test]
+fn spec_5_3_3_skriv_starts_on_any_stored_value() {
+    let quota = quota_of("skriv", "skriv");
+    let fill = |unit: &str| unit.repeat(quota / unit.len()).into_bytes();
+    let text = "# Rubrik\n\nEtt stycke med **fet**, *betonad* och `kod` text och \
+                [en länk](vy://x).\n\n- å\n  - \u{10348}\n\n```\nkod\n```\n"
+        .repeat(160);
+    let mut values: Vec<(String, Vec<u8>)> = vec![
+        ("a quota of line breaks".into(), fill("\n")),
+        ("a quota of [".into(), fill("[")),
+        ("a quota of links".into(), fill("[a](b)")),
+        ("a quota of W".into(), fill("W")),
+        ("a quota of four-byte characters".into(), fill("\u{10348}")),
+        ("a quota of paragraphs".into(), fill("a\n\n")),
+        ("a quota of zeros".into(), vec![0; quota]),
+        ("a quota of 0xFF".into(), vec![0xFF; quota]),
+        (
+            "a quota of text".into(),
+            text.as_bytes()[..quota.min(text.len())].to_vec(),
+        ),
+    ];
+    visits("skriv", "skriv", &values, true);
+    // Cuts of a text fall inside its two- and four-byte characters.
+    values = unmeant(
+        0x5C81_0000_0000_0001,
+        8000,
+        b"# ",
+        &text.as_bytes()[..6000],
+        61,
+    );
+    assert!(values.len() > 400);
+    visits("skriv", "skriv", &values, false);
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013): `kalkyl` on values that are
+/// not the sheets of `spec_5_3_3_kalkyl_starts_on_any_sheet_it_saved`:
+/// 300 random ones, a sheet cut at every length, sheets of random
+/// formulas, and the whole quota of one cell set again and again.
+#[test]
+fn spec_5_3_3_kalkyl_starts_on_any_stored_value() {
+    let quota = quota_of("kalkyl", "kalkyl");
+    let sums = sheet_of(|col, row| {
+        (row < 12).then(|| {
+            if col == 0 {
+                "1,5".into()
+            } else {
+                "=SUMMA(A1:A100)".into()
+            }
+        })
+    });
+    // One cell, set 65 000 times; every cell, cleared 87 000 times.
+    let again: Vec<u8> = [1u8]
+        .into_iter()
+        .chain((0..(quota - 1) / 4).flat_map(|n| [7, 0, 1, b'0' + (n % 10) as u8]))
+        .collect();
+    let cleared: Vec<u8> = [1u8]
+        .into_iter()
+        .chain((0..(quota - 1) / 3).flat_map(|n| {
+            let i = (n % 2600) as u16;
+            [i as u8, (i >> 8) as u8, 0]
+        }))
+        .collect();
+    let mut values: Vec<(String, Vec<u8>)> = vec![
+        ("one cell set 65 000 times".into(), again),
+        ("every cell cleared 87 000 times".into(), cleared),
+        (
+            "a cell that is not on the sheet".into(),
+            sheet_blob(&[(0, 100, "1")]),
+        ),
+        (
+            "a source that is no text".into(),
+            vec![1, 0, 0, 2, 0xC3, 0x28],
+        ),
+        ("an empty value".into(), Vec::new()),
+        ("a sheet without cells".into(), vec![1]),
+        ("a quota of zeros".into(), vec![0; quota]),
+        ("a quota of ones".into(), vec![1; quota]),
+        ("a quota of 0xFF".into(), vec![0xFF; quota]),
+    ];
+    // Sheets of formulas no one would write: every token there is, in a
+    // fixed pseudo-random order, in every cell.
+    let tokens = [
+        "=",
+        "=",
+        "SUMMA(",
+        "MEDEL(",
+        "MIN(",
+        "MAX(",
+        "ANTAL(",
+        "A1",
+        "Z100",
+        "B7",
+        "M50",
+        ":",
+        ";",
+        "+",
+        "-",
+        "*",
+        "/",
+        "(",
+        ")",
+        "1",
+        "0",
+        ",",
+        "5",
+        " ",
+        "å",
+        "x",
+        "999999999999",
+    ];
+    let mut seed = 0xCA1C_0000_0000_0001u64;
+    for n in 0..24 {
+        let cells = [26, 260, 1300, 2600][n % 4];
+        let longest = [12, 40, 200][n % 3];
+        let sources: Vec<String> = (0..cells)
+            .map(|_| {
+                let mut src = String::from(if next(&mut seed).is_multiple_of(4) {
+                    ""
+                } else {
+                    "="
+                });
+                let pieces = 1 + next(&mut seed) % 30;
+                for _ in 0..pieces {
+                    let token = tokens[(next(&mut seed) % tokens.len() as u64) as usize];
+                    if src.len() + token.len() > longest {
+                        break;
+                    }
+                    src.push_str(token);
+                }
+                src
+            })
+            .collect();
+        let sheet = sheet_of(|col, row| sources.get(row * 26 + col).cloned());
+        values.push((format!("random formulas {n} ({cells} cells)"), sheet));
+    }
+    let mut worst = (0, String::new());
+    let mut on = |values: &[(String, Vec<u8>)]| {
+        for (case, value) in values {
+            assert!(value.len() <= quota, "kalkyl on {case}: within the quota");
+            let (fuel, after) = kalkyl_on(case, value, 1024, 720);
+            if fuel > worst.0 {
+                worst = (fuel, format!("{case}, after {after}"));
+            }
+        }
+    };
+    on(&values);
+    on(&unmeant(0xCA1C_0000_0000_0002, 4000, &[1], &sums, 41));
+    eprintln!(
+        "kalkyl on stored values: costliest frame {} fuel, {}",
+        worst.0, worst.1
+    );
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013): `rymd` requests no storage
+/// and reads none: with values under every key the other pages use, and
+/// its own name, it draws what it draws without them.
+#[test]
+fn spec_5_3_3_rymd_reads_no_stored_value() {
+    let draft = fs::read_to_string(root().join("conformance/manifests/rymd.json")).unwrap();
+    assert!(Draft::from_json(&draft)
+        .unwrap()
+        .capabilities
+        .storage
+        .is_none());
+    let empty = Page::load("rymd", 1024, 720);
+    let full: Storage = ["rymd", "tavlan", "kalkyl", "rita", "skriv", "block"]
+        .iter()
+        .map(|key| (key.as_bytes().to_vec(), vec![0xFF; 4096]))
+        .collect();
+    let mut page = Page::load_with("rymd", 1024, 720, full.clone())
+        .unwrap()
+        .on("a full storage");
+    assert_eq!(
+        page.rt.display_list(),
+        empty.rt.display_list(),
+        "the same frames"
+    );
+    page.raster("the stored values");
+    page.resize(400, 700);
+    page.poke();
+    page.resize(1600, 1000);
+    page.raster("some use");
+    assert_eq!(page.rt.take_storage(), full, "and writes none");
+    page.report("with a full storage");
 }

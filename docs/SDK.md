@@ -377,6 +377,19 @@ vy-dev build
 | Glömd `resize` | sidan ritar för det gamla fönstret | spara `window` i `resize` (och klampa rullningen) |
 | `std`, trådar, WASI | modulen avvisas (SPEC-4.2.2, SPEC-4.2.3) | `#![cfg_attr(not(test), no_std)]` och `alloc` |
 
+**Sparad data är indata.** En sida får aldrig kunna stoppa sig själv med data den har sparat. Det
+`state_get` ger tillbaka är vad en tidigare version av sidan, eller ett fel i den, lade dit, och det
+läses i `init` vid varje besök: en sida som inte tål värdet går inte att öppna igen förrän någon
+rensar lagringen. Läs därför tillbaka som du läser indata utifrån. Kontrollera varje längd och
+varje antal mot värdets slut; avvisa ett värde som har mer än sidan själv tar emot (fler kort, fler
+punkter, mer bläck, en cell två gånger) i stället för att visa det; och gör det som kostar
+(tolkning, radbrytning, omräkning) i steg över flera frames när värdet är stort, inte i `init` och
+inte i en enda frame. Mät sedan värsta fallet och inte exemplet: kör sidan på det största och det
+besvärligaste värde kvoten rymmer och läs den dyraste framen med `vy-cli conformance --stats`
+(bränsle och rasterisering mot budgeten, SPEC-5.3.3 och SPEC-12.2.4). Exempelsidornas prov av det
+slaget, 300 slumpade värden, avklippta värden och hela kvoten för var och en, står i
+`crates/vy-cli/src/budget_tests.rs`.
+
 ## 10. Testa nativt
 
 SDK:t har en mock av värden (`vy_sdk::mock`), så `cargo test` kör sidans logik utan wasm-motor:

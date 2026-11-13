@@ -20,6 +20,11 @@ ritar ringen. Fönster från 400 × 600 till 1600 × 1000 och skalorna 1, 1,5 oc
 och skriver "sparas inte" i sin statusrad. Utan `ime` nekas `ime_begin` (SPEC-5.2.6): fälten tar
 fortfarande den text tangentbordet ger (`TEXT_INPUT`), men ingen komposition öppnas vid fältet.
 
+Sparad data läses som indata. Ett värde som sidan inte själv kan ha sparat (okänt format, avklippt,
+fler kort, punkter eller mer bläck än sidan tar emot, en cell två gånger) ersätts av exemplet eller
+en tom sida, och det sidan visar håller budgeten vad värdet än är. `budget_tests` i `vy-cli` startar
+varje sida på 300 slumpade värden, på avklippta värden och på hela sin kvot (granskning 0013).
+
 ## Köra dem lokalt
 
 ```sh
@@ -69,7 +74,8 @@ formel visar `…`). En formel läser högst två hela blad genom sina områden;
 
 **Visar:** frihandsstreck som förenklas (Ramer–Douglas–Peucker) och ritas som en `PATH` per streck,
 med kurvor i böjarna och raka linjer till hörnen; en ritning som hålls inom budgetarna (högst 2 500
-punkter, sedan säger sidan ifrån); ångra och gör om; en dialog som håller Tab inom sig.
+punkter och 2 000 000 i bläck, längd gånger bredd i papperets enheter, sedan säger sidan ifrån,
+och en sparad ritning med mer läses inte); ångra och gör om; en dialog som håller Tab inom sig.
 
 **Används:** dra på papperet för att rita. Verktygsraden har åtta färger, tre pennbredder, sudd (tar
 bort de streck det rör vid), Ångra, Gör om och Rensa, som frågar en gång. Ctrl+Z ångrar, Ctrl+Y gör
