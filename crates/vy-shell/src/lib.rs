@@ -1406,6 +1406,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
+    /// A page that saves a byte under "k" on every key, and that cannot
+    /// get through `vy_init` once something is saved: it spins there until
+    /// the hard limit (SPEC-5.3.3). What `skriv` and `kalkyl` did on their
+    /// own saved data (granskning 0013).
+    fn page_stuck_on_its_storage() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+                (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+                (import "vy" "state_get" (func $get (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "k")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
+                    (if (i32.gt_s
+                            (call $get (i32.const 16) (i32.const 1) (i32.const 64) (i32.const 16))
+                            (i32.const 0))
+                        (then (loop $spin (br $spin))))
+                    i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then
+                            (i32.store8 (i32.const 32) (local.get 1))
+                            (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap()
+    }
+
+    /// SPEC-5.2.9, SPEC-9.5.2: a tab process whose page never started has
+    /// none of the origin's storage, and what it says of storage on its
+    /// way out does not erase what the origin has saved. A page saves,
+    /// and when loaded again cannot get through `vy_init` (the call is
+    /// aborted at the hard limit). Its process, let go of by a reload and
+    /// then by closing the tab, answers its shutdown with an empty
+    /// storage, as a process without a page does: the saved data is still
+    /// there, so the page fails the same way again instead of starting
+    /// from nothing behind the user's back.
+    #[test]
+    fn spec_5_2_9_a_page_that_never_started_does_not_erase_its_storage() {
+        let data = std::env::temp_dir().join(format!("vy-storage-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let (address, origin) = signed_site(page_stuck_on_its_storage(), "Fastnar");
+        let saved = || crate::storage::load(&data.join("storage"), &origin);
+        let kept = vec![(b"k".to_vec(), vec![0x04])];
+        let mut shell = persisting_shell(&data);
+        let answered = |s: &crate::shell::Shell, tab| s.tab_status(tab) != "loading";
+        let tab = shell.open_tab(Some(Source::parse(&address).unwrap()));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        shell.key(0x04, true, 0, false);
+        shell.key(0x04, false, 0, false);
+        // Loaded again, three times over: it never starts, and what it
+        // saved stays.
+        for round in 0..3 {
+            shell.reload();
+            until(&mut shell, |s| answered(s, tab));
+            let status = shell.tab_status(tab);
+            assert!(
+                status.contains("call aborted after"),
+                "round {round}: the page starts from what it saved and fails: {status}"
+            );
+            assert_eq!(saved(), kept, "round {round}");
+        }
+        // The tab closed while its page is down: the same.
+        shell.open_tab(None);
+        shell.close_tab(tab);
+        until(&mut shell, |_| true);
+        assert_eq!(saved(), kept, "after closing the tab");
+        shell.shutdown();
+        assert_eq!(saved(), kept, "after closing the window");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     /// SPEC-5.2.9, SPEC-9.1.1 (granskning 0006:1): letting tab processes go
     /// never waits on the UI thread, and many let go of together share one
     /// grace period instead of waiting one each. Six tabs whose processes

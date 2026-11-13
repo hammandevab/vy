@@ -179,6 +179,11 @@ struct Tab {
     sem: Vec<SemNode>,
     has_tree: Option<bool>,
     loaded: bool,
+    /// The page of the tab's process was loaded and its `vy_init`
+    /// returned: only then is the storage the process answers with the
+    /// page's. A process whose load failed, or was let go of before it
+    /// answered, has none, and says "empty" (SPEC-5.2.9).
+    started: bool,
     tick_pending: bool,
     wants_more: bool,
     tick_due: bool,
@@ -278,6 +283,7 @@ impl Tab {
             sem: Vec::new(),
             has_tree: None,
             loaded: false,
+            started: false,
             tick_pending: false,
             wants_more: false,
             tick_due: false,
@@ -422,8 +428,11 @@ struct Retired {
     origin: String,
     storage_granted: bool,
     quota: u64,
-    /// The user cleared the origin's storage after the process was let
-    /// go of: what it answers with is what was cleared, and is not saved.
+    /// What the process answers with is not saved: the user cleared the
+    /// origin's storage after the process was let go of (the answer is
+    /// what was cleared), or the process's page never started (the answer
+    /// is the empty storage of a process without a page, and saving it
+    /// would erase what the origin has).
     discard: bool,
 }
 
@@ -1116,6 +1125,7 @@ impl Shell {
             tab.sem.clear();
             tab.has_tree = None;
             tab.loaded = false;
+            tab.started = false;
             tab.tick_pending = false;
             tab.wants_more = false;
             tab.tick_due = false;
@@ -1524,6 +1534,10 @@ impl Shell {
         match m {
             ToShell::Sandbox(report) => self.sandbox_reported(id, Some(report)),
             ToShell::Loaded { ok, error, .. } => {
+                // From here on the process holds the page's storage.
+                if let Some(tab) = self.tab_mut(id).filter(|_| ok) {
+                    tab.started = true;
+                }
                 // A load answered without a report leaves none to come.
                 self.sandbox_reported(id, None);
                 if let Some(tab) = self.tab_mut(id) {
@@ -1653,6 +1667,10 @@ impl Shell {
                 let Some(tab) = self.tab(id) else {
                     return;
                 };
+                // A process without a page has nothing of the origin's.
+                if !tab.started {
+                    return;
+                }
                 let origin = tab.origin.clone();
                 let granted = tab.capabilities().has(cap::STORAGE);
                 let quota = tab.storage_quota_bytes;
@@ -4017,6 +4035,7 @@ impl Shell {
         tab.conn = Some(conn);
         tab.state = State::Running;
         tab.loaded = true;
+        tab.started = true;
         (id, killed)
     }
 }
@@ -4073,7 +4092,7 @@ fn retire_process(
             origin,
             storage_granted: tab.capabilities().has(cap::STORAGE),
             quota: tab.storage_quota_bytes,
-            discard: false,
+            discard: !tab.started,
         });
     }
     reaper.retire(conn, deadline);
