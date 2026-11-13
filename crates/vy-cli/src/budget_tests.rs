@@ -1,13 +1,20 @@
 //! Frames after input keep the 8 ms budget (SPEC-5.3.3): pages driven on
-//! `vy-runtime` with the text that broke it. Neither the SDK's mock (it
-//! counts no fuel) nor `vy-publish build` (it sends no events) sees a frame
-//! like these.
+//! `vy-runtime` with the text that broke it, and with stored data that
+//! broke it. Neither the SDK's mock (it counts no fuel) nor
+//! `vy-publish build` (it sends no events and presets no storage) sees a
+//! frame like these.
+//!
+//! The runtime reports fuel for frames only. `vy_init` and `vy_event` have
+//! the hard limit of eight budgets and no other, so what these tests can
+//! say of them is that they were not aborted.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use vy_abi::{button, event as kind, modifier, role};
 use vy_manifest::Draft;
-use vy_runtime::{Capabilities, Options, Runtime, SemNode, FRAME_BUDGET_FUEL};
+use vy_runtime::{
+    Capabilities, CompileCache, Options, Runtime, SemNode, Storage, FRAME_BUDGET_FUEL,
+};
 
 /// USB HID usage ids of the keys the fields take (SPEC-A.2.1).
 mod key {
@@ -18,6 +25,17 @@ mod key {
     pub const DOWN: i32 = 0x51;
     pub const UP: i32 = 0x52;
 }
+
+/// The compiled code of the modules these tests start, by name. A test
+/// here starts a page hundreds of times; compiling it once and handing the
+/// code to every later load, as the client's main process does for its
+/// tab processes (SPEC-13.1.4), keeps the tests about frames.
+fn compiled(name: &str) -> Option<Vec<u8>> {
+    CODE.lock().unwrap().get(name).cloned()
+}
+
+static CODE: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,6 +56,18 @@ struct Page {
 
 impl Page {
     fn load(name: &'static str, width: u32, height: u32) -> Self {
+        Self::load_with(name, width, height, Storage::new())
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    /// The page started on `storage`, as a visit after an earlier one that
+    /// saved it (SPEC-5.2.9); `Err` when `vy_init` fails or is aborted.
+    fn load_with(
+        name: &'static str,
+        width: u32,
+        height: u32,
+        storage: Storage,
+    ) -> Result<Self, String> {
         let root = root();
         let path = root.join(format!("target/wasm/{name}.wasm"));
         let wasm = fs::read(&path)
@@ -52,17 +82,32 @@ impl Page {
             memory_max_pages: draft.memory_max,
             capabilities: Capabilities::from_names(granted).unwrap(),
             clipboard: Some(Vec::new()),
+            storage_quota_bytes: draft
+                .capabilities
+                .storage
+                .as_ref()
+                .map_or(vy_runtime::DEFAULT_STORAGE_QUOTA_BYTES, |s| {
+                    u64::from(s.quota_kb) * 1024
+                }),
+            storage,
+            compile_cache: CompileCache::Host {
+                code: compiled(name),
+            },
             ..Options::default()
         };
         let mut rt = Runtime::load(&wasm, &vy_runtime::sha256(&wasm), options).unwrap();
-        rt.init(width, height, 1.0).unwrap();
+        if let Some(code) = rt.take_code() {
+            CODE.lock().unwrap().insert(name.to_string(), code);
+        }
+        rt.init(width, height, 1.0)
+            .map_err(|e| format!("vy_init at {width} x {height}: {e}"))?;
         let mut page = Self {
             name,
             rt,
             worst: (0, String::new()),
         };
         page.frames("init");
-        page
+        Ok(page)
     }
 
     /// Run the frames the page asks for (at most eight: some pages
@@ -273,4 +318,187 @@ fn spec_5_3_3_long_word_in_skriv_keeps_the_budget() {
     page.click(tabs[0].x + tabs[0].w / 2.0, tabs[0].y + tabs[0].h / 2.0);
     page.resize(800, 600);
     page.report("6 000 x W");
+}
+
+/// A storage holding `value` under `key`: what an earlier visit saved.
+fn stored(key: &str, value: &[u8]) -> Storage {
+    Storage::from([(key.as_bytes().to_vec(), value.to_vec())])
+}
+
+/// xorshift64*, as the headless host's `random`: the same blobs in every
+/// run.
+fn next(state: &mut u64) -> u64 {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
+/// Texts within `skriv`'s 6 000 bytes that are as bad as Markdown gets for
+/// a parser, a layout or a tree: one construct over and over, openers
+/// that never close, and mixes of all the markup there is.
+fn hostile_markdown() -> Vec<(String, String)> {
+    let fill = |unit: &str| unit.repeat(6000 / unit.len());
+    let mut texts: Vec<(String, String)> = [
+        "W",
+        "[",
+        "]",
+        "(",
+        "[a](",
+        "[a]",
+        "[a](b)",
+        "[a](b) ",
+        "[[a](b)",
+        "`",
+        "`a",
+        "`a` ",
+        "*",
+        "*a",
+        "*a* ",
+        "**",
+        "**a",
+        "**a** ",
+        "***a*** ",
+        "_",
+        "_a",
+        "_a_ ",
+        "a_",
+        "\\[",
+        "\\",
+        "a ",
+        "å ",
+        "\u{10348}",
+        "\n",
+        "a\n\n",
+        "- a\n",
+        "  - a\n",
+        "1. a\n",
+        "# a\n",
+        "### \n",
+        "---\n",
+        "> a\n",
+        ">\n",
+        "```\n",
+        "```\na\n```\n",
+        "a\n```\n",
+        "*a _b `c [d](e) **f\n",
+        "- [a](b) `c` **d** *e*\n",
+    ]
+    .iter()
+    .map(|unit| (format!("{unit:?} repeated"), fill(unit)))
+    .collect();
+    texts.push(("5 999 x [ and one ]".into(), "[".repeat(5999) + "]"));
+    texts.push((
+        "[ x 2 000, ]( x 1 000, no )".into(),
+        "[".repeat(2000) + &"](".repeat(1000) + &"a".repeat(2000),
+    ));
+    texts.push((
+        "one link with a 5 990-byte target".into(),
+        format!("[a]({})", "b".repeat(5990)),
+    ));
+    texts.push((
+        "one link with a 5 990-byte text".into(),
+        format!("[{}](b)", "a".repeat(5990)),
+    ));
+    // Every piece of markup there is, in a fixed pseudo-random order.
+    let alphabet: Vec<&str> = vec![
+        "[", "]", "(", ")", "*", "**", "_", "`", "\\", "\n", "\n\n", "- ", "  - ", "1. ", "# ",
+        "> ", "```\n", "---\n", " ", "a", "ord", "å", "W",
+    ];
+    let mut seed = 0x5EED_5EED_0000_0001u64;
+    for n in 0..12 {
+        let mut text = String::new();
+        while text.len() < 5990 {
+            text.push_str(alphabet[(next(&mut seed) % alphabet.len() as u64) as usize]);
+        }
+        texts.push((format!("mixed markup {n}"), text));
+    }
+    texts
+}
+
+/// Open `skriv` on `text` as its stored note at `width` × `height` and use
+/// it: the narrow view's two tabs, Tab through the first links, the wheel
+/// over the preview, a resize, a character typed first in the note (the
+/// text is parsed, wrapped and saved again) and a reload on what that
+/// saved.
+fn skriv_on(case: &str, text: &[u8], width: u32, height: u32) -> (u64, String) {
+    let fail = |e: String| -> Page { panic!("skriv on {case}: {e}") };
+    let mut page =
+        Page::load_with("skriv", width, height, stored("skriv", text)).unwrap_or_else(fail);
+    let tabs: Vec<SemNode> = page
+        .rt
+        .semantic_tree()
+        .iter()
+        .filter(|n| n.role == role::TAB)
+        .cloned()
+        .collect();
+    for tab in tabs.iter().rev() {
+        page.click(tab.x + tab.w / 2.0, tab.y + tab.h / 2.0);
+    }
+    for _ in 0..4 {
+        page.key(vy_abi::key::TAB, 0);
+    }
+    let (x, y) = ((width as i32 - 60) * 100, (height as i32 / 2) * 100);
+    page.event("a pointer move", kind::POINTER_MOVE, x, y, 0, 0);
+    page.event("the wheel", kind::SCROLL, 0, 40_000, 0, 0);
+    page.resize(width + 123, height - 77);
+    if let Some(editor) = page
+        .rt
+        .semantic_tree()
+        .iter()
+        .find(|n| n.role == role::TEXTBOX)
+        .cloned()
+    {
+        page.click(editor.x + editor.w / 2.0, editor.y + editor.h / 2.0);
+        page.key(key::HOME, modifier::CTRL);
+        page.key(key::BACKSPACE, 0);
+        page.text("x");
+    }
+    // What the page saved now is what the next visit starts on.
+    let saved = page.rt.take_storage();
+    let mut again = Page::load_with("skriv", width, height, saved).unwrap_or_else(fail);
+    again.resize(width, height + 50);
+    if again.worst.0 > page.worst.0 {
+        again.worst
+    } else {
+        page.worst
+    }
+}
+
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013:1): `skriv` saves the note in
+/// the event, before the frame that shows it, so a text it cannot show
+/// within the budget stopped it at every reload. Whatever 6 000 bytes it
+/// holds, the page starts on them and keeps every frame within the
+/// budget, in the split view and behind the tabs: (a) a word without a
+/// space (49.3 M and an aborted frame before, the SDK's wrapping), (b)
+/// `[` after `[` (aborted: the parser looked for a `]` to the end of the
+/// text for each), and every other construct of the Markdown it reads,
+/// repeated to the limit.
+#[test]
+fn spec_5_3_3_skriv_starts_on_any_text_it_saved() {
+    let mut worst = (0, String::new());
+    for (case, text) in hostile_markdown() {
+        for (width, height) in [(1024, 720), (400, 700)] {
+            let (fuel, after) = skriv_on(&case, text.as_bytes(), width, height);
+            if fuel > worst.0 {
+                worst = (fuel, format!("{case} at {width} x {height}, after {after}"));
+            }
+        }
+    }
+    eprintln!(
+        "skriv on hostile notes: costliest frame {} fuel, {}",
+        worst.0, worst.1
+    );
+    // More than the editor takes, and bytes that are no text at all: the
+    // page cuts the one and starts on its sample for the other.
+    let long = "ord [a](b) ".repeat(1489);
+    assert_eq!(long.len(), 16_379, "what the quota of 16 KB holds");
+    skriv_on("16 KB of words and links", long.as_bytes(), 1024, 720);
+    let mut seed = 0xC0FF_EE00_0000_0001u64;
+    for n in 0..20 {
+        let len = (next(&mut seed) % 16_000) as usize;
+        let blob: Vec<u8> = (0..len).map(|_| next(&mut seed) as u8).collect();
+        skriv_on(&format!("random bytes {n}"), &blob, 800, 600);
+    }
+    skriv_on("an empty note", b"", 800, 600);
 }

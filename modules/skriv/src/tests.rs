@@ -520,3 +520,215 @@ fn a_narrow_window_has_tabs() {
     assert!(chord(&mut p, key::ENTER, 0));
     assert_eq!(p.pane, 0);
 }
+
+// ---- hostile texts ----------------------------------------------------
+
+/// `md::link_at` as it was: a search to the end of the text from every
+/// `[`. What a link is has not changed; this is its definition.
+fn link_at_searching(b: &[u8], i: usize) -> Option<(usize, usize, usize)> {
+    let close = i + 1 + b[i + 1..].iter().position(|c| *c == b']')?;
+    if b.get(close + 1) != Some(&b'(') {
+        return None;
+    }
+    let end = close + 2 + b[close + 2..].iter().position(|c| *c == b')')?;
+    (close > i + 1 && end > close + 2).then_some((close, close + 2, end))
+}
+
+/// The links of `src`, found as `inline` walks it: from each `[` in
+/// turn, going on after a link's `)`.
+fn links_of(
+    src: &str,
+    mut find: impl FnMut(&[u8], usize) -> Option<(usize, usize, usize)>,
+) -> Vec<(usize, usize, usize, usize)> {
+    let b = src.as_bytes();
+    let (mut found, mut i) = (Vec::new(), 0);
+    while i < b.len() {
+        match (b[i] == b'[').then(|| find(b, i)).flatten() {
+            Some((text_end, url, url_end)) => {
+                found.push((i, text_end, url, url_end));
+                i = url_end + 1;
+            }
+            None => i += 1,
+        }
+    }
+    found
+}
+
+/// xorshift64*: the same texts in every run.
+fn next(state: &mut u64) -> u64 {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
+/// SPEC-5.3.3 (granskning 0013:1): the parser looks at each byte of a
+/// text a fixed number of times, whatever the text. A `[` used to start a
+/// search for `]` to the end of the text, and a `](` one for `)`: 6 000
+/// openers without a closer were 18 million steps and stopped the page on
+/// its own saved note. The searches now remember what they found, so the
+/// same texts take one pass each, and they find exactly the links they
+/// found before.
+#[test]
+fn spec_5_3_3_hostile_markdown_is_searched_once() {
+    let searched = |src: &str| {
+        md::SEARCHED.with(|n| n.set(0));
+        let doc = parse(src);
+        (md::SEARCHED.with(core::cell::Cell::get), doc)
+    };
+    let cases = [
+        "[".repeat(6000),
+        "[".repeat(5999) + "]",
+        "[a](".repeat(1500),
+        "[".repeat(2000) + &"](".repeat(1000) + &"a".repeat(2000),
+        "[a]".repeat(2000),
+        "[a](b)".repeat(1000),
+        "[[a](b)".repeat(857),
+        "[]()".repeat(1500),
+        "](".repeat(3000),
+    ];
+    for src in &cases {
+        let (steps, doc) = searched(src);
+        // One paragraph: a pass for `]` and a pass for `)` at most.
+        assert!(
+            steps <= 2 * src.len(),
+            "{steps} bytes searched for {} bytes starting {:?}",
+            src.len(),
+            &src[..12]
+        );
+        assert_eq!(doc.blocks.len(), 1);
+    }
+    let (_, doc) = searched(&cases[5]);
+    assert_eq!(doc.links.len(), 1000);
+    assert_eq!(doc.blocks[0].text, "a".repeat(1000));
+    let (_, doc) = searched(&cases[0]);
+    assert_eq!(
+        doc.blocks[0].text, cases[0],
+        "openers without a closer are text"
+    );
+    assert!(doc.links.is_empty());
+
+    // The same links as a search from every `[` finds, in texts made of
+    // nothing but the characters that matter.
+    let alphabet = ["[", "]", "(", ")", "](", "[a]", "a", " ", "\\", "`", "*"];
+    let mut seed = 0x5EED_5EED_0000_0001u64;
+    for _ in 0..400 {
+        let mut src = String::new();
+        for _ in 0..(next(&mut seed) % 60) {
+            src.push_str(alphabet[(next(&mut seed) % alphabet.len() as u64) as usize]);
+        }
+        let (mut close, mut paren) = (md::Next::new(b']'), md::Next::new(b')'));
+        let remembered = links_of(&src, |b, i| md::link_at(b, i, &mut close, &mut paren));
+        assert_eq!(remembered, links_of(&src, link_at_searching), "{src:?}");
+    }
+
+    // Every other construct is linear already: an opener looks no
+    // further than the next marker of its kind. A text of each, at the
+    // editor's limit, parses to one block or one block a line.
+    for unit in [
+        "`", "`a", "*", "*a", "**", "**a", "_", "_a", "a_", "\\", "\\[", "***",
+    ] {
+        let src = unit.repeat(6000 / unit.len());
+        assert_eq!(parse(&src).blocks.len(), 1, "{unit:?}");
+    }
+    assert_eq!(parse(&"a\n\n".repeat(2000)).blocks.len(), 2000);
+    assert_eq!(parse(&"- a\n".repeat(1500)).blocks.len(), 1500);
+    assert!(parse(&"\n".repeat(6000)).blocks.is_empty());
+}
+
+/// SPEC-5.3.3 (granskning 0013:1): a long note's three heavy steps each
+/// get a frame of their own. In the frame where the editor wraps the text
+/// the preview keeps its last layout and asks for another frame; the next
+/// one parses, the one after lays out. A width change lays the same text
+/// out again without a parse, a short note does everything in one frame,
+/// and the preview a long note ends up with is the one a single pass
+/// gives.
+#[test]
+fn spec_5_3_3_a_long_note_is_prepared_over_several_frames() {
+    let mut p = page(1280.0, 800.0, true);
+    let frames = || mock::with(|h| h.frame_requests);
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 0, "the sample is short: one frame");
+    let sample_blocks = p.preview.doc.blocks.len();
+    assert!(sample_blocks > 10);
+
+    let long = "ett *två* [tre](vy://x)\n\n".repeat(200);
+    assert!(long.len() > PHASED && long.len() <= MAX_TEXT);
+    set_text(&mut p, &long);
+    // 1: the editor wraps; the preview still shows the sample.
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 1);
+    assert_eq!(p.preview.doc.blocks.len(), sample_blocks);
+    assert!(p.parsed.is_none());
+    // 2: the parse.
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 2);
+    assert!(p
+        .parsed
+        .as_ref()
+        .is_some_and(|(_, doc)| doc.blocks.len() == 200));
+    assert_eq!(p.preview.doc.blocks.len(), sample_blocks);
+    // 3: the layout, and nothing more is asked for.
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 2);
+    assert_eq!(p.preview.doc.blocks.len(), 200);
+    assert_eq!(p.preview.placed.len(), 200);
+    assert_eq!(p.laid, Some((p.revision, p.layout().text_w())));
+    mock::with(|h| {
+        let links = h.sem.iter().filter(|n| n.role == Role::Link as i32).count();
+        assert_eq!(links, 200, "the whole tree once the layout is ready");
+        assert_eq!(h.links.len(), 200);
+    });
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 2, "an unchanged note is drawn, nothing else");
+
+    // The same preview as one pass over the same text gives.
+    let phased = (p.preview.placed.clone(), p.preview.frags.clone());
+    let width = p.layout().text_w();
+    p.lay_out(parse(&long), width).unwrap();
+    assert_eq!((p.preview.placed.clone(), p.preview.frags.clone()), phased);
+
+    // A narrower window: the editor's frame, then the layout of the text
+    // the preview already holds, with no parse between them.
+    p.resize(Window {
+        width: 1000.0,
+        height: 800.0,
+        scale: 1.0,
+    });
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 3);
+    assert_ne!(p.laid, Some((p.revision, p.layout().text_w())), "not yet");
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 3);
+    assert!(p.parsed.is_none());
+    assert_eq!(p.laid, Some((p.revision, p.layout().text_w())));
+    assert_eq!(p.preview.doc.blocks.len(), 200);
+
+    // Typing while the preview is behind starts it over for the new text.
+    p.event(Event::TextInput { text: "x" });
+    mock::run_frame(&mut p, 0).unwrap();
+    p.event(Event::TextInput { text: "y" });
+    mock::run_frame(&mut p, 0).unwrap();
+    mock::run_frame(&mut p, 0).unwrap();
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(p.laid, Some((p.revision, p.layout().text_w())));
+    assert!(p.preview.doc.blocks.last().is_some_and(|b| b.text == "xy"));
+
+    // Behind the tabs of a narrow window the preview has the frame to
+    // itself: parse, then layout.
+    let mut p = page(400.0, 700.0, true);
+    set_text(&mut p, &long);
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!(frames(), 0, "the editor alone");
+    let read = p.layout().tabs[1];
+    p.event(Event::PointerDown {
+        x: read.x + 4.0,
+        y: read.y + 4.0,
+        button: 1,
+        modifiers: Modifiers(0),
+    });
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!((frames(), p.preview.doc.blocks.len()), (1, 0));
+    mock::run_frame(&mut p, 0).unwrap();
+    assert_eq!((frames(), p.preview.doc.blocks.len()), (1, 200));
+}

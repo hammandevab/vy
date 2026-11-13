@@ -254,15 +254,69 @@ pub fn parse(src: &str) -> Doc {
     doc
 }
 
+/// Where the next occurrence of one byte is, remembered between look-ups.
+///
+/// A text with one opener after another and no closer (`[[[[…`, or
+/// `[a](` over and over) would otherwise be searched to its end once for
+/// every opener: quadratic, and enough to stop a page on the 6 000 bytes
+/// it holds (granskning 0013:1). The look-ups of one pass over a text
+/// start further and further on, so what one of them found, or that it
+/// found nothing, answers the ones after it until they have passed that
+/// place; the stretches searched never overlap, and the whole pass looks
+/// at each byte once.
+pub(crate) struct Next {
+    byte: u8,
+    /// Where the remembered search started; past any text before the first.
+    from: usize,
+    at: Option<usize>,
+}
+
+impl Next {
+    pub(crate) fn new(byte: u8) -> Self {
+        Self {
+            byte,
+            from: usize::MAX,
+            at: None,
+        }
+    }
+
+    /// The first `byte` of `b` at or after `from`.
+    fn find(&mut self, b: &[u8], from: usize) -> Option<usize> {
+        let known = self.from <= from && self.at.is_none_or(|at| at >= from);
+        if !known {
+            let rest = b.get(from..).unwrap_or(&[]);
+            let found = rest.iter().position(|c| *c == self.byte);
+            #[cfg(test)]
+            SEARCHED.with(|n| n.set(n.get() + found.map_or(rest.len(), |n| n + 1)));
+            self.from = from;
+            self.at = found.map(|n| from + n);
+        }
+        self.at
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Bytes the look-ups of [`Next`] examined on this thread: what the
+    /// tests bound for texts made to be searched over and over.
+    pub static SEARCHED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 /// The text of a link starting at `[` in `b[i]`: where the text ends and
-/// where the target starts and ends.
-fn link_at(b: &[u8], i: usize) -> Option<(usize, usize, usize)> {
-    let close = i + 1 + b[i + 1..].iter().position(|c| *c == b']')?;
-    if b.get(close + 1) != Some(&b'(') {
+/// where the target starts and ends. `close` and `paren` remember where
+/// the next `]` and `)` are.
+pub(crate) fn link_at(
+    b: &[u8],
+    i: usize,
+    close: &mut Next,
+    paren: &mut Next,
+) -> Option<(usize, usize, usize)> {
+    let text_end = close.find(b, i + 1)?;
+    if b.get(text_end + 1) != Some(&b'(') {
         return None;
     }
-    let end = close + 2 + b[close + 2..].iter().position(|c| *c == b')')?;
-    (close > i + 1 && end > close + 2).then_some((close, close + 2, end))
+    let end = paren.find(b, text_end + 2)?;
+    (text_end > i + 1 && end > text_end + 2).then_some((text_end, text_end + 2, end))
 }
 
 fn alnum_before(s: &str, i: usize) -> bool {
@@ -287,6 +341,7 @@ fn inline(src: &str, links: &mut Vec<String>) -> (String, Vec<Run>) {
     let mut emphasis = 0u8;
     let mut from = 0;
     let mut i = 0;
+    let (mut close, mut paren) = (Next::new(b']'), Next::new(b')'));
     // End the run of plain or emphasised text collected so far.
     fn cut(out: &str, runs: &mut Vec<Run>, from: &mut usize, style: u8, link: Option<u16>) {
         if out.len() > *from {
@@ -344,7 +399,7 @@ fn inline(src: &str, links: &mut Vec<String>) -> (String, Vec<Run>) {
                 }
                 i += 1;
             }
-            b'[' => match link_at(b, i) {
+            b'[' => match link_at(b, i, &mut close, &mut paren) {
                 Some((text_end, url, url_end)) => {
                     cut(&out, &mut runs, &mut from, style, None);
                     let link = links.len() as u16;

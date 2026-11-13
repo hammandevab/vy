@@ -18,6 +18,13 @@
 //! - **Tabs** "Skriv" and "Läs" instead of the split below 720 px.
 //! - **Storage** of the text after every change (SPEC-5.2.9); without the
 //!   capability the page says "sparas inte".
+//! - **A frame budget kept whatever the text is** (SPEC-5.3.3). The text
+//!   is saved before it is shown, so a note the page could not show
+//!   within 8 ms would stop it at every visit. Parsing looks at each
+//!   byte once (`md.rs`), and a long note's three heavy steps – the
+//!   editor wrapping it, the parse, the preview's layout – each get a
+//!   frame of their own (`PHASED`), the preview showing what it had
+//!   until the new layout is ready.
 //!
 //! `text_style` has no slant (SPEC-5.2.5 takes a font role, a size, a
 //! weight and a colour), so emphasis is set in the serif role instead of
@@ -63,6 +70,12 @@ const PAD: f32 = 18.0;
 const PLATE: f32 = 3.0;
 /// Longest text the editor takes, in bytes.
 const MAX_TEXT: usize = 6000;
+/// Above this many bytes of text the page does one heavy thing a frame:
+/// the editor wraps the text in one, the preview parses it in the next
+/// and lays it out in a third. A text of thousands of one-letter
+/// paragraphs costs each of the three a good part of the 8 ms budget
+/// (SPEC-5.3.3); a text below this does all three in a quarter of it.
+const PHASED: usize = 2000;
 const STORE: &str = "skriv";
 
 /// Indices into the page's text styles.
@@ -127,6 +140,8 @@ struct Frag {
     w: f32,
     style: usize,
     link: Option<u16>,
+    /// The run of the block the fragment is a piece of.
+    run: u16,
     /// Inline code: drawn on a tinted plate.
     plate: bool,
 }
@@ -189,6 +204,10 @@ struct Page {
     preview: Preview,
     /// The revision and width `preview` was laid out for.
     laid: Option<(u32, f32)>,
+    /// A long text parsed and waiting for its layout: its revision.
+    parsed: Option<(u32, Doc)>,
+    /// The revision and width the editor last wrapped the text for.
+    wrapped: Option<(u32, f32)>,
     scroll: ScrollView,
     /// The pane a narrow window shows: 0 the editor, 1 the preview.
     pane: usize,
@@ -290,13 +309,43 @@ impl Page {
         self.preview.height + 2.0 * PAD
     }
 
-    /// Parse the text and wrap it at `width`, unless the preview is
-    /// already laid out for this text and width.
-    fn lay_out(&mut self, width: f32) -> Result<(), VyError> {
+    /// Bring the preview up to date with the text and `width`; true when
+    /// that takes a frame more. A short text is parsed and laid out at
+    /// once. A long one (`PHASED`) is parsed in one frame and laid out in
+    /// the next, and neither in a frame where the editor wraps the text
+    /// (`may_work` false): the preview shows its last layout meanwhile.
+    /// When only the width changed, the text the preview holds is laid
+    /// out again without a parse.
+    fn prepare_preview(&mut self, width: f32, may_work: bool) -> Result<bool, VyError> {
         if self.laid == Some((self.revision, width)) {
-            return Ok(());
+            return Ok(false);
         }
-        let doc = md::parse(self.editor.text());
+        let long = self.editor.text().len() > PHASED;
+        if long && !may_work {
+            return Ok(true);
+        }
+        let doc = if self
+            .laid
+            .is_some_and(|(revision, _)| revision == self.revision)
+        {
+            core::mem::take(&mut self.preview.doc)
+        } else {
+            match self.parsed.take() {
+                Some((revision, doc)) if revision == self.revision => doc,
+                _ if long => {
+                    self.parsed = Some((self.revision, md::parse(self.editor.text())));
+                    return Ok(true);
+                }
+                _ => md::parse(self.editor.text()),
+            }
+        };
+        self.lay_out(doc, width)?;
+        Ok(false)
+    }
+
+    /// Wrap the parsed text `doc` at `width`: the preview for the text as
+    /// it is now.
+    fn lay_out(&mut self, doc: Doc, width: f32) -> Result<(), VyError> {
         let mut frags: Vec<Frag> = Vec::new();
         let mut placed = Vec::with_capacity(doc.blocks.len());
         let mut y = 0.0;
@@ -327,6 +376,7 @@ impl Page {
                                 w: 0.0,
                                 style: S_CODE,
                                 link: None,
+                                run: 0,
                                 plate: false,
                             });
                         }
@@ -338,7 +388,7 @@ impl Page {
                 _ => {
                     let room = (width - indent).max(40.0);
                     let mut x = 0.0;
-                    for run in &block.runs {
+                    for (ri, run) in block.runs.iter().enumerate() {
                         let style = style_of(block.kind, run);
                         let ty = self.types[style];
                         let text = &block.text[run.start..run.end];
@@ -384,6 +434,7 @@ impl Page {
                                         w,
                                         style,
                                         link: run.link,
+                                        run: ri as u16,
                                         plate,
                                     });
                                 }
@@ -614,10 +665,11 @@ impl Page {
                 }
                 if link_node != Some(link) {
                     link_node = Some(link);
+                    // The link's whole text: its run, of which this is
+                    // the first piece.
                     let whole = block
                         .runs
-                        .iter()
-                        .find(|run| run.link == Some(link))
+                        .get(usize::from(frag.run))
                         .map_or(piece, |run| &block.text[run.start..run.end]);
                     f.sem
                         .node_with_id(ID_LINK - i32::from(link), Role::Link, r, whole)?;
@@ -699,6 +751,8 @@ impl App for Page {
             revision: 0,
             preview: Preview::default(),
             laid: None,
+            parsed: None,
+            wrapped: None,
             scroll: ScrollView::new(),
             pane: 0,
             focus: None,
@@ -713,8 +767,17 @@ impl App for Page {
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
         let l = self.layout();
         let t = self.theme;
+        // The editor wraps the text again when the text or its width
+        // changed; for a long text that is this frame's heavy step.
+        let editor_now = (self.revision, l.editor.w);
+        let wrapping = l.show_editor && self.wrapped != Some(editor_now);
+        if l.show_editor {
+            self.wrapped = Some(editor_now);
+        }
         if l.show_preview {
-            self.lay_out(l.text_w())?;
+            if self.prepare_preview(l.text_w(), !wrapping)? {
+                request_frame();
+            }
             self.scroll.clamp(l.view, self.content_h());
             // The preview follows the block the caret is in, and a link
             // the keyboard focused.
