@@ -1231,7 +1231,15 @@ mod tests {
     fn until(shell: &mut crate::shell::Shell, done: impl Fn(&crate::shell::Shell) -> bool) {
         let deadline = Instant::now() + TIMEOUT;
         while shell.retiring() > 0 || !done(shell) {
-            assert!(Instant::now() < deadline, "timed out");
+            assert!(
+                Instant::now() < deadline,
+                "timed out: {} processes still let go of, the active tab {}",
+                shell.retiring(),
+                shell
+                    .active_tab()
+                    .map(|t| shell.tab_status(t))
+                    .unwrap_or_default()
+            );
             if shell.wants_tick() && !shell.tick_pending() {
                 shell.tick();
             }
@@ -1481,6 +1489,159 @@ mod tests {
         shell.shutdown();
         assert_eq!(saved(), kept, "after closing the window");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013, 0015): a page stopped by
+    /// the client's hard limit is told to the user in plain words, with
+    /// the two ways out. A page that cannot get through `vy_init` once it
+    /// has saved something (as `skriv` and `kalkyl` could not) is loaded,
+    /// saves, and is loaded again: its init is aborted at the hard limit.
+    /// The tab then shows that the page stopped, what that means and what
+    /// the runtime said, with "Ladda om" and "Rensa sidans lagring", not
+    /// the manifest's fallback as for a rejected module. "Ladda om" loads
+    /// it again (and it stops again); "Rensa sidans lagring" asks, and
+    /// once answered the page runs. A frame that never returns gets the
+    /// same view; a local file is offered only "Ladda om"; a trap is
+    /// shown with its reason and no talk of time.
+    #[test]
+    fn spec_5_3_3_a_page_stopped_at_the_hard_limit_says_so_and_offers_ways_out() {
+        let sticks = page_stuck_on_its_storage();
+        let data = std::env::temp_dir().join(format!("vy-stopped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let (address, origin) = signed_site(sticks, "Fastnar");
+        let saved = || crate::storage::load(&data.join("storage"), &origin);
+        let mut shell = persisting_shell(&data);
+        let shown = |shell: &mut crate::shell::Shell| texts(&shell.chrome_display_list());
+        let has = |texts: &[String], part: &str| texts.iter().any(|t| t.contains(part));
+        let click = |shell: &mut crate::shell::Shell, r: crate::chrome::Rect| {
+            shell.pointer_move(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            shell.pointer_button(button::PRIMARY, true);
+            shell.pointer_button(button::PRIMARY, false);
+        };
+        let stopped = |s: &crate::shell::Shell, tab| s.tab_status(tab).starts_with("stopped");
+
+        let tab = shell.open_tab(Some(Source::parse(&address).unwrap()));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert!(!has(&shown(&mut shell), "Sidan stannade"));
+        shell.key(0x04, true, 0, false);
+        shell.key(0x04, false, 0, false);
+        shell.reload();
+        until(&mut shell, |s| stopped(s, tab));
+        assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])]);
+        assert!(
+            shell.tab_status(tab).contains("call aborted after"),
+            "{}",
+            shell.tab_status(tab)
+        );
+
+        // What the user sees: what happened, what it means, two ways out.
+        let view = shown(&mut shell);
+        for part in [
+            "Sidan stannade",
+            "Sidan tog för lång tid på sig och avbröts",
+            "call aborted after",
+            "Ladda om",
+            "Rensa sidans lagring",
+            "Andra flikar påverkas inte.",
+        ] {
+            assert!(has(&view, part), "{part}: {view:?}");
+        }
+        for not in ["Reservtexten", "Modulen avvisades"] {
+            assert!(!has(&view, not), "{not}: {view:?}");
+        }
+        shell.frame();
+        let page = shell.layout().page;
+        let (reload, clear) = (
+            shell.layout().reload_page.expect("Ladda om"),
+            shell.layout().clear_storage.expect("Rensa sidans lagring"),
+        );
+        for r in [reload, clear] {
+            assert!(
+                r.x >= page.x && r.right() <= page.right() && r.y > page.y,
+                "{r:?}"
+            );
+        }
+        assert!(clear.x > reload.right());
+
+        // "Ladda om": loaded again, and stuck again on what it saved.
+        let generation = shell.tab_generation(tab);
+        click(&mut shell, reload);
+        assert_eq!(shell.tab_generation(tab), generation + 1);
+        until(&mut shell, |s| stopped(s, tab));
+        assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])]);
+
+        // "Rensa sidans lagring": asked, answered, and the page runs.
+        shell.frame();
+        let clear = shell.layout().clear_storage.expect("still offered");
+        click(&mut shell, clear);
+        assert_eq!(
+            shell.question(),
+            Some(format!(
+                "Rensa allt som {origin} har sparat? Det går inte att ångra."
+            ))
+        );
+        std::thread::sleep(Duration::from_millis(
+            crate::shell::DIALOG_ARM_MS as u64 + 60,
+        ));
+        shell.frame();
+        let yes = shell.layout().allow.expect("Rensa");
+        click(&mut shell, yes);
+        until(&mut shell, |s| s.tab_status(tab) == "running");
+        assert!(saved().is_empty());
+        let view = shown(&mut shell);
+        assert!(!has(&view, "Sidan stannade"), "{view:?}");
+        shell.frame();
+        assert!(shell.layout().reload_page.is_none() && shell.layout().clear_storage.is_none());
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&data);
+
+        // A frame that never returns, and a trap, in local files.
+        let module = |frame: &str| {
+            wat::parse_str(format!(
+                r#"(module
+                    (memory (export "memory") 1)
+                    (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                    (func (export "vy_frame") (param i32) (result i32) {frame} i32.const 0)
+                    (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+                    (func (export "vy_resize") (param i32 i32 f32))
+                    (func (export "vy_suspend") (result i32) i32.const 0)
+                    (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+            ))
+            .unwrap()
+        };
+        let dir = std::env::temp_dir().join(format!("vy-stopped-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        for (name, frame, slow) in [
+            ("spins", "(loop $spin (br $spin))", true),
+            ("traps", "unreachable", false),
+        ] {
+            let path = dir.join(format!("{name}.wasm"));
+            std::fs::write(&path, module(frame)).unwrap();
+            let tab = shell.open_tab(Some(Source::File { path, draft: None }));
+            settle(&mut shell, 2, TIMEOUT).unwrap();
+            assert!(stopped(&shell, tab), "{name}: {}", shell.tab_status(tab));
+            let view = shown(&mut shell);
+            assert!(
+                has(&view, "Sidan stannade") && has(&view, "Ladda om"),
+                "{view:?}"
+            );
+            assert_eq!(has(&view, "tog för lång tid"), slow, "{name}: {view:?}");
+            assert_eq!(has(&view, "module trapped"), !slow, "{name}: {view:?}");
+            assert!(!has(&view, "Rensa sidans lagring"), "no origin: {view:?}");
+            shell.frame();
+            assert!(shell.layout().clear_storage.is_none());
+            let generation = shell.tab_generation(tab);
+            let reload = shell.layout().reload_page.expect("Ladda om");
+            click(&mut shell, reload);
+            assert_eq!(shell.tab_generation(tab), generation + 1, "{name}");
+            settle(&mut shell, 2, TIMEOUT).unwrap();
+            assert!(stopped(&shell, tab));
+        }
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// SPEC-5.2.9, SPEC-9.1.1 (granskning 0006:1): letting tab processes go
@@ -2524,7 +2685,11 @@ mod tests {
         let frame = shell.frame().clone();
         assert_eq!((frame.width, frame.height), (800, 600));
         assert!(texts(&chrome_for(
-            crate::chrome::PageView::Stopped("Flikprocessen avslutades."),
+            crate::chrome::PageView::Stopped {
+                reason: "Flikprocessen avslutades.",
+                explanation: None,
+                can_clear: false,
+            },
             "game.wasm"
         ))
         .contains(&"Sidan stannade".to_string()));

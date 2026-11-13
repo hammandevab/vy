@@ -1545,6 +1545,14 @@ impl Shell {
                         tab.loaded = true;
                         tab.state = State::Running;
                         tab.tick_due = true;
+                    } else if vy_runtime::Error::is_over_budget(&error) {
+                        // The module was not rejected: it was loaded and
+                        // its `vy_init` ran into the hard limit (granskning
+                        // 0013: a page stuck on what it saved itself). That
+                        // is a page that stopped, with the ways out the
+                        // stopped view offers, not the manifest's fallback.
+                        tab.state = State::Stopped(error);
+                        tab.loaded = false;
                     } else {
                         // A rejected module shows the fallback when the
                         // manifest has one (SPEC-8.3.1), else the reason.
@@ -2177,7 +2185,11 @@ impl Shell {
                         }
                     }
                 }
-                State::Stopped(reason) | State::Gone(reason) => PageView::Stopped(reason),
+                State::Stopped(reason) | State::Gone(reason) => PageView::Stopped {
+                    reason,
+                    explanation: stop_explanation(reason, t.origin.is_some()),
+                    can_clear: t.origin.is_some(),
+                },
             },
         };
         let badges = tab.map(Tab::badges).unwrap_or_default();
@@ -2874,6 +2886,15 @@ impl Shell {
                 }
                 self.frame_dirty = true;
             }
+            return;
+        }
+        // The ways out of a page that stopped.
+        if layout.reload_page.is_some_and(|r| r.contains(x, y)) {
+            self.reload();
+            return;
+        }
+        if layout.clear_storage.is_some_and(|r| r.contains(x, y)) {
+            self.ask_clear_storage();
             return;
         }
         if let Some(r) = layout.external {
@@ -4139,6 +4160,30 @@ pub struct PageLayer<'a> {
     pub place: LayerPlace,
 }
 
+/// What a stop means, in plain Swedish, when its reason is one of the
+/// client's own time limits (SPEC-5.3.3): the hard limit on a single
+/// call, or the suspension after repeated breaches of the frame budget.
+/// These are the stops a page can run into on what it saved itself
+/// (granskning 0013), so the user is told what happened and what to do,
+/// not only the runtime's words; `saves` is whether the page has an
+/// origin, and so may have something saved to clear. `None` for any
+/// other stop, whose reason is shown as it is.
+fn stop_explanation(reason: &str, saves: bool) -> Option<&'static str> {
+    if vy_runtime::Error::is_over_budget(reason) {
+        Some(if saves {
+            "Sidan tog för lång tid på sig och avbröts: ett enda anrop gick över klientens hårda tidsgräns. Det händer när sidan fastnar i en beräkning, ofta på något den själv har sparat. Ladda om sidan; fastnar den igen kan du rensa det den har sparat."
+        } else {
+            "Sidan tog för lång tid på sig och avbröts: ett enda anrop gick över klientens hårda tidsgräns. Det händer när sidan fastnar i en beräkning. Ladda om sidan för att försöka igen."
+        })
+    } else if reason.contains("suspended after repeated budget breaches") {
+        Some(
+            "Sidan gick över sin tidsbudget flera frames i rad och stoppades av klienten. Ladda om sidan för att börja om.",
+        )
+    } else {
+        None
+    }
+}
+
 /// Log a change of the tab's raster path (the fast path gave up).
 fn note_raster_change(tab: &mut Tab, before: RasterPath) {
     if tab.raster.path() != before {
@@ -4221,6 +4266,37 @@ pub mod hid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPEC-5.3.3 (granskning 0013): the stops the client's own time
+    /// limits cause are explained in plain Swedish; the texts are the
+    /// runtime's and the tab loop's own. Any other stop is shown by its
+    /// reason alone.
+    #[test]
+    fn spec_5_3_3_stops_by_the_budget_are_explained() {
+        let aborted = vy_runtime::Error::OverBudget { used_ms: 64 }.to_string();
+        let hard = stop_explanation(&aborted, true).expect("the hard limit");
+        assert!(hard.starts_with("Sidan tog för lång tid på sig och avbröts"));
+        assert!(hard.contains("rensa det den har sparat"));
+        // A page without an origin saves nothing: no talk of clearing.
+        let local = stop_explanation(&aborted, false).expect("the hard limit");
+        assert!(local.starts_with("Sidan tog för lång tid på sig och avbröts"));
+        assert!(!local.contains("sparat"), "{local}");
+        for suspended in [
+            vy_runtime::Error::Suspended.to_string(),
+            "module suspended after repeated budget breaches (SPEC-5.3.3)".to_string(),
+        ] {
+            let soft = stop_explanation(&suspended, true).expect("the suspension");
+            assert!(soft.contains("tidsbudget") && soft != hard, "{suspended}");
+        }
+        for other in [
+            vy_runtime::Error::Trap("unreachable".into()).to_string(),
+            vy_runtime::Error::Exited(0).to_string(),
+            "Flikprocessen avslutades.".to_string(),
+            String::new(),
+        ] {
+            assert_eq!(stop_explanation(&other, true), None, "{other}");
+        }
+    }
 
     /// SPEC-5.2.8, SPEC-7.1.3, SPEC-2.1.4: a plain-http request goes only
     /// to the page's own loopback origin, by the runtime's one rule

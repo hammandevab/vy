@@ -136,7 +136,16 @@ pub enum PageView<'a> {
     /// The manifest's `fallback` (SPEC-8.3.1).
     Fallback(&'a [Block]),
     /// The page stopped (a trap, `exit`, the budget) or its process is gone.
-    Stopped(&'a str),
+    Stopped {
+        /// What the tab process, or the shell, said happened.
+        reason: &'a str,
+        /// What that means in plain words, when the shell can say: a
+        /// stop by one of the client's own time limits (SPEC-5.3.3).
+        explanation: Option<&'a str>,
+        /// The page has an origin, and so may have something saved:
+        /// "Rensa sidans lagring" is offered beside "Ladda om".
+        can_clear: bool,
+    },
 }
 
 /// What the user is being asked, over the top of the page area.
@@ -250,6 +259,10 @@ pub struct Layout {
     pub deny: Option<Rect>,
     /// "Öppna externt" in an error view.
     pub external: Option<Rect>,
+    /// "Ladda om" in the view of a page that stopped.
+    pub reload_page: Option<Rect>,
+    /// "Rensa sidans lagring" in the view of a page that stopped.
+    pub clear_storage: Option<Rect>,
     /// The find bar, over the top right of the page area: what is under
     /// it is the shell's.
     pub find: Option<Rect>,
@@ -742,7 +755,11 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
                 ty += size.h + after;
             }
         }
-        PageView::Stopped(reason) => {
+        PageView::Stopped {
+            reason,
+            explanation,
+            can_clear,
+        } => {
             let mut ty = page.y + margin;
             let _ = dl.text(
                 page.x + margin,
@@ -752,17 +769,45 @@ pub fn draw(view: &View<'_>, text: &mut TextEngine, styles: &Styles) -> (Vec<u8>
                 "Sidan stannade".as_bytes(),
             );
             ty += 22.0 * vy_render::text::LINE_HEIGHT_FACTOR + 12.0;
-            let _ = dl.text(page.x + margin, ty, column, styles.body, reason.as_bytes());
-            let size = text
-                .measure(styles.body, column, reason)
-                .unwrap_or_default();
-            ty += size.h + 12.0;
+            // What it means, when the shell can say, then what was
+            // reported; else what was reported, as the text.
+            let mut paragraph = |dl: &mut DisplayList, style: u16, s: &str, after: f32| {
+                let _ = dl.text(page.x + margin, ty, column, style, s.as_bytes());
+                ty += text.measure(style, column, s).unwrap_or_default().h + after;
+            };
+            match explanation {
+                Some(plain) => {
+                    paragraph(&mut dl, styles.body, plain, 8.0);
+                    paragraph(&mut dl, styles.address_muted, reason, 16.0);
+                }
+                None => paragraph(&mut dl, styles.body, reason, 16.0),
+            }
+            // The ways out: load it again, or first clear what it saved.
+            let mut bx = page.x + margin;
+            let mut button = |dl: &mut DisplayList, label: &str, primary: bool| {
+                let (style, fill) = if primary {
+                    (styles.small_white, BUTTON_BG)
+                } else {
+                    (styles.small, BUTTON_PLAIN)
+                };
+                let size = text.measure(style, 0.0, label).unwrap_or_default();
+                let b = Rect::new(bx, ty, size.w + 24.0, 30.0);
+                let _ = dl.rect(b.x, b.y, b.w, b.h, 5.0, fill);
+                centred_both(dl, text, style, b, label);
+                bx = b.right() + 10.0;
+                b
+            };
+            layout.reload_page = Some(button(&mut dl, "Ladda om", true));
+            if can_clear {
+                layout.clear_storage = Some(button(&mut dl, "Rensa sidans lagring", false));
+            }
+            ty += 30.0 + 14.0;
             let _ = dl.text(
                 page.x + margin,
                 ty,
                 column,
                 styles.address_muted,
-                "Andra flikar påverkas inte. F5 laddar om.".as_bytes(),
+                "Andra flikar påverkas inte.".as_bytes(),
             );
         }
     }

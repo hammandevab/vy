@@ -105,6 +105,19 @@ pub enum Error {
     Hidden,
 }
 
+impl Error {
+    /// True when `text` is how [`Error::OverBudget`] reads: a call into
+    /// the module that was aborted at the hard limit of logical time
+    /// (SPEC-5.3.3). A tab process reports why its page stopped as the
+    /// error's text, and the shell, the same build, tells the user what a
+    /// stop of this kind means.
+    pub fn is_over_budget(text: &str) -> bool {
+        text.strip_prefix("call aborted after ")
+            .and_then(|rest| rest.split_once(" ms of logical time"))
+            .is_some_and(|(ms, _)| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()))
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

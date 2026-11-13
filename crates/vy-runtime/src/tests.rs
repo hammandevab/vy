@@ -4058,3 +4058,35 @@ fn spec_9_4_2_code_store_touches_only_its_own_files() {
     assert_eq!((std::fs::read(&target).unwrap(), modified(&target)), before);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// SPEC-5.3.3: the text of a call aborted at the hard limit is recognised
+/// as that, whatever the time it names, and no other error's text is: the
+/// shell explains such a stop to the user from the text a tab reports.
+#[test]
+fn spec_5_3_3_an_aborted_call_is_recognised_by_its_text() {
+    for used_ms in [0, 64, 65, 12_345] {
+        assert!(Error::is_over_budget(
+            &Error::OverBudget { used_ms }.to_string()
+        ));
+    }
+    for other in [
+        Error::Suspended,
+        Error::Trap("unreachable".into()),
+        Error::Exited(3),
+        Error::InitFailed(-2),
+        Error::Hidden,
+        Error::NotInitialized,
+        Error::Invalid("call aborted after 64 ms of logical time".into()),
+    ] {
+        assert!(!Error::is_over_budget(&other.to_string()), "{other}");
+    }
+    for text in [
+        "",
+        "call aborted after",
+        "call aborted after  ms of logical time",
+        "call aborted after x ms of logical time",
+        "the call aborted after 64 ms of logical time",
+    ] {
+        assert!(!Error::is_over_budget(text), "{text}");
+    }
+}
