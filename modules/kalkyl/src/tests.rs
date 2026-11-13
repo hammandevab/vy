@@ -3,7 +3,7 @@
 //! against the SDK's mock host.
 
 use super::*;
-use sheet::{parse_number, Fault, CELLS, ONE};
+use sheet::{parse_number, Fault, CELLS, HEAD_CHARS, ONE};
 use vy_sdk::mock;
 
 /// The index of the cell named `name`, as `B3`.
@@ -786,6 +786,201 @@ fn the_grid_is_virtualised_and_the_tree_is_whole() {
         modifiers: Modifiers(0),
     });
     assert_eq!(p.scroll.offset(), before - 100.0);
+}
+
+/// SPEC-5.3.3 (granskning 0013:3): a frame costs what its cells show, not
+/// what they hold. Of a text that is cut at its cell the page sends the
+/// start, as much as a cell's width can show, and measures nothing; the
+/// tree has every cell, the long texts whole while their pool lasts and
+/// cut after that. 2 600 cells of 200 bytes used to send 114 KB to draw
+/// the cells in view and 535 KB for the tree, in every frame.
+#[test]
+fn spec_5_3_3_a_frame_sends_what_the_cells_show_of_long_texts() {
+    let mut p = page(1600.0, 1000.0, true);
+    let long = "Wi".repeat(100);
+    for i in 0..CELLS {
+        p.sheet.set(i, &long);
+    }
+    let l = p.layout();
+    let in_view = (l.cols.1 - l.cols.0) * (l.rows.1 - l.rows.0);
+    assert!(in_view > 500, "{in_view}");
+    mock::with(|h| h.text_bytes = 0);
+    mock::run_frame(&mut p, 0).unwrap();
+    mock::with(|h| {
+        let drawn: Vec<&str> = h
+            .frame_ops()
+            .iter()
+            .filter_map(|op| match op {
+                mock::Op::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let heads = drawn.iter().filter(|t| **t == &long[..HEAD_CHARS]).count();
+        assert_eq!(heads, in_view, "every cell in view shows its start");
+        let cut = |t: &&str| !t.starts_with("Wi") || t.len() <= HEAD_CHARS;
+        assert!(drawn.iter().all(cut), "and no more than that");
+        // Nothing but what was drawn went to the host: no text was
+        // measured to find out that it does not fit.
+        let cells = (in_view * HEAD_CHARS) as u64;
+        assert!(h.text_bytes < cells + 1500, "{}", h.text_bytes);
+
+        let labels: Vec<&str> = h
+            .sem
+            .iter()
+            .filter(|n| n.role == Role::Cell as i32)
+            .map(|n| n.text.as_str())
+            .collect();
+        assert_eq!(labels.len(), CELLS, "every cell is in the tree");
+        assert_eq!(labels[0], format!("A1: {long}"));
+        let whole = labels.iter().filter(|t| t.ends_with(&long)).count();
+        assert_eq!(whole, LABEL_POOL / (4 + 200 - LABEL_SHORT), "the pool");
+        assert_eq!(labels[CELLS - 1], "Z100: WiWiWiWiWiWiWi…");
+        let bytes: usize = labels.iter().map(|t| t.len()).sum();
+        assert!(bytes <= CELLS * (LABEL_SHORT + 3) + LABEL_POOL, "{bytes}");
+        assert!(h.refusals.is_empty(), "{:?}", h.refusals);
+    });
+    // What is copied is still the whole text.
+    mock::as_copy_gesture(|| key_mod(&mut p, key::C, 2));
+    mock::with(|h| assert_eq!(h.clipboard, long));
+
+    // A window with more such cells in view than a frame pays for whole:
+    // each shows less of its text, and a column has one clip for them all.
+    let mut p = page(2560.0, 1440.0, true);
+    for i in 0..CELLS {
+        p.sheet.set(i, &long);
+    }
+    let l = p.layout();
+    let in_view = (l.cols.1 - l.cols.0) * (l.rows.1 - l.rows.0);
+    let each = DRAW_POOL / in_view;
+    assert!(in_view > 1200 && (HEAD_MIN..HEAD_CHARS).contains(&each));
+    mock::run_frame(&mut p, 0).unwrap();
+    mock::with(|h| {
+        let ops = h.frame_ops();
+        let is_head =
+            |op: &&mock::Op| matches!(op, mock::Op::Text { text, .. } if *text == long[..each]);
+        assert_eq!(ops.iter().filter(is_head).count(), in_view);
+        let clips = ops
+            .iter()
+            .filter(|op| matches!(op, mock::Op::ClipPush { .. }))
+            .count();
+        assert!(clips <= COLS + 4, "{clips} clips");
+        assert!(h.refusals.is_empty(), "{:?}", h.refusals);
+    });
+
+    // Characters of several bytes: 28 of them, or 40 bytes, whichever is
+    // less, and never part of one.
+    p.sheet.set(at("A1"), &"å".repeat(100));
+    p.sheet.set(at("B1"), &"\u{4e2d}".repeat(66));
+    p.sheet.set(at("C1"), "kort");
+    assert_eq!(p.sheet.get(at("A1")).unwrap().head(), "å".repeat(20));
+    assert_eq!(p.sheet.get(at("B1")).unwrap().head(), "\u{4e2d}".repeat(13));
+    assert_eq!(p.sheet.get(at("C1")).unwrap().head(), "kort");
+}
+
+/// A text still runs over the empty cells to its right when it fits them
+/// whole, measured once, and is cut at its own cell when it does not.
+#[test]
+fn a_text_runs_over_empty_cells_or_is_cut_at_its_own() {
+    let mut p = page(800.0, 600.0, true);
+    for i in p.sheet.filled().collect::<Vec<_>>() {
+        p.sheet.set(i, "");
+    }
+    // 35 characters: 273 px in the mock, so the text needs three cells.
+    let title = "En rubrik som är längre än sin cell";
+    p.sheet.set(at("A1"), title);
+    let frame = |p: &mut Page| -> (Vec<mock::Op>, u64) {
+        mock::with(|h| h.text_bytes = 0);
+        mock::run_frame(p, 0).unwrap();
+        mock::with(|h| (h.frame_ops().to_vec(), h.text_bytes))
+    };
+    let at_cell = |ops: &[mock::Op], text: &str| -> Option<bool> {
+        let i = ops
+            .iter()
+            .position(|op| matches!(op, mock::Op::Text { text: t, .. } if t == text))?;
+        // Cut texts come after the whole ones, inside their column's clip.
+        let open = |ops: &[mock::Op]| {
+            let count = |push: bool| {
+                ops.iter()
+                    .filter(|op| match op {
+                        mock::Op::ClipPush { .. } => push,
+                        mock::Op::ClipPop => !push,
+                        _ => false,
+                    })
+                    .count()
+            };
+            count(true) - count(false)
+        };
+        Some(open(&ops[..i]) > open(&ops[..1]))
+    };
+    let (ops, first) = frame(&mut p);
+    assert_eq!(at_cell(&ops, title), Some(false), "whole and not clipped");
+    let (_, second) = frame(&mut p);
+    assert_eq!(first - second, title.len() as u64, "measured once");
+
+    // With C1 taken it does not fit: its start, clipped at A1.
+    p.sheet.set(at("C1"), "x");
+    let (ops, _) = frame(&mut p);
+    assert_eq!(at_cell(&ops, title), None);
+    assert_eq!(
+        at_cell(&ops, "En rubrik som är längre än s"),
+        Some(true),
+        "28 characters under the cell's clip"
+    );
+    // With only D1 taken it fits again.
+    p.sheet.set(at("C1"), "");
+    p.sheet.set(at("D1"), "x");
+    let (ops, _) = frame(&mut p);
+    assert_eq!(at_cell(&ops, title), Some(false));
+    // A text of 29 one-byte characters and no empty cell beside it is
+    // not measured at all.
+    p.sheet.set(at("A2"), &"m".repeat(29));
+    p.sheet.set(at("B2"), "x");
+    frame(&mut p);
+    let (_, before) = frame(&mut p);
+    p.sheet.set(at("A2"), &"n".repeat(29));
+    let (ops, after) = frame(&mut p);
+    assert_eq!(after, before, "a new value, and nothing measured");
+    assert_eq!(at_cell(&ops, &"n".repeat(28)), Some(true));
+}
+
+/// A frame measures 8 KB of text at the most. A view with more texts that
+/// may fit than that has them measured over the frames that follow, and
+/// each is cut at its cell until it has been.
+#[test]
+fn texts_in_view_are_measured_a_pool_a_frame() {
+    let mut p = page(2560.0, 1440.0, true);
+    let text = "m".repeat(HEAD_CHARS);
+    for i in 0..CELLS {
+        p.sheet.set(i, &text);
+    }
+    let l = p.layout();
+    let in_view = (l.cols.1 - l.cols.0) * (l.rows.1 - l.rows.0);
+    let unmeasured = |p: &Page| {
+        (0..in_view)
+            .filter(|i| p.sheet.get(*i).unwrap().width < 0.0)
+            .count()
+    };
+    assert_eq!(unmeasured(&p), in_view);
+    let mut frames = 0;
+    while unmeasured(&p) > 0 {
+        let (before, asked) = (unmeasured(&p), mock::with(|h| h.frame_requests));
+        mock::with(|h| h.text_bytes = 0);
+        mock::run_frame(&mut p, 0).unwrap();
+        frames += 1;
+        let measured = before - unmeasured(&p);
+        assert_eq!(measured, (MEASURE_POOL / HEAD_CHARS).min(before));
+        mock::with(|h| {
+            // Every cell in view is drawn in every one of the frames.
+            let drawn = h
+                .frame_ops()
+                .iter()
+                .filter(|op| matches!(op, mock::Op::Text { text, .. } if text.starts_with("mm")))
+                .count();
+            assert_eq!(drawn, in_view);
+            assert_eq!(h.frame_requests, asked + u32::from(unmeasured(&p) > 0));
+        });
+    }
+    assert_eq!(frames, (in_view * HEAD_CHARS).div_ceil(MEASURE_POOL));
 }
 
 /// SPEC-5.2.9, SPEC-5.3.1: the sheet comes back in a new instance; without

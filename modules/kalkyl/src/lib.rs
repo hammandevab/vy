@@ -44,7 +44,7 @@ use alloc::string::String;
 use alloc::vec;
 use sheet::{
     col_name, col_row, format_decimals, format_number, index, name, push_u64, Sheet, Value, COLS,
-    MAX_SRC, ROWS,
+    HEAD_BYTES, HEAD_CHARS, MAX_SRC, ROWS,
 };
 use vy_sdk::event::{button, key};
 use vy_sdk::math::{ceil, floor, snap};
@@ -73,6 +73,32 @@ const CELL_PAD: f32 = 6.0;
 /// Room for the scroll bars right of and below the cells.
 const GUTTER: f32 = 12.0;
 const KEY: &str = "kalkyl";
+/// Bytes of a text cell's label that the tree always has: the cell's name
+/// and the start of its text. The tree holds every cell that is not
+/// empty, in view or not, in every frame, and the host charges for each
+/// byte: 2 600 labels of 200 bytes were more than a frame's whole budget
+/// (granskning 0013:3).
+const LABEL_SHORT: usize = 20;
+/// Bytes beyond [`LABEL_SHORT`] that the labels of one frame's tree share.
+/// A sheet with less long text than this has every text whole in its
+/// tree; in one with more, the texts after that are cut to
+/// [`LABEL_SHORT`] bytes and an ellipsis, and are whole in the formula
+/// field when their cell is selected.
+const LABEL_POOL: usize = 12 * 1024;
+/// Bytes that the texts cut at their cells share in one frame. Up to 580
+/// such cells in view, a window of 1600 × 1000, each has the
+/// [`HEAD_CHARS`] characters its cell can show; with more in view each
+/// has less, down to [`HEAD_MIN`], and a text of narrow letters may end
+/// short of its cell's edge.
+const DRAW_POOL: usize = 16 * 1024;
+/// Fewest bytes of a text that is cut at its cell.
+const HEAD_MIN: usize = 12;
+/// Bytes of text one frame measures to see whether texts fit the cells
+/// they may run over; each is measured once, when it first comes into
+/// view. A view with more than this to measure, 1 300 cells of 28
+/// letters in a window of 2560 × 1440, takes a few frames to it, and a
+/// text not yet measured is cut at its cell meanwhile.
+const MEASURE_POOL: usize = 8 * 1024;
 /// Units of the sheet's work one step of a recalculation does; a cell
 /// looked at is a unit. Measured in vy-runtime (`budget_tests` in vy-cli)
 /// a unit is 40 to 90 units of fuel, whatever the sheet, so a step is at
@@ -178,6 +204,10 @@ struct Page {
     last_press: Option<((usize, usize), i64)>,
     /// What the last copy did, until the selection moves.
     message: String,
+    /// Bytes of text this frame may still measure ([`MEASURE_POOL`]), and
+    /// whether a text in view went unmeasured for want of them.
+    measure_left: usize,
+    unmeasured: bool,
 }
 
 impl Page {
@@ -626,39 +656,97 @@ impl Page {
         )
     }
 
-    /// The text of one cell in view.
+    /// True when the text in cell (`col`, `row`) is drawn whole: it fits
+    /// its cell, or its cell and the empty cells to its right. A text
+    /// too long for the cells that are empty is not even measured: every
+    /// byte of a measured text costs, and a sheet may hold 200 bytes in
+    /// every cell in view.
+    fn text_is_whole(&mut self, col: usize, row: usize) -> Result<bool, VyError> {
+        let i = index(col, row);
+        // Past the last column there is nothing to run over.
+        let empty = |sheet: &Sheet, c: usize| c < COLS && sheet.get(index(c, row)).is_none();
+        let Some(cell) = self.sheet.get(i) else {
+            return Ok(false);
+        };
+        let least = cell.shown().len().div_ceil(HEAD_CHARS);
+        if !(col + 1..col + least).all(|c| empty(&self.sheet, c)) {
+            return Ok(false);
+        }
+        let mut width = cell.width;
+        if width < 0.0 {
+            // Until a later frame measures it, it is cut at its cell.
+            let Some(left) = self.measure_left.checked_sub(cell.shown().len()) else {
+                self.unmeasured = true;
+                return Ok(false);
+            };
+            self.measure_left = left;
+            width = text_measure(self.s.cell, 0.0, cell.shown())?.w;
+            if let Some(cell) = self.sheet.get_mut(i) {
+                cell.width = width;
+            }
+        }
+        let needs = ceil((width + 2.0 * CELL_PAD) / CELL_W) as usize;
+        Ok((col + 1..col + needs).all(|c| empty(&self.sheet, c)))
+    }
+
+    /// The text of one cell in view. A text that is cut at its cell is
+    /// left for a second round, where `cut` says how many bytes of it to
+    /// draw and the caller holds the clip of its column; true when the
+    /// cell is such a text.
     fn draw_cell(
         &mut self,
         f: &mut Frame,
         l: &Layout,
         col: usize,
         row: usize,
-    ) -> Result<(), VyError> {
+        cut: Option<usize>,
+    ) -> Result<bool, VyError> {
         let i = index(col, row);
         let style = self.s.cell;
         let room = CELL_W - 2.0 * CELL_PAD;
-        match self.sheet.get_mut(i) {
-            Some(cell) if cell.width < 0.0 => {
-                // A number too wide for its cell loses decimals until it fits.
-                let mut w = text_measure(style, 0.0, cell.shown())?.w;
-                cell.decimals = 6;
-                if let Value::Num(v) = cell.value {
-                    while w > room && cell.decimals > 0 {
-                        cell.decimals -= 1;
-                        let shorter = format_decimals(v, u32::from(cell.decimals));
-                        w = text_measure(style, 0.0, &shorter)?.w;
-                    }
-                }
-                cell.width = w;
-            }
-            Some(_) => {}
-            None => return Ok(()),
-        }
-        let Some(cell) = self.sheet.get(i) else {
-            return Ok(());
+        let is_text = match self.sheet.get(i) {
+            Some(cell) => matches!(cell.value, Value::Text),
+            None => return Ok(false),
         };
         let r = l.cell(col, row);
         let y = r.y + (CELL_H - self.s.line_h) / 2.0;
+        if is_text {
+            let whole = self.text_is_whole(col, row)?;
+            let Some(cell) = self.sheet.get(i) else {
+                return Ok(false);
+            };
+            match cut {
+                None if whole => {
+                    f.text(r.x + CELL_PAD, y, 0.0, style, cell.shown())?;
+                }
+                Some(bytes) if !whole => {
+                    let head = cell.head();
+                    let head = &head[..head.floor_char_boundary(bytes)];
+                    f.text(r.x + CELL_PAD, y, 0.0, style, head)?;
+                }
+                _ => {}
+            }
+            return Ok(!whole);
+        }
+        if cut.is_some() {
+            return Ok(false);
+        }
+        if let Some(cell) = self.sheet.get_mut(i).filter(|cell| cell.width < 0.0) {
+            // A number too wide for its cell loses decimals until it fits.
+            let mut w = text_measure(style, 0.0, cell.shown())?.w;
+            cell.decimals = 6;
+            if let Value::Num(v) = cell.value {
+                while w > room && cell.decimals > 0 {
+                    cell.decimals -= 1;
+                    let shorter = format_decimals(v, u32::from(cell.decimals));
+                    w = text_measure(style, 0.0, &shorter)?.w;
+                }
+            }
+            cell.width = w;
+        }
+        let Some(cell) = self.sheet.get(i) else {
+            return Ok(false);
+        };
         let x = r.right() - CELL_PAD - cell.width;
         match cell.value {
             Value::Num(_) if cell.width > room => {
@@ -674,22 +762,9 @@ impl Page {
             Value::Fault(_) => {
                 f.text_centred(r, self.s.fault, cell.shown())?;
             }
-            Value::Text => {
-                // A long text runs over the empty cells to its right.
-                let needs = ceil((cell.width + 2.0 * CELL_PAD) / CELL_W) as usize;
-                let free = (col + 1..(col + needs).min(COLS))
-                    .all(|c| self.sheet.get(index(c, row)).is_none());
-                if cell.width <= room || free {
-                    f.text(r.x + CELL_PAD, y, 0.0, style, cell.shown())?;
-                } else {
-                    let inside = Rect::new(r.x, r.y, CELL_W - CELL_PAD / 2.0, CELL_H);
-                    f.clipped(inside, 0.0, |f| {
-                        f.text(r.x + CELL_PAD, y, 0.0, style, cell.shown())
-                    })?;
-                }
-            }
+            Value::Text => {}
         }
-        Ok(())
+        Ok(false)
     }
 
     fn draw_grid(&mut self, f: &mut Frame, l: &Layout) -> Result<(), VyError> {
@@ -725,12 +800,32 @@ impl Page {
         if many {
             f.rect(range, 0.0, RANGE)?;
         }
+        let edited = self.editing.then_some(self.cur);
+        let (mut cut, mut cut_cols) = (0, 0u32);
         for row in r0..r1 {
             for col in c0..c1 {
-                if !(self.editing && (col, row) == self.cur) {
-                    self.draw_cell(f, l, col, row)?;
+                if edited != Some((col, row)) && self.draw_cell(f, l, col, row, None)? {
+                    cut += 1;
+                    cut_cols |= 1 << col;
                 }
             }
+        }
+        // The texts that are cut at their cells: a column at a time under
+        // one clip, and of each as much as a cell can show, or less when
+        // the view holds more of them than a frame can pay for.
+        let bytes = (DRAW_POOL / cut.max(1)).clamp(HEAD_MIN, HEAD_BYTES);
+        for col in (c0..c1).filter(|col| cut_cols & 1 << col != 0) {
+            let top = l.cell(col, r0);
+            let rows = (r1 - r0) as f32 * CELL_H;
+            let inside = Rect::new(top.x, top.y, CELL_W - CELL_PAD / 2.0, rows);
+            f.clipped(inside, 0.0, |f| {
+                for row in r0..r1 {
+                    if edited != Some((col, row)) {
+                        self.draw_cell(f, l, col, row, Some(bytes))?;
+                    }
+                }
+                Ok(())
+            })?;
         }
         if many {
             Self::outline(f, range, line, p.accent)?;
@@ -827,6 +922,8 @@ impl Page {
         f.sem
             .begin(Role::Table, l.grid, "Blad med 26 kolumner och 100 rader")?;
         let mut open = None;
+        let mut pool = LABEL_POOL;
+        let mut short = String::with_capacity(LABEL_SHORT + 3);
         for i in self.sheet.filled() {
             let (col, row) = col_row(i);
             if open != Some(row) {
@@ -840,7 +937,19 @@ impl Page {
                 open = Some(row);
             }
             if let Some(cell) = self.sheet.get(i) {
-                f.sem.node(Role::Cell, l.cell(col, row), &cell.label)?;
+                let more = cell.label.len().saturating_sub(LABEL_SHORT);
+                // Numbers and faults are never cut: a number without its
+                // last digits is another number.
+                let label = if more <= pool || !matches!(cell.value, Value::Text) {
+                    pool = pool.saturating_sub(more);
+                    &cell.label
+                } else {
+                    short.clear();
+                    short.push_str(&cell.label[..cell.label.floor_char_boundary(LABEL_SHORT)]);
+                    short.push('…');
+                    &short
+                };
+                f.sem.node(Role::Cell, l.cell(col, row), label)?;
             }
         }
         if open.is_some() {
@@ -976,6 +1085,8 @@ impl App for Page {
             hgrab: None,
             last_press: None,
             message: String::new(),
+            measure_left: 0,
+            unmeasured: false,
         };
         page.load_bar();
         Ok(page)
@@ -989,7 +1100,14 @@ impl App for Page {
         let l = self.layout();
         let window = Rect::new(0.0, 0.0, self.window.width, self.window.height);
         f.rect(window, 0.0, PAGE)?;
-        f.group(Role::Main, window, "", |f| self.draw_page(f, &l))
+        self.measure_left = MEASURE_POOL;
+        self.unmeasured = false;
+        f.group(Role::Main, window, "", |f| self.draw_page(f, &l))?;
+        // The texts in view that this frame had no room to measure.
+        if self.unmeasured {
+            request_frame();
+        }
+        Ok(())
     }
 
     fn event(&mut self, event: Event<'_>) -> bool {

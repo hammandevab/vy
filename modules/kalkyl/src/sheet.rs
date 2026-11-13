@@ -40,6 +40,17 @@ pub const MAX_SRC: usize = 200;
 /// otherwise name the whole sheet 24 times. A formula that asks for more
 /// is `#FEL`.
 pub const MAX_RANGE_CELLS: u32 = 2 * CELLS as u32;
+/// Characters of a text that the width of one cell can show, and the most
+/// the page sends for a text that is cut at its cell. The narrowest
+/// glyphs of the cell's style (`'`, `i`, `j`, `l`) are 3.6 px wide: 28
+/// of them are 100 px, and a cell clips its text 90 px from where the
+/// text starts. Sending the 200 bytes a cell may hold to draw a dozen
+/// letters of them was 12 800 units of fuel a cell and frame, and what
+/// the rasterizer was charged for (granskning 0013:3).
+pub const HEAD_CHARS: usize = 28;
+/// Most bytes of those characters: a text of characters of several bytes
+/// is cut here, at a whole character (20 of two bytes, 13 of three).
+pub const HEAD_BYTES: usize = 40;
 const FORMAT: u8 = 1;
 
 /// Why a formula has no value.
@@ -135,12 +146,21 @@ pub struct Cell {
     pub width: f32,
     /// Decimals of a number that fit the cell's width; set with `width`.
     pub decimals: u8,
+    /// Bytes of [`Cell::head`].
+    head: u8,
 }
 
 impl Cell {
     /// What the cell shows: the formatted number, the text or the fault.
     pub fn shown(&self) -> &str {
         &self.label[self.shown_at..]
+    }
+
+    /// The start of what the cell shows, as much as one cell's width can
+    /// show of it: [`HEAD_CHARS`] characters and [`HEAD_BYTES`] bytes at
+    /// the most.
+    pub fn head(&self) -> &str {
+        &self.shown()[..usize::from(self.head)]
     }
 
     /// Read a formula through without evaluating it: whether it parses,
@@ -196,6 +216,10 @@ impl Cell {
             Value::Fault(f) => self.label.push_str(f.text()),
         }
         self.width = -1.0;
+        let shown = self.shown();
+        let chars = shown.char_indices().nth(HEAD_CHARS);
+        let end = chars.map_or(shown.len(), |(at, _)| at).min(HEAD_BYTES);
+        self.head = shown.floor_char_boundary(end) as u8;
     }
 }
 
@@ -875,6 +899,7 @@ impl Sheet {
             shown_at: 0,
             width: -1.0,
             decimals: 6,
+            head: 0,
         };
         cell.relabel(index);
         self.cells[index] = Some(Box::new(cell));

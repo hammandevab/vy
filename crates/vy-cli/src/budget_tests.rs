@@ -601,14 +601,34 @@ impl Page {
 
 /// Open `kalkyl` on `blob` as its stored sheet and use it: the frames it
 /// asks for until the sheet is calculated, a cell changed, another size,
-/// and a reload on what it saved. Returns the page after the first
-/// recalculation, for the caller to look at.
+/// the wheel, and a reload on what it saved. The costliest frame and what
+/// led to it.
 fn kalkyl_on(case: &str, blob: &[u8], width: u32, height: u32) -> (u64, String) {
+    let (fuel, after, _) = kalkyl_visit(case, blob, width, height, false);
+    (fuel, after)
+}
+
+/// [`kalkyl_on`]; with `look`, the frame is rasterized as well at each
+/// stop and held to that budget. The costliest frame, what led to it, and
+/// the largest share of the raster budget.
+fn kalkyl_visit(
+    case: &str,
+    blob: &[u8],
+    width: u32,
+    height: u32,
+    look: bool,
+) -> (u64, String, f64) {
     let fail = |e: String| -> Page { panic!("kalkyl on {case}: {e}") };
     let mut page = Page::load_with("kalkyl", width, height, stored("kalkyl", blob))
         .unwrap_or_else(fail)
         .on(case);
+    let look_at = |page: &mut Page, after: &str| {
+        if look {
+            page.raster(after);
+        }
+    };
     page.settle("the stored sheet");
+    look_at(&mut page, "the stored sheet");
     let calculating = |page: &Page| {
         page.rt
             .semantic_tree()
@@ -627,18 +647,23 @@ fn kalkyl_on(case: &str, blob: &[u8], width: u32, height: u32) -> (u64, String) 
     page.settle("a cell changed");
     assert!(!calculating(&page), "{case}: calculated after the change");
     page.resize(width + 300, height + 200);
+    look_at(&mut page, "a resize");
     page.event("the wheel", kind::SCROLL, 0, 60_000, 0, 0);
     page.settle("scrolling");
+    look_at(&mut page, "scrolling");
     let saved = page.rt.take_storage();
     let mut again = Page::load_with("kalkyl", width, height, saved)
         .unwrap_or_else(fail)
         .on(case);
     again.settle("the sheet it saved");
-    if again.worst.0 > page.worst.0 {
+    look_at(&mut again, "the sheet it saved");
+    let raster = page.raster_worst.max(again.raster_worst);
+    let (fuel, after) = if again.worst.0 > page.worst.0 {
         again.worst
     } else {
         page.worst
-    }
+    };
+    (fuel, after, raster)
 }
 
 /// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013:2): `kalkyl` saves the sheet
@@ -1375,4 +1400,96 @@ fn spec_5_3_3_rymd_reads_no_stored_value() {
     page.raster("some use");
     assert_eq!(page.rt.take_storage(), full, "and writes none");
     page.report("with a full storage");
+}
+
+/// SPEC-5.3.3 (granskning 0013:3): `kalkyl` with long texts in view. A
+/// cell may hold 200 bytes and the quota 256 KB: 1 260 cells of 200
+/// bytes were 14.1 M units of fuel for the first frame at 1024 × 720 and
+/// 20.9 M at 1600 × 1000, and the rasterizer stopped at its budget. The
+/// page sent every text in view whole to draw the dozen letters its cell
+/// shows, and every text of the sheet whole to the tree, in every frame.
+/// Whatever texts the sheet holds, every frame keeps both budgets.
+#[test]
+fn spec_5_3_3_kalkyl_long_texts_keep_the_budget() {
+    let dense = |n: usize, src: &str| {
+        let src = src.to_string();
+        sheet_of(move |col, row| (row * 26 + col < n).then(|| src.clone()))
+    };
+    let words = "ord och text som inte ryms i sin cell ".repeat(3);
+    let sheets: Vec<(&str, Vec<u8>)> = vec![
+        ("1 260 cells of 200 x W", dense(1260, &"W".repeat(200))),
+        ("1 260 cells of 200 x i", dense(1260, &"i".repeat(200))),
+        (
+            "1 260 cells of 100 combining marks",
+            dense(1260, &"\u{301}".repeat(100)),
+        ),
+        ("2 600 cells of 97 letters", dense(2600, &"a".repeat(97))),
+        ("2 600 cells of 48 x å", dense(2600, &"å".repeat(48))),
+        (
+            "2 600 cells of 32 characters of three bytes",
+            dense(2600, &"\u{4e2d}".repeat(32)),
+        ),
+        (
+            "2 600 cells of 24 characters of four bytes",
+            dense(2600, &"\u{10348}".repeat(24)),
+        ),
+        ("2 600 cells of words", dense(2600, &words[..97])),
+        // As long as a text may be and still be measured: 28 bytes.
+        ("2 600 cells of 28 x m", dense(2600, &"m".repeat(28))),
+        // Texts with empty cells to run over: enough for all of it, and
+        // one cell too few.
+        (
+            "a text of 196 x i in every seventh column",
+            sheet_of(|col, _| (col % 7 == 0).then(|| "i".repeat(196))),
+        ),
+        (
+            "a text of 192 bytes in every other column",
+            sheet_of(|col, _| (col % 2 == 0).then(|| "Wi".repeat(96))),
+        ),
+    ];
+    let mut worst = (0, String::new());
+    let mut raster_worst = (0.0, String::new());
+    for (case, blob) in &sheets {
+        assert!(blob.len() <= quota_of("kalkyl", "kalkyl"), "{case}");
+        // The last is a window with every column and 50 rows in view.
+        for (width, height) in [(1024, 720), (1600, 1000), (2560, 1440)] {
+            let (fuel, after, raster) = kalkyl_visit(case, blob, width, height, true);
+            if fuel > worst.0 {
+                worst = (fuel, format!("{case} at {width} x {height}, after {after}"));
+            }
+            if raster > raster_worst.0 {
+                raster_worst = (raster, format!("{case} at {width} x {height}"));
+            }
+        }
+    }
+    eprintln!(
+        "kalkyl on long texts: costliest frame {} fuel, {}; most of the raster budget {:.0} % ({})",
+        worst.0,
+        worst.1,
+        raster_worst.0 * 100.0,
+        raster_worst.1
+    );
+
+    // The review's sheet: what its first frame costs now, and what the
+    // tree has of it. Every cell is a node; the first texts are whole and
+    // the rest are their start.
+    for (width, height) in [(1024, 720), (1600, 1000)] {
+        let mut page = Page::load_with("kalkyl", width, height, stored("kalkyl", &sheets[0].1))
+            .unwrap()
+            .on(sheets[0].0);
+        let share = page.raster("the first frame");
+        page.report(&format!(
+            "at {width} x {height} ({:.0} % of the raster budget)",
+            share * 100.0
+        ));
+        let cells: Vec<&SemNode> = page
+            .rt
+            .semantic_tree()
+            .iter()
+            .filter(|n| n.role == role::CELL)
+            .collect();
+        assert_eq!(cells.len(), 1260);
+        assert_eq!(cells[0].text, format!("A1: {}", "W".repeat(200)));
+        assert_eq!(cells[1259].text, "L49: WWWWWWWWWWWWWWW…");
+    }
 }

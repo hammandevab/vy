@@ -8,7 +8,7 @@ sida är en egen crate med bara `vy-sdk` som beroende, har sitt manifestutkast i
 | Sida | Modul | Capabilities | Storlek |
 | --- | --- | --- | --- |
 | Tavlan | `kanban` | `ime`, `storage` 16 KB | 54 KB |
-| Kalkylark | `kalkyl` | `ime`, `storage` 256 KB | 61 KB |
+| Kalkylark | `kalkyl` | `ime`, `storage` 256 KB | 64 KB |
 | Ritbord | `rita` | `storage` 64 KB | 37 KB |
 | Anteckningar | `skriv` | `ime`, `storage` 16 KB | 61 KB |
 | Block | `block` | `storage` 1 KB | 22 KB |
@@ -69,6 +69,12 @@ SPEC-8.2.4, kräver ingen capability). Hjulet rullar raderna, Skift+hjul kolumne
 **Gränser:** en omräkning görs i steg om lika mycket arbete, ett per frame, så ett stort blad räknas
 över flera frames medan statusraden visar "räknar…" och cellerna behåller sina förra värden (en ny
 formel visar `…`). En formel läser högst två hela blad genom sina områden; fler ger `#FEL`.
+En frame kostar vad cellerna visar, inte vad de rymmer: av en text som kapas vid sin cell skickas
+början, högst 28 tecken (det smalaste tecknet är 3,6 px och cellen 96), och i ett fönster med fler
+än 580 sådana celler i bild delar de på 16 KB. Trädet har varje cell; långa texter står hela så
+länge de tillsammans ryms i 12 KB, därefter cellens namn, textens början och `…` (hela texten står
+i formelfältet när cellen är markerad). Texter som kan rymmas i tomma celler till höger mäts en
+gång, högst 8 KB per frame.
 
 ## Ritbord (`rita`)
 
