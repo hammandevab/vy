@@ -9,28 +9,41 @@ Varför: ägaren vill ha mer avancerade sidor att köra i klienten än referenss
 formatet klarar, prövar att komponenterna i `vy_sdk::ui` räcker för riktiga appar, och publiceras på
 den publika sajten (`tools/publish_site.sh` tar varje utkast i `conformance/manifests/`).
 
-## Läget (uppdateras efter varje sida)
+## Läget
 
-| # | Sida | Modul | Läge | Commits |
-| --- | --- | --- | --- | --- |
-| 1 | Tavlan | `kanban` | klar: 54 267 byte, 0,11 M bränsle per frame (1,1 M med 60 kort), 5 fall | 2188796, 94e6aa2 |
-| 2 | Kalkylark | `kalkyl` | klar: 61 149 byte, 0,33 M bränsle per frame (1,6 M med 1 040 celler vid 1600 × 1000), 4 fall | c252b0f, 01c49db |
-| 3 | Ritbord | `rita` | klar: 37 376 byte, 0,08 M bränsle per frame tom (3,0 M full, 4,1 M när banorna byggs om), 5 fall | dae13cb, 121a185 |
-| 4 | Anteckningar | `skriv` | klar: 60 895 byte, 0,45 M bränsle per frame (1,6 M med 6 000 byte där varje ord byter stil, 3,9 M när den bryts om), 4 fall | 8742960, 686aefd |
-| 5 | Block | `block` | klar: 21 746 byte, 0,10–0,15 M bränsle per frame i spel, 4 fall | 4df6c82, 79f213d |
-| 6 | Rymd | `rymd` | pågår | – |
-| 7 | `docs/EXEMPEL.md` | – | ej påbörjad | – |
+Allt i uppdraget är klart: sex sidor, `docs/EXEMPEL.md` och den här filen.
 
-Ordningen är uppdragets. Varje sida är två commits: `modules/<namn>: …` (modul, utkast, tester; röd
-på `spec_12_1_2_conformance_defines_client` tills fallen finns, som `widgets` och `studio` landade)
-och `golden: …` (fall, guldbilder, träd).
+| # | Sida | Modul | wasm | Bränsle per frame (av 8 M) | Nativa tester | Fall | Commits |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Tavlan | `kanban` | 54 267 byte | 0,11 M; 1,1 M med 60 kort | 10 | 5 | 2188796, 94e6aa2 |
+| 2 | Kalkylark | `kalkyl` | 61 149 byte | 0,33 M; 1,6 M med 1 040 celler i bild vid 1600 × 1000 | 14 | 4 | c252b0f, 01c49db |
+| 3 | Ritbord | `rita` | 37 376 byte | 0,08 M tom; 3,0 M full (2 500 punkter), 4,1 M den frame banorna byggs om | 9 | 5 | dae13cb, 121a185 |
+| 4 | Anteckningar | `skriv` | 60 895 byte | 0,45 M; 1,6 M med 6 000 byte där varje ord byter stil, 3,9 M den frame texten bryts om | 9 | 4 | 8742960, 686aefd |
+| 5 | Block | `block` | 21 746 byte | 0,10–0,15 M i spel | 12 | 4 | 4df6c82, 79f213d |
+| 6 | Rymd | `rymd` | 38 963 byte | 0,44 M med förvalen; 1,87 M som mest (torus, 800 partiklar) | 18 | 5 | fd5a5c1, 8169a92 |
+| 7 | `docs/EXEMPEL.md` | – | – | – | – | – | e31e311 |
+
+Sämsta uppmätta frame i hela spåret är 4,1 M (`rita`, full ritning, fönstret ändrat), alltså
+49 % marginal; med förvalen ligger varje sida under 0,5 M. Alla sidor är under 64 KB.
+`vy-publish build` godtar alla sex paketen (SPEC-13.4.1).
+
+Sviten har 27 nya fall (91 totalt, alla 0,000 %) och 19 nya träd i `conformance/semantic/`. Inga
+befintliga guldbilder eller träd är ändrade: efter varje `conformance --update` visade `git status`
+bara nya filer.
+
+Ordningen är uppdragets. Varje sida är två commits: `modules/<namn>: …` (modul, utkast, tester) och
+`golden: …` (fall, guldbilder, träd). **Mellan de två är två tester röda, inte ett:**
+`spec_12_1_2_conformance_defines_client` och `spec_10_4_2_ime_required_for_input` i `vy-cli` kräver
+båda ett fall per modul. Det står i varje modulcommit. Den som delar historiken (bisect) ska räkna
+paret som en enhet.
 
 ## Så arbetar spåret
 
 - Grindarna körs från roten före varje commit (se CLAUDE.md); `CARGO_INCREMENTAL=0` i varje skal.
-- Bränsle per frame mäts med ett litet verktyg utanför repot (ett ocommittat exempel i `vy-cli` som
-  kör ett fall som `vy-cli conformance` gör och skriver ut `Runtime::last_frame().fuel` per frame);
-  `vy-publish build` körs för varje sida (SPEC-13.4.1).
+- Bränsle per frame mättes med ett eget litet verktyg: ett ocommittat exempel i `vy-cli` som körde ett
+  fall som `vy-cli conformance` gör och skrev ut `Runtime::last_frame().fuel`, rasterenheter och
+  minnessidor per frame och sparade sista bilden. Det är **raderat** och har aldrig committats (se
+  *Verktygsluckor*); siffrorna ovan kommer därifrån. `vy-publish build` kördes för varje sida.
 - Varje sida ses som PNG vid 1280 × 800, 800 × 600 och 400 × 700 @2 före commit.
 
 ## Beslut (gemensamma)
@@ -44,7 +57,29 @@ och `golden: …` (fall, guldbilder, träd).
 - **Fokus är värdens** (SPEC-10.3.1): allt som kan få fokus har fasta negativa nod-id, och sidorna
   ritar ringen själva (SPEC-10.3.3).
 
-## SDK-luckor (fylls på per sida)
+## Beslut i `rymd`
+
+- **Vinklar är heltal** (65 536 på varvet) och allt annat är `f32`-addition, -multiplikation och
+  -division i fast ordning, som wasm och varje plattform räknar lika. Sinus är ett polynom på en
+  kvarts varv (fel under 4 × 10⁻⁶), kvadratroten Newton och används bara när kropparna byggs.
+- **Ritordningen sorteras på heltal** (djup × 65 536, ytans index som särskiljare), så ordningen är
+  total och densamma vilken sorteringsalgoritm `core` än har.
+- **Ljuset är fast mot ögat**, inte mot kroppen: en yta ljusnar när den vänds uppåt till vänster.
+- **Fyllda ytor stryks också i sin egen färg** (1 px). Två ytor som möts täcker annars kantpixlarna
+  bara delvis var, och himlen lyser igenom som en hårfin fog. Det dubblar banornas byte.
+- **Trådmodellen är två banor**, inte en per yta: de bortvända ytornas kanter först och svagare. En
+  kant som två ytor delar blir då en linje, och 200 ytor kostar två opkoder i stället för 200.
+- **Scenen klipps inte.** Klippta fyllningar kostar 16 rasterenheter per pixel mot 1; i stället ritas
+  panelen efter scenen och täcker det som sticker ut. En inzoomad kropp kan därför gå över rubriken.
+- **Stjärnorna kommer ur en fast talföljd**, inte ur värdens `random`: himlen är densamma överallt
+  och guldbilderna beror inte på slumpkällan. De ritas på hela enhetspixlar (`math::snap`).
+- **Första framen efter en vila vrider inget** (dess `dt_ms` är tiden sidan stod still), och ett
+  stopp längre än 100 ms räknas som 100 ms.
+- **Rotationen är på från start**, så sidan begär frames redan från den första. I `cases.toml`
+  måste därför *varje* händelse ha `after_frames`, också den första; annars körs alla frames upp
+  till taket innan händelsen levereras.
+
+## SDK-luckor
 
 Från `kanban`:
 
@@ -136,8 +171,65 @@ Från `block`:
 - **Få tangentnamn.** `event::key` har A, C, V och X; sidorna definierar själva Z, Y, P, H och F2.
   Förslag: hela alfabetet och F-tangenterna.
 
+Från `rymd`:
+
+- **Egen trigonometri.** Sinus, cosinus och kvadratrot skrevs i sidan (`scene.rs`, omkring 40 rader,
+  testade mot `std` till fem decimaler). De är deterministiska och kan flyttas som de är till
+  `vy_sdk::math::{sin, cos, sqrt}`; samma lucka som under `rita`.
+- **`Path` byggs om för varje yta och frame.** Utan `clear` och `with_capacity` är varje yta en ny
+  `Path` som växer 8 → 16 → 32 → 64 byte, alltså fyra allokeringar. Uppmätt på trådmodellen med 200
+  ytor: 857 k bränsle på modulsidan med en bana per yta mot 579 k med två gemensamma banor, alltså
+  omkring 1 400 per yta för banan själv. De fyllda ytorna har var sin färg och kan inte slås ihop.
+- **Samma bana skickas två gånger** när en yta både fylls och stryks: `Frame::path` tar ett läge, och
+  varje anrop debiteras 64 bränsle per byte. En opkod för "fyll och stryk" vore en 1.x-fråga.
+- **`ui::Slider::draw` använder `format!`**, så en sida med ett reglage drar in `core::fmt` hur den
+  än bygger sina egna strängar (i `kalkyl` var `core::fmt` värt omkring 4 KB; här är det inte
+  uppmätt). Reglaget ritar inte heller sin etikett: sidan mäter och ritar "Partiklar" själv bredvid.
+- **`Color` kan inte skalas eller läsas av.** Belysningen räknas på tre `u8` vid sidan av. Förslag:
+  `Color::scaled(f32)` eller `r()`, `g()`, `b()`.
+- **`SCROLL` bär ingen position** (SPEC bilaga A), så sidan vet inte om pekaren är över scenen när
+  hjulet rullar; `rymd` zoomar var pekaren än står. En sida med två rullbara ytor måste själv minnas
+  senaste `POINTER_MOVE`. Det är ABI, inte SDK: en 1.x-fråga.
+- **Växlingsknapp och fasta steg** saknas här också (formknapparna är sidans egna, och regeln om
+  första framen efter en vila skrevs för tredje gången efter `kanban` och `block`).
+
+### Verktygsluckor
+
+- **Inget sätt att se bränsle per frame för ett fall med händelser.** `vy-cli conformance` skriver
+  bara diffen, `vy-cli render` tar inga händelser, och `vy-publish build` rapporterar dyraste framen
+  i en körning utan händelser. Jag mätte med ett eget exempel i `vy-cli` (omkring 230 rader som körde
+  fallen som sviten gör). Det raderades i stället för att committas, eftersom det dubblerade svitens
+  händelseleverans och skulle glida ifrån den. Rätt plats är sviten själv, till exempel
+  `vy-cli conformance --stats [filter]` som skriver frames, högsta och sista bränsle, rasterenheter
+  och minnessidor per fall.
+- **Ett fall för en sida som animerar från start är lätt att skriva fel:** utan `after_frames` på
+  första händelsen körs alla frames först, och fallet blir grönt på fel bild. En varning när en
+  händelse utan `after_frames` följer på en frame som begärt nästa hade sparat en omgång per sida.
+
 ## Berör andra spår
 
-Inget ännu.
+Inget. Ingen fil utanför `modules/`, `conformance/` och `docs/` är ändrad på grenen, och
+`crates/vy-sdk` är orörd. Mätverktyget låg ocommittat under `crates/vy-cli/examples/` medan arbetet
+pågick och är borttaget; `.cargo/config.toml` i arbetskatalogen är koordinatorns och är inte
+committad.
+
+`conformance/cases.toml` är delad med andra spår: de sex avsnitten står i följd före
+`# Skalet (M3 …)`, så en sammanslagning med ett spår som lagt till fall på samma ställe ger en
+textkonflikt som löses genom att behålla båda.
 
 ## Kvar och öppet
+
+- **`tools/publish_site.sh` är inte kört här.** Det bygger `vy-cli` och `vy-publish` i release, och
+  det bygget kördes inte för att spara den delade disken (7 GB fritt). Varje paket är i stället
+  byggt med `vy-publish build` (debug). Skriptet tar varje utkast i `conformance/manifests/`, så
+  sidorna följer med utan ändring; kör det en gång före publicering.
+- **Guldbilderna är skapade på Linux.** De 27 nya fallen är inte körda på macOS.
+- **Prestandagrinden (`vy-cli bench`) är inte körd**; den stod inte i spårets grindar och ingen
+  klientkod är ändrad.
+- **Granskningssidan** i `docs/reviews/` skrivs av en annan agent.
+- **README och CLAUDE.md** nämner inte de nya modulerna eller `docs/EXEMPEL.md`; de ligger utanför
+  spåret.
+- Kända gränser, alla avsiktliga: `rita` tar högst 2 500 punkter och säger sedan ifrån; `skriv` tar
+  6 000 byte och sätter betoning i serif (ingen lutning i ABI:t); `kalkyl` klistrar in text i en cell
+  i taget; `rymd` sorterar ytor på mittpunktens djup, vilket i princip kan ge en felordnad yta på torusen
+  i någon vinkel (ingen sådan syntes i de vyer jag såg), och klipper inte scenen.
