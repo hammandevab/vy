@@ -105,7 +105,7 @@ fn spec_7_2_1_end_to_end_localhost() {
 
     // Fetch, twice, with one cache.
     let cache_dir = temp_dir("cache");
-    let mut fetcher = Fetcher::new(Options::new(&cache_dir)).unwrap();
+    let fetcher = Fetcher::new(Options::new(&cache_dir)).unwrap();
     let address = Address::parse(&format!("vy://localhost:{}/hello", server.port())).unwrap();
     assert!(address.is_localhost());
     let first = fetcher.fetch(&address).unwrap();

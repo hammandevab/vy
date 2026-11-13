@@ -5,10 +5,11 @@
 //! drive the same object.
 //!
 //! Threads: the UI thread owns the [`Shell`]; every tab has a reader
-//! thread; the loader thread loads pages and a worker per tab performs
-//! the page's own requests ([`page::Loader`]); all of them report
-//! into one inbox ([`Incoming`]) and call the [`Waker`], which the window
-//! turns into a wake-up of its event loop.
+//! thread; the loader's workers load pages, one origin at a time on each,
+//! and a worker per tab performs the page's own requests
+//! ([`page::Loader`]); all of them report into one inbox ([`Incoming`])
+//! and call the [`Waker`], which the window turns into a wake-up of its
+//! event loop.
 
 use crate::a11y;
 use crate::address::{AddressField, Edit};

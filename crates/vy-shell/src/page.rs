@@ -2,13 +2,14 @@
 //! or from a local `.vyp` package or bare `.wasm` for development; the
 //! trust decision and the default capability verdicts (SPEC-7.4.3,
 //! SPEC-8.2.3). Runs off the UI thread, since a fetch can take seconds:
-//! pages on the loader thread, a page's own requests on its tab's worker.
+//! pages on the loader's workers, one origin at a time on each, and a
+//! page's own requests on its tab's worker.
 
 use crate::ipc::ResourceBytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use vy_manifest::{Draft, Grant, Manifest, Package};
 use vy_proto::{
@@ -183,7 +184,7 @@ pub fn restriction_reason(r: &Restriction) -> &'static str {
 }
 
 /// Load `source`, fetching through `fetcher` for an address.
-pub fn load(fetcher: &mut Fetcher, source: &Source) -> Result<LoadedPage, LoadError> {
+pub fn load(fetcher: &Fetcher, source: &Source) -> Result<LoadedPage, LoadError> {
     match source {
         Source::Address(address) => {
             let fetched = fetcher.fetch(address).map_err(|e| match e {
@@ -405,15 +406,24 @@ pub enum Done {
     },
 }
 
+/// How many page loads and live-reload checks run at once, each for a
+/// different origin.
+pub const LOADER_WORKERS: usize = 4;
+
 /// The loader (SPEC-5.2.7, SPEC-7.4.5): page loads and live-reload checks
-/// run in order on one thread, which owns the [`Fetcher`] with its caches
-/// and key store; a page's own requests run on a worker thread per tab,
-/// in the order the tab made them, so a slow request (a long poll, a slow
-/// server) holds up neither another tab's requests nor any page load, and a
-/// page load (a first visit's DNS lookup can take seconds) holds up no
-/// page's requests.
+/// run on [`LOADER_WORKERS`] threads that share one [`Fetcher`] with its
+/// caches and key store. Jobs for different origins run side by side, so
+/// an origin whose server is slow or whose first visit's DNS lookup hangs
+/// (up to 6 s) holds up no other origin's page and no live-reload check;
+/// jobs for one origin run one at a time in the order they were asked for,
+/// and never take a second worker, since the trust decision for an origin
+/// is made by one fetch at a time (the fetcher holds to that by itself).
+/// A page's own requests run on a worker thread per tab, in the order the
+/// tab made them, so a slow request (a long poll, a slow server) holds up
+/// neither another tab's requests nor any page load, and a page load holds
+/// up no page's requests.
 pub struct Loader {
-    pages: Sender<Job>,
+    queue: Arc<Queue>,
     requester: Requester,
     report: Report,
     workers: HashMap<u32, Sender<Job>>,
@@ -421,16 +431,89 @@ pub struct Loader {
 
 type Report = Arc<dyn Fn(Done) + Send + Sync>;
 
+/// The page loads and checks waiting for a worker, with the origin each
+/// is for (a local file has none), and the origins a worker is on.
+struct Queue {
+    state: Mutex<QueueState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct QueueState {
+    jobs: VecDeque<(Option<String>, Job)>,
+    busy: HashSet<String>,
+    closed: bool,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Queue {
+    /// The next job a worker may take: the oldest whose origin no worker
+    /// is on, which that origin then is until [`Queue::done`]. Waits for
+    /// one; `None` once the loader is gone.
+    fn take(&self) -> Option<(Option<String>, Job)> {
+        let mut state = lock(&self.state);
+        loop {
+            if state.closed {
+                return None;
+            }
+            let free = state
+                .jobs
+                .iter()
+                .position(|(origin, _)| origin.as_ref().is_none_or(|o| !state.busy.contains(o)));
+            if let Some(job) = free.and_then(|i| state.jobs.remove(i)) {
+                if let Some(origin) = &job.0 {
+                    state.busy.insert(origin.clone());
+                }
+                return Some(job);
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// The job for `origin` is finished: its next one may start.
+    fn done(&self, origin: Option<&String>) {
+        if let Some(origin) = origin {
+            lock(&self.state).busy.remove(origin);
+            self.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for Loader {
+    /// The workers end once the job each is on is done; what waits is
+    /// dropped with the shell that asked for it.
+    fn drop(&mut self) {
+        lock(&self.queue.state).closed = true;
+        self.queue.changed.notify_all();
+    }
+}
+
 impl Loader {
-    /// Hand `job` to the thread that does it: a request to its tab's
-    /// worker (started at the tab's first request), anything else to the
-    /// loader thread.
+    /// Hand `job` to a thread that does it: a request to its tab's worker
+    /// (started at the tab's first request), anything else to the loader's
+    /// workers, queued behind what is already waiting for its origin.
     pub fn send(&mut self, job: Job) {
-        let Job::Request { tab, .. } = &job else {
-            let _ = self.pages.send(job);
-            return;
+        let tab = match &job {
+            Job::Request { tab, .. } => *tab,
+            Job::Page { source, .. } => {
+                let origin = source.origin();
+                lock(&self.queue.state).jobs.push_back((origin, job));
+                self.queue.changed.notify_all();
+                return;
+            }
+            Job::Check(check) => {
+                let origin = Some(check.address.origin());
+                lock(&self.queue.state).jobs.push_back((origin, job));
+                self.queue.changed.notify_all();
+                return;
+            }
         };
-        let tab = *tab;
         // A worker whose thread has ended hands the job back; start anew.
         let job = match self.workers.get(&tab) {
             None => job,
@@ -541,73 +624,100 @@ pub fn start_loader(
 ) -> std::io::Result<Loader> {
     let report: Report = Arc::new(report);
     let requester = Requester::new(&FetchOptions::new(&cache_dir));
-    let (tx, rx) = std::sync::mpsc::channel::<Job>();
-    let pages_report = report.clone();
-    thread::Builder::new()
-        .name("vy-loader".into())
-        .spawn(move || {
-            let report = pages_report;
-            let mut fetcher: Option<Fetcher> = None;
-            let open = |fetcher: &mut Option<Fetcher>| -> Result<(), String> {
-                if fetcher.is_none() {
-                    *fetcher = Some(
-                        Fetcher::new(FetchOptions::new(&cache_dir)).map_err(|e| e.to_string())?,
-                    );
+    let queue = Arc::new(Queue {
+        state: Mutex::new(QueueState::default()),
+        changed: Condvar::new(),
+    });
+    // Opened by the first job that fetches, and again by the next one if
+    // the cache directory could not be used: a file needs no caches and
+    // loads all the same.
+    let fetcher: Arc<Mutex<Option<Arc<Fetcher>>>> = Arc::new(Mutex::new(None));
+    let cache_dir = Arc::new(cache_dir);
+    for n in 0..LOADER_WORKERS {
+        let (queue, fetcher, cache_dir, report) = (
+            queue.clone(),
+            fetcher.clone(),
+            cache_dir.clone(),
+            report.clone(),
+        );
+        let started = thread::Builder::new()
+            .name(format!("vy-loader-{n}"))
+            .spawn(move || {
+                while let Some((origin, job)) = queue.take() {
+                    run_job(job, &fetcher, &cache_dir, &report);
+                    queue.done(origin.as_ref());
                 }
-                Ok(())
-            };
-            while let Ok(job) = rx.recv() {
-                match job {
-                    Job::Page {
-                        tab,
-                        generation,
-                        source,
-                    } => {
-                        // A file needs no caches; it loads even when the
-                        // cache directory is unusable.
-                        let result = match &source {
-                            Source::File { .. } => load_file_source(&source),
-                            Source::Address(_) => match open(&mut fetcher) {
-                                Ok(()) => load(fetcher.as_mut().expect("opened"), &source),
-                                Err(e) => Err(LoadError::Fetch(format!("cache: {e}"))),
-                            },
-                        };
-                        report(Done::Page {
-                            tab,
-                            generation,
-                            result: Box::new(result),
-                        });
-                    }
-                    Job::Check(Check {
-                        tab,
-                        generation,
-                        address,
-                    }) => {
-                        let result = open(&mut fetcher).and_then(|()| {
-                            fetcher
-                                .as_mut()
-                                .expect("opened")
-                                .revalidate(&address)
-                                .map(|h| h.0)
-                                .map_err(|e| e.to_string())
-                        });
-                        report(Done::Check {
-                            tab,
-                            generation,
-                            result,
-                        });
-                    }
-                    // Requests go to their tab's worker (`Loader::send`).
-                    Job::Request { .. } => {}
-                }
-            }
-        })?;
+            });
+        // One worker is a loader; fewer than asked for is a slower one.
+        if let (Err(e), 0) = (started, n) {
+            return Err(e);
+        }
+    }
     Ok(Loader {
-        pages: tx,
+        queue,
         requester,
         report,
         workers: HashMap::new(),
     })
+}
+
+/// The loader's fetcher, opened at first use.
+fn open_fetcher(
+    shared: &Mutex<Option<Arc<Fetcher>>>,
+    cache_dir: &Path,
+) -> Result<Arc<Fetcher>, String> {
+    let mut slot = lock(shared);
+    if let Some(fetcher) = slot.as_ref() {
+        return Ok(fetcher.clone());
+    }
+    let fetcher = Arc::new(Fetcher::new(FetchOptions::new(cache_dir)).map_err(|e| e.to_string())?);
+    *slot = Some(fetcher.clone());
+    Ok(fetcher)
+}
+
+/// Do one page load or live-reload check and report it.
+fn run_job(job: Job, fetcher: &Mutex<Option<Arc<Fetcher>>>, cache_dir: &Path, report: &Report) {
+    match job {
+        Job::Page {
+            tab,
+            generation,
+            source,
+        } => {
+            // A file needs no caches; it loads even when the cache
+            // directory is unusable.
+            let result = match &source {
+                Source::File { .. } => load_file_source(&source),
+                Source::Address(_) => match open_fetcher(fetcher, cache_dir) {
+                    Ok(fetcher) => load(&fetcher, &source),
+                    Err(e) => Err(LoadError::Fetch(format!("cache: {e}"))),
+                },
+            };
+            report(Done::Page {
+                tab,
+                generation,
+                result: Box::new(result),
+            });
+        }
+        Job::Check(Check {
+            tab,
+            generation,
+            address,
+        }) => {
+            let result = open_fetcher(fetcher, cache_dir).and_then(|fetcher| {
+                fetcher
+                    .revalidate(&address)
+                    .map(|h| h.0)
+                    .map_err(|e| e.to_string())
+            });
+            report(Done::Check {
+                tab,
+                generation,
+                result,
+            });
+        }
+        // Requests go to their tab's worker (`Loader::send`).
+        Job::Request { .. } => {}
+    }
 }
 
 fn load_file_source(source: &Source) -> Result<LoadedPage, LoadError> {
@@ -764,6 +874,71 @@ mod tests {
         );
         loader.close_tab(1);
         assert_eq!(loader.workers(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// SPEC-7.4.5, SPEC-9.5.1 (granskning 0009:2): page loads of different
+    /// origins do not wait for each other. While origin A's server holds
+    /// its page open (as a first visit's DNS lookup can, for up to 6 s),
+    /// five more pages of origin A queue behind it, more than there are
+    /// workers, and still a page of origin B and a live-reload check of it
+    /// are answered: jobs of one origin take one worker between them. Once
+    /// A's server answers, A's pages come in the order they were asked for.
+    #[test]
+    fn spec_7_4_5_page_loads_do_not_wait_for_other_origins() {
+        let (held_port, release) = held_server();
+        let (other_port, _other) = held_server();
+        let (tx, rx) = std::sync::mpsc::channel::<Done>();
+        let tx = std::sync::Mutex::new(tx);
+        let dir = std::env::temp_dir().join(format!("vy-loader-origins-{}", std::process::id()));
+        let mut loader = start_loader(dir.clone(), move |d| {
+            let _ = tx.lock().unwrap().send(d);
+        })
+        .unwrap();
+        let address = |port: u16, path: &str| {
+            Address::parse(&format!("vy://127.0.0.1:{port}{path}")).unwrap()
+        };
+        let page = |tab: u32, port: u16, path: &str| Job::Page {
+            tab,
+            generation: 1,
+            source: Source::Address(address(port, path)),
+        };
+        let tag = |d: &Done| match d {
+            Done::Page { tab, .. } => format!("page {tab}"),
+            Done::Check { tab, .. } => format!("check {tab}"),
+            Done::Request { tab, id, .. } => format!("request {tab}.{id}"),
+        };
+        // The queue below is longer than the pool.
+        const { assert!(LOADER_WORKERS < 6) };
+        loader.send(page(1, held_port, "/slow-page"));
+        for tab in 2..=6 {
+            loader.send(page(tab, held_port, "/after"));
+        }
+        loader.send(page(7, other_port, "/page"));
+        let wait = std::time::Duration::from_secs(20);
+        let first = rx
+            .recv_timeout(wait)
+            .expect("origin B's page is not held up");
+        assert_eq!(tag(&first), "page 7");
+        loader.send(Job::Check(Check {
+            tab: 7,
+            generation: 1,
+            address: address(other_port, "/page"),
+        }));
+        let second = rx.recv_timeout(wait).expect("nor is its live-reload check");
+        assert_eq!(tag(&second), "check 7");
+        assert!(rx.try_recv().is_err(), "origin A's pages are still waiting");
+
+        release.send(()).unwrap();
+        let late: Vec<String> = (0..6)
+            .map(|_| tag(&rx.recv_timeout(wait).expect("origin A's pages")))
+            .collect();
+        assert_eq!(
+            late,
+            ["page 1", "page 2", "page 3", "page 4", "page 5", "page 6"],
+            "one origin's pages in the order they were asked for"
+        );
+        drop(loader);
         let _ = std::fs::remove_dir_all(dir);
     }
 

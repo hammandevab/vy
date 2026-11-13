@@ -216,6 +216,32 @@ impl TxtResolver for FakeResolver {
     }
 }
 
+/// A [`FakeResolver`] whose answers wait: a lookup is counted when it
+/// arrives and answered only once the test lets the lookups go.
+#[derive(Clone, Debug, Default)]
+struct HeldResolver {
+    dns: FakeResolver,
+    open: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl HeldResolver {
+    fn release(&self) {
+        *self.open.0.lock().unwrap() = true;
+        self.open.1.notify_all();
+    }
+}
+
+impl TxtResolver for HeldResolver {
+    fn txt(&self, name: &str) -> Result<Vec<String>, DnsError> {
+        let answer = self.dns.txt(name);
+        let mut open = self.open.0.lock().unwrap();
+        while !*open {
+            open = self.open.1.wait(open).unwrap();
+        }
+        answer
+    }
+}
+
 /// Plumbing that lets a test address a loopback server by a remote name:
 /// every host resolves to the server's port on 127.0.0.1, and the plain
 /// TCP connection reports itself as TLS so an `https://` request goes
@@ -319,7 +345,7 @@ fn spec_7_1_1_translation() {
     // The header actually sent is exactly that.
     let site = Site::new(package(&key(0), None), Form::Package, &[key(0)]);
     let server = serve(&site);
-    let (mut f, dir) = fetcher("accept");
+    let (f, dir) = fetcher("accept");
     f.fetch(&addr(&server, "/hello")).unwrap();
     let first = &server.requests()[0];
     assert_eq!(first.path, "/hello");
@@ -348,7 +374,7 @@ fn spec_7_2_1_media_types() {
     let p = package(&key(0), None);
     let site = Site::new(p.clone(), Form::Package, &[key(0)]);
     let server = serve(&site);
-    let (mut f, dir) = fetcher("forms");
+    let (f, dir) = fetcher("forms");
     let whole = f.fetch(&addr(&server, "/hello")).unwrap();
     assert_eq!(whole.form, Form::Package);
     assert_eq!(whole.package, p);
@@ -358,7 +384,7 @@ fn spec_7_2_1_media_types() {
     assert_eq!(whole.requests, 3);
 
     site.lock().unwrap().form = Form::Manifest;
-    let (mut g, dir2) = fetcher("forms2");
+    let (g, dir2) = fetcher("forms2");
     let bare = g.fetch(&addr(&server, "/hello")).unwrap();
     assert_eq!(bare.form, Form::Manifest);
     assert_eq!(bare.package, p);
@@ -394,7 +420,7 @@ fn spec_7_1_3_tls_required() {
         .redirects
         .insert("/plain".into(), "http://example.invalid/hello".into());
     let server = serve(&site);
-    let (mut f, dir) = fetcher("tls");
+    let (f, dir) = fetcher("tls");
     match f.fetch(&addr(&server, "/plain")) {
         Err(Error::TlsRequired { url }) => assert_eq!(url, "http://example.invalid/hello"),
         other => panic!("expected TlsRequired, got {other:?}"),
@@ -445,7 +471,7 @@ fn spec_7_2_2_other_media_type_not_rendered() {
         ("application/octet-stream".into(), vec![0; 10]),
     );
     let server = serve(&site);
-    let (mut f, dir) = fetcher("notvy");
+    let (f, dir) = fetcher("notvy");
     match f.fetch(&addr(&server, "/page.html")) {
         Err(Error::NotVy { media_type, url }) => {
             assert_eq!(media_type, "text/html");
@@ -476,7 +502,7 @@ fn spec_7_3_1_content_addressed_cache() {
     let server = serve(&site);
     let module_path = format!("/_vy/{}", p.manifest.module.hash.hex());
     let res_path = format!("/_vy/{}", p.manifest.resources[0].hash.hex());
-    let (mut f, dir) = fetcher("blobs");
+    let (f, dir) = fetcher("blobs");
     f.fetch(&addr(&server, "/hello")).unwrap();
     assert_eq!(server.count(&module_path), 1);
     assert_eq!(server.count(&res_path), 1);
@@ -511,7 +537,7 @@ fn spec_7_3_1_content_addressed_cache() {
     assert_eq!(server.count(&module_path), 2);
 
     // A server answering a hash URL with other bytes is refused (SPEC-9.4.1).
-    let (mut g, dir2) = fetcher("blobs2");
+    let (g, dir2) = fetcher("blobs2");
     site.lock()
         .unwrap()
         .blob_override
@@ -540,7 +566,7 @@ fn spec_4_1_4_declared_sizes_bound_blob_downloads() {
     site.lock().unwrap().cache_control = None;
     let server = serve(&site);
     let module_path = format!("/_vy/{}", p.manifest.module.hash.hex());
-    let (mut f, dir) = fetcher("declared");
+    let (f, dir) = fetcher("declared");
 
     let mut huge = p.clone();
     huge.manifest.module.size = 1 << 40;
@@ -585,7 +611,7 @@ fn spec_7_3_2_revalidate_ignores_freshness() {
     let p = package(&key(0), None);
     let site = Site::new(p.clone(), Form::Manifest, &[key(0)]);
     let server = serve(&site);
-    let (mut f, _dir) = fetcher("revalidate");
+    let (f, _dir) = fetcher("revalidate");
     let at = addr(&server, "/hello");
     f.fetch(&at).unwrap();
     let a = f.revalidate(&at).unwrap();
@@ -636,7 +662,7 @@ fn spec_7_3_2_revalidate_keeps_the_trust_path() {
         ("text/plain".into(), log.text().into_bytes()),
     );
     let dns = FakeResolver::default();
-    let (mut f, dir) = remote_fetcher("revalidate-trust", &server, &dns);
+    let (f, dir) = remote_fetcher("revalidate-trust", &server, &dns);
     let trust_requests = || {
         (
             server.count(WELL_KNOWN_KEY_PATH),
@@ -708,7 +734,7 @@ fn spec_7_3_2_manifest_http_cache() {
     let p = package(&key(0), None);
     let site = Site::new(p.clone(), Form::Manifest, &[key(0)]);
     let server = serve(&site);
-    let (mut f, dir) = fetcher("http");
+    let (f, dir) = fetcher("http");
     let first = f.fetch(&addr(&server, "/hello")).unwrap();
     // Manifest, key file, key log (SPEC-7.6.2), module, resource.
     assert_eq!(first.requests, 5);
@@ -720,7 +746,7 @@ fn spec_7_3_2_manifest_http_cache() {
 
     // Stale at once, with ETag: one conditional request, answered 304.
     site.lock().unwrap().cache_control = Some("max-age=0".into());
-    let (mut g, dir2) = fetcher("http2");
+    let (g, dir2) = fetcher("http2");
     g.fetch(&addr(&server, "/hello")).unwrap();
     let third = g.fetch(&addr(&server, "/hello")).unwrap();
     assert_eq!(third.requests, 1);
@@ -747,7 +773,7 @@ fn spec_7_3_2_manifest_http_cache() {
     // no-store: refetched every time, with the body.
     site.lock().unwrap().cache_control = Some("no-store".into());
     site.lock().unwrap().etag = false;
-    let (mut h, dir3) = fetcher("http3");
+    let (h, dir3) = fetcher("http3");
     h.fetch(&addr(&server, "/hello")).unwrap();
     let before = server.count("/hello");
     let again = h.fetch(&addr(&server, "/hello")).unwrap();
@@ -769,7 +795,7 @@ fn spec_7_4_1_signature_scope() {
     assert_eq!(altered.manifest.sig, p.manifest.sig);
     let site = Site::new(altered.clone(), Form::Package, &[key(0)]);
     let server = serve(&site);
-    let (mut f, dir) = fetcher("scope");
+    let (f, dir) = fetcher("scope");
     let fetched = f.fetch(&addr(&server, "/hello")).unwrap();
     assert!(!fetched.trusted());
     assert_eq!(fetched.key_id, key(0).public().key_id());
@@ -790,12 +816,12 @@ fn spec_7_4_2_key_discovery() {
     let site = Site::new(p.clone(), Form::Package, &[key(0), key(9)]);
     site.lock().unwrap().cache_control = None;
     let server = serve(&site);
-    let (mut f, dir) = fetcher("tofu");
+    let (f, dir) = fetcher("tofu");
     let a = addr(&server, "/hello");
     let first = f.fetch(&a).unwrap();
     assert!(first.trusted());
     assert_eq!(server.count(WELL_KNOWN_KEY_PATH), 1);
-    let pinned = f.keys().origin(&a.origin()).unwrap();
+    let pinned = f.keys().origin(&a.origin()).cloned().unwrap();
     assert_eq!(pinned.pinned.len(), 2, "every published key is pinned");
 
     // Same origin again: the pin answers, no discovery.
@@ -813,7 +839,7 @@ fn spec_7_4_2_key_discovery() {
 
     // A first visit to an origin whose key file lacks the signing key.
     site.lock().unwrap().keys = key_file(&[key(0).public()]);
-    let (mut g, dir2) = fetcher("tofu2");
+    let (g, dir2) = fetcher("tofu2");
     assert!(!g.fetch(&a).unwrap().trusted());
     assert!(
         g.keys().has_pins(&a.origin()),
@@ -821,7 +847,7 @@ fn spec_7_4_2_key_discovery() {
     );
     // A first visit without any key file: untrusted, nothing pinned.
     site.lock().unwrap().keys.clear();
-    let (mut h, dir3) = fetcher("tofu3");
+    let (h, dir3) = fetcher("tofu3");
     let none = h.fetch(&a).unwrap();
     assert!(!none.trusted());
     assert!(!h.keys().has_pins(&a.origin()));
@@ -864,12 +890,12 @@ fn spec_7_4_2_dns_txt_must_agree() {
             vy_manifest::dns_txt_record(&publisher.public()),
         ]),
     );
-    let (mut f, dir) = remote_fetcher("dns-agree", &server, &dns);
+    let (f, dir) = remote_fetcher("dns-agree", &server, &dns);
     let first = f.fetch(&a).unwrap();
     assert!(first.trusted(), "{:?}", first.restriction());
     assert_eq!(first.restriction(), None);
     assert_eq!(dns.lookups(), [name]);
-    let pins = f.keys().origin(&a.origin()).unwrap();
+    let pins = f.keys().origin(&a.origin()).cloned().unwrap();
     assert_eq!(
         pins.pinned.keys().collect::<Vec<_>>(),
         [&publisher.public().key_id()],
@@ -900,7 +926,7 @@ fn spec_7_4_2_dns_txt_must_agree() {
         name,
         Ok(vec![vy_manifest::dns_txt_record(&stranger.public())]),
     );
-    let (mut g, dir2) = remote_fetcher("dns-mismatch", &server, &dns);
+    let (g, dir2) = remote_fetcher("dns-mismatch", &server, &dns);
     let mismatch = g.fetch(&a).unwrap();
     assert!(!mismatch.trusted());
     assert_eq!(
@@ -919,7 +945,7 @@ fn spec_7_4_2_dns_txt_must_agree() {
     for records in [vec![], vec!["v=spf1 -all".to_string()]] {
         let dns = FakeResolver::default();
         dns.set(name, Ok(records));
-        let (mut h, dir3) = remote_fetcher("dns-missing", &server, &dns);
+        let (h, dir3) = remote_fetcher("dns-missing", &server, &dns);
         let missing = h.fetch(&a).unwrap();
         assert!(!missing.trusted());
         assert_eq!(
@@ -933,7 +959,7 @@ fn spec_7_4_2_dns_txt_must_agree() {
     // The lookup fails: restricted, fail closed, and asked again next time.
     let dns = FakeResolver::default();
     dns.set(name, Err(DnsError::Timeout));
-    let (mut t, dir4) = remote_fetcher("dns-timeout", &server, &dns);
+    let (t, dir4) = remote_fetcher("dns-timeout", &server, &dns);
     let timed_out = t.fetch(&a).unwrap();
     assert!(!timed_out.trusted());
     assert_eq!(
@@ -964,7 +990,7 @@ fn spec_7_4_2_dns_txt_must_agree() {
         .unwrap()
         .packages
         .insert("/hello".into(), package(&stranger, None));
-    let (mut s, dir5) = remote_fetcher("dns-half", &server, &dns);
+    let (s, dir5) = remote_fetcher("dns-half", &server, &dns);
     let half = s.fetch(&a).unwrap();
     assert!(!half.trusted());
     assert!(matches!(
@@ -988,7 +1014,7 @@ fn spec_7_4_2_dns_txt_must_agree() {
     // Loopback has no DNS: the key file alone, no lookup (SPEC-7.1.3).
     let dns = FakeResolver::default();
     let dir6 = temp_dir("dns-local");
-    let mut l = Fetcher::with_resolver(Options::new(&dir6), Box::new(dns.clone())).unwrap();
+    let l = Fetcher::with_resolver(Options::new(&dir6), Box::new(dns.clone())).unwrap();
     let local = l.fetch(&addr(&server, "/hello")).unwrap();
     assert!(local.trusted());
     assert!(dns.lookups().is_empty());
@@ -1021,7 +1047,7 @@ fn spec_7_4_3_restricted_mode() {
     let site = Site::new(bad, Form::Package, &[key(0)]);
     site.lock().unwrap().cache_control = None;
     let server = serve(&site);
-    let (mut f, dir) = fetcher("restricted");
+    let (f, dir) = fetcher("restricted");
     let a = addr(&server, "/hello");
     let restricted = f.fetch(&a).unwrap();
     assert!(!restricted.trusted());
@@ -1071,7 +1097,7 @@ fn spec_7_4_4_key_rotation() {
     );
     site.lock().unwrap().cache_control = None;
     let server = serve(&site);
-    let (mut f, dir) = fetcher("rotation");
+    let (f, dir) = fetcher("rotation");
     let a = addr(&server, "/hello");
     assert!(f.fetch(&a).unwrap().trusted());
     assert!(f.keys().is_successor(&a.origin(), &new.public().key_id()));
@@ -1204,7 +1230,7 @@ fn spec_7_4_4_next_key_id_cannot_forge_pins() {
         let site = Site::new(hostile.clone(), form, std::slice::from_ref(&publisher));
         site.lock().unwrap().cache_control = None;
         let server = serve(&site);
-        let (mut f, dir) = fetcher("forge");
+        let (f, dir) = fetcher("forge");
         let a = addr(&server, "/hello");
         let err = f.fetch(&a).unwrap_err();
         assert!(
@@ -1238,7 +1264,7 @@ fn spec_7_5_1_no_referer_max_redirects() {
         s.redirects.insert("/r0".into(), "/r1".into());
     }
     let server = serve(&site);
-    let (mut f, dir) = fetcher("redirects");
+    let (f, dir) = fetcher("redirects");
     // Three hops: allowed.
     let fetched = f.fetch(&addr(&server, "/r1")).unwrap();
     assert!(fetched.trusted());
@@ -1427,7 +1453,7 @@ fn spec_7_6_2_7_6_3_key_log_checked_at_key_decisions() {
 
     // A served log without the key: restricted, nothing pinned.
     set_log(Some(log.text().into_bytes()));
-    let (mut f, dir) = fetcher("log-decisions");
+    let (f, dir) = fetcher("log-decisions");
     let missing = f.fetch(&a).unwrap();
     assert_eq!(
         missing.restriction(),
@@ -1462,7 +1488,7 @@ fn spec_7_6_2_7_6_3_key_log_checked_at_key_decisions() {
     set_log(Some(log.text().into_bytes()));
     let first = f.fetch(&a).unwrap();
     assert!(first.trusted(), "{:?}", first.restriction());
-    let o = f.keys().origin(&a.origin()).unwrap();
+    let o = f.keys().origin(&a.origin()).cloned().unwrap();
     assert_eq!(
         o.pinned.keys().collect::<Vec<_>>(),
         [&old.public().key_id()],
@@ -1522,7 +1548,7 @@ fn spec_7_6_2_7_6_3_key_log_checked_at_key_decisions() {
         .unwrap()
         .packages
         .insert("/hello".into(), package(&old, None));
-    let (mut g, dir2) = fetcher("log-absent");
+    let (g, dir2) = fetcher("log-absent");
     let plain = g.fetch(&a).unwrap();
     assert!(plain.trusted(), "{:?}", plain.restriction());
     assert_eq!(g.keys().log_head(&a.origin()), None);
@@ -1579,7 +1605,7 @@ fn spec_9_5_3_private_network_rule() {
     let dir = temp_dir("private-network");
     let options = Options::new(&dir);
     let net = remote::net_with_hosts(Fetcher::test_config(&options), port, names);
-    let mut f = Fetcher::with_parts(options, Box::new(FakeResolver::default()), net).unwrap();
+    let f = Fetcher::with_parts(options, Box::new(FakeResolver::default()), net).unwrap();
     let at = |host: &str, path: &str| Address::parse(&format!("vy://{host}:{port}{path}")).unwrap();
     let https = |host: &str, path: &str| format!("https://{host}:{port}{path}");
     const LIMIT: u64 = 1 << 20;
@@ -1729,5 +1755,90 @@ fn spec_9_5_3_private_network_rule() {
         other => panic!("expected a refusal, got {other:?}"),
     }
     assert_eq!(server.requests().len(), before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SPEC-7.4.5, SPEC-7.4.2, SPEC-9.5.1 (granskning 0009:2): one fetcher
+/// serves many threads. Fetches of one origin take turns, so two first
+/// visits of an origin at once make one DNS lookup, one request for the
+/// key file and one pin: the second waits for the first and finds the
+/// origin pinned. Fetches of other origins do not wait: while the first
+/// visit's lookup is held open, a page of another origin is fetched,
+/// trusted and pinned.
+#[test]
+fn spec_7_4_5_first_visits_at_once_pin_once() {
+    let publisher = key(0);
+    let site = Site::new(
+        package(&publisher, None),
+        Form::Package,
+        std::slice::from_ref(&publisher),
+    );
+    let server = serve(&site);
+    let a = Address::parse("vy://exempel.test/hello").unwrap();
+    let name = "_vy.exempel.test";
+    let held = HeldResolver::default();
+    held.dns.set(
+        name,
+        Ok(vec![vy_manifest::dns_txt_record(&publisher.public())]),
+    );
+    let dir = temp_dir("turns");
+    let options = Options::new(&dir);
+    let net = remote::net(Fetcher::test_config(&options), server.port());
+    let f = Arc::new(Fetcher::with_parts(options, Box::new(held.clone()), net).unwrap());
+    let visit = |f: &Arc<Fetcher>, a: &Address| {
+        let (f, a) = (Arc::clone(f), a.clone());
+        std::thread::spawn(move || f.fetch(&a).map(|p| p.trusted()))
+    };
+    // Each of these comes about or the test fails; neither is a matter of
+    // how long anything takes.
+    let until = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::yield_now();
+        }
+    };
+
+    // The first visit gets as far as its lookup, which is held.
+    let first = visit(&f, &a);
+    until("the first visit asks DNS", &|| {
+        !held.dns.lookups().is_empty()
+    });
+    // The second waits for the origin's turn. Without turns it would be
+    // at the key file and then at DNS itself.
+    let second = visit(&f, &a);
+    until("the second visit waits or asks DNS itself", &|| {
+        f.waiting() == 1 || held.dns.lookups().len() > 1
+    });
+    assert_eq!(held.dns.lookups(), [name], "one lookup for the origin");
+    assert_eq!(f.waiting(), 1);
+    assert!(!f.keys().has_pins(&a.origin()), "nothing pinned yet");
+
+    // Another origin meanwhile (loopback asks no DNS, SPEC-7.1.3): fetched
+    // and pinned while the first origin's lookup is still held.
+    let b = addr(&server, "/hello");
+    let other = f.fetch(&b).unwrap();
+    assert!(other.trusted(), "{:?}", other.restriction());
+    assert!(f.keys().has_pins(&b.origin()));
+    assert_eq!(f.waiting(), 1, "the second visit still waits");
+    assert_eq!(held.dns.lookups(), [name]);
+
+    held.release();
+    assert!(first.join().unwrap().unwrap(), "the first visit is trusted");
+    assert!(second.join().unwrap().unwrap(), "and so is the second");
+    assert_eq!(held.dns.lookups(), [name], "still one lookup");
+    assert_eq!(f.waiting(), 0);
+    let key_files = server
+        .requests()
+        .iter()
+        .filter(|r| r.path == WELL_KNOWN_KEY_PATH)
+        .filter(|r| r.header("host") == Some("exempel.test"))
+        .count();
+    assert_eq!(key_files, 1, "the key file was asked for once");
+    let pins = f.keys().origin(&a.origin()).cloned().unwrap();
+    assert_eq!(
+        pins.pinned.keys().collect::<Vec<_>>(),
+        [&publisher.public().key_id()]
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
