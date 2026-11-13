@@ -115,10 +115,31 @@ fn native_tests_pass(project: &Path) {
     );
 }
 
+/// Most bytes the starter page's module may be: it was 28 848 when the
+/// ceiling was set.
+const STARTER_MAX_BYTES: usize = 30_000;
+
 #[test]
 fn scaffold_builds_to_wasm_and_passes_check_abi() {
     let (dir, project) = scaffold("prov-sida");
     let wasm = build_wasm(&project, "prov_sida");
+    // SPEC-13.1.4 (granskning 0014:7): the starter has a one-line field
+    // only, so it carries none of ui::TextBox's multi-line code. That
+    // rests on the compiler folding a constant argument, and the module's
+    // size is what shows whether it still does.
+    assert!(
+        wasm.len() <= STARTER_MAX_BYTES,
+        "the starter page is {} bytes, over its ceiling of {STARTER_MAX_BYTES}.\n\
+         It has a one-line text field only, so the multi-line half of ui::TextBox (wrapping, \
+         the vertical keys, the wheel, the scroll bar) must not be in the module: TextBox \
+         hands its line mode to the shared Field as an argument that is the same constant \
+         at every call, and the compiler folds it away. About 6 500 bytes over 28 848 means \
+         the folding stopped (the mode became a field, a function pointer or a run-time \
+         value in crates/vy-sdk/src/ui/textbox.rs, or the template's build settings \
+         changed). A smaller growth means the starter or the SDK really grew: raise \
+         STARTER_MAX_BYTES in the same commit and say why.",
+        wasm.len()
+    );
     let mut rt = start(&project, &wasm);
 
     // A first frame with the tree the template promises.
