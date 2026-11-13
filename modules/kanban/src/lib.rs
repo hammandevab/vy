@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 use vy_sdk::event::{button, key};
 use vy_sdk::math::snap;
 use vy_sdk::prelude::*;
-use vy_sdk::ui::{self, Input, Palette, ScrollView, TextBox, Theme};
+use vy_sdk::ui::{self, Input, Label, Palette, ScrollView, TextBox, Theme};
 use vy_sdk::{now_ms, state_get, state_put};
 
 const PAGE: Color = Color::rgb(0xF1, 0xF3, 0xF7);
@@ -910,7 +910,8 @@ impl Page {
                 f.rect(r, 8.0, CARD_EDGE)?;
                 f.rect(r.inset(1.0), 7.0, CARD)?;
                 if let Some((_, field)) = self.edit.as_mut() {
-                    field.draw(f, edit_rect(r), &t, "Kortets titel")?;
+                    let label = Label::hidden("Kortets titel");
+                    field.draw(f, edit_rect(r), &t, label, "Kortets titel")?;
                 }
                 continue;
             }
@@ -981,7 +982,8 @@ impl Page {
             self.scroll[c] = scroll;
             drawn?;
 
-            self.new[c].draw(f, lane.field, &t, "Nytt kort")?;
+            let name = format!("Nytt kort i {}", NAMES[c]);
+            self.new[c].draw(f, lane.field, &t, Label::hidden(&name), "Nytt kort")?;
             let id = ID_ADD - c as i32;
             if self.focus == Some(id) {
                 self.ring(f, lane.add, ui::RADIUS)?;

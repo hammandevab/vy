@@ -435,6 +435,10 @@ impl ChatPage {
             let (cx, _) = text_caret(self.field, &self.input, self.input.len())?;
             f.rect(Rect::new(tx + cx, ty + 1.0, 1.0, 17.0), 0.0, INK)?;
         }
+        // The field's name: a `text` node right before it, without a size
+        // (the placeholder is drawn, not registered).
+        f.sem
+            .node(Role::Text, Rect::new(r.x, r.y, 0.0, 0.0), "Meddelande")?;
         f.sem
             .node_with_id(ID_COMPOSER, Role::Textbox, r, &self.input)?;
         let b = self.send_rect();

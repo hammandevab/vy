@@ -1453,6 +1453,48 @@ events = [{kind = "text_input", text = "it's"}]   # a comment with ' and "
         }
     }
 
+    /// SPEC-10.1.1 (granskning 0010:4): a text field has a name in the
+    /// tree. A `textbox` node's text is the field's value and a
+    /// placeholder is only drawn, so in every tree of the suite each
+    /// `textbox` node comes right after a `text` node that names it, also
+    /// while the field is empty. `ui::TextBox::draw` registers that node
+    /// from its `Label`; the pages with fields of their own do the same.
+    #[test]
+    fn spec_10_1_1_every_text_field_has_a_name() {
+        let dir = root().join("conformance/semantic");
+        let (mut trees, mut fields) = (0, 0);
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let tree: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let nodes = tree["nodes"].as_array().unwrap();
+            trees += 1;
+            for (i, node) in nodes.iter().enumerate() {
+                if node["role"] != vy_abi::role::TEXTBOX {
+                    continue;
+                }
+                fields += 1;
+                let name = i.checked_sub(1).map(|i| &nodes[i]);
+                assert!(
+                    name.is_some_and(|n| n["role"] == vy_abi::role::TEXT
+                        && n["text"].as_str().is_some_and(|t| !t.is_empty())
+                        && n["parent_id"] == node["parent_id"]),
+                    "{}: the textbox {} has no name: the node before it is {:?}",
+                    path.display(),
+                    node["id"],
+                    name
+                );
+            }
+        }
+        assert!(
+            trees >= 40 && fields >= 30,
+            "{trees} trees, {fields} fields"
+        );
+    }
+
     /// SPEC-12.2.2: the case list parses and names the four hello cases.
     #[test]
     fn spec_12_2_2_cases_parse() {
@@ -1833,7 +1875,8 @@ fetch = [{url = "https://chat.example/api/messages", status = 201, body = "ok"},
                 ..RenderRequest::new(&wasm, 800, 600)
             };
             let out = render(&req).unwrap();
-            assert_eq!(out.semantic[3].text, "Anna Lind", "the page still ran");
+            let name = out.semantic.iter().find(|n| n.id == -10).unwrap();
+            assert_eq!(name.text, "Anna Lind", "the page still ran");
             out.logs
                 .into_iter()
                 .filter(|l| l.message.contains("E_DENIED"))

@@ -12,6 +12,9 @@ use crate::VyError;
 const CW: f32 = 9.6;
 const SHIFT: i32 = 1;
 const CTRL: i32 = 2;
+/// No name: the tests that are not about the field's label register the
+/// field's own node and nothing else.
+const BARE: Label<'static> = Label::hidden("");
 
 /// `a` and `b` agree to a thousandth of a pixel (the ABI carries lengths
 /// × 100, so `3.0 * CW` and the host's 28.8 differ in the last bit).
@@ -265,7 +268,7 @@ fn spec_10_3_3_textbox_draw() {
     let p = Palette::LIGHT;
     let r = Rect::new(10.0, 20.0, 200.0, 40.0);
     let mut tb = TextBox::new(-7);
-    let (ops, sem) = drawn(|f| tb.draw(f, r, &t, "Namn"));
+    let (ops, sem) = drawn(|f| tb.draw(f, r, &t, BARE, "Namn"));
     assert_eq!(
         ops[..3],
         [
@@ -306,7 +309,7 @@ fn spec_10_3_3_textbox_draw() {
     send(&mut tb, focus(-7, true), r, &t);
     send(&mut tb, typed("Anna"), r, &t);
     tb.select(1..3);
-    let (ops, sem) = drawn(|f| tb.draw(f, r, &t, "Namn"));
+    let (ops, sem) = drawn(|f| tb.draw(f, r, &t, BARE, "Namn"));
     assert!(matches!(ops[0], Op::Rect { color, .. } if color == p.accent.0));
     assert!(
         matches!(ops[1], Op::Rect { x, w, radius, .. } if (x, w, radius) == (12.0, 196.0, 4.0))
@@ -329,7 +332,7 @@ fn spec_10_3_3_textbox_draw() {
     // 30 characters (288 px) in 176: End scrolls the text left so the
     // caret stays inside; Home scrolls back.
     tb.set_text(&"x".repeat(30));
-    let (ops, _) = drawn(|f| tb.draw(f, r, &t, ""));
+    let (ops, _) = drawn(|f| tb.draw(f, r, &t, BARE, ""));
     let text_x = |ops: &[Op]| {
         ops.iter()
             .find_map(|o| match o {
@@ -346,19 +349,84 @@ fn spec_10_3_3_textbox_draw() {
     });
     assert!(caret.is_some_and(|x| near(x, 22.0 + 175.0)), "{caret:?}");
     send(&mut tb, key(key::HOME), r, &t);
-    let (ops, _) = drawn(|f| tb.draw(f, r, &t, ""));
+    let (ops, _) = drawn(|f| tb.draw(f, r, &t, BARE, ""));
     assert_eq!(text_x(&ops), 22.0);
 
     let big = TextBox::multiline(-8)
         .with_max_len(10_000)
         .with_text(&"é".repeat(3000));
     let mut big = big;
-    let (_, sem) = drawn(|f| big.draw(f, Rect::new(0.0, 0.0, 300.0, 100.0), &t, ""));
+    let (_, sem) = drawn(|f| big.draw(f, Rect::new(0.0, 0.0, 300.0, 100.0), &t, BARE, ""));
     assert_eq!(
         sem[0].text.len(),
         4096,
         "the node's text is capped (SPEC-9.3.2)"
     );
+}
+
+/// SPEC-10.1.1 (granskning 0010:4): a field has a name in the tree also
+/// while it is empty. The `textbox` node's text is the value and the
+/// placeholder is only drawn, so the field registers its [`Label`] as a
+/// `text` node right before its own: over the rectangle the page drew the
+/// label in, or, for a name that is drawn nowhere, at the field's corner
+/// without a size, where no pointer finds it. The name is there with and
+/// without a value, is cut to the node's 4 KB, and draws nothing.
+#[test]
+fn spec_10_1_1_textbox_label_is_in_the_tree() {
+    let t = theme();
+    let r = Rect::new(10.0, 40.0, 200.0, 40.0);
+    let mut tb = TextBox::new(-7);
+    let (bare_ops, sem) = drawn(|f| tb.draw(f, r, &t, BARE, "Nytt kort"));
+    assert_eq!(sem.len(), 1, "an empty label registers nothing");
+
+    let (ops, sem) = drawn(|f| tb.draw(f, r, &t, Label::hidden("Nytt kort i Pågår"), "Nytt kort"));
+    assert_eq!(ops, bare_ops, "the label draws nothing");
+    let nodes: Vec<(i32, i32, &str)> = sem
+        .iter()
+        .map(|n| (n.id, n.role, n.text.as_str()))
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            (1, Role::Text as i32, "Nytt kort i Pågår"),
+            (-7, Role::Textbox as i32, "")
+        ],
+        "the name, then the field"
+    );
+    assert_eq!(
+        (sem[0].x, sem[0].y, sem[0].w, sem[0].h),
+        (10.0, 40.0, 0.0, 0.0),
+        "the field's corner, no size"
+    );
+    assert_eq!(sem[0].parent_id, sem[1].parent_id);
+
+    // A label the page draws above the field is registered where it is.
+    let above = Rect::new(10.0, 16.0, 200.0, 20.0);
+    send(&mut tb, focus(-7, true), r, &t);
+    send(&mut tb, typed("Anna"), r, &t);
+    let (_, sem) = drawn(|f| tb.draw(f, r, &t, Label::shown(above, "Namn"), "Förnamn"));
+    assert_eq!(
+        (
+            sem[0].role,
+            sem[0].text.as_str(),
+            sem[0].x,
+            sem[0].y,
+            sem[0].w,
+            sem[0].h
+        ),
+        (Role::Text as i32, "Namn", 10.0, 16.0, 200.0, 20.0)
+    );
+    assert_eq!(
+        (sem[1].id, sem[1].text.as_str()),
+        (-7, "Anna"),
+        "with a value too"
+    );
+
+    // The same for a multi-line field, and a name longer than a node takes.
+    let mut note = TextBox::multiline(-8);
+    let long = "n".repeat(5000);
+    let (_, sem) = drawn(|f| note.draw(f, r, &t, Label::hidden(&long), ""));
+    assert_eq!((sem[0].text.len(), sem[1].id), (4096, -8));
 }
 
 /// SPEC-5.2.6: focus opens composition over the field (`ime_begin`) and
@@ -375,7 +443,7 @@ fn spec_5_2_6_textbox_ime() {
     send(&mut tb, focus(-1, true), r, &t);
     mock::with(|h| assert_eq!(h.ime_rect, Some((0.0, 0.0, 300.0, 40.0))));
     let moved = r.offset(0.0, 50.0);
-    drawn(|f| tb.draw(f, moved, &t, ""));
+    drawn(|f| tb.draw(f, moved, &t, BARE, ""));
     mock::with(|h| assert_eq!(h.ime_rect, Some((0.0, 50.0, 300.0, 40.0))));
 
     let compose = Event::ImeCompose {
@@ -384,7 +452,7 @@ fn spec_5_2_6_textbox_ime() {
     };
     assert_eq!(send(&mut tb, compose, moved, &t), (Response::Redraw, true));
     assert_eq!(tb.text(), "Hej");
-    let (ops, _) = drawn(|f| tb.draw(f, moved, &t, ""));
+    let (ops, _) = drawn(|f| tb.draw(f, moved, &t, BARE, ""));
     assert!(ops
         .iter()
         .any(|o| matches!(o, Op::Text { text, .. } if text == "Hejかな")));
@@ -396,7 +464,7 @@ fn spec_5_2_6_textbox_ime() {
     );
     send(&mut tb, typed("かな"), moved, &t);
     assert_eq!(tb.text(), "Hejかな");
-    let (ops, _) = drawn(|f| tb.draw(f, moved, &t, ""));
+    let (ops, _) = drawn(|f| tb.draw(f, moved, &t, BARE, ""));
     assert!(
         !ops.iter().any(|o| matches!(o, Op::Rect { h: 1.0, .. })),
         "no underline after the commit"
@@ -430,7 +498,7 @@ fn spec_6_4_3_textbox_multiline() {
     let r = Rect::new(0.0, 0.0, 24.0 + 10.0 * CW, 80.0);
     let mut tb = TextBox::multiline(-3).with_text("aaa bbb ccc ddd\n\nabcdefghijklmnop");
     assert!(tb.is_multiline());
-    let (ops, _) = drawn(|f| tb.draw(f, r, &t, ""));
+    let (ops, _) = drawn(|f| tb.draw(f, r, &t, BARE, ""));
     assert_eq!(
         tb.field.wrap.lines,
         [(0, 8), (8, 15), (16, 16), (17, 27), (27, 33)]
@@ -477,7 +545,7 @@ fn spec_6_4_3_textbox_multiline() {
 
     // A press on the second visual line (scrolled to the top first).
     send(&mut tb, key_with(key::HOME, CTRL), r, &t);
-    drawn(|f| tb.draw(f, r, &t, ""));
+    drawn(|f| tb.draw(f, r, &t, BARE, ""));
     assert_eq!(tb.field.scroll_y, 0.0);
     send(&mut tb, down(12.0 + 2.0 * CW, 10.0 + 20.0 + 5.0), r, &t);
     assert_eq!(tb.caret(), 10);
@@ -524,7 +592,7 @@ fn spec_6_4_3_textbox_multiline() {
     );
     send(&mut tb, Event::PointerLeave, r, &t);
     assert!(!send(&mut tb, wheel, r, &t).1);
-    let (ops, _) = drawn(|f| tb.draw(f, r, &t, ""));
+    let (ops, _) = drawn(|f| tb.draw(f, r, &t, BARE, ""));
     assert!(
         ops.iter()
             .any(|o| matches!(o, Op::Rect { w: 3.0, color, .. } if *color == t.palette.track.0)),
@@ -541,12 +609,12 @@ fn spec_6_4_3_textbox_rewrap_matches_fresh_wrap() {
     let r = Rect::new(0.0, 0.0, 24.0 + 10.0 * CW, 400.0);
     let fresh = |text: &str| {
         let mut tb = TextBox::multiline(-1).with_text(text);
-        drawn(|f| tb.draw(f, r, &t, ""));
+        drawn(|f| tb.draw(f, r, &t, BARE, ""));
         tb.field.wrap.lines.clone()
     };
     let mut tb = TextBox::multiline(-1).with_text("aaa bbb ccc\nsame\nsame\nddd eee fff ggg");
     send(&mut tb, focus(-1, true), r, &t);
-    drawn(|f| tb.draw(f, r, &t, ""));
+    drawn(|f| tb.draw(f, r, &t, BARE, ""));
     assert_eq!(
         tb.field.wrap.lines,
         fresh("aaa bbb ccc\nsame\nsame\nddd eee fff ggg")
@@ -568,7 +636,7 @@ fn spec_6_4_3_textbox_rewrap_matches_fresh_wrap() {
     ];
     for (e, want) in edits {
         send(&mut tb, e, r, &t);
-        drawn(|f| tb.draw(f, r, &t, ""));
+        drawn(|f| tb.draw(f, r, &t, BARE, ""));
         assert_eq!(tb.text(), want);
         assert_eq!(tb.field.wrap.lines, fresh(want), "after {e:?}");
     }
@@ -576,10 +644,10 @@ fn spec_6_4_3_textbox_rewrap_matches_fresh_wrap() {
     // space (one paragraph shrinks), Enter splits it in two.
     send(&mut tb, key(key::END), r, &t);
     send(&mut tb, key(key::DELETE), r, &t);
-    drawn(|f| tb.draw(f, r, &t, ""));
+    drawn(|f| tb.draw(f, r, &t, BARE, ""));
     assert_eq!(tb.field.wrap.lines, fresh(tb.text()));
     send(&mut tb, key(key::ENTER), r, &t);
-    drawn(|f| tb.draw(f, r, &t, ""));
+    drawn(|f| tb.draw(f, r, &t, BARE, ""));
     assert_eq!(tb.field.wrap.lines, fresh(tb.text()));
     assert_eq!(
         tb.text(),
@@ -804,12 +872,12 @@ fn spec_5_3_3_textbox_wrap_measures_in_the_order_of_the_text() {
         mock::with(|h| h.text_bytes) - before
     };
     let first = cost(&mut || {
-        drawn(|f| tb.draw(f, r, &t, ""));
+        drawn(|f| tb.draw(f, r, &t, BARE, ""));
     });
     assert_eq!(tb.field.wrap.lines.len(), 103, "40 characters a line");
     assert!(first <= 4 * 4096, "the first frame shaped {first} bytes");
     let again = cost(&mut || {
-        drawn(|f| tb.draw(f, r, &t, ""));
+        drawn(|f| tb.draw(f, r, &t, BARE, ""));
     });
     assert!(again <= 400, "an unchanged field wraps nothing: {again}");
     send(&mut tb, focus(-1, true), r, &t);
@@ -819,12 +887,12 @@ fn spec_5_3_3_textbox_wrap_measures_in_the_order_of_the_text() {
     assert!(press <= 400, "a press reads one line: {press}");
     let narrower = Rect::new(0.0, 0.0, 24.0 + 25.0 * CW, 100.0);
     let resized = cost(&mut || {
-        drawn(|f| tb.draw(f, narrower, &t, ""));
+        drawn(|f| tb.draw(f, narrower, &t, BARE, ""));
     });
     assert!(resized <= 4 * 4096, "a resize shaped {resized} bytes");
     let typed_cost = cost(&mut || {
         send(&mut tb, typed("x"), narrower, &t);
-        drawn(|f| tb.draw(f, narrower, &t, ""));
+        drawn(|f| tb.draw(f, narrower, &t, BARE, ""));
     });
     assert!(typed_cost <= 4 * 4096, "a keystroke shaped {typed_cost}");
 }

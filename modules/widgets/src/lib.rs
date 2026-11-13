@@ -26,8 +26,8 @@ use alloc::format;
 use alloc::string::String;
 use vy_sdk::prelude::*;
 use vy_sdk::ui::{
-    self, Button, Checkbox, Column, Input, List, Multiline, Palette, RadioGroup, Row, ScrollView,
-    Slider, TextBox, Theme,
+    self, Button, Checkbox, Column, Input, Label, List, Multiline, Palette, RadioGroup, Row,
+    ScrollView, Slider, TextBox, Theme,
 };
 use vy_sdk::{clipboard_write, text_measure};
 
@@ -312,11 +312,16 @@ impl Page {
     fn draw_form(&mut self, f: &mut Frame, l: &Layout) -> Result<(), VyError> {
         let t = self.theme;
         let s = self.s;
-        block(f, l.name_label, s.label, Role::Text, "Namn")?;
-        self.name.draw(f, l.name, &t, "Förnamn Efternamn")?;
-        block(f, l.note_label, s.label, Role::Text, "Anteckning")?;
+        // A field's label is drawn here and registered by the field, as
+        // the `text` node right before its own.
+        let (name, note) = (l.name_label, l.note_label);
+        f.text(name.x, name.y, name.w, s.label, "Namn")?;
+        let label = Label::shown(name, "Namn");
+        self.name.draw(f, l.name, &t, label, "Förnamn Efternamn")?;
+        f.text(note.x, note.y, note.w, s.label, "Anteckning")?;
+        let label = Label::shown(note, "Anteckning");
         self.note
-            .draw(f, l.note, &t, "Flera rader; Enter bryter raden.")?;
+            .draw(f, l.note, &t, label, "Flera rader; Enter bryter raden.")?;
         self.news.draw(f, l.news, &t, "Skicka nyhetsbrevet")?;
         block(f, l.size_label, s.label, Role::Text, "Storlek")?;
         self.size.draw(f, l.sizes, &t, &SIZES)?;
@@ -525,6 +530,7 @@ mod tests {
     fn spec_10_1_1_whole_tree_in_tab_order() {
         let mut p = page(800.0, 600.0);
         assert!(mock::run_frame(&mut p, 0).unwrap() > 50);
+        let l = p.layout();
         mock::with(|h| {
             let focusable: Vec<i32> = h.sem.iter().filter(|n| n.id < 0).map(|n| n.id).collect();
             assert_eq!(focusable, [-10, -11, -12, -13, -14, -15, -16, -17, -18]);
@@ -535,6 +541,20 @@ mod tests {
                     .count(),
                 24
             );
+            // Each field's label is the `text` node right before it,
+            // over the rectangle the label is drawn in.
+            for (id, name, at) in [
+                (-10, "Namn", l.name_label),
+                (-11, "Anteckning", l.note_label),
+            ] {
+                let i = h.sem.iter().position(|n| n.id == id).unwrap();
+                let label = &h.sem[i - 1];
+                assert_eq!((label.role, label.text.as_str()), (Role::Text as i32, name));
+                assert_eq!(
+                    (label.x, label.y, label.w, label.h),
+                    (at.x, at.y, at.w, at.h)
+                );
+            }
             assert!(h.sem.iter().any(|n| n.text == "Mellan (vald)"));
             assert!(h.sem.iter().any(|n| n.text == "Volym: 40"));
             assert!(h.refusals.is_empty(), "{:?}", h.refusals);

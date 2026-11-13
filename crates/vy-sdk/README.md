@@ -127,7 +127,7 @@ En sida med ett fält och en knapp:
 
 ```rust
 use vy_sdk::prelude::*;
-use vy_sdk::ui::{Button, Input, TextBox, Theme};
+use vy_sdk::ui::{Button, Input, Label, TextBox, Theme};
 
 struct Page { window: Window, theme: Theme, name: TextBox, send: Button, sent: bool }
 
@@ -144,7 +144,7 @@ impl App for Page {
     }
     fn frame(&mut self, f: &mut Frame, _: i32) -> Result<(), VyError> {
         let (field, button) = self.layout();
-        self.name.draw(f, field, &self.theme, "Ditt namn")?;
+        self.name.draw(f, field, &self.theme, Label::hidden("Namn"), "Ditt namn")?;
         self.send.draw(f, button, &self.theme, "Skicka")
     }
     fn event(&mut self, event: Event<'_>) -> bool {
@@ -166,14 +166,19 @@ Ett textfält på en rad (`TextBox`) eller flera (`TextBox<Multiline>`): markör
 och pekaren, ord med Ctrl, Ctrl+A, Ctrl+C och Ctrl+X genom `clipboard_write` under
 kopieringsgesten (SPEC-8.2.4; klipp tar bara bort texten om skrivningen lyckades), inklistring som
 `TEXT_INPUT`, IME med `ime_begin`/`ime_end` när fältet får och tappar fokus. Manifestet måste begära
-`ime` (SPEC-10.4.2). Noden är en `textbox` med värdet; rita etiketten själv ovanför och registrera
-den som `Role::Text`. Fokuserat får fältet 2 px ram i accentfärgen.
+`ime` (SPEC-10.4.2). Noden är en `textbox` med värdet. Fältets namn är en `text`-nod som `draw`
+registrerar precis före fältet, så att det finns i trädet också när fältet är tomt (platshållaren
+ritas bara): `Label::shown(rektangel, "Namn")` för en etikett som sidan själv ritar i `rektangel`
+med `f.text` (utan egen nod), `Label::hidden("Sök")` för ett namn som inte ritas någonstans; det
+får då fältets hörn och ingen storlek. Fokuserat får fältet 2 px ram i accentfärgen.
 
 ```rust
 name: TextBox::new(-1).with_max_len(200),        // byte; längre inmatning kapas
 note: TextBox::multiline(-2),                     // fältets typ: TextBox<Multiline>
 
-self.name.draw(f, l.name, &self.theme, "Förnamn Efternamn")?;   // platshållare när tomt
+f.text(l.label.x, l.label.y, l.label.w, self.label, "Namn")?;   // etiketten ritar sidan
+self.name.draw(f, l.name, &self.theme, Label::shown(l.label, "Namn"), "Förnamn Efternamn")?;
+self.note.draw(f, l.note, &self.theme, Label::hidden("Anteckning"), "Skriv här")?;   // platshållare när tomt
 let r = self.name.event(&mut ui, l.name, &self.theme);
 if r.activated() { /* Enter i ett enradsfält */ }
 let value: &str = self.name.text();               // set_text, select_all, selection, last_copy

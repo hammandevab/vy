@@ -605,6 +605,23 @@ fn the_grid_is_virtualised_and_the_tree_is_whole() {
         assert_eq!(nodes(Role::Row), 12);
         assert_eq!(nodes(Role::Table), 1);
         assert!(h.sem.iter().any(|n| n.text == "E4: 99000"));
+        // The bar and its two neighbours each have their name as the
+        // `text` node right before them.
+        let named: Vec<(&str, i32)> = h
+            .sem
+            .windows(2)
+            .filter(|w| w[1].role == Role::Textbox as i32)
+            .map(|w| (w[0].text.as_str(), w[0].role))
+            .collect();
+        let text = Role::Text as i32;
+        assert_eq!(
+            named,
+            [
+                ("Föregående cell", text),
+                ("Innehåll i A1", text),
+                ("Nästa cell", text)
+            ]
+        );
         assert!(h.refusals.is_empty(), "{:?}", h.refusals);
     });
 

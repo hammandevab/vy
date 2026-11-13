@@ -297,6 +297,12 @@ fn the_tree_has_every_block_with_its_role() {
         assert_eq!(count(Role::ListItem), 7);
         assert_eq!(count(Role::Separator), 1);
         assert_eq!(count(Role::Textbox), 1);
+        // The editor's name is the `text` node right before it.
+        let editor = h.sem.iter().position(|n| n.id == ID_EDITOR).unwrap();
+        assert_eq!(
+            (h.sem[editor - 1].role, h.sem[editor - 1].text.as_str()),
+            (Role::Text as i32, "Anteckningens text i Markdown")
+        );
         assert_eq!(count(Role::Link), 2);
         let list = h.sem.iter().find(|n| n.role == Role::List as i32).unwrap();
         let item = h

@@ -283,7 +283,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use vy_sdk::prelude::*;
-use vy_sdk::ui::{self, Button, Column, Input, Row, TextBox, Theme};
+use vy_sdk::ui::{self, Button, Column, Input, Label, Row, TextBox, Theme};
 
 const BG: Color = Color::rgb(0xF2, 0xF3, 0xF5);
 const CARD: Color = Color::rgb(0xFF, 0xFF, 0xFF);
@@ -398,10 +398,11 @@ impl App for Page {
             f.sem.node(Role::Heading, l.title, TITLE)?;
             f.text(x, l.body.y, l.body.w, self.body, BODY)?;
             f.sem.node(Role::Text, l.body, BODY)?;
-            // A field's label is a node of its own, just before the field.
+            // A field's label is drawn here; the field registers it as its
+            // name, the node just before its own.
             f.text(x, l.label.y, l.label.w, self.label, LABEL)?;
-            f.sem.node(Role::Text, l.label, LABEL)?;
-            self.name.draw(f, l.name, &t, "Förnamn")?;
+            let label = Label::shown(l.label, LABEL);
+            self.name.draw(f, l.name, &t, label, "Förnamn")?;
             self.greet.draw(f, l.greet, &t, "Hälsa")?;
             f.text(x, l.greeting.y, l.greeting.w, t.text, &self.greeting)?;
             f.sem.node(Role::Text, l.greeting, &self.greeting)?;
@@ -459,10 +460,10 @@ mod tests {
                 7,
                 "main, heading, two texts, textbox, button, text"
             );
-            assert!(h
-                .sem
-                .iter()
-                .any(|n| n.id == ID_NAME && n.role == Role::Textbox as i32));
+            // The field's name is the node before it: its label.
+            let name = h.sem.iter().position(|n| n.id == ID_NAME).unwrap();
+            assert_eq!(h.sem[name].role, Role::Textbox as i32);
+            assert_eq!(h.sem[name - 1].text, LABEL);
             assert!(h
                 .sem
                 .iter()
@@ -581,12 +582,12 @@ filverktygen når bara den här katalogen. Avsluta med två meningar om vad du �
 
 ## Komponenter (`vy_sdk::ui`)
 
-Allt finns i `vy_sdk::ui`; importera det sidan använder, t.ex. `use vy_sdk::ui::{self, Button, Input, TextBox, Theme};`
+Allt finns i `vy_sdk::ui`; importera det sidan använder, t.ex. `use vy_sdk::ui::{self, Button, Input, Label, TextBox, Theme};`
 (en import som inte används är en varning, och bygget ska gå utan varningar).
 
 | Komponent | Nod | Gör |
 | --- | --- | --- |
-| `TextBox::new(id)`, `TextBox::multiline(id)` (typ `TextBox<Multiline>`) | `textbox` | markör, markering (Skift, pekaren), Ctrl+A/C/X, inklistring, IME, radbrytning; `.text()`, `.set_text()`, `.with_max_len(n)` |
+| `TextBox::new(id)`, `TextBox::multiline(id)` (typ `TextBox<Multiline>`) | `text` (fältets namn) + `textbox` | markör, markering (Skift, pekaren), Ctrl+A/C/X, inklistring, IME, radbrytning; `.text()`, `.set_text()`, `.with_max_len(n)`; `draw(f, r, &theme, Label::shown(etikettens_rektangel, "Namn"), platshållare)` för en etikett sidan ritar, `Label::hidden("Sök")` för ett namn som inte ritas |
 | `Button::new(id)`, `Button::secondary(id)` | `button` | tryck, Enter, mellanslag |
 | `Checkbox::new(id, checked)` | `checkbox` | tryck, mellanslag; `.checked` |
 | `RadioGroup::new(first_id, n, selected)` | `radio` × n (id `first`, `first − 1`, …) | tryck, mellanslag; `.selected` |

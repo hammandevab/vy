@@ -48,7 +48,7 @@ registrerar sin nod i `draw`, och hanterar sina händelser i `event` mot samma r
 
 | Komponent | Roll i trädet | Gör |
 | --- | --- | --- |
-| `TextBox::new(id)`, `TextBox::multiline(id)` | `textbox` | markör, markering med Skift och pekaren, Ctrl+A/C/X, inklistring, IME, radbrytning |
+| `TextBox::new(id)`, `TextBox::multiline(id)` | `text` (fältets namn) + `textbox` | markör, markering med Skift och pekaren, Ctrl+A/C/X, inklistring, IME, radbrytning |
 | `Button::new(id)`, `Button::secondary(id)` | `button` | aktiveras av tryck, Enter och mellanslag |
 | `Checkbox::new(id, checked)` | `checkbox` | växlar med tryck och mellanslag |
 | `RadioGroup::new(first_id, n, selected)` | `radio` × n | ett tryck eller mellanslag väljer |
@@ -71,6 +71,11 @@ Regler som gäller alla:
   rad öppnad), `.changed()` (värdet ändrat), `.redraw()`.
 - **Fasta negativa nod-id** för allt som kan få fokus: `TextBox::new(-1)`, `Button::new(-2)`. Fokus
   följer id:t mellan frames (SPEC-10.3.2), och Tab går i den ordning noderna registreras.
+- **Ett textfält har alltid ett namn.** En `textbox`-nods text är fältets värde, och platshållaren
+  ritas bara, så `TextBox::draw` tar fältets namn som en `Label` och registrerar det som en
+  `text`-nod precis före fältet: `Label::shown(rektangel, "Namn")` för en etikett som sidan själv
+  ritar i `rektangel` (med `f.text`, utan egen nod), `Label::hidden("Ny uppgift")` för ett namn som
+  inte ritas någonstans. Utan namn vet en skärmläsare inte vad ett tomt fält är till för.
 - **En lista eller rullyta har ingen fokuserbar roll** (SPEC-10.3.2). Den tar tangenter när den är
   aktiv: efter ett tryck i den som inte gav någon nod fokus, eller när sidan sagt `set_active(true)`.
 - **Knappar aktiveras på `POINTER_DOWN`**, som i alla referenssidor.
@@ -177,7 +182,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use vy_sdk::prelude::*;
-use vy_sdk::ui::{self, Button, Column, Input, List, Row, TextBox, Theme};
+use vy_sdk::ui::{self, Button, Column, Input, Label, List, Row, TextBox, Theme};
 
 const BG: Color = Color::rgb(0xF2, 0xF3, 0xF5);
 const CARD: Color = Color::rgb(0xFF, 0xFF, 0xFF);
@@ -275,7 +280,9 @@ impl App for Page {
         f.group(Role::Main, l.card, "", |f| {
             f.text(l.title.x, l.title.y, l.title.w, self.title, "Att göra")?;
             f.sem.node(Role::Heading, l.title, "Att göra")?;
-            self.field.draw(f, l.field, &t, "Ny uppgift")?;
+            // The field's name in the tree; nothing is drawn for it.
+            let label = Label::hidden("Ny uppgift");
+            self.field.draw(f, l.field, &t, label, "Ny uppgift")?;
             self.add.draw(f, l.add, &t, "Lägg till")?;
             self.list.draw(f, l.list, &t, &self.tasks[..])?;
             self.remove.draw(f, l.remove, &t, "Ta bort")?;
@@ -360,6 +367,7 @@ vy-dev build
 | Textfält utan `"ime": {}` i manifestet | konformanssviten avvisar sidan (SPEC-10.4.2); `ime_begin` nekas | begär `ime` så fort sidan har en `textbox` |
 | Bild utan `w`/`h` i manifestet, eller fel storlek | manifestet valideras inte; värden avvisar bilden med `E_RESOURCE` (SPEC-8.1.2, SPEC-6.5.1) | ange bildens verkliga storlek i pixlar |
 | Glömd semantisk nod | texten finns inte för skärmläsare, sök eller markering; Tab hoppar över kontrollen | `f.sem.node(…)` för varje text, komponenterna för kontroller |
+| Textfält utan namn (bara en platshållare) | en skärmläsare möter ett tomt fält utan att veta vad det är | `Label::shown(…)` eller `Label::hidden(…)` i `TextBox::draw`; platshållaren når aldrig trädet |
 | Ny nod före en fokuserad kontroll med automatiskt id | id:n flyttas, fokus hamnar på fel nod | fasta negativa id för allt fokuserbart |
 | Obegränsad allokering per frame (en `format!` per rad i en lång lista, växande `Vec`) | minnet tar slut mot `memory_max`, budgeten spricker | tak på data, återanvänd buffertar, rita bara det som syns |
 | `event` returnerar `false` efter en ändring | ingen ny frame; skärmen visar det gamla | `ui.redraw() \|\| ändrat` |

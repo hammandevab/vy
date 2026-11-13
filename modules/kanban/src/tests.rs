@@ -443,6 +443,20 @@ fn tree_lists_every_control_in_tab_order() {
     }
     assert_eq!(focusable, expected);
     mock::with(|h| {
+        // Each field's name is the `text` node right before it: the
+        // placeholder "Nytt kort" is drawn, never registered.
+        for (c, name) in NAMES.iter().enumerate() {
+            let i = h
+                .sem
+                .iter()
+                .position(|n| n.id == ID_NEW - c as i32)
+                .unwrap();
+            assert_eq!(
+                (h.sem[i - 1].role, h.sem[i - 1].text.clone()),
+                (Role::Text as i32, format!("Nytt kort i {name}"))
+            );
+            assert_eq!((h.sem[i - 1].w, h.sem[i - 1].h), (0.0, 0.0));
+        }
         assert!(h.sem.iter().any(|n| n.text == "Lägg till kort i Pågår"));
         assert!(h
             .sem

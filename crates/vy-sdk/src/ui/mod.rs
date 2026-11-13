@@ -36,7 +36,7 @@
 //!
 //! ```
 //! use vy_sdk::prelude::*;
-//! use vy_sdk::ui::{Button, Input, TextBox, Theme};
+//! use vy_sdk::ui::{Button, Input, Label, TextBox, Theme};
 //!
 //! struct Page { window: Window, theme: Theme, name: TextBox, send: Button, sent: bool }
 //!
@@ -55,7 +55,7 @@
 //!     }
 //!     fn frame(&mut self, f: &mut Frame, _: i32) -> Result<(), VyError> {
 //!         let (field, button) = self.layout();
-//!         self.name.draw(f, field, &self.theme, "Ditt namn")?;
+//!         self.name.draw(f, field, &self.theme, Label::hidden("Namn"), "Ditt namn")?;
 //!         self.send.draw(f, button, &self.theme, "Skicka")
 //!     }
 //!     fn event(&mut self, event: Event<'_>) -> bool {
@@ -72,7 +72,7 @@
 //! # vy_sdk::mock::reset();
 //! # let mut page = Page::init(Window { width: 400.0, height: 300.0, scale: 1.0 }, 0).unwrap();
 //! # assert!(vy_sdk::mock::run_frame(&mut page, 0).is_ok());
-//! # vy_sdk::mock::with(|h| assert_eq!(h.sem.len(), 2));
+//! # vy_sdk::mock::with(|h| assert_eq!(h.sem.len(), 3, "the field's name, the field, the button"));
 //! ```
 
 mod button;
@@ -94,7 +94,7 @@ pub use list::{List, Rows};
 pub use radio::RadioGroup;
 pub use scroll::{ScrollView, BAR_W, LINE_PX};
 pub use slider::Slider;
-pub use textbox::{Lines, Multiline, OneLine, TextBox, MAX_LINE_BYTES, MAX_MULTILINE_BYTES};
+pub use textbox::{Label, Lines, Multiline, OneLine, TextBox, MAX_LINE_BYTES, MAX_MULTILINE_BYTES};
 pub use theme::{Palette, Theme, Words};
 
 use crate::event::Event;

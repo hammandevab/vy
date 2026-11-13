@@ -21,7 +21,7 @@ use alloc::format;
 use alloc::string::String;
 use vy_sdk::event::key;
 use vy_sdk::prelude::*;
-use vy_sdk::ui::{Button, Input, Palette, TextBox, Theme};
+use vy_sdk::ui::{Button, Input, Label, Palette, TextBox, Theme};
 
 const PAPER: Color = Color::rgb(0xF4, 0xF5, 0xF7);
 const CARD: Color = Color::rgb(0xFF, 0xFF, 0xFF);
@@ -157,21 +157,23 @@ impl FormPage {
         true
     }
 
-    /// A label above the field, then the field itself (`ui::TextBox`).
+    /// A label above the field, then the field itself (`ui::TextBox`),
+    /// which registers the label as its name in the tree.
     fn draw_field(&mut self, f: &mut Frame, r: Rect, email: bool) -> Result<(), VyError> {
         let (label, placeholder) = if email {
             ("E-post", "namn@exempel.se")
         } else {
             ("Namn", "Förnamn Efternamn")
         };
-        f.text(r.x, r.y - 20.0, r.w, self.label, label)?;
+        let above = Rect::new(r.x, r.y - 20.0, r.w, 20.0);
+        f.text(above.x, above.y, above.w, self.label, label)?;
         let theme = self.theme;
         let field = if email {
             &mut self.email
         } else {
             &mut self.name
         };
-        field.draw(f, r, &theme, placeholder)
+        field.draw(f, r, &theme, Label::shown(above, label), placeholder)
     }
 }
 

@@ -71,8 +71,42 @@ struct Field {
     wrap: Wrap,
 }
 
+/// The name of a text field in the semantic tree. A `textbox` node's own
+/// text is the field's value, so the name is a `text` node of its own,
+/// which [`TextBox::draw`] registers right before the field's: whoever
+/// reads the tree meets the name and then the field, also while the field
+/// is empty and its placeholder shows (the placeholder is drawn, never
+/// registered).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Label<'a> {
+    text: &'a str,
+    at: Option<Rect>,
+}
+
+impl<'a> Label<'a> {
+    /// A label the page draws itself, in `rect` (with `Frame::text`, in a
+    /// style of its own): the node is registered over `rect`, where the
+    /// words are seen, so the host selects and finds them there. The page
+    /// registers no node for the label itself.
+    pub const fn shown(rect: Rect, text: &'a str) -> Self {
+        Self {
+            text,
+            at: Some(rect),
+        }
+    }
+
+    /// A name that is drawn nowhere, for a field whose placeholder or
+    /// place says what it is: the node sits at the field's corner without
+    /// a size, so it is in the tree but never under the pointer. An empty
+    /// `text` registers nothing.
+    pub const fn hidden(text: &'a str) -> Self {
+        Self { text, at: None }
+    }
+}
+
 /// A text field with a `textbox` node of a fixed id whose text is the
-/// value (at most 4 KB of it, SPEC-9.3.2).
+/// value (at most 4 KB of it, SPEC-9.3.2), named by the `text` node of
+/// its [`Label`].
 ///
 /// - **Typing** arrives as `TEXT_INPUT` (SPEC-5.1.6) and replaces the
 ///   selection; Ctrl+V comes the same way, the host delivers the clipboard
@@ -247,15 +281,16 @@ impl<L: Lines> TextBox<L> {
     }
 
     /// Draw the field in `r`, with `placeholder` while it is empty, and
-    /// register its node.
+    /// register its name (`label`, a `text` node) and then its own node.
     pub fn draw(
         &mut self,
         f: &mut Frame,
         r: Rect,
         theme: &Theme,
+        label: Label<'_>,
         placeholder: &str,
     ) -> Result<(), VyError> {
-        self.field.draw(f, r, theme, placeholder, L::MULTI)
+        self.field.draw(f, r, theme, label, placeholder, L::MULTI)
     }
 }
 
@@ -814,6 +849,7 @@ impl Field {
         f: &mut Frame,
         r: Rect,
         theme: &Theme,
+        label: Label<'_>,
         placeholder: &str,
         multi: bool,
     ) -> Result<(), VyError> {
@@ -832,8 +868,13 @@ impl Field {
         self.scroll_into_view(r, theme, multi);
         let this = &*self;
         f.clipped(inner, 0.0, |f| this.paint(f, r, theme, placeholder, multi))?;
-        let value = clip_str(&self.text, limits::MAX_SEM_TEXT_BYTES as usize);
-        f.sem.node_with_id(self.id, Role::Textbox, r, value)?;
+        let cap = limits::MAX_SEM_TEXT_BYTES as usize;
+        if !label.text.is_empty() {
+            let at = label.at.unwrap_or(Rect::new(r.x, r.y, 0.0, 0.0));
+            f.sem.node(Role::Text, at, clip_str(label.text, cap))?;
+        }
+        f.sem
+            .node_with_id(self.id, Role::Textbox, r, clip_str(&self.text, cap))?;
         Ok(())
     }
 

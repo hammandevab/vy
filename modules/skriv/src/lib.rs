@@ -35,7 +35,7 @@ use md::{Doc, Kind, Run, BOLD, CODE, ITALIC};
 use vy_sdk::event::{button, key};
 use vy_sdk::math::snap;
 use vy_sdk::prelude::*;
-use vy_sdk::ui::{self, Input, Multiline, Palette, ScrollView, TextBox, Theme};
+use vy_sdk::ui::{self, Input, Label, Multiline, Palette, ScrollView, TextBox, Theme};
 use vy_sdk::{link_register, navigate, state_get, state_put};
 
 const PAGE: Color = Color::rgb(0xF1, 0xF3, 0xF7);
@@ -763,7 +763,9 @@ impl App for Page {
                 self.draw_tabs(f, &l)?;
             }
             if l.show_editor {
-                self.editor.draw(f, l.editor, &t, "Skriv Markdown här …")?;
+                let label = Label::hidden("Anteckningens text i Markdown");
+                self.editor
+                    .draw(f, l.editor, &t, label, "Skriv Markdown här …")?;
             }
             if l.show_preview {
                 f.rect(l.card, ui::RADIUS, EDGE)?;

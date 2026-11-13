@@ -42,7 +42,7 @@ use sheet::{
 use vy_sdk::event::{button, key};
 use vy_sdk::math::{ceil, floor, snap};
 use vy_sdk::prelude::*;
-use vy_sdk::ui::{Input, Palette, ScrollView, TextBox, Theme};
+use vy_sdk::ui::{Input, Label, Palette, ScrollView, TextBox, Theme};
 use vy_sdk::{clipboard_write, now_ms, state_get, state_put};
 
 const PAGE: Color = Color::rgb(0xF1, 0xF3, 0xF7);
@@ -863,16 +863,22 @@ impl Page {
         Self::centred(f, l.name, self.s.name, &selected)?;
         f.sem
             .node(Role::Text, l.name, &cat(&["Markerat: ", &selected]))?;
+        // Each of the three fields has its name as the `text` node before
+        // it: the bar's is the cell it edits.
         let here = Rect::new(l.bar.x, l.bar.y, 0.0, 0.0);
         let (prev, next) = ((self.ring + 2) % 3, (self.ring + 1) % 3);
+        f.sem.node(Role::Text, here, "Föregående cell")?;
         f.sem
             .node_with_id(RING[prev], Role::Textbox, here, self.beside(-1))?;
+        let cell = cat(&["Innehåll i ", &name(index(self.cur.0, self.cur.1))]);
         self.bar.draw(
             f,
             l.bar,
             &t,
+            Label::hidden(&cell),
             "Värde eller formel, till exempel =SUMMA(B4:D4)",
         )?;
+        f.sem.node(Role::Text, here, "Nästa cell")?;
         f.sem
             .node_with_id(RING[next], Role::Textbox, here, self.beside(1))?;
 
