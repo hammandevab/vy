@@ -45,6 +45,13 @@ mod imp {
     const CHANNEL_DELTA: u8 = 2;
     /// See [`CHANNEL_DELTA`].
     const DIFFERING_SHARE: f64 = 0.03;
+    /// The most any channel of any pixel may be off (granskning 0011:4):
+    /// a quarter of the range. An anti-aliased edge drawn by area or
+    /// distance instead of by sampling is off by a part of one pixel's
+    /// coverage (measured with Mesa llvmpipe: at most 41 levels in any
+    /// class of input); more than this is a shape drawn where the
+    /// reference draws none, on however few pixels.
+    const MAX_DELTA: u8 = 64;
     /// The hidden window's size in physical pixels: at least the largest
     /// window composited in the SPEC-9.6.1 checks.
     const WINDOW: (u32, u32) = (960, 640);
@@ -57,7 +64,9 @@ mod imp {
         any: u64,
         /// Pixels with a channel off by more than [`CHANNEL_DELTA`].
         over: u64,
+        /// The largest difference of any channel, and the pixel it is at.
         max: u8,
+        max_at: (u32, u32),
     }
 
     impl Diff {
@@ -67,11 +76,19 @@ mod imp {
                 pixels: u64::from(a.width) * u64::from(a.height),
                 ..Diff::default()
             };
-            for (p, q) in a.data.chunks_exact(4).zip(b.data.chunks_exact(4)) {
+            for (i, (p, q)) in a
+                .data
+                .chunks_exact(4)
+                .zip(b.data.chunks_exact(4))
+                .enumerate()
+            {
                 let m = p.iter().zip(q).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
                 d.any += u64::from(m > 0);
                 d.over += u64::from(m > CHANNEL_DELTA);
-                d.max = d.max.max(m);
+                if m > d.max {
+                    d.max = m;
+                    d.max_at = (i as u32 % a.width, i as u32 / a.width);
+                }
             }
             d
         }
@@ -84,7 +101,10 @@ mod imp {
             self.pixels += o.pixels;
             self.any += o.any;
             self.over += o.over;
-            self.max = self.max.max(o.max);
+            if o.max > self.max {
+                self.max = o.max;
+                self.max_at = o.max_at;
+            }
         }
     }
 
@@ -94,6 +114,8 @@ mod imp {
         sum: Diff,
         worst: Diff,
         worst_what: String,
+        /// The frame the largest difference is in.
+        max_what: String,
         frames: usize,
         gpu_frames: usize,
         instances: usize,
@@ -102,6 +124,9 @@ mod imp {
 
     impl Class {
         fn add(&mut self, d: Diff, what: String, gpu: bool, stats: vy_render::gl::GlStats) {
+            if d.max > self.sum.max {
+                self.max_what = what.clone();
+            }
             self.sum.add(&d);
             if d.share() >= self.worst.share() {
                 self.worst = d;
@@ -116,12 +141,14 @@ mod imp {
         fn line(&self, name: &str) -> String {
             let pct = |n: u64, d: &Diff| n as f64 / d.pixels.max(1) as f64 * 100.0;
             format!(
-                "{name:<10} {:>4} frames ({} on GL): {:.3} % of pixels differ at all, {:.3} % by more than {CHANNEL_DELTA}, max {}; worst frame {:.3} % ({}); {} instances, {} draws in all",
+                "{name:<10} {:>4} frames ({} on GL): {:.3} % of pixels differ at all, {:.3} % by more than {CHANNEL_DELTA}, max {} at {:?} of {}; worst frame {:.3} % ({}); {} instances, {} draws in all",
                 self.frames,
                 self.gpu_frames,
                 pct(self.sum.any, &self.sum),
                 pct(self.sum.over, &self.sum),
                 self.sum.max,
+                self.sum.max_at,
+                self.max_what,
                 self.worst.share() * 100.0,
                 self.worst_what,
                 self.instances,
@@ -291,6 +318,45 @@ mod imp {
         }
         for _ in 0..depth {
             dl.clip_pop().unwrap();
+        }
+        dl.end().unwrap();
+        dl.bytes().to_vec()
+    }
+
+    /// Thin lines the way a page draws a mesh (`rymd`): triangles with
+    /// sharp corners, each filled and then stroked in its own colour, and
+    /// open polylines, all with one stroke width, on a dark ground.
+    fn stroke_list(g: &mut Gen, w: f32, h: f32, stroke: f32) -> Vec<u8> {
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.rect(0.0, 0.0, w, h, 0.0, 0x0609_13FF).unwrap();
+        for _ in 0..14 {
+            let color = g.color() | 0xFF;
+            let (ax, ay) = (g.coord(w), g.coord(h));
+            // A long thin triangle: its far corner is sharp.
+            let (bx, by) = (g.coord(w), g.coord(h));
+            let (cx, cy) = (bx + g.length(9.0) - 4.0, by + g.length(9.0) - 4.0);
+            let triangle = [
+                PathCmd::MoveTo(ax, ay),
+                PathCmd::LineTo(bx, by),
+                PathCmd::LineTo(cx, cy),
+                PathCmd::Close,
+            ];
+            dl.path(color, 0.0, &triangle).unwrap();
+            dl.path(color, stroke, &triangle).unwrap();
+        }
+        for _ in 0..6 {
+            let (x, y) = (g.coord(w), g.coord(h));
+            let line = [
+                PathCmd::MoveTo(x, y),
+                PathCmd::LineTo(x + g.length(60.0), y + g.length(3.0)),
+                PathCmd::LineTo(x + g.length(8.0), y + g.length(2.0)),
+                PathCmd::QuadTo {
+                    ctrl: (x + 20.0, y + 30.0),
+                    to: (x + g.length(40.0), y + g.length(40.0)),
+                },
+            ];
+            dl.path(g.color(), stroke, &line).unwrap();
         }
         dl.end().unwrap();
         dl.bytes().to_vec()
@@ -944,6 +1010,12 @@ mod imp {
                     d.max
                 ));
             }
+            if class == "strokes" && d.max > MAX_DELTA {
+                failures.push(format!(
+                    "{class} {what}: the pixel at {:?} is {} levels off, more than {MAX_DELTA}",
+                    d.max_at, d.max
+                ));
+            }
         };
 
         // The frame of SPEC-13.2.1, at two scales.
@@ -1031,6 +1103,26 @@ mod imp {
             random.add(d, what, gpu, stats);
         }
         lines.push(random.line("random"));
+
+        // Thin strokes with sharp corners (granskning 0011:4): the
+        // reference draws a stroke at most a pixel wide as a hairline,
+        // without joins, and the GL path must draw the same line. Widths
+        // from a quarter of a pixel to a few, at three scales.
+        let mut strokes = Class::default();
+        let mut g = Gen(0x0BAD_5EED_1357_9BDF);
+        let none = ImageCache::empty(0);
+        let mut r = Renderer::new(RasterPath::Fast);
+        for case in 0..45 {
+            let scale = [1.0f32, 1.5, 2.0][case % 3];
+            let stroke = [1.0f32, 0.5, 0.25, 1.5, 2.2][(case / 3) % 5];
+            let (w, h) = (300u32, 220u32);
+            let list = stroke_list(&mut g, w as f32 / scale, h as f32 / scale, stroke);
+            let (d, gpu, stats) = compare(ctx, &mut r, &list, w, h, scale, &mut t, &none)?;
+            let what = format!("case {case} stroke {stroke}@{scale}");
+            check("strokes", &d, &what);
+            strokes.add(d, what, gpu, stats);
+        }
+        lines.push(strokes.line("strokes"));
 
         // Every reference page, frame by frame.
         let dir = root().join("target/wasm");
