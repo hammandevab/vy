@@ -1096,20 +1096,24 @@ impl Sheet {
 
     /// The sheet a stored value describes, its formulas waiting for a
     /// recalculation ([`Sheet::step`]): reading a sheet costs in proportion
-    /// to its bytes, whatever its formulas are. `None` for anything else.
+    /// to its bytes, whatever its formulas are. `None` for anything else:
+    /// the cells come in the order [`Sheet::encode`] writes them, each
+    /// once, so a value of any length sets at most every cell.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (&format, mut rest) = bytes.split_first()?;
         if format != FORMAT {
             return None;
         }
         let mut sheet = Self::new();
+        let mut next = 0;
         while !rest.is_empty() {
             let (head, tail) = rest.split_at_checked(3)?;
             let i = usize::from(u16::from_le_bytes([head[0], head[1]]));
             let (src, tail) = tail.split_at_checked(usize::from(head[2]))?;
-            if i >= CELLS {
+            if i >= CELLS || i < next {
                 return None;
             }
+            next = i + 1;
             sheet.set(i, core::str::from_utf8(src).ok()?);
             rest = tail;
         }

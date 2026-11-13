@@ -376,6 +376,17 @@ fn the_stored_form_round_trips() {
         "no such cell"
     );
     assert_eq!(Sheet::decode(&[1]).unwrap().count(), 0);
+    // Each cell once and in order, as `encode` writes them: a value that
+    // sets one cell 65 000 times is not a sheet, however little it holds.
+    assert!(Sheet::decode(&[1, 7, 0, 1, b'1', 8, 0, 1, b'2']).is_some());
+    assert!(
+        Sheet::decode(&[1, 7, 0, 1, b'1', 7, 0, 1, b'2']).is_none(),
+        "a cell twice"
+    );
+    assert!(
+        Sheet::decode(&[1, 8, 0, 1, b'1', 7, 0, 1, b'2']).is_none(),
+        "out of order"
+    );
 }
 
 // ---- the page ---------------------------------------------------------
