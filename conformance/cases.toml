@@ -1421,6 +1421,96 @@ events = [
   {kind = "pointer_down", x = 156, y = 568, after_frames = 2},  # nedknappen hålls: mjukt släpp
 ]
 
+# rymd: exempelsidan Rymd (modules/rymd) – en 3D-scen ritad i mjukvara: en kropp som vrids,
+# projiceras, belyses yta för yta och ritas bakifrån som fyllda PATH-ytor (SPEC-C.1.2) över ett
+# stjärnfält med parallax. Egen sinus och cosinus med heltalsvinklar, så bilden är densamma på
+# varje maskin (SPEC-2.1.5). Med "Rotera" på begär varje frame nästa (SPEC-5.2.2) redan från den
+# första, så varje händelse har after_frames och fallen anger `frames`: 1 + summan + de frames som
+# körs efter sista händelsen. Inga capabilities.
+
+[[case]]
+name = "rymd-1280x800@1"
+module = "rymd"
+width = 1280
+height = 800
+scale = 1
+semantic = "rymd"
+
+[[case]]
+name = "rymd-800x600@1-torus"                      # torus vald, vriden med pekaren, zoomad med hjulet, 600 partiklar
+module = "rymd"
+width = 800
+height = 600
+scale = 1
+frames = 17
+semantic = "rymd-torus"
+events = [
+  {kind = "pointer_down", x = 668, y = 102, after_frames = 2},  # Torus
+  {kind = "pointer_up", x = 668, y = 102, after_frames = 1},
+  {kind = "pointer_down", x = 240, y = 280, after_frames = 2},  # scenen tas ...
+  {kind = "pointer_move", x = 255, y = 300, buttons = 1, after_frames = 1},  # ... och dras åt höger och nedåt
+  {kind = "pointer_move", x = 270, y = 320, buttons = 1, after_frames = 1},
+  {kind = "pointer_up", x = 270, y = 320, after_frames = 1},  # släppt: kroppen roterar själv igen
+  {kind = "scroll", dy = -2, lines = true, after_frames = 2},  # hjulet två rader: två zoomsteg in
+  {kind = "pointer_down", x = 685, y = 300, after_frames = 2},  # reglaget: 600 partiklar
+  {kind = "pointer_up", x = 685, y = 300, after_frames = 1},
+]
+
+[[case]]
+name = "rymd-800x600@1-wire"                       # bara tangenter: trådmodell, vridning, zoom, rotationen av
+module = "rymd"
+width = 800
+height = 600
+scale = 1
+frames = 14
+semantic = "rymd-wire"
+events = [
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Ikosaeder
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Torus
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Kub
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Trådmodell
+  {kind = "key_down", code = 44, after_frames = 1},  # mellanslag: trådmodell på
+  {kind = "key_down", code = 80, after_frames = 1},  # pil vänster två gånger: tio grader
+  {kind = "key_down", code = 80, after_frames = 1},
+  {kind = "key_down", code = 82, after_frames = 1},  # pil upp: fem grader
+  {kind = "key_down", code = 75, after_frames = 1},  # Page Up: ett zoomsteg in
+  {kind = "key_down", code = 43, after_frames = 1},  # Tab: Rotera
+  {kind = "key_down", code = 44, after_frames = 1},  # mellanslag: rotationen av, sidan vilar (SPEC-6.2.2)
+]
+
+[[case]]
+name = "rymd-400x700@2-cube"                       # smalt: inställningarna under scenen; kub, 800 partiklar, vriden och utzoomad
+module = "rymd"
+width = 400
+height = 700
+scale = 2
+frames = 17
+events = [
+  {kind = "pointer_down", x = 326, y = 564, after_frames = 2},  # Kub
+  {kind = "pointer_up", x = 326, y = 564, after_frames = 1},
+  {kind = "pointer_down", x = 200, y = 648, after_frames = 2},  # reglaget tas mitt på ...
+  {kind = "pointer_move", x = 330, y = 648, buttons = 1, after_frames = 1},  # ... och dras till slutet: 800 partiklar
+  {kind = "pointer_up", x = 330, y = 648, after_frames = 1},
+  {kind = "pointer_down", x = 200, y = 300, after_frames = 2},  # scenen dras åt vänster och nedåt
+  {kind = "pointer_move", x = 170, y = 340, buttons = 1, after_frames = 1},
+  {kind = "pointer_up", x = 170, y = 340, after_frames = 1},
+  {kind = "scroll", dy = 120, after_frames = 1},  # hjulet 120 px: tre zoomsteg ut
+]
+
+[[case]]
+name = "rymd-960x640@1.5-torus-wire"               # skala 1,5: torus som trådmodell, stjärnorna på hela pixlar
+module = "rymd"
+width = 960
+height = 640
+scale = 1.5
+frames = 9
+events = [
+  {kind = "pointer_down", x = 828, y = 102, after_frames = 2},  # Torus
+  {kind = "pointer_up", x = 828, y = 102, after_frames = 1},
+  {kind = "pointer_down", x = 720, y = 194, after_frames = 1},  # Trådmodell
+  {kind = "pointer_up", x = 720, y = 194, after_frames = 1},
+]
+
 # Skalet (M3, SPEC-9.6.1, SPEC-11.3.2): `shell = true` kör modulen med sitt manifestutkast i en
 # flikprocess under det huvudlösa skalet och jämför hela den komponerade bilden – flikrad,
 # adressfält med markörer, sidytan – vid fönsterstorleken width × height. Lokala filer körs i
