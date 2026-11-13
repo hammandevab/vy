@@ -52,6 +52,8 @@ impl From<accesskit_winit::Event> for UserEvent {
 }
 
 struct App {
+    /// What tab processes are started from ([`tab_exe`]).
+    exe: std::path::PathBuf,
     shell: Option<Shell>,
     /// The GL path while it works.
     gpu: Option<gpu::Gpu>,
@@ -305,7 +307,7 @@ impl ApplicationHandler<UserEvent> for App {
         });
         let data_dir = data_dir().unwrap_or_else(|| scratch_dir("data"));
         let config = Config {
-            exe: crate::process::self_exe().ok(),
+            exe: Some(self.exe.clone()),
             code_cache: Some(crate::paths::code_cache_dir(&data_dir)),
             data_dir,
             headless: false,
@@ -749,14 +751,27 @@ mod gpu {
     }
 }
 
+/// The executable tab processes are started from, or why the window does
+/// not open. Without one every page would run on a thread of this
+/// process, outside the OS sandbox (SPEC-9.1.1, SPEC-9.1.3), and kept
+/// code would be deserialized here (SPEC-9.4.2; granskning 0014:2): the
+/// window refuses to start instead, as `--screenshot` does.
+fn tab_exe(found: std::io::Result<std::path::PathBuf>) -> Result<std::path::PathBuf, String> {
+    found.map_err(|e| {
+        format!("cannot find the client's own executable to start tab processes from: {e}")
+    })
+}
+
 /// Open the window with `sources` in tabs (an empty tab when none) and
 /// run until it closes.
 pub fn run(sources: Vec<Source>) -> Result<(), String> {
+    let exe = tab_exe(crate::process::self_exe())?;
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let mut app = App {
+        exe,
         shell: None,
         gpu: None,
         gpu_page: None,
@@ -791,6 +806,21 @@ mod tests {
             }
         }
         img
+    }
+
+    /// SPEC-9.1.1, SPEC-9.4.2 (granskning 0014:2): the window does not
+    /// open without an executable to start tab processes from; it never
+    /// falls back to running pages on threads of the main process.
+    #[test]
+    fn spec_9_1_1_no_window_without_a_tab_executable() {
+        let gone = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let why = tab_exe(Err(gone)).unwrap_err();
+        assert!(
+            why.contains("tab processes") && why.contains("no such file"),
+            "{why}"
+        );
+        let exe = std::path::PathBuf::from("/proc/self/exe");
+        assert_eq!(tab_exe(Ok(exe.clone())), Ok(exe));
     }
 
     /// SPEC-13.2.2, SPEC-9.6.1: the window converts and sends what changed

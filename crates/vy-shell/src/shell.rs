@@ -90,7 +90,8 @@ pub enum Incoming {
 /// How the shell is set up.
 pub struct Config {
     /// The executable started as a tab process; `None` runs tabs on
-    /// threads of this process (tests only; no isolation).
+    /// threads of this process (tests only; no isolation, and then no
+    /// compilation cache either, whatever `code_cache` says).
     pub exe: Option<PathBuf>,
     /// Grants, page storage, caches and keys live here.
     pub data_dir: PathBuf,
@@ -106,6 +107,8 @@ pub struct Config {
     /// Where compiled code of modules is kept between loads (SPEC-13.1.4,
     /// SPEC-9.4.2): a directory of the user's own. `None` is no cache:
     /// every load compiles, as a screenshot and the conformance suite do.
+    /// Used only when `exe` is set: kept code runs in a tab process and
+    /// nowhere else.
     pub code_cache: Option<PathBuf>,
 }
 
@@ -538,7 +541,14 @@ impl Shell {
         };
         let mut chrome_text = TextEngine::new();
         let styles = Styles::register(&mut chrome_text);
-        let code_cache = config.code_cache.as_deref().and_then(CodeCache::open);
+        // Kept code is native code for whoever deserializes it, and only
+        // a sandboxed tab process may (SPEC-9.4.2, granskning 0014:2): a
+        // shell whose tabs are threads of this process has no cache.
+        let code_cache = config
+            .exe
+            .as_ref()
+            .and(config.code_cache.as_deref())
+            .and_then(CodeCache::open);
         let mut shell = Self {
             config,
             inbox_rx,
@@ -1388,14 +1398,17 @@ impl Shell {
         };
         let generation = self.tab(id).map_or(0, |t| t.generation);
         let record = self.tab(id).and_then(|t| t.record.clone());
+        let conn = self.spawn_tab(id, generation, record.as_deref());
         // The compilation cache (SPEC-13.1.4): the key is made here, from
         // the bytes about to be sent. Not under a recording, whose file
-        // must hold no machine code and replay the same anywhere.
-        let offer = match (&self.code_cache, &record) {
-            (Some(cache), None) => Some(cache.offer(&page.wasm)),
+        // must hold no machine code and replay the same anywhere; and
+        // only for a tab that is a process of its own, since kept code is
+        // deserialized where the tab runs (SPEC-9.4.2): a tab on a thread
+        // of this process is offered nothing and hands over nothing.
+        let offer = match (&self.code_cache, &record, &conn) {
+            (Some(cache), None, Ok(c)) if c.is_process() => Some(cache.offer(&page.wasm)),
             _ => None,
         };
-        let conn = self.spawn_tab(id, generation, record.as_deref());
         // The Windows job's commit limit follows the page's memory_max
         // (SPEC-9.3.1); elsewhere this does nothing.
         if let Ok(c) = &conn {
@@ -1695,7 +1708,8 @@ impl Shell {
     /// (SPEC-13.1.4): from the code the cache offered, or compiled, with
     /// the code to keep. It counts once per load, while the load is
     /// unanswered (no code of the page has run in the process yet), and
-    /// only when the main process turned the cache on for that load; the
+    /// only when the main process turned the cache on for that load,
+    /// which it does only for a tab in a process of its own; the
     /// key the code is kept under is the one made in [`Shell::start_page`]
     /// from the module bytes sent, never anything in the report
     /// (SPEC-9.4.2).
@@ -1703,8 +1717,11 @@ impl Shell {
         let Some(tab) = find_tab(&mut self.tabs, id) else {
             return;
         };
+        let process = tab.conn.as_ref().is_some_and(TabConnection::is_process);
         let pending = match (&self.code_cache, &mut tab.code) {
-            (Some(_), Some(load)) if tab.state == State::Loading && load.reported.is_none() => {
+            (Some(_), Some(load))
+                if process && tab.state == State::Loading && load.reported.is_none() =>
+            {
                 load.reported = Some((cached, micros));
                 load.pending.clone()
             }

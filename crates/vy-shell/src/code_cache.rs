@@ -445,7 +445,8 @@ mod tests {
         let hello = module("hello");
         let text = module("text");
         let text_code = compiled(&text);
-        let mut sh = shell(None, &dir, Some(&code_dir));
+        let exe = shell_exe();
+        let mut sh = shell(Some(exe.clone()), &dir, Some(&code_dir));
         let report = |sh: &mut Shell, tab: TabId, m: ToShell| {
             let generation = sh.tab_generation(tab);
             sh.handle(Incoming::Tab(tab, generation, Inbound::Message(m)));
@@ -528,7 +529,7 @@ mod tests {
         sh.shutdown();
 
         // A shell without the cache keeps nothing a tab hands it.
-        let mut sh = shell(None, &dir, None);
+        let mut sh = shell(Some(exe), &dir, None);
         sh.stall_next_tab();
         let tab = sh.open_tab_loaded(page(module("game")));
         let generation = sh.tab_generation(tab);
@@ -557,7 +558,7 @@ mod tests {
         let wasm = module("hello");
         let key = CodeKey::of(&wasm);
         let good = compiled(&wasm);
-        let mut sh = shell(None, &dir, Some(&code_dir));
+        let mut sh = shell(Some(shell_exe()), &dir, Some(&code_dir));
         let store = sh.code_cache().unwrap().store().clone();
         let file = code_dir.join(key.file_name());
         let load = |sh: &mut Shell| {
@@ -618,10 +619,8 @@ mod tests {
         ));
         sh.code_cache().unwrap().flush();
         assert!(!file.exists());
-        sh.shutdown();
 
         // A process that dies with the offered code in it.
-        let mut sh = shell(Some(shell_exe()), &dir, Some(&code_dir));
         let tab = load(&mut sh);
         assert_eq!(sh.tab_code(tab).map(|c| c.0), Some(false));
         let tab = load(&mut sh);
@@ -770,6 +769,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SPEC-9.4.2, SPEC-9.1.3 (granskning 0014:2): kept code runs only in
+    /// a tab process, never in the main process. A shell without a tab
+    /// executable runs its pages on threads of the main process; given a
+    /// cache directory that holds good code for the module it loads, it
+    /// opens no cache, offers the page nothing (the tab says nothing of
+    /// its module, as when the cache is off), keeps nothing of a module
+    /// that has no entry, and leaves the directory as it was. A report a
+    /// thread-backed tab is made to send is ignored. The same directory in
+    /// a shell with tab processes is a hit.
+    #[test]
+    fn spec_9_4_2_kept_code_never_runs_in_the_main_process() {
+        let dir = scratch("thread");
+        let code_dir = dir.join("code");
+        let hello = module("hello");
+        let text = module("text");
+        let key = CodeKey::of(&hello);
+        let store = CodeStore::open(&code_dir).unwrap();
+        store.put(&key, hello.len(), &compiled(&hello)).unwrap();
+        let before = std::fs::read(code_dir.join(key.file_name())).unwrap();
+
+        let mut sh = shell(None, &dir, Some(&code_dir));
+        assert!(sh.code_cache().is_none(), "no cache without tab processes");
+        for wasm in [&hello, &text] {
+            let tab = sh.open_tab_loaded(page(wasm.clone()));
+            settle(&mut sh, 1, TIMEOUT).unwrap();
+            assert_eq!(sh.tab_status(tab), "running");
+            assert_eq!(sh.tab_pid(tab), None, "a thread of this process");
+            assert_eq!(sh.tab_code(tab), None, "nothing offered, nothing said");
+            assert!(!logged(&sh, tab, "module code"), "{:?}", sh.tab_logs(tab));
+            // What such a tab might send all the same.
+            let generation = sh.tab_generation(tab);
+            sh.handle(Incoming::Tab(
+                tab,
+                generation,
+                Inbound::Message(ToShell::Code {
+                    cached: false,
+                    micros: 1,
+                    code: b"from a thread".to_vec(),
+                }),
+            ));
+            assert!(logged(&sh, tab, "compiled code ignored"));
+        }
+        sh.shutdown();
+        assert_eq!(entries(&code_dir), [key.file_name()], "nothing was kept");
+        assert_eq!(
+            std::fs::read(code_dir.join(key.file_name())).unwrap(),
+            before,
+            "and the entry was not rewritten"
+        );
+
+        // The same directory with tab processes: the entry is used.
+        let mut sh = shell(Some(shell_exe()), &dir, Some(&code_dir));
+        let tab = sh.open_tab_loaded(page(hello.clone()));
+        settle(&mut sh, 1, TIMEOUT).unwrap();
+        assert!(sh.tab_pid(tab).is_some());
+        assert_eq!(sh.tab_code(tab).map(|(cached, _)| cached), Some(true));
+        sh.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// SPEC-9.4.2: without a directory of the user's own there is no
     /// cache: one that group or others may write is not opened, and one
     /// that turns so later is neither read nor written.
@@ -786,7 +845,8 @@ mod tests {
         mode(0o777);
         assert!(CodeCache::open(&code_dir).is_none());
         let wasm = module("hello");
-        let mut sh = shell(None, &dir, Some(&code_dir));
+        let exe = shell_exe();
+        let mut sh = shell(Some(exe.clone()), &dir, Some(&code_dir));
         assert!(sh.code_cache().is_none());
         let tab = sh.open_tab_loaded(page(wasm.clone()));
         settle(&mut sh, 1, TIMEOUT).unwrap();
@@ -797,7 +857,7 @@ mod tests {
 
         // Opened while private, opened up afterwards.
         mode(0o700);
-        let mut sh = shell(None, &dir, Some(&code_dir));
+        let mut sh = shell(Some(exe), &dir, Some(&code_dir));
         let load = |sh: &mut Shell| {
             let tab = sh.open_tab_loaded(page(wasm.clone()));
             settle(sh, 1, TIMEOUT).unwrap();
