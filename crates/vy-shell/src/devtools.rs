@@ -7,7 +7,8 @@
 //! "Inspelning" (record the session of a tab process to a file and replay
 //! one; the main process writes and reads the file, the tab process stays
 //! locked down) and "Studio" (live reload of localhost pages, a link to
-//! Studio, and "Rensa cache", which empties the compilation cache).
+//! Studio, "Rensa cache", which empties the compilation cache, and "Rensa
+//! sidans lagring", which removes what the page's origin has saved).
 //!
 //! Everything here turns what the shell has into lines of text; the shell
 //! does what a line's [`Command`] says, and `chrome::draw_devtools` draws
@@ -87,6 +88,9 @@ pub enum Command {
     /// Empty the compilation cache: every module compiles at its next
     /// load (SPEC-9.4.2).
     ClearCache,
+    /// Remove what the active page's origin has saved (SPEC-5.2.9) and
+    /// load the page again; the shell asks first.
+    ClearStorage,
 }
 
 /// One line of a pane.
@@ -406,10 +410,17 @@ pub fn recording_lines(
     out
 }
 
-/// The "Studio" pane: live reload, the way to Studio, and the client's
+/// The "Studio" pane: live reload, the way to Studio, the client's
 /// compilation cache with the way to empty it (`code_cache`: the client
-/// keeps one in this run). `note` is what the last action here did.
-pub fn studio_lines(live_reload: bool, code_cache: bool, note: &str) -> Vec<Line> {
+/// keeps one in this run), and the way to clear the storage of the
+/// active page's origin (`origin`; a local file has none and nothing
+/// saved). `note` is what the last action here did.
+pub fn studio_lines(
+    live_reload: bool,
+    code_cache: bool,
+    origin: Option<&str>,
+    note: &str,
+) -> Vec<Line> {
     let mut out = vec![
         Line::strong("Studio"),
         Line::button(
@@ -439,6 +450,22 @@ pub fn studio_lines(live_reload: bool, code_cache: bool, note: &str) -> Vec<Line
         ));
     } else {
         out.push(Line::plain("Ingen kompileringscache i den här körningen."));
+    }
+    out.push(Line::plain(""));
+    out.push(Line::strong("Lagring"));
+    match origin {
+        Some(origin) => {
+            out.push(Line::button(
+                format!("Rensa sidans lagring ({origin})"),
+                Command::ClearStorage,
+            ));
+            out.push(Line::plain(
+                "    tar bort allt sidan har sparat hos klienten och laddar om den; frågar först",
+            ));
+        }
+        None => out.push(Line::plain(
+            "Sidan har ingen lagring att rensa (ingen vy://-adress).",
+        )),
     }
     if !note.is_empty() {
         out.push(Line::plain(note));
@@ -565,7 +592,7 @@ mod tests {
         assert!(recording_lines(None, false, &[], "")
             .iter()
             .all(|l| l.command.is_none()));
-        let studio = studio_lines(true, true, "Rensat.");
+        let studio = studio_lines(true, true, Some("vy://docs.example"), "Rensat.");
         assert!(studio[1].text.starts_with("[x] Live-omladdning"));
         assert!(studio
             .iter()
@@ -576,8 +603,13 @@ mod tests {
             .expect("Rensa cache");
         assert!(clear.text.starts_with("Rensa cache"));
         assert_eq!(studio.last().unwrap().text, "Rensat.");
-        assert!(studio_lines(false, false, "")
+        let storage = studio
             .iter()
-            .all(|l| l.command != Some(Command::ClearCache)));
+            .find(|l| l.command == Some(Command::ClearStorage))
+            .expect("Rensa sidans lagring");
+        assert_eq!(storage.text, "Rensa sidans lagring (vy://docs.example)");
+        assert!(studio_lines(false, false, None, "").iter().all(|l| {
+            l.command != Some(Command::ClearCache) && l.command != Some(Command::ClearStorage)
+        }));
     }
 }

@@ -195,9 +195,12 @@ struct Tab {
     /// Clock reading of the last user gesture delivered to the page (a
     /// pointer release or a key press) that no external open has used.
     gesture_ms: Option<i64>,
-    /// Clock reading at which the capability question now shown for this
-    /// tab appeared, for arming "Tillåt" (`DIALOG_ARM_MS`).
+    /// Clock reading at which the question now shown for this tab
+    /// appeared, for arming its "Tillåt" or "Rensa" (`DIALOG_ARM_MS`).
     ask_since: Option<i64>,
+    /// The user chose "Rensa sidans lagring" for this tab and has not
+    /// answered the question yet; it is asked before any capability is.
+    clear_ask: bool,
     /// Clock reading of the last copy gesture (Ctrl+C or Ctrl+X) delivered
     /// to the page that no `clipboard_write` has used yet (SPEC-8.2.4).
     copy_gesture_ms: Option<i64>,
@@ -289,6 +292,7 @@ impl Tab {
             under_min: false,
             gesture_ms: None,
             ask_since: None,
+            clear_ask: false,
             copy_gesture_ms: None,
             clipboard_sent: None,
             focus: None,
@@ -322,7 +326,17 @@ impl Tab {
 
     /// The question now shown appeared at `now`, if there is one.
     fn ask_shown(&mut self, now: i64) {
-        self.ask_since = (!self.asks.is_empty()).then_some(now);
+        self.ask_since = self.question().is_some().then_some(now);
+    }
+
+    /// What the user is asked about this tab now: whether to clear its
+    /// page's storage, when they chose that, else the first capability
+    /// the page waits for an answer on.
+    fn question(&self) -> Option<chrome::Ask<'_>> {
+        match (&self.origin, self.clear_ask) {
+            (Some(origin), true) => Some(chrome::Ask::ClearStorage(origin)),
+            _ => self.asks.front().map(|cap| chrome::Ask::Capability(cap)),
+        }
     }
 
     /// Whether a request the page wants made may be made (SPEC-5.2.8,
@@ -408,6 +422,9 @@ struct Retired {
     origin: String,
     storage_granted: bool,
     quota: u64,
+    /// The user cleared the origin's storage after the process was let
+    /// go of: what it answers with is what was cleared, and is not saved.
+    discard: bool,
 }
 
 /// The find bar (Ctrl+F) and its search of the active page's tree.
@@ -752,6 +769,16 @@ impl Shell {
         self.tabs
             .get(self.active)
             .and_then(|t| t.asks.front().copied())
+    }
+
+    /// The question laid over the active tab's page now, as the user
+    /// reads it: about a capability, or whether to clear the page's
+    /// storage.
+    pub fn question(&self) -> Option<String> {
+        self.tabs
+            .get(self.active)
+            .and_then(Tab::question)
+            .map(|q| q.question())
     }
 
     /// The active tab's log lines.
@@ -1100,6 +1127,7 @@ impl Shell {
             tab.pressed_link = None;
             tab.gesture_ms = None;
             tab.ask_since = None;
+            tab.clear_ask = false;
             tab.copy_gesture_ms = None;
             tab.clipboard_sent = None;
             tab.focus = None;
@@ -1834,9 +1862,12 @@ impl Shell {
         match inbound {
             Inbound::Message(ToShell::Storage(entries)) => {
                 let r = self.retired.remove(at).expect("found");
-                if let Err(e) =
+                let saved = if r.discard {
+                    Ok(())
+                } else {
                     self.save_storage(Some(&r.origin), r.storage_granted, r.quota, &entries)
-                {
+                };
+                if let Err(e) = saved {
                     if let Some(tab) = self.tab_mut(id) {
                         tab.log(format!("{e} (the previous page)"));
                     }
@@ -1962,6 +1993,23 @@ impl Shell {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
+        if tab
+            .question()
+            .is_some_and(|q| matches!(q, chrome::Ask::ClearStorage(_)))
+        {
+            // The question about the page's storage: "Rensa" or "Avbryt".
+            tab.clear_ask = false;
+            tab.ask_shown(now);
+            let id = tab.id;
+            if allow {
+                self.clear_storage(id);
+            } else if let Some(d) = self.devtools.as_mut() {
+                d.note = "Sidans lagring lämnades orörd.".into();
+            }
+            self.relayout();
+            self.frame_dirty = true;
+            return;
+        }
         let Some(name) = tab.asks.pop_front() else {
             return;
         };
@@ -2134,7 +2182,7 @@ impl Shell {
                 .is_some_and(|t| t.state == State::Running && t.has_tree == Some(false)),
             loading: tab.is_some_and(|t| t.state == State::Loading),
             badges: &badges,
-            ask: tab.and_then(|t| t.asks.front().copied()),
+            ask: tab.and_then(Tab::question),
             page: page_view,
             zoom: tab.map_or(1.0, |t| t.zoom),
             find: self.find.is_some(),
@@ -2416,12 +2464,9 @@ impl Shell {
         }
         // The capability question over the top of the page area, after
         // the page: the page is where it would be without the question.
-        let ask = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.asks.front().copied());
-        if let Some((cap, r)) = ask.zip(self.layout.dialog) {
-            let (dl, w, h) = chrome::draw_dialog(&mut self.chrome_text, &self.styles, cap, r.w);
+        let ask = self.tabs.get(self.active).and_then(Tab::question);
+        if let Some((ask, r)) = ask.zip(self.layout.dialog) {
+            let (dl, w, h) = chrome::draw_dialog(&mut self.chrome_text, &self.styles, &ask, r.w);
             let (dw, dh) = physical(w, h, scale);
             if let Ok(res) = vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none) {
                 let x = (r.x * scale).round() as i64;
@@ -2761,8 +2806,9 @@ impl Shell {
             if self.dialog_armed() {
                 self.answer_ask(true);
             } else if let Some(tab) = self.tabs.get_mut(self.active) {
+                let yes = tab.question().map_or("Tillåt", |q| q.answers().0);
                 tab.log(format!(
-                    "[host info] click on Tillåt ignored: the question has been up for less than {DIALOG_ARM_MS} ms"
+                    "[host info] click on {yes} ignored: the question has been up for less than {DIALOG_ARM_MS} ms"
                 ));
             }
             return;
@@ -3341,9 +3387,12 @@ impl Shell {
                 &devtools::list_recordings(&self.recordings_dir()),
                 &d.status,
             ),
-            Pane::Studio => {
-                devtools::studio_lines(self.live_reload, self.code_cache.is_some(), &d.note)
-            }
+            Pane::Studio => devtools::studio_lines(
+                self.live_reload,
+                self.code_cache.is_some(),
+                tab.and_then(|t| t.origin.as_deref()),
+                &d.note,
+            ),
         }
     }
 
@@ -3369,6 +3418,7 @@ impl Shell {
                     self.open_tab(Some(source));
                 }
             }
+            Command::ClearStorage => self.ask_clear_storage(),
             Command::ClearCache => {
                 let note = match self.clear_code_cache() {
                     Some(1) => "Kompileringscachen rensad: 1 post borttagen.".into(),
@@ -3379,6 +3429,83 @@ impl Shell {
                     d.note = note;
                 }
             }
+        }
+        self.frame_dirty = true;
+    }
+
+    /// The user chose "Rensa sidans lagring" for the active tab: ask
+    /// before doing it, with the question over the top of the page area
+    /// that capabilities are asked with, armed the same way
+    /// (`DIALOG_ARM_MS`). Nothing for a page without an origin, which
+    /// has nothing saved.
+    pub fn ask_clear_storage(&mut self) {
+        let now = self.now_ms();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if tab.origin.is_none() || tab.clear_ask {
+            return;
+        }
+        tab.clear_ask = true;
+        tab.ask_shown(now);
+        self.relayout();
+        self.frame_dirty = true;
+    }
+
+    /// Remove everything the origin of tab `id`'s page has saved with the
+    /// client (SPEC-5.2.9) and load its pages again (granskning 0013: a
+    /// page that cannot get past what it saved itself has no other way
+    /// out). Done here, in the main process, on the origin's file
+    /// (SPEC-9.5.2); no tab process is asked. Every tab of the origin
+    /// starts over, since a page still running would save its own copy
+    /// again when it is let go of, and what the processes let go of
+    /// answer with is not saved: it is what is being cleared.
+    fn clear_storage(&mut self, id: TabId) {
+        let Some(origin) = self.tab(id).and_then(|t| t.origin.clone()) else {
+            return;
+        };
+        let pages: Vec<(TabId, Source)> = self
+            .tabs
+            .iter()
+            .filter(|t| t.origin.as_deref() == Some(origin.as_str()))
+            .filter_map(|t| Some((t.id, t.source.clone()?)))
+            .collect();
+        for (tab, source) in &pages {
+            self.navigate_tab(*tab, source.clone(), false);
+        }
+        for r in &mut self.retired {
+            if r.origin == origin {
+                r.discard = true;
+            }
+        }
+        // Nothing is persisted headless: there is no file to remove.
+        let removed = if self.config.headless {
+            Ok(())
+        } else {
+            storage::save(&self.config.data_dir.join("storage"), &origin, &[])
+        };
+        let note = match &removed {
+            Ok(()) if pages.len() == 1 => {
+                format!("Lagringen för {origin} rensad; sidan laddas om.")
+            }
+            Ok(()) => format!(
+                "Lagringen för {origin} rensad; {} flikar laddas om.",
+                pages.len()
+            ),
+            Err(e) => format!("Lagringen för {origin} kunde inte rensas: {e}"),
+        };
+        for (tab, _) in &pages {
+            if let Some(tab) = self.tab_mut(*tab) {
+                tab.log(match &removed {
+                    Ok(()) => {
+                        format!("[host info] storage of {origin} cleared at the user's request")
+                    }
+                    Err(e) => format!("[host] storage of {origin} not cleared: {e}"),
+                });
+            }
+        }
+        if let Some(d) = self.devtools.as_mut() {
+            d.note = note;
         }
         self.frame_dirty = true;
     }
@@ -3946,6 +4073,7 @@ fn retire_process(
             origin,
             storage_granted: tab.capabilities().has(cap::STORAGE),
             quota: tab.storage_quota_bytes,
+            discard: false,
         });
     }
     reaper.retire(conn, deadline);

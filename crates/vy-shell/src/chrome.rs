@@ -139,6 +139,37 @@ pub enum PageView<'a> {
     Stopped(&'a str),
 }
 
+/// What the user is being asked, over the top of the page area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask<'a> {
+    /// May the page use this capability (SPEC-8.2.3)?
+    Capability(&'static str),
+    /// Remove everything the page's origin (this one) has saved with the
+    /// client (SPEC-5.2.9)? Asked because the user chose "Rensa sidans
+    /// lagring", and because it cannot be undone.
+    ClearStorage(&'a str),
+}
+
+impl Ask<'_> {
+    /// The question as the user reads it.
+    pub fn question(&self) -> String {
+        match self {
+            Ask::Capability(cap) => format!("Sidan vill använda {} ({}).", cap_label(cap), cap),
+            Ask::ClearStorage(origin) => {
+                format!("Rensa allt som {origin} har sparat? Det går inte att ångra.")
+            }
+        }
+    }
+
+    /// The two answers: the one that does it and the one that does not.
+    pub fn answers(&self) -> (&'static str, &'static str) {
+        match self {
+            Ask::Capability(_) => ("Tillåt", "Neka"),
+            Ask::ClearStorage(_) => ("Rensa", "Avbryt"),
+        }
+    }
+}
+
 /// Everything the chrome draws from.
 #[derive(Clone, Debug)]
 pub struct View<'a> {
@@ -172,8 +203,9 @@ pub struct View<'a> {
     pub loading: bool,
     /// Capabilities requested by the page: name and whether granted (SPEC-9.2.1).
     pub badges: &'a [(&'static str, bool)],
-    /// A capability the user is being asked about (SPEC-8.2.3).
-    pub ask: Option<&'static str>,
+    /// What the user is being asked: about a capability (SPEC-8.2.3), or
+    /// whether to clear the page's storage.
+    pub ask: Option<Ask<'a>>,
     /// The page area's content.
     pub page: PageView<'a>,
     /// Font scale of the page (Ctrl+Plus/Minus); shown when not 1.
@@ -208,12 +240,13 @@ pub struct Layout {
     pub address_text_x: f32,
     /// Capability badges: name and rectangle; a click revokes or re-grants.
     pub badges: Vec<(&'static str, Rect)>,
-    /// The capability question, over the top of the page area: what is
+    /// The question ([`Ask`]), over the top of the page area: what is
     /// under it is the shell's, not the page's.
     pub dialog: Option<Rect>,
-    /// "Tillåt" in the capability question.
+    /// The answer that does it: "Tillåt" in a capability question,
+    /// "Rensa" in the question about the page's storage.
     pub allow: Option<Rect>,
-    /// "Neka" in the capability question.
+    /// The answer that does not: "Neka", "Avbryt".
     pub deny: Option<Rect>,
     /// "Öppna externt" in an error view.
     pub external: Option<Rect>,
@@ -892,7 +925,7 @@ pub fn draw_devtools(
     (dl.bytes().to_vec(), hits)
 }
 
-/// "Tillåt" and "Neka" within a question `w` wide, in its own coordinates.
+/// The two answers within a question `w` wide, in its own coordinates.
 fn dialog_buttons(w: f32) -> (Rect, Rect) {
     (
         Rect::new(w - 168.0, 7.0, 72.0, 26.0),
@@ -900,15 +933,16 @@ fn dialog_buttons(w: f32) -> (Rect, Rect) {
     )
 }
 
-/// The capability question (SPEC-8.2.3) about `cap`, laid over the top
-/// of the page area without moving it: its own display list, `(bytes,
-/// width, height)` in logical pixels, composited after the page (see
-/// `compose`). Full width, so it is the same question wherever the
-/// pointer is, and opaque, so nothing a page draws shows through it.
+/// The question `ask` (a capability, SPEC-8.2.3, or clearing the page's
+/// storage), laid over the top of the page area without moving it: its
+/// own display list, `(bytes, width, height)` in logical pixels,
+/// composited after the page (see `compose`). Full width, so it is the
+/// same question wherever the pointer is, and opaque, so nothing a page
+/// draws shows through it.
 pub fn draw_dialog(
     text: &mut TextEngine,
     styles: &Styles,
-    cap: &str,
+    ask: &Ask<'_>,
     width: f32,
 ) -> (Vec<u8>, f32, f32) {
     let (w, h) = (width.max(1.0), DIALOG_H);
@@ -916,8 +950,8 @@ pub fn draw_dialog(
     dl.begin().expect("fresh list");
     let _ = dl.rect(0.0, 0.0, w, h, 0.0, DIALOG_BG);
     let _ = dl.rect(0.0, h - 1.0, w, 1.0, 0.0, RULE);
-    let question = format!("Sidan vill använda {} ({}).", cap_label(cap), cap);
-    let question = fit(text, styles.ui, &question, (w - 200.0).max(20.0));
+    let (yes, no) = ask.answers();
+    let question = fit(text, styles.ui, &ask.question(), (w - 200.0).max(20.0));
     centred_text(
         &mut dl,
         text,
@@ -927,9 +961,9 @@ pub fn draw_dialog(
     );
     let (allow, deny) = dialog_buttons(w);
     let _ = dl.rect(allow.x, allow.y, allow.w, allow.h, 5.0, BUTTON_BG);
-    centred_both(&mut dl, text, styles.small_white, allow, "Tillåt");
+    centred_both(&mut dl, text, styles.small_white, allow, yes);
     let _ = dl.rect(deny.x, deny.y, deny.w, deny.h, 5.0, BUTTON_PLAIN);
-    centred_both(&mut dl, text, styles.small, deny, "Neka");
+    centred_both(&mut dl, text, styles.small, deny, no);
     dl.end().expect("balanced list");
     (dl.bytes().to_vec(), w, h)
 }
@@ -1052,7 +1086,7 @@ mod tests {
         assert!(layout.allow.is_none() && layout.dialog.is_none());
 
         let mut asking = view(&tabs, &address);
-        asking.ask = Some("clipboard");
+        asking.ask = Some(Ask::Capability("clipboard"));
         asking.badges = &[("net", true), ("clipboard", false)];
         asking.restricted = true;
         asking.inaccessible = true;
@@ -1109,18 +1143,39 @@ mod tests {
                 .any(|t| t == "Tillåt" || t.contains("urklippet")),
             "the question is not part of the chrome's list: {texts:?}"
         );
-        let (dialog_bytes, dw, dh) = draw_dialog(&mut text, &styles, "clipboard", dialog.w);
+        let ask = Ask::Capability("clipboard");
+        let (dialog_bytes, dw, dh) = draw_dialog(&mut text, &styles, &ask, dialog.w);
         assert_eq!((dw, dh), (800.0, DIALOG_H));
         let texts = decode(&dialog_bytes);
         assert!(texts.contains(&"Tillåt".to_string()));
         assert!(texts.contains(&"Neka".to_string()));
+        // The question about the page's storage: the same surface and
+        // places, its own words.
+        let clear = Ask::ClearStorage("vy://docs.example");
+        let mut clearing = view(&tabs, &address);
+        clearing.ask = Some(clear);
+        let (_, clearing_layout) = draw(&clearing, &mut text, &styles);
+        assert_eq!(clearing_layout.dialog, layout.dialog);
+        assert_eq!(clearing_layout.allow, layout.allow);
+        assert_eq!(clearing_layout.deny, layout.deny);
+        let (bytes, _, _) = draw_dialog(&mut text, &styles, &clear, dialog.w);
+        let asked = decode(&bytes);
+        assert!(
+            asked.contains(
+                &"Rensa allt som vy://docs.example har sparat? Det går inte att ångra.".to_string()
+            ),
+            "{asked:?}"
+        );
+        assert!(asked.contains(&"Rensa".to_string()) && asked.contains(&"Avbryt".to_string()));
+        assert!(!asked.contains(&"Tillåt".to_string()));
         assert!(texts.iter().any(|t| t.contains("urklippet")));
         assert_eq!(
-            draw_dialog(&mut text, &styles, "clipboard", dialog.w).0,
+            draw_dialog(&mut text, &styles, &ask, dialog.w).0,
             dialog_bytes,
             "deterministic"
         );
-        let (narrow_dialog, _, _) = draw_dialog(&mut text, &styles, "persist_frame", 150.0);
+        let (narrow_dialog, _, _) =
+            draw_dialog(&mut text, &styles, &Ask::Capability("persist_frame"), 150.0);
         assert!(!narrow_dialog.is_empty());
 
         // Error and fallback views draw their content in the page area.
