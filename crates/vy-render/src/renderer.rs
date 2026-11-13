@@ -935,10 +935,34 @@ mod tests {
         ]
     }
 
+    /// The same three style ids as [`styles`] with every property another:
+    /// what a page that registers its styles anew may make of them.
+    fn other_styles(t: &mut TextEngine) -> [u16; 3] {
+        [
+            t.style(vy_abi::font::SERIF, 13.5, 700, 0x1040_90FF)
+                .unwrap(),
+            t.style(vy_abi::font::MONO, 10.0, 400, 0x9933_66C0).unwrap(),
+            t.style(vy_abi::font::SANS, 12.0, 700, 0x2221_1FFF).unwrap(),
+        ]
+    }
+
     /// The reference's frame, drawn with a fresh engine.
     fn reference(bytes: &[u8], w: u32, h: u32, scale: f32, images: &ImageCache) -> Rendered {
         let mut t = TextEngine::new();
         styles(&mut t);
+        raster::render(bytes, w, h, scale, &mut t, images).unwrap()
+    }
+
+    /// [`reference`] with the styles of [`other_styles`].
+    fn reference_restyled(
+        bytes: &[u8],
+        w: u32,
+        h: u32,
+        scale: f32,
+        images: &ImageCache,
+    ) -> Rendered {
+        let mut t = TextEngine::new();
+        other_styles(&mut t);
         raster::render(bytes, w, h, scale, &mut t, images).unwrap()
     }
 
@@ -1121,6 +1145,13 @@ mod tests {
     /// rounded – are drawn in sequence by one renderer, which redraws only
     /// what changed, in one or three bands; every frame is the reference's
     /// frame for that list, and a list drawn twice redraws nothing.
+    ///
+    /// Then what a window does to a page without changing its list
+    /// (granskning 0011:6), on that same renderer: another size, another
+    /// scale, the same style ids meaning other styles, each alone, back
+    /// again, and all three at once; and an edit after that. Every frame
+    /// is still the reference's, a new size or scale draws everything,
+    /// and a change of style alone is seen though no op changed.
     #[test]
     fn spec_11_3_2_damage_draws_what_the_reference_draws() {
         let _serial = crate::tests::serial();
@@ -1129,7 +1160,14 @@ mod tests {
         let mut g = Gen(0x2F5B_D6FF_0BAD_CAFE);
         let mut t = TextEngine::new();
         let st = styles(&mut t);
+        let mut restyled_engine = TextEngine::new();
+        assert_eq!(
+            other_styles(&mut restyled_engine),
+            st,
+            "the same ids, other styles"
+        );
         let mut partial = 0;
+        let mut restyles_seen = 0;
         for case in 0..90 {
             let (w, h) = [(160u32, 120u32), (97, 61), (128, 128)][case % 3];
             let scale = [1.0f32, 2.0, 1.5][(case / 3) % 3];
@@ -1158,8 +1196,75 @@ mod tests {
             r.render(&bytes, w, h, scale, &mut t, &images).unwrap();
             assert_eq!(r.info().redrawn, None, "case {case}: nothing changed");
             assert_eq!(r.image().data, before);
+
+            // The same list on the same renderer: the window resized, the
+            // scale changed, the styles registered anew; then all back,
+            // and all at once.
+            let has_text = ops.iter().any(|o| matches!(o, Op::Text { .. }));
+            let (w2, h2) = (w + 31, h - 13);
+            let scale2 = scale * 1.25;
+            for (step, (cw, ch, cs, restyled)) in [
+                (w2, h2, scale, false),
+                (w, h, scale, false),
+                (w, h, scale2, false),
+                (w, h, scale, false),
+                (w, h, scale, true),
+                (w, h, scale, false),
+                (w2, h2, scale2, true),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let what =
+                    format!("case {case}, window step {step}: {cw}x{ch}@{cs}, restyled {restyled}");
+                let (want, engine) = if restyled {
+                    (
+                        reference_restyled(&bytes, cw, ch, cs, &images),
+                        &mut restyled_engine,
+                    )
+                } else {
+                    (reference(&bytes, cw, ch, cs, &images), &mut t)
+                };
+                let report = r.render(&bytes, cw, ch, cs, engine, &images).unwrap();
+                same((r.image(), report), &want, &what);
+                // Steps 4 and 5 change the styles and nothing else: what
+                // is redrawn is the text that shows, if any does.
+                if step == 4 || step == 5 {
+                    let redrew = r.info().redrawn.is_some();
+                    assert!(
+                        has_text || !redrew,
+                        "{what}: a change of style redraws nothing without text"
+                    );
+                    restyles_seen += usize::from(redrew);
+                } else {
+                    assert!(
+                        r.info().full,
+                        "{what}: a new size or scale draws everything"
+                    );
+                }
+            }
+            // And the renderer goes on from there: an edit, at the new
+            // size and scale with the other styles.
+            let (lw2, lh2) = (w2 as f32 / scale2, h2 as f32 / scale2);
+            for _ in 0..2 {
+                edit(&mut g, &mut ops, &st, lw2, lh2);
+            }
+            let bytes = encode(&ops);
+            let want = reference_restyled(&bytes, w2, h2, scale2, &images);
+            let report = r
+                .render(&bytes, w2, h2, scale2, &mut restyled_engine, &images)
+                .unwrap();
+            same(
+                (r.image(), report),
+                &want,
+                &format!("case {case}, an edit after the window changed"),
+            );
         }
         assert!(partial > 200, "only {partial} frames were partial redraws");
+        assert!(
+            restyles_seen > 100,
+            "only {restyles_seen} changes of style alone had text to redraw"
+        );
     }
 
     /// SPEC-13.2.1, SPEC-11.3.2: the frame the budget is measured on, whole
