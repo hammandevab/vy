@@ -11,8 +11,8 @@ Granskningssidan skrivs av en annan agent. Sessionen kan startas om: läget stå
 | --- | --- | --- |
 | 1 Kompileringscachen i skalet | klar; release-mätningen görs om sist | `f46daac` (`spec:` SPEC-9.4.2), `1d8b7a2`, `2339f12` (noteringar) |
 | 2 Parallella sidladdningar | klar | `b362580` |
-| 3 `widgets`-hjälptexten | ej påbörjad | – |
-| 4 Textfältets kod delad mellan radlägena | utkast utanför arbetskopian (`/tmp/m5p/textbox.rs`) | – |
+| 3 `widgets`-hjälptexten | klar | `daf0fe1` (`golden:`) |
+| 4 Textfältets kod delad mellan radlägena | klar | `7d73fe7` |
 
 ## Punkt 1 – kompileringscachen i skalet (SPEC-13.1.4, SPEC-9.4.2)
 
@@ -183,6 +183,62 @@ Mutationskontroll: utan turordningen gör det andra besöket ett eget DNS-uppsla
 faller; utan köns origin-regel tar A:s jobb alla arbetare och skaltestet faller (B hålls).
 Befintliga `spec_5_2_7_requests_do_not_wait_for_other_tabs` är oförändrat grönt.
 
+## Punkt 3 – `widgets`-sidans hjälptext
+
+Sista stycket i rullrutan sade "Huvudlöst finns inget urklipp, så statusraden visar värdens svar".
+Konformansens värd har sedan `8b15ef0` ett minnesurklipp och kopierar, medan `vy-cli render` saknar
+ett och nekar; texten var alltså sann i en värd av tre. Nu: "Ctrl+C i ett textfält kopierar
+markeringen under kopieringsgesten, och statusraden visar om det gick eller vad värden svarade."
+Modulens dokumentation säger samma sak. Stycket har samma rektangel som förr (298 × 70, lika många
+rader), så bara textnoden i de tre träden `widgets`, `widgets-typed` och `widgets-list` ändras.
+**Ingen guldbild ändrades**, inte heller `widgets`-fallens: stycket ligger under fönstret i alla
+fem fall, och `conformance --update` skrev de 64 bilderna byte för byte lika. Modulen är 8 byte
+mindre (64 482 → 64 474).
+
+## Punkt 4 – textfältets kod i en kopia (SPEC-13.1.4)
+
+**Före.** `TextBox<L>` höll tillståndet och all logik i generiska metoder; `TextBox` och
+`TextBox<Multiline>` blev två uppsättningar funktioner. En sida med båda radlägena bar två kopior
+av redigering, markör, markering, träfftest och ritning (m5/sdk: galleriet 55 → 64 KB).
+
+**Nu.** Tillståndet och logiken ligger i en privat, icke-generisk `Field`. `TextBox<L>` är
+`Field` plus `PhantomData<L>`, och dess publika metoder skickar `L::MULTI` som ett argument
+(`multi: bool`) till `Field`s metoder. På en sida med bara enradsfält är argumentet samma konstant
+vid varje anrop, så LLVM viker det (IPSCCP) och radbrytningen, upp/ned-förflyttningen, hjulet och
+rullningslisten faller bort som förr; på en sida med båda lägena finns en kopia med körtidsgrenar.
+Publikt API är oförändrat (`TextBox`, `TextBox<Multiline>`, `Lines`, `OneLine`, `Multiline`, alla
+metoder med samma signaturer). Kontrollerat per funktion i en ostrippad `form`: ingen
+flerradsfunktion (`wrap_paragraph`, `fit_prefix`, `vertical`s kropp) finns kvar, och skillnaden mot
+förr är att LLVM inlinar några hjälpfunktioner annorlunda (`text_caret` är t.ex. en egen funktion
+nu).
+
+**Beteende.** Varje guldbild och varje semantiskt träd är byte för byte detsamma: konformans
+64/64 à 0,000 % utan `--update`, `git status` rent under `conformance/`. vy-sdk:s 33 enhetstester
+och 5 doctester är gröna. Enda ändringen i testerna: nio åtkomster av privata fält i
+`textbox_tests.rs` (`tb.wrap.lines`, `tb.scroll_y`) går nu via `tb.field`; inget påstående är
+ändrat. Dokumentationen av `last_copy` säger "a host without a clipboard refuses" i stället för
+"a headless host has no clipboard" (punkt 3:s sak, i den fil som ändå skrevs om).
+
+### Modulstorlekar (byte)
+
+`tools/build_modules.sh` (det reproducerbara receptet) för modulerna; startsidan och guidens sida
+ur `target/vy-dev-tests` efter `scaffold_builds`-testerna.
+
+| Modul | före (`bc22baa`) | efter punkt 3 | efter punkt 4 | Ändring punkt 4 |
+| --- | --- | --- | --- | --- |
+| widgets (båda radlägena) | 64 482 | 64 474 | **55 493** | −8 981 (−13,9 %) |
+| form (enradsfält) | 30 547 | 30 547 | 30 627 | +80 (+0,3 %) |
+| studio (ingen `ui::TextBox`) | 61 123 | 61 123 | 61 180 | +57 (+0,1 %) |
+| startsidan (`vy-dev new`, enradsfält) | 28 189 | 28 189 | 28 342 | +153 (+0,5 %) |
+| guidens sida (Att göra, enradsfält) | 33 291 | 33 291 | 33 557 | +266 (+0,8 %) |
+| övriga tio | – | – | oförändrade | 0 |
+
+De små ökningarna är inte kvarbliven flerradskod utan andra inliningbeslut och en annan
+funktionsordning när koden kompileras i `vy-sdk` i stället för i sidans crate (Studio använder inte
+textfältet alls och flyttar sig ändå 57 byte). Ett försök att hålla läget konstant ända in i
+`paint` med två stängningar ändrade inget för `form` och gjorde `widgets` 218 byte större; det är
+inte kvar.
+
 ## Beslut
 
 - **De katalogbaserade lägena och `precompile` är borttagna ur `vy-runtime`**, inte bara oanvända:
@@ -195,10 +251,45 @@ Befintliga `spec_5_2_7_requests_do_not_wait_for_other_tabs` är oförändrat gr�
   `Compiled { bytes }`: skalet får veta att erbjuden kod avvisades (posten tas bort), testerna får
   ett svar från fliken på att den inte kompilerade, och §13-testet får flikens tid.
 
+- **Punkt 4: radläget som argument, inte som fält eller funktionspekare.** Ett fält i `Field`
+  hade dragit in radbrytningen i varje sida med ett textfält (m5/sdk mätte 30 → 37 KB för `form`);
+  ett argument som är konstant vid varje anrop viks bort av kompilatorn. Det vilar på en
+  optimering (LLVM:s interprocedurella konstantpropagering med `opt-level = "s"`, `lto = true`,
+  `codegen-units = 1`, som modulerna byggs med); slutar den verka syns det som ungefär +7 KB i
+  `form` och i startsidan.
+- **Punkt 2: turordning per origin i `vy-proto` och i skalets kö.** Antingen ensam räcker för att
+  förtroendebesluten ska vara rätt; båda finns för att `Fetcher` ska vara riktig i sig själv och
+  för att samma origin inte ska ta flera av skalets fyra arbetare.
+
 ## Öppet
 
-- Ingen knapp eller flagga för att rensa cachen; katalogen tas bort för hand.
+1. Ingen knapp eller flagga för att rensa kompileringscachen; katalogen tas bort för hand.
+2. Fyra olika origins som hänger samtidigt tar hela laddarpoolen tills tidsgränserna löpt ut.
+3. Enradssidor blev 80–266 byte större av punkt 4 (inlining, inte ny kod). Ingen storleksgrind
+   vaktar att radbrytningen fortsätter att vikas bort ur enradssidor.
+4. `conformance/bench/build-vm.json`: `compile-hit.*` mäter nu skalets väg (huvudprocessens
+   uppslag och ram plus flikprocessens deserialisering) och `compile.widgets` saknar rad; baslinjen
+   är orörd (ändras bara i ett `bench:`-commit på en tyst maskin).
+5. `fuzz/corpus/manifest/*.cbor` har glidit sedan M4: `VY_WRITE_FUZZ_SEEDS=1` skriver om tio
+   manifestfrön (modulerna har ändrats) och lägger till `widgets`. Inte incheckat här; bara de fyra
+   nya IPC-fröna är det.
 
 ## Berör andra spår
 
-- (fylls i)
+- **m5/examples** (sex nya exempelsidor, `modules/`, `conformance/`, `docs/`): inga av dess filer
+  är rörda. Det som kan märkas vid sammanslagningen:
+  - `crates/vy-sdk/src/ui/textbox.rs` är omskriven (punkt 4) med samma publika API. En sida med
+    båda radlägena blir mindre, en med bara enradsfält ändras med någon tiondels procent; sidornas
+    guldbilder påverkas inte (alla 64 befintliga är byte för byte desamma). Har m5/examples ändrat
+    `textbox.rs` blir det en konflikt som löses för hand.
+  - `modules/widgets/src/lib.rs` och de tre `conformance/semantic/widgets*.json` (punkt 3).
+  - `vy_proto::Fetcher::fetch` och `revalidate` tar `&self`, och `blobs()`/`keys()` ger ett lås
+    (punkt 2). Anropare med `let mut fetcher` får en varning om onödig `mut`; `vy_shell::page::load`
+    tar `&Fetcher`.
+  - `vy_shell::shell::Config` har ett nytt fält `code_cache: Option<PathBuf>` (punkt 1); den som
+    bygger en `Config` själv måste ange det (`None` huvudlöst).
+  - `vy_runtime::CompileCache` har varianterna `Off` och `Host { code }`; `ReadOnly`, `ReadWrite`,
+    `precompile` och `LoadStats::written` finns inte längre.
+- **IPC:** två nya ramar, `ToTab::CodeCache` (tagg 15) och `ToShell::Code` (tagg 79). `Load`-ramen
+  är oförändrad, så äldre inspelningar spelas upp som förr.
+- **Releasen:** klientbinären växer (se *Slutmätningar*); marginalen mot 25 MB krymper.
