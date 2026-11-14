@@ -35,6 +35,10 @@ pub struct TabLoop<T: IpcTransport> {
     last_sem: Vec<vy_runtime::SemNode>,
     last_ime: Option<(f32, f32, f32, f32)>,
     last_focus: Option<i32>,
+    /// The page's storage revision (`Runtime::storage_revision`) when the
+    /// storage was last sent to the shell; 0 for a page that has sent
+    /// none, which is the storage the shell started it with (SPEC-9.5.4).
+    storage_sent: u64,
     /// Set by [`ToTab::CopyGesture`] and spent by the next event: that
     /// event is delivered as a copy gesture (SPEC-8.2.4).
     copy_gesture_armed: bool,
@@ -79,6 +83,7 @@ impl<T: IpcTransport> TabLoop<T> {
             last_sem: Vec::new(),
             last_ime: None,
             last_focus: None,
+            storage_sent: 0,
             copy_gesture_armed: false,
             sandbox_report: None,
             code_cache: None,
@@ -212,6 +217,18 @@ impl<T: IpcTransport> TabLoop<T> {
                 self.send_storage()?;
                 return Ok(false);
             }
+            ToTab::SaveStorage => {
+                // Only what the shell does not have: a page that changed
+                // nothing since its storage was last sent says nothing.
+                let changed = self
+                    .rt
+                    .as_ref()
+                    .is_some_and(|rt| rt.storage_revision() != self.storage_sent);
+                if changed {
+                    let entries = self.storage_entries();
+                    self.send(&ToShell::StorageSnapshot(entries))?;
+                }
+            }
             ToTab::Clipboard { bytes } => {
                 if let Some(rt) = &mut self.rt {
                     rt.set_clipboard(Some(bytes));
@@ -266,6 +283,7 @@ impl<T: IpcTransport> TabLoop<T> {
         self.last_sem.clear();
         self.last_ime = None;
         self.last_focus = None;
+        self.storage_sent = 0;
         self.copy_gesture_armed = false;
         let options = Options {
             memory_max_pages: req.memory_max_pages,
@@ -506,15 +524,22 @@ impl<T: IpcTransport> TabLoop<T> {
     }
 
     fn send_storage(&mut self) -> io::Result<()> {
-        let entries = match self.rt.as_ref() {
-            Some(rt) => rt
-                .storage()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            None => Vec::new(),
-        };
+        let entries = self.storage_entries();
         self.send(&ToShell::Storage(entries))
+    }
+
+    /// The page's storage as the shell saves it, noted as sent.
+    fn storage_entries(&mut self) -> Vec<crate::ipc::Entry> {
+        match self.rt.as_ref() {
+            Some(rt) => {
+                self.storage_sent = rt.storage_revision();
+                rt.storage()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            }
+            None => Vec::new(),
+        }
     }
 }
 
@@ -856,6 +881,102 @@ mod tests {
             ToShell::Navigate { url, replace: false } if url == "vy://docs.example/personer/maja-ek"
         )), "{msgs:?}");
         tx.send(ToTab::Shutdown.encode()).unwrap();
+        h.join().unwrap();
+    }
+
+    /// SPEC-9.5.4: asked to save, the tab sends the page's storage when
+    /// the page has changed it since the tab last sent it, and nothing
+    /// when it has not, also for a page started with storage from an
+    /// earlier visit; `vy_suspend` is not called for it (the tab is not
+    /// being hidden, SPEC-5.1.5). The shutdown's answer is still the
+    /// whole storage, after `vy_suspend`.
+    #[test]
+    fn spec_9_5_4_a_save_is_answered_only_with_changes() {
+        // On every key down: `state_put("k", [keycode])`; `vy_suspend`
+        // puts the last keycode under "s".
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "k")
+                (data (i32.const 20) "s")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then
+                            (i32.store8 (i32.const 32) (local.get 1))
+                            (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32)
+                    (drop (call $put (i32.const 20) (i32.const 1) (i32.const 32) (i32.const 1)))
+                    i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        assert_eq!(vy_abi::event::KEY_DOWN, 5);
+        let key_down = |code: i32, clock_ms: i64| {
+            ToTab::Event {
+                kind: vy_abi::event::KEY_DOWN,
+                a: code,
+                b: 0,
+                c: 0,
+                d: 0,
+                clock_ms,
+            }
+            .encode()
+        };
+        let old = (b"old".to_vec(), b"1".to_vec());
+        let (tx, rx, h) = start();
+        let mut req = load_request(
+            wasm,
+            pack_capabilities(Capabilities::from_names(["storage"]).unwrap()),
+        );
+        req.storage = vec![old.clone()];
+        tx.send(ToTab::Load(Box::new(req)).encode()).unwrap();
+        recv_until(&rx, |m| matches!(m, ToShell::Loaded { .. }));
+        // What a tick is answered with ends what the ask before it gave.
+        let until_tick_answer = |clock_ms: i64| {
+            tx.send(ToTab::Tick { clock_ms }.encode()).unwrap();
+            recv_until(&rx, |m| matches!(m, ToShell::Frame { .. } | ToShell::Idle))
+        };
+        let snapshots = |msgs: &[ToShell]| {
+            msgs.iter()
+                .filter(|m| matches!(m, ToShell::StorageSnapshot(_)))
+                .count()
+        };
+        until_tick_answer(0);
+        // Nothing stored since the load: nothing to say.
+        tx.send(ToTab::SaveStorage.encode()).unwrap();
+        assert_eq!(snapshots(&until_tick_answer(16)), 0, "unchanged storage");
+        // A change: the whole storage, without `vy_suspend`.
+        tx.send(key_down(4, 32)).unwrap();
+        tx.send(ToTab::SaveStorage.encode()).unwrap();
+        let msgs = recv_until(&rx, |m| matches!(m, ToShell::StorageSnapshot(_)));
+        assert_eq!(
+            msgs.last(),
+            Some(&ToShell::StorageSnapshot(vec![
+                (b"k".to_vec(), vec![4]),
+                old.clone()
+            ]))
+        );
+        // Asked again with nothing new: nothing.
+        tx.send(ToTab::SaveStorage.encode()).unwrap();
+        assert_eq!(snapshots(&until_tick_answer(48)), 0, "already sent");
+        // The shutdown's answer is the last word, after `vy_suspend`.
+        tx.send(key_down(5, 64)).unwrap();
+        tx.send(ToTab::Shutdown.encode()).unwrap();
+        let msgs = recv_until(&rx, |m| matches!(m, ToShell::Storage(_)));
+        assert_eq!(
+            msgs.last(),
+            Some(&ToShell::Storage(vec![
+                (b"k".to_vec(), vec![5]),
+                old,
+                (b"s".to_vec(), vec![5])
+            ]))
+        );
+        assert_eq!(snapshots(&msgs), 0);
         h.join().unwrap();
     }
 

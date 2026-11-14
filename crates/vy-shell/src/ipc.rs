@@ -471,6 +471,12 @@ pub enum ToTab {
     Suspend,
     /// Leave: `vy_suspend`, [`ToShell::Storage`], then the process ends.
     Shutdown,
+    /// The shell is about to save what the page has stored while it runs
+    /// (SPEC-9.5.4): answered with [`ToShell::StorageSnapshot`] when the
+    /// storage changed since the tab last sent it, and not at all
+    /// otherwise. `vy_suspend` is not called: the tab is not being hidden
+    /// (SPEC-5.1.5).
+    SaveStorage,
     /// The shell's clipboard changed (SPEC-5.2.12).
     Clipboard {
         /// Its bytes.
@@ -588,6 +594,10 @@ pub enum ToShell {
     },
     /// The page's storage (SPEC-5.2.9), after a suspend or at shutdown.
     Storage(Vec<Entry>),
+    /// The page's storage while the page runs, in answer to
+    /// [`ToTab::SaveStorage`] (SPEC-9.5.4). Not the last word of a process
+    /// that is leaving: that is [`ToShell::Storage`], which comes after.
+    StorageSnapshot(Vec<Entry>),
     /// What the tab process's lockdown applied and what it could not
     /// (SPEC-9.1.3), sent once, just before its first [`ToTab::Load`] is
     /// handled: before any page code has run in the process.
@@ -638,6 +648,7 @@ const T_RASTER: u8 = 12;
 const T_COPY_GESTURE: u8 = 13;
 const T_STOP_RECORDING: u8 = 14;
 const T_CODE_CACHE: u8 = 15;
+const T_SAVE_STORAGE: u8 = 16;
 
 const S_LOADED: u8 = 64;
 const S_FRAME: u8 = 65;
@@ -655,6 +666,7 @@ const S_STOPPED: u8 = 76;
 const S_FOCUS: u8 = 77;
 const S_SANDBOX: u8 = 78;
 const S_CODE: u8 = 79;
+const S_STORAGE_SNAPSHOT: u8 = 80;
 
 fn put_random(w: &mut Writer, r: RandomSource) {
     match r {
@@ -826,6 +838,7 @@ impl ToTab {
             }
             Self::Suspend => Writer::new(T_SUSPEND).finish(),
             Self::Shutdown => Writer::new(T_SHUTDOWN).finish(),
+            Self::SaveStorage => Writer::new(T_SAVE_STORAGE).finish(),
             Self::Clipboard { bytes } => {
                 let mut w = Writer::new(T_CLIPBOARD);
                 w.bytes(bytes);
@@ -939,6 +952,7 @@ impl ToTab {
             },
             T_SUSPEND => Self::Suspend,
             T_SHUTDOWN => Self::Shutdown,
+            T_SAVE_STORAGE => Self::SaveStorage,
             T_CLIPBOARD => Self::Clipboard {
                 bytes: r.bytes()?.to_vec(),
             },
@@ -1061,6 +1075,11 @@ impl ToShell {
             }
             Self::Storage(entries) => {
                 let mut w = Writer::new(S_STORAGE);
+                put_entries(&mut w, entries);
+                w.finish()
+            }
+            Self::StorageSnapshot(entries) => {
+                let mut w = Writer::new(S_STORAGE_SNAPSHOT);
                 put_entries(&mut w, entries);
                 w.finish()
             }
@@ -1245,6 +1264,7 @@ impl ToShell {
                     .to_vec(),
             },
             S_STORAGE => Self::Storage(get_entries(&mut r)?),
+            S_STORAGE_SNAPSHOT => Self::StorageSnapshot(get_entries(&mut r)?),
             S_SANDBOX => Self::Sandbox(crate::sandbox::Report {
                 layers: get_lines(&mut r, "sandbox layers")?,
                 warnings: get_lines(&mut r, "sandbox warnings")?,
@@ -1351,6 +1371,7 @@ mod tests {
             },
             ToTab::Suspend,
             ToTab::Shutdown,
+            ToTab::SaveStorage,
             ToTab::Clipboard { bytes: vec![] },
             ToTab::Raster {
                 truncated: true,
@@ -1428,6 +1449,7 @@ mod tests {
                 body: b"{}".to_vec(),
             },
             ToShell::Storage(vec![(vec![], vec![0; 300])]),
+            ToShell::StorageSnapshot(vec![(b"k".to_vec(), vec![1; 3])]),
             ToShell::Clipboard(b"x".to_vec()),
             ToShell::Ime(Some((1.0, 2.0, 3.0, 4.0))),
             ToShell::Ime(None),
@@ -1473,8 +1495,8 @@ mod tests {
             assert!(ToTab::decode(&body).is_err(), "tags are disjoint: {m:?}");
             shell_tags.insert(body[0]);
         }
-        assert_eq!(tab_tags.len(), 15, "every ToTab variant is covered");
-        assert_eq!(shell_tags.len(), 16, "every ToShell variant is covered");
+        assert_eq!(tab_tags.len(), 16, "every ToTab variant is covered");
+        assert_eq!(shell_tags.len(), 17, "every ToShell variant is covered");
         assert!(tab_tags.is_disjoint(&shell_tags));
         // Over a byte stream: lengths first, little-endian.
         let mut pipe = Vec::new();
@@ -1722,6 +1744,13 @@ mod tests {
             ),
             (
                 ToShell::Storage(vec![(
+                    vec![0; limits::MAX_STATE_KEY_BYTES as usize + 1],
+                    Vec::new(),
+                )]),
+                "storage key",
+            ),
+            (
+                ToShell::StorageSnapshot(vec![(
                     vec![0; limits::MAX_STATE_KEY_BYTES as usize + 1],
                     Vec::new(),
                 )]),

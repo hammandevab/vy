@@ -57,6 +57,12 @@ pub const GESTURE_WINDOW_MS: i64 = 1000;
 /// gets nothing from it. "Neka" always counts.
 pub const DIALOG_ARM_MS: i64 = 700;
 
+/// How long after the shell let a page's code run it asks the tab for
+/// what the page stored (SPEC-9.5.4): what a page saves is on disk about
+/// this long after the change, without the tab being hidden, reloaded or
+/// closed, so a client that is ended abruptly loses a second's changes.
+pub const STORAGE_SAVE_MS: i64 = 1000;
+
 /// Something that wakes the UI thread after a message was put in the inbox.
 #[derive(Clone)]
 pub struct Waker(Arc<dyn Fn() + Send + Sync>);
@@ -242,6 +248,13 @@ struct Tab {
     /// key the main process made for the module it sent, and what the
     /// tab reported back. `None` when the cache is off for the load.
     code: Option<CodeLoad>,
+    /// Set when the shell sends the tab's process anything: page code
+    /// may run on it and store something. [`Shell::poll`] turns it into
+    /// `save_at` (SPEC-9.5.4).
+    touched: std::cell::Cell<bool>,
+    /// Clock reading at which the tab is next asked for its page's
+    /// storage; `None` when nothing was sent to it since the last ask.
+    save_at: Option<i64>,
 }
 
 /// A load the compilation cache is on for.
@@ -311,6 +324,8 @@ impl Tab {
             sandbox: None,
             parked: None,
             code: None,
+            touched: std::cell::Cell::new(false),
+            save_at: None,
         }
     }
 
@@ -382,6 +397,10 @@ impl Tab {
     fn send(&self, msg: &ToTab) {
         if let Some(c) = &self.conn {
             c.send(msg);
+            // The ask itself runs no page code.
+            if !matches!(msg, ToTab::SaveStorage) {
+                self.touched.set(true);
+            }
         }
     }
 
@@ -1671,7 +1690,9 @@ impl Shell {
                 url,
                 body,
             } => self.fetch_for(id, req, method, url, body),
-            ToShell::Storage(entries) => {
+            // The answer to a suspend, and what the page had stored when
+            // the shell asked while it runs (SPEC-9.5.4): saved alike.
+            ToShell::Storage(entries) | ToShell::StorageSnapshot(entries) => {
                 let Some(tab) = self.tab(id) else {
                     return;
                 };
@@ -1899,6 +1920,23 @@ impl Shell {
                     }
                 }
                 self.unpark();
+            }
+            // Asked for before the process was let go of: saved, since a
+            // process that never answers its shutdown leaves nothing
+            // newer. Not its last word, which comes after this and is
+            // what a page of the same origin waits for.
+            Inbound::Message(ToShell::StorageSnapshot(entries)) => {
+                let r = &self.retired[at];
+                let saved = if r.discard {
+                    Ok(())
+                } else {
+                    self.save_storage(Some(&r.origin), r.storage_granted, r.quota, &entries)
+                };
+                if let Err(e) = saved {
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.log(format!("{e} (the previous page)"));
+                    }
+                }
             }
             Inbound::Gone { .. } => {
                 self.retired.remove(at);
@@ -3676,6 +3714,7 @@ impl Shell {
     /// answers and [`Shell::handle`] reloads a page that changed. The
     /// window calls this when [`Shell::poll_in`] says it is due.
     pub fn poll(&mut self) {
+        self.ask_for_storage();
         if !self.live_reload {
             return;
         }
@@ -3700,11 +3739,51 @@ impl Shell {
     }
 
     /// How long until [`Shell::poll`] has something to do; `None` while
-    /// live reload is off.
+    /// live reload is off and no tab is waiting to be asked for its
+    /// storage.
     pub fn poll_in(&self) -> Option<std::time::Duration> {
-        self.live_reload.then(|| {
-            std::time::Duration::from_millis((self.next_live_check - self.now_ms()).max(0) as u64)
-        })
+        let live = self.live_reload.then_some(self.next_live_check);
+        let save = self.tabs.iter().filter_map(|t| t.save_at).min();
+        let at = match (live, save) {
+            (Some(a), Some(b)) => a.min(b),
+            (a, b) => a.or(b)?,
+        };
+        Some(std::time::Duration::from_millis(
+            (at - self.now_ms()).max(0) as u64,
+        ))
+    }
+
+    /// SPEC-9.5.4: a tab whose process was sent something, so that page
+    /// code may have run, is asked for the page's storage
+    /// [`STORAGE_SAVE_MS`] later; the tab answers only when the storage
+    /// changed, and the answer is saved as a suspend's is. A page nothing
+    /// is sent to is not asked, so a resting page stays at rest
+    /// (SPEC-13.3.2). Only where storage is saved at all: in a window,
+    /// for a page of an origin granted `storage`.
+    fn ask_for_storage(&mut self) {
+        if self.config.headless {
+            return;
+        }
+        let now = self.now_ms();
+        for tab in &mut self.tabs {
+            let touched = tab.touched.replace(false);
+            let saves = tab.started
+                && tab.conn.is_some()
+                && tab.replay.is_none()
+                && tab.capabilities().has(cap::STORAGE)
+                && tab.origin.as_ref().is_some_and(|o| !o.starts_with("file:"));
+            if !saves {
+                tab.save_at = None;
+                continue;
+            }
+            if touched && tab.save_at.is_none() {
+                tab.save_at = Some(now + STORAGE_SAVE_MS);
+            }
+            if tab.save_at.is_some_and(|at| now >= at) {
+                tab.save_at = None;
+                tab.send(&ToTab::SaveStorage);
+            }
+        }
     }
 
     /// A live-reload answer: the first sets what the page is; a different

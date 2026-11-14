@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(shell.tab_status(tab), "running");
         assert_eq!(shell.tab_badges(tab), vec![("storage", true)]);
         key(&mut shell, 0x04);
-        assert!(saved().is_empty(), "nothing saved while the page runs");
+        assert!(saved().is_empty(), "nothing saved before the shell asks");
         shell.reload();
         let_go(&mut shell);
         assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])], "saved on F5");
@@ -1139,6 +1139,161 @@ mod tests {
         shell.shutdown();
         assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x07])], "saved on close");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SPEC-9.5.4: what a page stores is on disk about a second after the
+    /// shell let its code run, with the tab neither hidden, reloaded nor
+    /// closed, so a client that is ended abruptly keeps it. The shell asks
+    /// only a tab it sent something to: once the page rests, nothing is
+    /// due. A snapshot that arrives after its process was let go of is
+    /// saved without standing in for the process's last word: the answer
+    /// to the shutdown, made after `vy_suspend`, is still waited for and
+    /// is what stays. Headless, where nothing is persisted, nothing is
+    /// asked. The tab runs in the in-process transport; the shell
+    /// persists as in a window, to a scratch data directory.
+    #[test]
+    fn spec_9_5_4_storage_is_saved_while_the_page_runs() {
+        use crate::clipboard::MemoryClipboard;
+        use crate::external::RecordingOpener;
+        use crate::shell::{Config, Shell, Waker, STORAGE_SAVE_MS};
+        // On every key down: `state_put("k", [keycode])`; `vy_suspend`
+        // puts the last keycode under "s".
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "k")
+                (data (i32.const 20) "s")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then
+                            (i32.store8 (i32.const 32) (local.get 1))
+                            (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32)
+                    (drop (call $put (i32.const 20) (i32.const 1) (i32.const 32) (i32.const 1)))
+                    i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        let data = std::env::temp_dir().join(format!("vy-storage-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let origin = "vy://live.example";
+        let page = LoadedPage {
+            display: format!("{origin}/"),
+            origin: Some(origin.into()),
+            manifest: None,
+            sha256: vy_runtime::sha256(&wasm),
+            wasm,
+            resources: Vec::new(),
+            trusted: true,
+            restriction: None,
+            verdicts: vec![("storage", vy_manifest::Grant::Auto)],
+            is_localhost: false,
+            net_class: vy_proto::NetClass::Public,
+        };
+        let config = |headless: bool| Config {
+            exe: None,
+            data_dir: data.clone(),
+            headless,
+            opener: Box::new(RecordingOpener::default()),
+            clipboard: Box::new(MemoryClipboard::new()),
+            waker: Waker::none(),
+            code_cache: None,
+        };
+        let mut shell = Shell::new(config(false), 800.0, 600.0, 1.0).unwrap();
+        let saved = || crate::storage::load(&data.join("storage"), origin);
+        let key = |shell: &mut Shell, code: i32| {
+            shell.key(code, true, 0, false);
+            shell.key(code, false, 0, false);
+        };
+        // What the window's loop does between events: ask what is due and
+        // handle what came, until `done`.
+        let run_until = |shell: &mut Shell, done: &dyn Fn(&Shell) -> bool, what: &str| {
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                shell.poll();
+                if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(10)) {
+                    shell.handle(m);
+                }
+                if done(shell) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "{what}");
+            }
+        };
+        let put_k = |code: u8| (b"k".to_vec(), vec![code]);
+        let put_s = |code: u8| (b"s".to_vec(), vec![code]);
+
+        let tab = shell.open_tab_loaded(page.clone());
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_badges(tab), vec![("storage", true)]);
+        // A change, and then only the clock: the value reaches the disk.
+        let asked = Instant::now();
+        key(&mut shell, 0x04);
+        assert!(saved().is_empty(), "nothing saved before the shell asks");
+        run_until(&mut shell, &|_| saved() == vec![put_k(0x04)], "never saved");
+        assert!(
+            asked.elapsed() >= Duration::from_millis(STORAGE_SAVE_MS as u64 / 2),
+            "saved by the ask, which comes after a wait"
+        );
+        // `vy_suspend` was not called for it (SPEC-5.1.5): no "s".
+        assert_eq!(saved(), vec![put_k(0x04)]);
+        // The page rests: after the asks its own messages caused, nothing
+        // is due, and the loop would sleep.
+        run_until(&mut shell, &|s| s.poll_in().is_none(), "asks never end");
+        std::thread::sleep(Duration::from_millis(50));
+        shell.poll();
+        shell.drain();
+        assert!(shell.poll_in().is_none(), "a resting page is not asked");
+        // A second change is saved the same way.
+        key(&mut shell, 0x05);
+        assert!(shell.poll_in().is_none(), "armed by the loop, not the key");
+        shell.poll();
+        assert!(
+            shell
+                .poll_in()
+                .is_some_and(|d| d <= Duration::from_millis(STORAGE_SAVE_MS as u64)),
+            "due within a second of the key"
+        );
+        run_until(&mut shell, &|_| saved() == vec![put_k(0x05)], "never saved");
+        // An ask whose answer arrives after the process was let go of:
+        // the snapshot is saved, and the shutdown's answer after it is
+        // still the one that stays.
+        key(&mut shell, 0x06);
+        shell.poll();
+        std::thread::sleep(Duration::from_millis(STORAGE_SAVE_MS as u64 + 50));
+        shell.poll();
+        std::thread::sleep(Duration::from_millis(100));
+        shell.reload();
+        let deadline = Instant::now() + TIMEOUT;
+        while shell.retiring() > 0 {
+            assert!(Instant::now() < deadline, "a process let go of never ended");
+            if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(10)) {
+                shell.handle(m);
+            }
+        }
+        shell.drain();
+        assert_eq!(
+            saved(),
+            vec![put_k(0x06), put_s(0x06)],
+            "the shutdown's answer, not the snapshot before it"
+        );
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&data);
+
+        // Headless nothing is persisted, so nothing is asked.
+        let mut shell = Shell::new(config(true), 800.0, 600.0, 1.0).unwrap();
+        shell.open_tab_loaded(page);
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        key(&mut shell, 0x07);
+        shell.poll();
+        assert!(shell.poll_in().is_none());
+        shell.shutdown();
     }
 
     /// A page as a signed package on a loopback server of its own, with
