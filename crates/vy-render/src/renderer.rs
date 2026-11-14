@@ -54,6 +54,20 @@ pub enum RasterPath {
     Fast,
 }
 
+/// What a caught panic said.
+fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
+    e.downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| e.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".into())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test: the reference path panics instead of drawing.
+    static FAIL_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Most bands a frame is split into.
 pub const MAX_BANDS: usize = 4;
 /// Fewest rows a band gets: below this a thread costs more than it saves.
@@ -229,7 +243,28 @@ impl Renderer {
     ) -> Result<RasterReport, RenderError> {
         match self.path {
             RasterPath::Reference => {
-                let r = raster::render(display_list, width, height, scale, text, images)?;
+                // The end of the chain, and in the window the main process
+                // drawing a page's list (SPEC-9.1.2): a panic here, in
+                // this code or in the text and path libraries under it,
+                // would end the client and every tab with it over one
+                // page's frame. It is that page's error instead; what the
+                // renderer kept of earlier frames is dropped, since a
+                // panic may have left it half changed.
+                let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    if FAIL_REFERENCE.with(|f| f.get()) {
+                        panic!("the reference path was asked to fail");
+                    }
+                    raster::render(display_list, width, height, scale, text, images)
+                }));
+                let r = match drawn {
+                    Ok(r) => r?,
+                    Err(e) => {
+                        self.last = None;
+                        self.runs = RunCache::default();
+                        return Err(RenderError::Failed(panic_text(e.as_ref())));
+                    }
+                };
                 self.image = r.image;
                 self.report = r.report;
                 self.info = FrameInfo {
@@ -247,14 +282,9 @@ impl Renderer {
                 match fast {
                     Ok(r) => r,
                     Err(e) => {
-                        // The fallback chain's last link: a bug in the fast
-                        // path costs speed, never the page.
-                        let why = e
-                            .downcast_ref::<&str>()
-                            .map(|s| (*s).to_owned())
-                            .or_else(|| e.downcast_ref::<String>().cloned())
-                            .unwrap_or_else(|| "panic".into());
-                        self.give_up(why);
+                        // A bug in the fast path costs speed, never the
+                        // page: the reference draws it from here on.
+                        self.give_up(panic_text(e.as_ref()));
                         self.render(display_list, width, height, scale, text, images)
                     }
                 }
@@ -1366,6 +1396,72 @@ mod tests {
         assert_eq!(
             f.render(&bytes, 0, 10, 1.0, &mut t, &images).unwrap_err(),
             RenderError::BadSize
+        );
+    }
+
+    /// SPEC-9.1.2, SPEC-11.2.2: the rasterizer runs in the main process
+    /// on a page's display list, so a panic in it must not be the
+    /// client's end. A panic in the reference path, the last link of the
+    /// chain, is an error for that frame: the renderer says what failed,
+    /// keeps the picture it had, and draws the next list as if nothing
+    /// had happened, byte for byte the reference's. The fast path ends in
+    /// the same place: its own panic falls back to the reference, and a
+    /// panic there is the same error.
+    #[test]
+    fn spec_9_1_2_a_panic_in_the_rasterizer_is_the_pages_error() {
+        let mut t = TextEngine::new();
+        let st = styles(&mut t);
+        let images = ImageCache::empty(1);
+        let mut g = Gen(78);
+        let first = random_list(&mut g, &st, 80.0, 60.0);
+        let second = random_list(&mut g, &st, 80.0, 60.0);
+        let failing = |on: bool| FAIL_REFERENCE.with(|f| f.set(on));
+        // The message of a caught panic goes to stderr once per panic;
+        // nothing else leaves the renderer.
+        let mut r = Renderer::new(RasterPath::Reference);
+        let report = r.render(&first, 80, 60, 1.0, &mut t, &images).unwrap();
+        let before = r.image().clone();
+        same(
+            (&before, report),
+            &reference(&first, 80, 60, 1.0, &images),
+            "first",
+        );
+        failing(true);
+        let err = r.render(&second, 80, 60, 1.0, &mut t, &images).unwrap_err();
+        failing(false);
+        assert_eq!(
+            err,
+            RenderError::Failed("the reference path was asked to fail".into())
+        );
+        assert!(err.to_string().contains("the rasterizer failed"));
+        assert_eq!(r.image(), &before, "the last picture stays");
+        let report = r.render(&second, 80, 60, 1.0, &mut t, &images).unwrap();
+        same(
+            (r.image(), report),
+            &reference(&second, 80, 60, 1.0, &images),
+            "after the failure",
+        );
+
+        // A renderer that began on the fast path and gave it up ends in
+        // the same place: the reference, with the same guard.
+        let mut f = Renderer::new(RasterPath::Fast);
+        let report = f.render(&first, 80, 60, 1.0, &mut t, &images).unwrap();
+        same(
+            (f.image(), report),
+            &reference(&first, 80, 60, 1.0, &images),
+            "fast, first",
+        );
+        f.give_up("a test".into());
+        assert_eq!(f.path(), RasterPath::Reference);
+        failing(true);
+        let err = f.render(&second, 80, 60, 1.0, &mut t, &images).unwrap_err();
+        failing(false);
+        assert!(matches!(err, RenderError::Failed(_)), "{err}");
+        let report = f.render(&second, 80, 60, 1.0, &mut t, &images).unwrap();
+        same(
+            (f.image(), report),
+            &reference(&second, 80, 60, 1.0, &images),
+            "fast, after the failure",
         );
     }
 }

@@ -137,12 +137,17 @@ pub enum RenderError {
     Decode(DecodeError),
     /// Zero or absurd output size.
     BadSize,
+    /// The rasterizer itself failed on the list: a panic in it or in a
+    /// library under it, caught by [`crate::Renderer::render`], where the
+    /// list is a page's and the process is not.
+    Failed(String),
 }
 
 impl std::fmt::Display for RenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Decode(e) => write!(f, "display list does not decode: {e:?}"),
+            Self::Failed(why) => write!(f, "the rasterizer failed on this display list: {why}"),
             Self::BadSize => {
                 write!(
                     f,
