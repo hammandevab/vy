@@ -43,7 +43,7 @@ mod sheet;
 use alloc::string::String;
 use alloc::vec;
 use sheet::{
-    col_name, col_row, format_decimals, format_number, index, name, push_u64, Sheet, Value, COLS,
+    col_name, col_row, format_number, index, name, push_u64, NumText, Sheet, Value, COLS,
     HEAD_BYTES, HEAD_CHARS, MAX_SRC, ROWS,
 };
 use vy_sdk::event::{button, key};
@@ -107,6 +107,12 @@ const MEASURE_POOL: usize = 8 * 1024;
 /// sheet takes up to 2.8 ms of the rest. The sample sheet is 6 900 units;
 /// 2 500 sums of a column of a hundred numbers are 900 000, 45 frames.
 const RECALC_STEP: u32 = 20_000;
+/// Cells in view up to which a frame's step of a recalculation is the
+/// whole [`RECALC_STEP`]: a window of 1600 × 1000. A larger window has
+/// more to draw in the same frame and takes a step that much smaller
+/// (granskning 0018:1: at 2560 × 1440, 1 350 cells in view, a whole step
+/// left 3 % of the budget).
+const STEP_VIEW: u32 = 580;
 const F2: i32 = 0x3B;
 const DOUBLE_MS: i64 = 400;
 
@@ -430,7 +436,7 @@ impl Page {
         }
         let mut s = self.range_name();
         if n > 0 {
-            let mean = (sum + n / 2 * sum.signum()) / n;
+            let mean = sum.saturating_add(n / 2 * sum.signum()) / n;
             s.push_str(&cat(&[
                 " · Summa ",
                 &format_number(sum),
@@ -731,18 +737,51 @@ impl Page {
         if cut.is_some() {
             return Ok(false);
         }
-        if let Some(cell) = self.sheet.get_mut(i).filter(|cell| cell.width < 0.0) {
-            // A number too wide for its cell loses decimals until it fits.
-            let mut w = text_measure(style, 0.0, cell.shown())?.w;
-            cell.decimals = 6;
-            if let Value::Num(v) = cell.value {
-                while w > room && cell.decimals > 0 {
-                    cell.decimals -= 1;
-                    let shorter = format_decimals(v, u32::from(cell.decimals));
-                    w = text_measure(style, 0.0, &shorter)?.w;
+        if let Some(cell) = self.sheet.get(i).filter(|cell| cell.width < 0.0) {
+            // A number too wide for its cell loses decimals until it fits:
+            // up to seven texts measured for one cell. They draw on the
+            // frame's pool as the texts do, and are written on the stack;
+            // a cell the pool has nothing left for is fitted, and drawn,
+            // by a later frame (granskning 0018:1: 2 600 long numbers in
+            // view cost three budgets in their first frame).
+            let mut left = self.measure_left;
+            let mut measure = |text: &str| -> Result<Option<f32>, VyError> {
+                let Some(rest) = left.checked_sub(text.len()) else {
+                    return Ok(None);
+                };
+                left = rest;
+                Ok(Some(text_measure(style, 0.0, text)?.w))
+            };
+            let mut fitted = None;
+            if let Some(mut w) = measure(cell.shown())? {
+                let mut decimals = 6u8;
+                let mut measured = true;
+                if let Value::Num(v) = cell.value {
+                    while w > room && decimals > 0 {
+                        decimals -= 1;
+                        let shorter = NumText::new(v, u32::from(decimals));
+                        match measure(shorter.as_str())? {
+                            Some(narrower) => w = narrower,
+                            None => {
+                                measured = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if measured {
+                    fitted = Some((w, decimals));
                 }
             }
-            cell.width = w;
+            self.measure_left = left;
+            let Some((w, decimals)) = fitted else {
+                self.unmeasured = true;
+                return Ok(false);
+            };
+            if let Some(cell) = self.sheet.get_mut(i) {
+                cell.width = w;
+                cell.decimals = decimals;
+            }
         }
         let Some(cell) = self.sheet.get(i) else {
             return Ok(false);
@@ -753,8 +792,8 @@ impl Page {
                 f.text_centred(r, style, "#####")?;
             }
             Value::Num(v) if cell.decimals < 6 => {
-                let shorter = format_decimals(v, u32::from(cell.decimals));
-                f.text(x, y, 0.0, style, &shorter)?;
+                let shorter = NumText::new(v, u32::from(cell.decimals));
+                f.text(x, y, 0.0, style, shorter.as_str())?;
             }
             Value::Num(_) => {
                 f.text(x, y, 0.0, style, cell.shown())?;
@@ -1093,11 +1132,14 @@ impl App for Page {
     }
 
     fn frame(&mut self, f: &mut Frame, _dt_ms: i32) -> Result<(), VyError> {
-        // A recalculation under way goes on a step a frame.
-        if !self.sheet.step(RECALC_STEP) {
+        let l = self.layout();
+        // A recalculation under way goes on a step a frame, a smaller one
+        // the more cells the frame has to draw.
+        let in_view = ((l.cols.1 - l.cols.0 + 1) * (l.rows.1 - l.rows.0 + 1)) as u32;
+        let step = RECALC_STEP * STEP_VIEW / in_view.max(STEP_VIEW);
+        if !self.sheet.step(step) {
             request_frame();
         }
-        let l = self.layout();
         let window = Rect::new(0.0, 0.0, self.window.width, self.window.height);
         f.rect(window, 0.0, PAGE)?;
         self.measure_left = MEASURE_POOL;

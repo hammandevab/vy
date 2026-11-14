@@ -74,7 +74,12 @@ början, högst 28 tecken (det smalaste tecknet är 3,6 px och cellen 96), och i
 än 580 sådana celler i bild delar de på 16 KB. Trädet har varje cell; långa texter står hela så
 länge de tillsammans ryms i 12 KB, därefter cellens namn, textens början och `…` (hela texten står
 i formelfältet när cellen är markerad). Texter som kan rymmas i tomma celler till höger mäts en
-gång, högst 8 KB per frame.
+gång, högst 8 KB per frame. Ur samma 8 KB mäts tal som är för breda för sin cell, upp till sju
+gånger var medan de tappar decimaler; tal som inte hinner med ritas av nästa frame. En cells
+etikett får sin plats innan den skrivs och en formels rymmer vilket värde som helst, så en
+omräkning flyttar inget på högen (granskning 0018: 2 599 formler som fick långa värden stoppade
+sidan för gott). I ett fönster med fler än 580 celler i bild är omräkningens steg så mycket
+mindre som det finns mer att rita; i 2560 × 1440 kostar den dyraste framen 6,4 M av 8.
 
 ## Ritbord (`rita`)
 

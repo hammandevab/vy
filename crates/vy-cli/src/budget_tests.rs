@@ -757,6 +757,87 @@ fn spec_5_3_3_kalkyl_starts_on_any_sheet_it_saved() {
     assert!(page.shows("A1: #CIRKEL") && page.shows("R8: #CIRKEL"));
 }
 
+/// SPEC-5.3.3, SPEC-5.2.9 (granskning 0018:1): a sheet of one number and
+/// 2 599 formulas that divide it opened and worked while the values were
+/// short. One ordinary edit that made every value long (`7` to
+/// `1234567,891234`, so `=A1/7` shows `176366,841605`) moved every
+/// formula's label out of the 16 bytes it had, on a heap whose allocator
+/// looks through its holes at every free: two frames over the budget, the
+/// page stopped, and since the sheet was saved in the event it stopped
+/// again at every visit. A label now has its room before it is written
+/// and a formula's holds any value, so nothing moves. The same sheet of
+/// plain long numbers cost three budgets in its first frame in a large
+/// window, where each number in view was formatted and measured up to
+/// seven times on the heap: numbers are now fitted on the stack, as many
+/// in a frame as the pool for measuring allows, the rest in the next.
+#[test]
+fn spec_5_3_3_kalkyl_keeps_the_budget_when_values_grow() {
+    let ratios = sheet_of(|col, row| {
+        Some(if col == 0 && row == 0 {
+            "7".into()
+        } else {
+            "=A1/7".into()
+        })
+    });
+    let wide = sheet_of(|_, _| Some("12345678901,123456".into()));
+    let sizes = [(800, 600), (1024, 720), (1600, 1000), (2560, 1440)];
+    let mut worst = (0, String::new());
+    let mut note = |page: &Page, width: u32, height: u32| {
+        if page.worst.0 > worst.0 {
+            worst = (
+                page.worst.0,
+                format!(
+                    "{} at {width} x {height}, after {}",
+                    page.name, page.worst.1
+                ),
+            );
+        }
+    };
+    for (width, height) in sizes {
+        let case = "one number and 2 599 formulas of it";
+        let mut page = Page::load_with("kalkyl", width, height, stored("kalkyl", &ratios))
+            .unwrap()
+            .on(case);
+        page.settle("the stored sheet");
+        assert!(page.shows("B1: 1"), "{case}: 7 / 7");
+        // A1, a long number, Enter: every formula comes to a long value.
+        page.click(90.0, 127.0);
+        page.text("1234567,891234");
+        page.key(vy_abi::key::ENTER, 0);
+        page.settle("every value grew");
+        assert!(
+            page.shows("A1: 1234567,891234") && page.shows("B1: 176366,841605"),
+            "{case}: recalculated"
+        );
+        note(&page, width, height);
+        // And again on what it saved.
+        let saved = page.rt.take_storage();
+        let mut again = Page::load_with("kalkyl", width, height, saved)
+            .unwrap()
+            .on(case);
+        again.settle("the sheet it saved");
+        assert!(again.shows("B1: 176366,841605"), "{case}: reopened");
+        again.event("the wheel", kind::SCROLL, 0, 60_000, 0, 0);
+        again.settle("scrolling");
+        note(&again, width, height);
+
+        let case = "2 600 long numbers";
+        let mut page = Page::load_with("kalkyl", width, height, stored("kalkyl", &wide))
+            .unwrap()
+            .on(case);
+        page.settle("the stored sheet");
+        page.event("the wheel", kind::SCROLL, 0, 60_000, 0, 0);
+        page.settle("scrolling");
+        page.resize(width + 300, height + 200);
+        page.settle("a resize");
+        note(&page, width, height);
+    }
+    eprintln!(
+        "kalkyl when values grow: costliest frame {} fuel, {}",
+        worst.0, worst.1
+    );
+}
+
 // A page must never be able to stop itself with data it saved (granskning
 // 0013, the rule from its findings 1 and 2). What a page reads back from
 // `state_get` is whatever an earlier version of it, or a bug in it, put

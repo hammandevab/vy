@@ -201,19 +201,31 @@ impl Cell {
     /// recalculation relabels thousands of cells; a string that had to
     /// move for each would leave as many holes in the heap, and the SDK's
     /// allocator looks through the holes below a block every time it
-    /// frees one.
+    /// frees one. So the string never moves: it is given its room before
+    /// anything is written to it, a formula's room is [`LABEL_ROOM`] from
+    /// the start, which holds any value a formula can come to, and a
+    /// number is written out on the stack first to know its length
+    /// (granskning 0018:1: a formula whose value grew past the 16 bytes it
+    /// once had moved, and 2 599 of them stopped the page for good).
     fn relabel(&mut self, index: usize) {
         self.label.clear();
-        if let Value::Text = self.value {
-            self.label.reserve_exact(self.src.len() + 8);
-        }
+        let number = match self.value {
+            Value::Num(v) => Some(NumText::new(v, 6)),
+            _ => None,
+        };
+        let shown = match (&number, self.value) {
+            (Some(number), _) => number.as_str().len(),
+            (None, Value::Fault(f)) => f.text().len(),
+            (None, _) => self.src.len(),
+        };
+        self.label.reserve_exact(NAME_ROOM + shown);
         push_name(&mut self.label, index);
         self.label.push_str(": ");
         self.shown_at = self.label.len();
-        match self.value {
-            Value::Num(v) => push_decimals(&mut self.label, v, 6),
-            Value::Text => self.label.push_str(&self.src),
-            Value::Fault(f) => self.label.push_str(f.text()),
+        match (&number, self.value) {
+            (Some(number), _) => self.label.push_str(number.as_str()),
+            (None, Value::Fault(f)) => self.label.push_str(f.text()),
+            (None, _) => self.label.push_str(&self.src),
         }
         self.width = -1.0;
         let shown = self.shown();
@@ -252,8 +264,63 @@ fn push_name(s: &mut String, index: usize) {
     push_u64(s, row as u64 + 1);
 }
 
+/// Bytes of a label before what the cell shows: the longest name and
+/// the colon and space after it, `Z100: `.
+const NAME_ROOM: usize = 6;
+/// Bytes that hold any formula's label: the name and the longest number
+/// (`Z100: -92233720368,547758`, 25 bytes) or fault.
+pub const LABEL_ROOM: usize = 32;
+
+/// What the number formatting writes to, a byte of ASCII at a time: a
+/// `String`, or a [`NumText`] on the stack.
+pub trait Sink {
+    /// Append `byte`.
+    fn put(&mut self, byte: u8);
+}
+
+impl Sink for String {
+    fn put(&mut self, byte: u8) {
+        self.push(byte as char);
+    }
+}
+
+/// A number as the sheet shows it, written on the stack: what a frame
+/// formats for the cells in view, and a recalculation for every cell it
+/// changes, without a block on the heap for each.
+pub struct NumText {
+    bytes: [u8; 24],
+    len: u8,
+}
+
+impl NumText {
+    /// What [`format_decimals`] gives for `v`.
+    pub fn new(v: i64, decimals: u32) -> Self {
+        let mut text = Self {
+            bytes: [0; 24],
+            len: 0,
+        };
+        push_decimals(&mut text, v, decimals);
+        text
+    }
+
+    /// The text.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
+    }
+}
+
+impl Sink for NumText {
+    fn put(&mut self, byte: u8) {
+        // The longest number is 19 bytes; one more than fits is dropped.
+        if let Some(at) = self.bytes.get_mut(usize::from(self.len)) {
+            *at = byte;
+            self.len += 1;
+        }
+    }
+}
+
 /// Append `v` in decimal.
-pub fn push_u64(s: &mut String, mut v: u64) {
+pub fn push_u64(s: &mut impl Sink, mut v: u64) {
     let mut digits = [0u8; 20];
     let mut n = 0;
     loop {
@@ -265,7 +332,7 @@ pub fn push_u64(s: &mut String, mut v: u64) {
         }
     }
     for d in digits[..n].iter().rev() {
-        s.push(*d as char);
+        s.put(*d);
     }
 }
 
@@ -284,7 +351,7 @@ pub fn format_decimals(v: i64, decimals: u32) -> String {
 }
 
 /// Append what [`format_decimals`] gives.
-fn push_decimals(s: &mut String, v: i64, decimals: u32) {
+fn push_decimals(s: &mut impl Sink, v: i64, decimals: u32) {
     let decimals = decimals.min(6);
     let a = v.unsigned_abs();
     let one = ONE as u64;
@@ -297,11 +364,11 @@ fn push_decimals(s: &mut String, v: i64, decimals: u32) {
         frac -= limit;
     }
     if v < 0 && (int != 0 || frac != 0) {
-        s.push('-');
+        s.put(b'-');
     }
     push_u64(s, int);
     if frac != 0 {
-        s.push(',');
+        s.put(b',');
         let mut digits = [b'0'; 6];
         let digits = &mut digits[..decimals as usize];
         for d in digits.iter_mut().rev() {
@@ -310,7 +377,7 @@ fn push_decimals(s: &mut String, v: i64, decimals: u32) {
         }
         let used = digits.iter().rposition(|d| *d != b'0').map_or(0, |i| i + 1);
         for d in &digits[..used] {
-            s.push(*d as char);
+            s.put(*d);
         }
     }
 }
@@ -893,9 +960,9 @@ impl Sheet {
             reads: Vec::new(),
             cost: EVAL_COST,
             value,
-            // Room for a formula's name and any value it usually gets
-            // (`Z100: #CIRKEL`), so that relabelling does not move it.
-            label: String::with_capacity(if is_formula { 16 } else { 0 }),
+            // Room for a formula's name and any value it can come to,
+            // so that relabelling never moves it.
+            label: String::with_capacity(if is_formula { LABEL_ROOM } else { 0 }),
             shown_at: 0,
             width: -1.0,
             decimals: 6,
