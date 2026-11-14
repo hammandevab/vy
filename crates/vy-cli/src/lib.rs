@@ -1163,6 +1163,54 @@ mod tests {
         assert!(checked >= modules, "every module under modules/");
     }
 
+    /// SPEC-13.1.4, the cold half for the pages there are: every module under
+    /// `modules/` compiles in at most 60 ms, P95 over 100 runs. The sentence
+    /// gives a 300 KB module that time, so a page a fifth of that size has
+    /// room to spare, and still the larger ones do not make it: Cranelift on
+    /// one thread takes about 1.7 ms per KB of module. Backlog until the
+    /// first load compiles some other way, or the owner changes the number
+    /// (docs/notes/m5-slut.md). The compilation cache makes every later load
+    /// free (`spec_13_1_4_compile_time`).
+    #[test]
+    #[ignore = "SPEC-13.1.4: on GitHub's runner the 64 KB pages compile cold in 100-110 ms (P50) and hello (5 KB) in 12 ms, about 1.7 ms per KB; 300 KB would take half a second"]
+    fn spec_13_1_4_every_page_compiles_cold_within_budget() {
+        if cfg!(debug_assertions) {
+            eprintln!("SPEC-13.1.4 is a release-mode budget; run with --release");
+            return;
+        }
+        let dir = root().join("target/wasm");
+        let mut over = Vec::new();
+        for entry in fs::read_dir(&dir).expect("target/wasm (tools/build_modules.sh)") {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "wasm") {
+                continue;
+            }
+            let wasm = fs::read(&path).unwrap();
+            let hash = vy_runtime::sha256(&wasm);
+            let mut samples: Vec<std::time::Duration> = (0..100)
+                .map(|_| {
+                    let t = Instant::now();
+                    let rt = Runtime::load(&wasm, &hash, Options::default()).unwrap();
+                    let elapsed = t.elapsed();
+                    drop(rt);
+                    elapsed
+                })
+                .collect();
+            samples.sort();
+            let p95 = samples[94];
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            eprintln!(
+                "SPEC-13.1.4: {name} ({} KB) compiles in {p95:?} (P95), {:.2} ms per KB",
+                wasm.len() / 1024,
+                p95.as_secs_f64() * 1000.0 / (wasm.len() as f64 / 1024.0)
+            );
+            if p95.as_millis() > 60 {
+                over.push(format!("{name} {p95:?}"));
+            }
+        }
+        assert!(over.is_empty(), "over 60 ms: {over:?}");
+    }
+
     /// SPEC-11.3.1: `--size` parsing.
     #[test]
     fn spec_11_3_1_size_parsing() {
