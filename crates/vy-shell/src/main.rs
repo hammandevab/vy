@@ -20,6 +20,7 @@ fn usage() -> ExitCode {
         "usage:\n  \
          vy-shell [<vy://address | page.vyp | module.wasm>]\n  \
          vy-shell --screenshot <out.png> --size WxH [--scale S] [--manifest <draft.json>] <address or file>\n  \
+         \x20   (the page's first frame: no input is sent, and its storage starts empty)\n  \
          vy-shell --tab [--sandbox-probe]   (started by the shell itself)"
     );
     ExitCode::from(2)

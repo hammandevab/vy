@@ -10,7 +10,7 @@ use vy_dev::{build_project, paths, Project, ServeConfig};
 fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
-         vy-dev new <dir> [--name <name>] [--sdk <vy-checkout>]\n  \
+         vy-dev new <dir> [--name <page-name>] [--sdk <vy-checkout>]\n  \
          vy-dev build [<dir>] [--key <dev.key>] [--out <page.vyp>]\n  \
          vy-dev serve [<dir>] [--port {DEFAULT_PORT}] [--studio-port {DEFAULT_STUDIO_PORT}] [--key <dev.key>] [--agent-cmd <cmd>] [--studio <studio.vyp>] [--quiet]"
     );

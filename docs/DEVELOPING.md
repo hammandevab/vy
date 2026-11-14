@@ -32,6 +32,38 @@ Projektets `CLAUDE.md` har hela loopen, reglerna och ett sammandrag av SDK:t; de
 människor också. Hela guiden till SDK:t och dess komponenter (`vy_sdk::ui`) står i
 [`docs/SDK.md`](SDK.md).
 
+## Publicera
+
+`vy-dev build` signerar med utvecklarnyckeln och räcker på din egen dator. En sida som andra ska
+öppna signeras med en nyckel du själv förvarar och serveras av `vy-serve`:
+
+```sh
+vy-publish keygen --out min.key          # skriver också min.key.pub; förvara min.key som ett lösenord
+vy-dev build --key min.key --out sajt/min-sida.vyp
+vy-publish inspect sajt/min-sida.vyp     # vad paketet innehåller och att signaturen gäller
+vy-serve --dir sajt --port 8080 --public-key min.key.pub
+vy-shell vy://localhost:8080/min-sida
+```
+
+`vy-serve` serverar varje `<namn>.vyp` i katalogen som `vy://<värd>/<namn>`, och nyckeln på
+`/.well-known/vy-key`. Den lyssnar på alla nätverkskort, eftersom den är till för en värd på nätet;
+`--bind 127.0.0.1` håller den till den egna datorn. På `localhost` litar klienten på nyckeln vid
+första besöket. På en riktig värd ska nyckeln dessutom stå i DNS, som TXT-posten
+`_vy.<värd>` med värdet `v=vy1; k=<innehållet i min.key.pub>` (SPEC-7.4.5); utan den körs sidan i
+begränsat läge, utan capabilities.
+
+## Pröva inmatning och sparat tillstånd
+
+En bild utan fönster: `vy-shell --screenshot bild.png --size 800x600 vy://localhost:8080/min-sida`
+hämtar sidan som klienten gör och ritar den med adressfält och allt. Det är sidans första bild:
+kommandot tar ingen inmatning, och sidan startar med tom lagring.
+
+Inmatning och sparat tillstånd prövas utan fönster med konformansfall: en fil som säger vilka
+händelser sidan får (Tab, text, tangenter, pekare, en ny start med den gamla lagringen) och en
+bild och ett semantiskt träd att jämföra med. Hur filen ser ut och var den ska ligga står i
+[`docs/SDK.md`](SDK.md), avsnitt 10. I fönstret sparas det sidan lagt i sin lagring inom ett par
+sekunder och när fliken göms, laddas om eller stängs.
+
 ## Med Studio
 
 ```sh
@@ -51,10 +83,13 @@ varje körning; **Kör** blir **Stoppa** medan agenten arbetar, **Bygg om** bygg
 | `vy://localhost:8080/<namn>` | sidan under utveckling (origin A) | egen origin: `net` beviljas bara mot den utan fråga (SPEC-8.2.3, SPEC-9.5.1) |
 | `vy://localhost:8081/` | Studio och dev-API:t (origin B) | API:t startar Claude Code med din inloggning och ska inte nås av sidan du bygger |
 
-Allt binder `127.0.0.1`. API:t kräver dessutom en nyckel som byts vid varje start och bara finns i
-Studio och på `api:`-raden i terminalen. Ber en sida under utveckling om nät mot `localhost:8081`:
-säg nej. Andra portar: `vy-dev serve --port 8090 --studio-port 8091`; Studio följer med.
-Utvecklarnyckeln skapas första gången i klientens katalog (`dev.key`), eller `--key <fil>`.
+`vy-dev serve` binder bara `127.0.0.1`. API:t kräver dessutom en nyckel som byts vid varje start och
+bara finns i Studio och på `api:`-raden i terminalen. Ber en sida under utveckling om nät mot
+`localhost:8081`: säg nej. Andra portar: `vy-dev serve --port 8090 --studio-port 8091`; Studio
+följer med. Utvecklarnyckeln skapas första gången `vy-dev build` eller `vy-dev serve` körs utan
+`--key`, i klientens datakatalog: `%APPDATA%\vy\dev.key` på Windows,
+`~/Library/Application Support/vy/dev.key` på macOS och `~/.config/vy/dev.key` på Linux
+(`$XDG_CONFIG_HOME/vy/` om den är satt). `--key <fil>` eller `VY_DEV_KEY` väljer en annan.
 
 ## Felsökning
 

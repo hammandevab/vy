@@ -167,7 +167,7 @@ impl Scaffold {
     pub fn create(&self) -> Result<Vec<PathBuf>> {
         if !valid_name(&self.name) {
             bail!(
-                "{:?} is not a valid page name: lowercase letters, digits, - and _, starting with a letter, not a name cargo reserves (pass --name)",
+                "{:?} is not a valid page name: lowercase letters, digits, - and _, starting with a letter, not a name cargo reserves (--name sets it; the title users see is \"name\" in manifest.json)",
                 self.name
             );
         }
@@ -660,7 +660,7 @@ med namn: `use vy_sdk::{fetch_begin, fetch_poll, fetch_read, Method, state_get, 
   `MenuItem`, `Tab`, `TabPanel`, `Progress`, `Slider`, `Separator`.
 - `Event`: `PointerMove { x, y, buttons, modifiers }`, `PointerDown { x, y, button, modifiers }`,
   `PointerUp { … }`, `PointerLeave`, `Scroll { dx, dy, lines, modifiers }`,
-  `KeyDown { code, modifiers, repeat }`, `KeyUp { code, modifiers }`, `TextInput { text }`,
+  `KeyDown { code, modifiers, repeat }`, `KeyUp { code, modifiers }` (`code: i32`, `vy_sdk::event::key`), `TextInput { text }`,
   `ImeCompose { text, caret }`, `Focus { node, gained, keyboard }`,
   `FetchDone { request, status, bytes }`, `Visibility { visible }`,
   `Budget { used_ms, allowed_ms, last_warning }`, `Capability { cap, granted }`,

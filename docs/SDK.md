@@ -52,7 +52,7 @@ registrerar sin nod i `draw`, och hanterar sina händelser i `event` mot samma r
 | `Button::new(id)`, `Button::secondary(id)` | `button` | aktiveras av tryck, Enter och mellanslag |
 | `Checkbox::new(id, checked)` | `checkbox` | växlar med tryck och mellanslag |
 | `RadioGroup::new(first_id, n, selected)` | `radio` × n | ett tryck eller mellanslag väljer |
-| `Slider::new(id, min, max, value)` | `slider` | dras med pekaren, pilar, Page Up/Down, Home/End |
+| `Slider::new(id, min, max, value)` | `slider` | dras med pekaren, pilar, Page Up/Down, Home/End; ritar sitt värde till höger om spåret, inte sitt namn |
 | `List::new(row_h)` | `list` + `listitem` × n | virtualiserad, en markerad rad, pilar och Enter |
 | `ScrollView::new()` | – | rullar innehåll med hjul, tangenter och list |
 | `Column`, `Row`, `split` | – | staplar rektanglar med mellanrum och marginal |
@@ -118,6 +118,21 @@ policyn beviljar (SPEC-2.1.4, SPEC-8.2.1). Manifestutkastet (`manifest.json`) be
   `ResourceId(i + 1)` (SPEC-4.5.1).
 - `memory_max` är i wasm-sidor à 64 KB och minst modulens initiala minne plus en (SPEC-8.1.3);
   `vy-cli check-abi` säger modulens.
+- **Lagring** är nycklar och värden i byte, per origin. Läs i `init`, skriv när något ändrats:
+
+  ```rust
+  // i init: värdet från förra besöket, om det finns och går att läsa
+  let mut buf = [0u8; 64];
+  let saved = match state_get("val", &mut buf) {
+      Ok(n) if n <= buf.len() => Some(&buf[..n]),   // n är värdets hela längd, även över buf
+      _ => None,                                     // inget sparat, nekad lagring eller för långt
+  };
+  // efter en ändring
+  let saved_now = state_put("val", &bytes).is_ok(); // Err(Denied) utan `storage`: visa "sparas inte"
+  ```
+
+  Värden skriver det sparade till disk inom ett par sekunder, och när fliken göms, laddas om eller
+  stängs. Läs alltid tillbaka som indata (avsnitt 9, "Sparad data är indata").
 
 ## 5. Determinism
 
@@ -399,3 +414,51 @@ trädet och `h.frame_ops()` för display listen, `h.caps.ime = true` för att be
 `mock::as_copy_gesture(|| …)` för en händelse under kopieringsgesten. Mockens text är fast: varje
 tecken är 0,6 × storleken brett och en rad 1,25 × storleken hög. Pixlar kommer bara från
 `vy-cli render`.
+
+Mocken äger inget fokus. Flytta det som värden gör vid Tab: först
+`Event::Focus { node: gamla, gained: false, .. }`, sedan `gained: true` för den nya noden. Annars
+tar den förra kontrollen fortfarande tangenterna. Tangentkoder är `i32` (`vy_sdk::event::key`).
+
+### Händelser utan fönster
+
+`vy-cli conformance` kör sidan som klienten gör, utan fönster: den spelar upp händelser, låter
+värden äga fokus (Tab går genom trädets fokuserbara noder), kan starta om sidan med den gamla
+lagringen och jämför slutbilden och det semantiska trädet med sparade facit. Den vill ha en rot
+med den här formen, som du lägger bredvid projektet:
+
+```
+prov/
+  conformance/cases.toml             fallen
+  conformance/manifests/min_sida.json   sidans manifest.json, under modulens namn
+  target/wasm/min_sida.wasm          modulen, kopierad ur target/wasm32-unknown-unknown/release/
+```
+
+Ett fall som skriver i ett fält, trycker på en knapp, startar om sidan och ser att värdet finns
+kvar:
+
+```toml
+[[case]]
+name = "min-sida-sparar"
+module = "min_sida"
+width = 800
+height = 600
+semantic = "min-sida-sparar"
+capabilities = ["ime", "storage"]
+events = [
+  {kind = "key_down", code = 43},                  # Tab: värdens fokus till första kontrollen
+  {kind = "text_input", text = "450"},
+  {kind = "key_down", code = 43},
+  {kind = "key_down", code = 40},                  # Enter på knappen
+  {kind = "pointer_down", x = 300, y = 250},
+  {kind = "pointer_move", x = 390, y = 250, buttons = 1},   # buttons = 1: knappen hålls nere (krävs för att dra)
+  {kind = "pointer_up", x = 390, y = 250},
+  {kind = "suspend"},
+  {kind = "reinit"},                               # ny instans med den gamla lagringen
+]
+```
+
+`vy-cli conformance --root prov --update` skriver `prov/conformance/golden/<name>.png` och
+`prov/conformance/semantic/<semantic>.json`: titta på bilden och läs trädet. Samma kommando utan
+`--update` jämför mot dem och fäller ett fall som ändrats eller som har en frame över budgeten;
+`--stats` visar vad varje frame kostade. Tangentkoderna är USB HID (43 Tab, 40 Enter, 79–82
+pilarna). Alla händelser och fält står i huvudet på `conformance/cases.toml` i repot.

@@ -13,7 +13,8 @@ fn usage() -> ExitCode {
          vy-cli check-abi <module.wasm>\n  \
          vy-cli render <file.wasm> --out <png> --size WxH [--scale S] [--frames MAX] [--grant cap,..]\n           \
          [--resource <file> [--resource-size WxH]].. [--dump-semantic <json>]\n  \
-         vy-cli conformance [--update] [--stats] [--root <dir>] [case-prefix..]   (--stats: what each case's frames cost, SPEC-12.2.4)\n  \
+         vy-cli conformance [--update] [--stats] [--root <dir>] [case-prefix..]   (--stats: what each case's frames cost, SPEC-12.2.4;\n  \
+         \x20   under <dir>: conformance/cases.toml, conformance/manifests/<module>.json, target/wasm/<module>.wasm)\n  \
          vy-cli abi-dump      (the frozen ABI 1.0 listing, docs/ABI-1.0.md)\n  \
          vy-cli bench [--runs N] [--only <row-prefix>] [--json] [--compare <baseline.json>] [--root <dir>]   (SPEC §13, headless; --compare: SPEC-12.2.3)"
     );

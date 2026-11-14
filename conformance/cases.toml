@@ -13,8 +13,8 @@
 # SPEC-8.2.1; bara vad modulens manifest i manifests/ begär, SPEC-8.2.2), resources (lista med
 # filer relativt repots rot som "sökväg" eller {path, w, h} med bildens storlek ur manifestet,
 # SPEC-8.1.2; resources[i] blir resurs-id i + 1, SPEC-4.5.1) och events (lista med
-# inline-tabeller: pointer_move/down/up med x, y;
-# pointer_leave utan argument; key_down/up med code (USB HID); text_input med text; scroll
+# inline-tabeller: pointer_move med x, y och buttons (1 = primärknappen hålls nere; krävs för att
+# dra), pointer_down/up med x, y; pointer_leave utan argument; key_down/up med code (USB HID); text_input med text; scroll
 # med dx, dy, lines; focus med node, gained, keyboard; visibility med visible; budget utan
 # argument (nästa frame rapporteras över budget, SPEC-5.3.3); resize med width, height, scale
 # (sista storleken är bildens); suspend; reinit (ny instans med den gamlas lagring, SPEC-5.2.9);
