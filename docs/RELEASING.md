@@ -67,9 +67,9 @@ mål och funktioner.
 **Prov.** `spec_9_7_1_reproducible_build` (i `cargo test`) bygger modulerna i två kopior av
 arbetsträdet på olika djup och jämför alla `.wasm` byte för byte och alla paketidentiteter. CI:s
 jobb `repro` bygger hela releasen två gånger med `build_release.sh`, i två git-worktrees på olika
-sökvägar, med två `CARGO_HOME` och två tidszoner, och jämför SHA-256; Linux och Windows är grind
-(Windows gick igenom första gången 2026-11-14), macOS rapporterar tills det har gått igenom en
-gång.
+sökvägar, med två `CARGO_HOME` och två tidszoner, och jämför SHA-256. Jobbet är grind på alla tre
+plattformarna sedan 2026-11-14, då Windows och macOS gick igenom första gången (macOS efter att
+länkningen fått `-Wl,-S`, se `tools/build_release.sh`).
 
 **Bygga om en release.** `BUILD.md` i releasen har kommandona; i korthet:
 

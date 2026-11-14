@@ -54,11 +54,13 @@ någon annanstans än på byggmaskinen.
    arbetskopior med två `CARGO_HOME` och två tidszoner, så Windows är grind från och med nu.
 4. **`repro (macos)`.** Binärerna från två arbetskopior skilde sig i 48 byte: LC_UUID (16) och
    signaturens hash över den sidan (32). Allt annat var lika. `a148b67` länkar utan
-   felsökningskarta (`-Wl,-S`) och sätter `ZERO_AR_DATE`; om det räcker visar nästa körning.
-   Jobbet skriver numera ut var `vy-serve` skiljer sig när byggena inte är lika.
+   felsökningskarta (`-Wl,-S`) och sätter `ZERO_AR_DATE`, och nästa körning gick igenom: det var
+   kartan. Jobbet skriver numera ut var `vy-serve` skiljer sig när byggena inte är lika.
 
-Linux och Windows är grind för `repro` och håller. macOS rapporterar tills det gått igenom en
-gång (`docs/RELEASING.md`).
+`repro` är därmed grind på alla tre plattformarna. Generalrepetitionen av releasen (körning
+43550703892, `dry_run`) byggde dessutom samma commit på andra maskiner än `repro`-jobbet, och
+binärerna för Linux, macOS och Windows fick samma SHA-256 i båda: tre oberoende byggen per
+plattform som stämmer byte för byte.
 
 ## Baslinjen för prestanda går inte att lita på mellan maskiner (`e89b198`)
 
@@ -105,6 +107,68 @@ som alla är ägarens beslut:
   `spec:`-commit.
 
 Tills dess är testet backlogg och M3:s grind öppen också på den här punkten.
+
+## Förpasset av grindprovet: en utomstående agent bygger en sida
+
+Innan releasen fick en agent utan projektkunskap releasekandidatens Linux-binärer och adresserna
+till de publika guiderna, med uppdraget att bygga, signera, servera och visa en egen sida
+("Dricksräknaren": textfält, reglage, två knappar, sparade värden) på under en timme. Enda
+avvikelsen från en riktig utomstående: taggen `v0.3.0` fanns inte än, så SDK:t togs med `--sdk`.
+
+Den blev klar på 12,4 minuter med alla sex kriterierna uppfyllda (byggd med `vy-dev`, signerad med
+egen nyckel, serverad av `vy-serve`, hämtad över `vy://` och ritad av klienten, visad efter
+inmatning, sparade värden tillbaka i en ny process). Agentens minuter är inte en människas; det
+som går att föra över är hindren den mötte, och de är rättade här:
+
+| Hinder | Rättning |
+| --- | --- |
+| Det sidan sparat skrevs till disk först när fliken laddades om eller stängdes; efter 20 s och en avbruten klient var ändringen borta fast `state_put` svarat OK | SPEC-9.5.4 (nästa avsnitt) |
+| `vy-shell --screenshot` börjar med tom lagring och tar ingen inmatning, utan att säga det | står i `--help` och i `docs/DEVELOPING.md` |
+| Hur man skickar händelser utan fönster stod bara i huvudet på `conformance/cases.toml`, som releasen inte bär | `docs/SDK.md` avsnitt 10, "Händelser utan fönster", med rotens form och ett helt fall; `vy-cli --help` säger var filerna ska ligga |
+| Ett drag i ett fall kräver `buttons = 1`, vilket formatbeskrivningen inte sade | huvudet på `cases.toml` och exemplet i guiden |
+| Mocken flyttar inte fokus mellan kontroller | `docs/SDK.md` avsnitt 10 |
+| Guiderna slutade vid `vy-dev build`: nyckel, `vy-serve` och klienten stod bara som `cargo run`-rader i README | nytt avsnitt "Publicera" i `docs/DEVELOPING.md` |
+| `vy-dev new --name` är sidans namn, inte titeln, och felet slutade med "(pass --name)" | användningsraden säger `<page-name>` och felet säger var titeln sätts |
+| Tangentkoder är `i32`; utvecklarnyckelns plats stod fel; `vy-serve` lyssnar på alla nätverkskort medan guiden sade loopback; reglaget ritar sitt värde men inte sitt namn; inget exempel på lagring | rättat i projektmallens `CLAUDE.md`, `docs/DEVELOPING.md` och `docs/SDK.md` |
+
+Det som inte är gjort: `vy-dev new` skriver inget konformansfall för startsidan och `vy-dev build`
+kör inga fall. Det hade tagit bort det andra hindret helt och är nästa steg för verktygen.
+
+Agenten fick projektets `CLAUDE.md` i sitt sammanhang av körmiljön. Den beskriver arbetssättet,
+inte SDK:t, men provet var alltså inte helt utan förkunskap.
+
+## Lagringen sparas medan sidan körs (SPEC-9.5.4)
+
+**Före.** Flikprocessen skickade sidans lagring till huvudprocessen när fliken gömdes, laddades om
+eller stängdes, och bara då. En sida som sade "sparat" hade sitt värde i flikprocessens minne.
+En krasch, ett strömavbrott eller en avslutad process tog allt sedan sidan öppnades. Testet
+`spec_5_2_9_storage_saved_on_reload_and_close` hävdade till och med att inget sparas medan sidan
+körs.
+
+**Efter.** Huvudprocessen frågar. Varje gång den skickar något till en flik kan sidans kod köras
+och lägga något i lagringen; en sekund senare (`STORAGE_SAVE_MS`) skickar den `ToTab::SaveStorage`.
+Fliken jämför lagringens ändringsräknare (`Runtime::storage_revision`) med den den senast skickade
+vid och svarar med `ToShell::StorageSnapshot` bara om något ändrats; svaret sparas som ett vanligt
+lagringssvar, med samma prövning av capability och kvot. `vy_suspend` anropas inte (fliken göms
+inte, SPEC-5.1.5). En flik som inget skickas till frågas inte, så en vilande sida väcks inte
+(SPEC-13.3.2), och headless frågas ingen.
+
+**Det som kunde gå fel.** Ett svar på frågan kan komma efter att processen släppts (en omladdning
+mitt emellan). Hade det varit ett vanligt `Storage`-svar hade det tagits för processens sista ord:
+sidan som väntar på sin origins lagring hade startat på det, och det riktiga svaret efter
+`vy_suspend` hade kastats. Därför är ögonblicksbilden ett eget meddelande: från en släppt process
+sparas den men avslutar ingenting. Testet låter sidans `vy_suspend` lägga en egen nyckel och ser
+att den finns kvar efter omladdningen.
+
+**Tester.** `spec_9_5_4_storage_revision_counts_changes` (vy-runtime),
+`spec_9_5_4_a_save_is_answered_only_with_changes` (flikens slinga),
+`spec_9_5_4_storage_is_saved_while_the_page_runs` (skalet: värdet på disk utan omladdning, ingen
+fråga till en vilande sida, loppet mot en omladdning, inget headless).
+
+**Kostnad.** Hela lagringen skickas och skrivs om, högst en gång per sekund och bara när den
+ändrats. Exempelsidornas kvoter är 1–256 KB. En sida med 16 MB som ändrar sin lagring varje
+sekund ger en skrivning på 16 MB per sekund på huvudtråden; det är inte mätt och är det första
+att flytta till en egen tråd om det märks.
 
 ## Releasen v0.3.0 och grindprovet
 

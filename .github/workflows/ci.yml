@@ -172,8 +172,8 @@ jobs:
   # registry paths, as two users have), in two time zones and minutes apart: every binary
   # and LICENSE has the same SHA-256, and studio.vyp, signed with a throwaway key each
   # time, the same package identity. Too slow for `cargo test`, which checks the modules
-  # the same way (spec_9_7_1_reproducible_build). Linux and Windows are gates; macOS
-  # reports until a first green run there (docs/notes/m5-slut.md).
+  # the same way (spec_9_7_1_reproducible_build). A gate on all three platforms since
+  # each has passed (docs/notes/m5-slut.md).
   repro:
     strategy:
       fail-fast: false
@@ -186,7 +186,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     defaults:
       run:
         shell: bash
