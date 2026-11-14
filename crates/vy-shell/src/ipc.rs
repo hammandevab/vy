@@ -472,10 +472,11 @@ pub enum ToTab {
     /// Leave: `vy_suspend`, [`ToShell::Storage`], then the process ends.
     Shutdown,
     /// The shell is about to save what the page has stored while it runs
-    /// (SPEC-9.5.4): answered with [`ToShell::StorageSnapshot`] when the
-    /// storage changed since the tab last sent it, and not at all
-    /// otherwise. `vy_suspend` is not called: the tab is not being hidden
-    /// (SPEC-5.1.5).
+    /// (SPEC-9.5.4): answered once, with [`ToShell::StorageSnapshot`]
+    /// when the storage changed since the tab last sent it and with
+    /// [`ToShell::StorageUnchanged`] otherwise, so the shell knows when
+    /// to ask again. `vy_suspend` is not called: the tab is not being
+    /// hidden (SPEC-5.1.5).
     SaveStorage,
     /// The shell's clipboard changed (SPEC-5.2.12).
     Clipboard {
@@ -605,6 +606,9 @@ pub enum ToShell {
     /// [`ToTab::SaveStorage`] (SPEC-9.5.4). Not the last word of a process
     /// that is leaving: that is [`ToShell::Storage`], which comes after.
     StorageSnapshot(Vec<Entry>),
+    /// The answer to a [`ToTab::SaveStorage`] when the page has stored
+    /// nothing since its storage was last sent.
+    StorageUnchanged,
     /// What the tab process's lockdown applied and what it could not
     /// (SPEC-9.1.3), sent once, just before its first [`ToTab::Load`] is
     /// handled: before any page code has run in the process.
@@ -674,6 +678,7 @@ const S_FOCUS: u8 = 77;
 const S_SANDBOX: u8 = 78;
 const S_CODE: u8 = 79;
 const S_STORAGE_SNAPSHOT: u8 = 80;
+const S_STORAGE_UNCHANGED: u8 = 81;
 
 fn put_random(w: &mut Writer, r: RandomSource) {
     match r {
@@ -1090,6 +1095,7 @@ impl ToShell {
                 put_entries(&mut w, entries);
                 w.finish()
             }
+            Self::StorageUnchanged => Writer::new(S_STORAGE_UNCHANGED).finish(),
             Self::Sandbox(report) => {
                 let mut w = Writer::new(S_SANDBOX);
                 put_lines(&mut w, &report.layers);
@@ -1272,6 +1278,7 @@ impl ToShell {
             },
             S_STORAGE => Self::Storage(get_entries(&mut r)?),
             S_STORAGE_SNAPSHOT => Self::StorageSnapshot(get_entries(&mut r)?),
+            S_STORAGE_UNCHANGED => Self::StorageUnchanged,
             S_SANDBOX => Self::Sandbox(crate::sandbox::Report {
                 layers: get_lines(&mut r, "sandbox layers")?,
                 warnings: get_lines(&mut r, "sandbox warnings")?,
@@ -1457,6 +1464,7 @@ mod tests {
             },
             ToShell::Storage(vec![(vec![], vec![0; 300])]),
             ToShell::StorageSnapshot(vec![(b"k".to_vec(), vec![1; 3])]),
+            ToShell::StorageUnchanged,
             ToShell::Clipboard(b"x".to_vec()),
             ToShell::Ime(Some((1.0, 2.0, 3.0, 4.0))),
             ToShell::Ime(None),
@@ -1503,7 +1511,7 @@ mod tests {
             shell_tags.insert(body[0]);
         }
         assert_eq!(tab_tags.len(), 16, "every ToTab variant is covered");
-        assert_eq!(shell_tags.len(), 17, "every ToShell variant is covered");
+        assert_eq!(shell_tags.len(), 18, "every ToShell variant is covered");
         assert!(tab_tags.is_disjoint(&shell_tags));
         // Over a byte stream: lengths first, little-endian.
         let mut pipe = Vec::new();

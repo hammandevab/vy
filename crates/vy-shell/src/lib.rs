@@ -1156,21 +1156,28 @@ mod tests {
         use crate::clipboard::MemoryClipboard;
         use crate::external::RecordingOpener;
         use crate::shell::{Config, Shell, Waker, STORAGE_SAVE_MS};
-        // On every key down: `state_put("k", [keycode])`; `vy_suspend`
+        // On every key down: `state_put("k", [keycode])`, except key 0x20,
+        // which puts a megabyte less a byte under "b" (with its key, the
+        // megabyte a page has without the user being asked); `vy_suspend`
         // puts the last keycode under "s".
         let wasm = wat::parse_str(
             r#"(module
                 (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
-                (memory (export "memory") 1)
+                (memory (export "memory") 18)
                 (data (i32.const 16) "k")
                 (data (i32.const 20) "s")
+                (data (i32.const 24) "b")
                 (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
                 (func (export "vy_frame") (param i32) (result i32) i32.const 0)
                 (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
                     (if (i32.eq (local.get 0) (i32.const 5))
                         (then
-                            (i32.store8 (i32.const 32) (local.get 1))
-                            (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))
+                            (if (i32.eq (local.get 1) (i32.const 0x20))
+                                (then
+                                    (drop (call $put (i32.const 24) (i32.const 1) (i32.const 65536) (i32.const 1048575))))
+                                (else
+                                    (i32.store8 (i32.const 32) (local.get 1))
+                                    (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))))
                     i32.const 0)
                 (func (export "vy_resize") (param i32 i32 f32))
                 (func (export "vy_suspend") (result i32)
@@ -1205,7 +1212,19 @@ mod tests {
             waker: Waker::none(),
             code_cache: None,
         };
+        // What a client ended in the middle of a save left behind is
+        // gone when the next one starts (granskning 0017:6).
+        let left = data.join("storage").join("left.tmp4711");
+        std::fs::create_dir_all(data.join("storage")).unwrap();
+        std::fs::write(&left, b"half").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&left)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
         let mut shell = Shell::new(config(false), 800.0, 600.0, 1.0).unwrap();
+        assert!(!left.exists(), "swept at start");
         let saved = || crate::storage::load(&data.join("storage"), origin);
         let key = |shell: &mut Shell, code: i32| {
             shell.key(code, true, 0, false);
@@ -1292,23 +1311,53 @@ mod tests {
             "due within a second of the key"
         );
         run_until(&mut shell, &|_| saved() == vec![put_k(0x05)], "never saved");
+        // Two changes with the tab's answers unread in between, as when a
+        // tab lags behind the shell: one ask is open at a time, the second
+        // goes out when the first is answered, and the later change
+        // reaches the disk (granskning 0017:U1: with two asks open the
+        // second answer was taken for one nobody asked for).
+        let wait = Duration::from_millis(STORAGE_SAVE_MS as u64 + 50);
+        key(&mut shell, 0x08);
+        shell.poll();
+        std::thread::sleep(wait);
+        shell.poll();
+        key(&mut shell, 0x09);
+        shell.poll();
+        std::thread::sleep(wait);
+        shell.poll();
+        assert!(
+            shell.poll_in().is_none(),
+            "an ask that is due waits for the open one, without the loop spinning"
+        );
+        run_until(
+            &mut shell,
+            &|_| saved() == vec![put_k(0x09)],
+            "the later change was never saved",
+        );
         // An ask whose answer arrives after the process was let go of:
         // the snapshot is saved, and the shutdown's answer after it is
         // still the one that stays.
+        run_until(&mut shell, &|s| s.poll_in().is_none(), "asks never end");
         key(&mut shell, 0x06);
         shell.poll();
-        std::thread::sleep(Duration::from_millis(STORAGE_SAVE_MS as u64 + 50));
+        std::thread::sleep(wait);
         shell.poll();
         std::thread::sleep(Duration::from_millis(100));
         shell.reload();
+        let mut snapshot_saved = saved() == vec![put_k(0x06)];
         let deadline = Instant::now() + TIMEOUT;
         while shell.retiring() > 0 {
             assert!(Instant::now() < deadline, "a process let go of never ended");
             if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(10)) {
                 shell.handle(m);
             }
+            snapshot_saved |= saved() == vec![put_k(0x06)];
         }
         shell.drain();
+        assert!(
+            snapshot_saved,
+            "the snapshot asked for before the process was let go of was saved"
+        );
         assert_eq!(
             saved(),
             vec![put_k(0x06), put_s(0x06)],
@@ -1353,6 +1402,29 @@ mod tests {
             "what vy_init stored in a background tab is never saved",
         );
         assert_eq!(shell.tab_frames(behind), 0, "it was never ticked");
+        // A megabyte saved: the next ask waits two seconds, not one
+        // (granskning 0017:2, `storage_save_delay_ms`).
+        key(&mut shell, 0x20);
+        run_until(
+            &mut shell,
+            &|_| {
+                saved()
+                    .iter()
+                    .map(|(k, v)| k.len() + v.len())
+                    .sum::<usize>()
+                    == 1 << 20
+            },
+            "the megabyte was never saved",
+        );
+        run_until(&mut shell, &|s| s.poll_in().is_none(), "asks never end");
+        key(&mut shell, 0x21);
+        shell.poll();
+        let due = shell.poll_in().expect("an ask is due");
+        assert!(
+            due > Duration::from_millis(STORAGE_SAVE_MS as u64)
+                && due <= Duration::from_millis(2 * STORAGE_SAVE_MS as u64),
+            "{due:?}"
+        );
         shell.shutdown();
         let _ = std::fs::remove_dir_all(&data);
 

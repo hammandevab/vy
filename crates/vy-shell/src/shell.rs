@@ -1727,6 +1727,12 @@ impl Shell {
             // the shell asked while it runs (SPEC-9.5.4).
             ToShell::Storage(entries) => self.storage_answer(id, entries, false),
             ToShell::StorageSnapshot(entries) => self.storage_answer(id, entries, true),
+            // Nothing to save, and the tab may be asked again.
+            ToShell::StorageUnchanged => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.snapshot_asked = false;
+                }
+            }
             ToShell::Clipboard(bytes) => {
                 // The clipboard is written through `clipboard_write`, which
                 // needs the capability (SPEC-5.2.12, SPEC-5.3.1) or the
@@ -3802,7 +3808,14 @@ impl Shell {
     /// storage.
     pub fn poll_in(&self) -> Option<std::time::Duration> {
         let live = self.live_reload.then_some(self.next_live_check);
-        let save = self.tabs.iter().filter_map(|t| t.save_at).min();
+        // A tab whose last ask is unanswered is asked when the answer
+        // comes, which wakes the loop by itself: nothing to wait for.
+        let save = self
+            .tabs
+            .iter()
+            .filter(|t| !t.snapshot_asked)
+            .filter_map(|t| t.save_at)
+            .min();
         let at = match (live, save) {
             (Some(a), Some(b)) => a.min(b),
             (a, b) => a.or(b)?,
@@ -3840,7 +3853,12 @@ impl Shell {
             if tab.touched.replace(false) && tab.save_at.is_none() {
                 tab.save_at = Some(now + storage_save_delay_ms(tab.saved_bytes));
             }
-            if tab.save_at.is_some_and(|at| now >= at) {
+            // One ask at a time: the tab answers every ask, and an ask
+            // that came due while the last is unanswered goes out when
+            // the answer is in. Two open asks would have two answers and
+            // no way to tell the second from one nobody asked for
+            // (granskning 0017:U1).
+            if tab.save_at.is_some_and(|at| now >= at) && !tab.snapshot_asked {
                 tab.save_at = None;
                 tab.snapshot_asked = true;
                 tab.send(&ToTab::SaveStorage);

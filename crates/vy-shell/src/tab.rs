@@ -219,7 +219,9 @@ impl<T: IpcTransport> TabLoop<T> {
             }
             ToTab::SaveStorage => {
                 // Only what the shell does not have: a page that changed
-                // nothing since its storage was last sent says nothing.
+                // nothing since its storage was last sent says so, in a
+                // frame without the storage. Every ask has its answer:
+                // the shell asks again only once it has it.
                 let changed = self
                     .rt
                     .as_ref()
@@ -227,6 +229,8 @@ impl<T: IpcTransport> TabLoop<T> {
                 if changed {
                     let entries = self.storage_entries();
                     self.send(&ToShell::StorageSnapshot(entries))?;
+                } else {
+                    self.send(&ToShell::StorageUnchanged)?;
                 }
             }
             ToTab::Clipboard { bytes } => {
@@ -884,12 +888,12 @@ mod tests {
         h.join().unwrap();
     }
 
-    /// SPEC-9.5.4: asked to save, the tab sends the page's storage when
-    /// the page has changed it since the tab last sent it, and nothing
-    /// when it has not, also for a page started with storage from an
-    /// earlier visit; `vy_suspend` is not called for it (the tab is not
-    /// being hidden, SPEC-5.1.5). The shutdown's answer is still the
-    /// whole storage, after `vy_suspend`.
+    /// SPEC-9.5.4: asked to save, the tab answers once: with the page's
+    /// storage when the page has changed it since the tab last sent it,
+    /// and with a frame that says "unchanged" when it has not, also for a
+    /// page started with storage from an earlier visit; `vy_suspend` is
+    /// not called for it (the tab is not being hidden, SPEC-5.1.5). The
+    /// shutdown's answer is still the whole storage, after `vy_suspend`.
     #[test]
     fn spec_9_5_4_a_save_is_answered_only_with_changes() {
         // On every key down: `state_put("k", [keycode])`; `vy_suspend`
@@ -946,10 +950,21 @@ mod tests {
                 .filter(|m| matches!(m, ToShell::StorageSnapshot(_)))
                 .count()
         };
+        let unchanged = |msgs: &[ToShell]| {
+            msgs.iter()
+                .filter(|m| matches!(m, ToShell::StorageUnchanged))
+                .count()
+        };
         until_tick_answer(0);
-        // Nothing stored since the load: nothing to say.
+        // Nothing stored since the load: the answer says so, without the
+        // storage.
         tx.send(ToTab::SaveStorage.encode()).unwrap();
-        assert_eq!(snapshots(&until_tick_answer(16)), 0, "unchanged storage");
+        let msgs = until_tick_answer(16);
+        assert_eq!(
+            (snapshots(&msgs), unchanged(&msgs)),
+            (0, 1),
+            "unchanged storage"
+        );
         // A change: the whole storage, without `vy_suspend`.
         tx.send(key_down(4, 32)).unwrap();
         tx.send(ToTab::SaveStorage.encode()).unwrap();
@@ -961,9 +976,11 @@ mod tests {
                 old.clone()
             ]))
         );
-        // Asked again with nothing new: nothing.
+        assert_eq!(unchanged(&msgs), 0, "one answer to an ask");
+        // Asked again with nothing new: unchanged.
         tx.send(ToTab::SaveStorage.encode()).unwrap();
-        assert_eq!(snapshots(&until_tick_answer(48)), 0, "already sent");
+        let msgs = until_tick_answer(48);
+        assert_eq!((snapshots(&msgs), unchanged(&msgs)), (0, 1), "already sent");
         // The shutdown's answer is the last word, after `vy_suspend`.
         tx.send(key_down(5, 64)).unwrap();
         tx.send(ToTab::Shutdown.encode()).unwrap();
