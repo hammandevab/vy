@@ -1,9 +1,10 @@
 # Skriva en Vy-sida med vy-sdk
 
 En guide för den som ska bygga en sida – människa eller agent – och inte har sett Vy förut. Den
-förutsätter Rust men inget om Vy. API-referensen är rustdoc för `vy-sdk` (`tools/build_docs.sh`
-lägger den bredvid den här filen); den normativa texten är `SPEC.md`, och id:n som `SPEC-10.3.1`
-pekar dit.
+förutsätter Rust men inget om Vy. API-referensen är rustdoc för `vy-sdk`: i ett sidprojekt bygger
+`cargo doc --no-deps -p vy-sdk` den på ett par sekunder (`target/doc/vy_sdk/index.html`), och i en
+checkout lägger `tools/build_docs.sh` den bredvid den här filen. Den normativa texten är `SPEC.md`,
+och id:n som `SPEC-10.3.1` pekar dit.
 
 ## 1. Tankemodellen
 
@@ -460,5 +461,7 @@ events = [
 `vy-cli conformance --root prov --update` skriver `prov/conformance/golden/<name>.png` och
 `prov/conformance/semantic/<semantic>.json`: titta på bilden och läs trädet. Samma kommando utan
 `--update` jämför mot dem och fäller ett fall som ändrats eller som har en frame över budgeten;
-`--stats` visar vad varje frame kostade. Tangentkoderna är USB HID (43 Tab, 40 Enter, 79–82
+`--stats` visar vad varje frame kostade. Fallen kör modulen och manifestutkastet, inte det
+signerade paketet från servern, och roten är en kopia: kopiera modulen på nytt efter varje bygge.
+Tangentkoderna är USB HID (43 Tab, 40 Enter, 44 mellanslag, 79–82
 pilarna). Alla händelser och fält står i huvudet på `conformance/cases.toml` i repot.

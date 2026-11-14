@@ -40,7 +40,7 @@ människor också. Hela guiden till SDK:t och dess komponenter (`vy_sdk::ui`) st
 ```sh
 vy-publish keygen --out min.key          # skriver också min.key.pub; förvara min.key som ett lösenord
 vy-dev build --key min.key --out sajt/min-sida.vyp
-vy-publish inspect sajt/min-sida.vyp     # vad paketet innehåller och att signaturen gäller
+vy-publish inspect sajt/min-sida.vyp --public-key min.key.pub   # innehållet, och att signaturen gäller
 vy-serve --dir sajt --port 8080 --public-key min.key.pub
 vy-shell vy://localhost:8080/min-sida
 ```
@@ -61,8 +61,9 @@ kommandot tar ingen inmatning, och sidan startar med tom lagring.
 Inmatning och sparat tillstånd prövas utan fönster med konformansfall: en fil som säger vilka
 händelser sidan får (Tab, text, tangenter, pekare, en ny start med den gamla lagringen) och en
 bild och ett semantiskt träd att jämföra med. Hur filen ser ut och var den ska ligga står i
-[`docs/SDK.md`](SDK.md), avsnitt 10. I fönstret sparas det sidan lagt i sin lagring inom ett par
-sekunder och när fliken göms, laddas om eller stängs.
+[`docs/SDK.md`](SDK.md), avsnitt 10. Fallen kör modulen, inte det signerade paketet från servern;
+det finns ännu inget sätt att ge den riktiga klienten inmatning utan fönster. I fönstret sparas
+det sidan lagt i sin lagring inom ett par sekunder och när fliken göms, laddas om eller stängs.
 
 ## Med Studio
 

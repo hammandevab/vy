@@ -270,6 +270,47 @@ kan inte slå runt (0018:4), och två noteringar som sade mer än som var mätt 
 - Releasens Linux-bygge är inte pinnat på en containerdigest (0012:6).
 - `IME_COMPOSE` är oprövat med en riktig IME (0010:5), och en riktig GPU är okörd (0011:4, 0015:2).
 
-## Releasen v0.3.0 och grindprovet
+## Releasen v0.3.0
 
-Fylls i när de är gjorda (se slutet av filen).
+Taggad på `4fb8db2` den 2026-11-14 06:54 UTC av arbetsflödet (körning 43567444947), efter en hel
+grön CI-körning på samma commit (43564147645: grindar, plattform på macOS och Windows, bench,
+storlek och `repro` på alla tre). Sju tillgångar: tre plattformszippar, sajten, konformanssviten,
+`SHA256SUMS` och `BUILD.md`. Röktestet sist i arbetsflödet, det första som går vägen med taggen
+(`vy-dev new` hämtar SDK:t på `v0.3.0`), gick igenom.
+
+Reproducerbarheten prövad mot releasen själv: `repro`-jobbet i CI byggde samma commit på andra
+maskiner, i andra kataloger, och alla femton binärerna (fem per plattform) har där samma SHA-256
+som i releasens `SHA256SUMS`. Klienten för Windows är 21,4 MB, för Linux 24,6 MB (taket är 25).
+
+## Grindprovet för M5
+
+Milstolpens grind: en utomstående agent publicerar en sida på under en timme. En agent utan
+projektkunskap fick releasesidans adress, adresserna till guiderna på taggen och uppdraget
+"Inköpslistan" (textfält, lista med kryssrutor, "Rensa köpta", räknare, sparad lista), med förbud
+mot att läsa något på maskinen utanför sin egen katalog.
+
+Den blev klar på 13,5 minuter; alla sju kriterierna var uppfyllda efter 5,1: zippen hämtad och
+kontrollerad mot `SHA256SUMS`, projektet skapat med `vy-dev new` och SDK:t hämtat på taggen,
+paketet signerat med egen nyckel, serverat av `vy-serve`, hämtat över `vy://` och ritat av
+klienten, rätt lista och räknare efter inmatning med tangentbordet, och listan tillbaka efter en
+ny start. Inget hinder stoppade den, och varje kommando i `docs/DEVELOPING.md` och `docs/SDK.md`
+gick som skrivet första gången. Grinden är därmed uppfylld, med två förbehåll som hör till
+resultatet: agentens minuter är inte en människas (den läser och skriver på sekunder), och
+körmiljön lade projektets `CLAUDE.md` i agentens sammanhang, så provet var inte helt utan
+förkunskap, även om filen inte säger något om SDK:t.
+
+Hindren den mötte, i den ordning de kostade:
+
+| Hinder | Läge |
+| --- | --- |
+| Inmatning och sparat tillstånd går inte att visa i den riktiga klienten utan fönster: `--screenshot` tar ingen inmatning, och konformansfallen kör modulen, inte paketet | sagt i guiderna nu; ett `vy-cli conformance --package` eller ett skärmbildsläge som spelar upp ett fall är ogjort |
+| `Checkbox` med en etikett på flera rader spiller ur sin rektangel | känt fel, dokumenterat i `crates/vy-sdk/README.md`; ogjort |
+| Ingen API-referens för den som inte har en checkout | `docs/SDK.md` säger nu `cargo doc --no-deps -p vy-sdk` i sidprojektet |
+| Konformansroten kopieras för hand och blir gammal efter ett bygge | sagt i guiden; `vy-dev test` är ogjort |
+| `SHA256SUMS` namnger binärerna under en katalog som zippen inte har; releasesidan säger inte var man börjar | ogjort: zippen bör packas med katalogen och releasesidan få fem rader |
+| `vy-publish inspect` säger "not checked" utan `--public-key`; mellanslag (44) saknades bland tangentkoderna | rättat i guiderna |
+| Ingen binär svarar på `--version` | ogjort |
+
+Det som fungerade och inte ska röras, enligt båda proven: mallen från `vy-dev new` och dess
+`CLAUDE.md`, `vy-dev build` som ett kommando, fallformatet med värdens fokus, `reinit` och sparat
+tillstånd, och felmeddelandena.

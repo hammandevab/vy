@@ -216,6 +216,10 @@ self.news.draw(f, l.news, &self.theme, "Skicka nyhetsbrevet")?;  // rutan, etike
 if self.news.event(&mut ui, l.news, &self.theme).changed() { /* self.news.checked */ }
 ```
 
+En etikett som inte ryms på en rad bryts, men första raden centreras som om den vore den enda och
+resten hamnar utanför rektangeln: håll etiketten till en rad, eller ge kryssrutan bara den första
+radens höjd och rita resten själv (känt fel, funnet av grindprovet mot v0.3.0).
+
 Ett tryck var som helst i rektangeln eller mellanslag med fokus växlar. Nodens text får
 `Words::checked` (" (markerad)") när rutan är kryssad.
 

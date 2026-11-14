@@ -72,7 +72,7 @@ aldrig koden. Skriv den för en läsare som har fem minuter.
 | M2 ✓ | Rust-SDK, tio referenssidor | ABI 1.0 fryst, inga öppna frågor i SPEC §15 |
 | M3 | `vy-shell`, `vy-proto`, processisolering – levererat | prestandabudget SPEC §13 hållen: **öppen** tills SPEC-13.2.1 (GL-vägen) och SPEC-13.1.1 är mätta på ägarens dator och SPEC-13.1.4:s kalla halva hålls (i dag 2–3 ms per KB kod, budgeten ger 0,2) |
 | M4 | signering, semantiskt träd, devtools, fuzz, macOS + Windows – levererat | hotanalys klar; extern sandbox-granskning: **öppen**, görs av någon utanför projektet |
-| M5 | reproducerbara byggen, publicerad svit, SDK-docs – levererat | utomstående agent publicerar en sida på < 1 h: prövas mot releasen v0.3.0 |
+| M5 ✓ | reproducerbara byggen, publicerad svit, SDK-docs | utomstående agent publicerar en sida på < 1 h: 13,5 minuter mot releasen v0.3.0 (`docs/notes/m5-slut.md`) |
 
 ## Struktur
 
