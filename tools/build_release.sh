@@ -27,11 +27,20 @@ fi
 ext=""
 case "$target" in *windows*) ext=.exe ;; esac
 # MSVC's linker stamps the PE header with the time; /Brepro puts a hash of the
-# image there instead. Only the two native builds get the flag: exported, it would
-# reach the wasm link of studio below, and rust-lld takes /Brepro for a file.
+# image there instead. On macOS two checkouts gave binaries that differed only in
+# LC_UUID and in the signature hash over it (CI's repro job). Apple's linker makes
+# the UUID from what it links, and the one thing there that names the checkout is
+# the debug map (object paths under target/, file times), which the release profile
+# strips afterwards: -S links without the map and ZERO_AR_DATE zeroes the times.
+# Only the two native builds get these flags: exported, they would reach the wasm
+# link of studio below, and rust-lld takes /Brepro for a file.
 native_flags=$CARGO_ENCODED_RUSTFLAGS
 case "$target" in
   *-windows-msvc) native_flags="$native_flags$repro_sep-Clink-arg=/Brepro" ;;
+  *-apple-darwin)
+    native_flags="$native_flags$repro_sep-Clink-arg=-Wl,-S"
+    export ZERO_AR_DATE=1
+    ;;
 esac
 CARGO_ENCODED_RUSTFLAGS=$native_flags \
   cargo build --release --locked --target "$target" -p vy-cli -p vy-dev -p vy-publish -p vy-serve
