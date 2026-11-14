@@ -8,16 +8,19 @@ CSS, ingen JavaScript-motor.
 - `CLAUDE.md` – arbetsbeskrivning för agenterna som bygger klienten.
 - `crates/` – klienten i Rust. `modules/` – referensmoduler. `conformance/` – guldbilder.
 
-## Status: M2.5, ABI-kandidat inför frysning
+## Status: v0.3.0
 
-`vy-cli render` kör en modul headless i wasmtime, rasteriserar display listen i mjukvara
-(text, rektanglar, banor, PNG-bilder, rundade klipp) och skriver en deterministisk PNG;
-`conformance` jämför 45 fall mot guldbilderna i `conformance/golden/`, med scriptade händelser,
-capabilities, resurser och manifest per fall. `crates/vy-sdk` är modulsidans SDK (`App` +
-`export!`, `Frame`, layout, `Event`, mock för nativa tester); elva referenssidor under `modules/`
-bygger på det. Specen är v0.3: beslutslistan ur granskning 0002 är genomförd för ABI och
-spec-text (32 importer, statuskod från varje import som kan misslyckas, värden äger fokus);
-kvar före frysen är SDK- och verktygsbesluten.
+Klienten (`vy-shell`) hämtar signerade sidor över `vy://`, kör varje flik i en egen sandlådad
+process och ritar med OpenGL i fönstret (mjukvara som referens och reserv). ABI 1.0 är fryst.
+Under `modules/` finns nitton sidor på `vy-sdk`: tolv referenssidor, Studio och sex större
+exempel (`docs/EXEMPEL.md`); `conformance` jämför över hundra fall mot guldbilderna och håller
+varje frame till budgeten. `vy-dev` skapar, bygger och serverar ett sidprojekt, med Studio för
+att låta Claude Code bygga sidan (`docs/DEVELOPING.md`); `docs/SDK.md` är guiden till SDK:t.
+En release byggs reproducerbart med kontrollsummor och byggrecept (`docs/RELEASING.md`).
+
+Öppet (se `CLAUDE.md`, milstolparna): SPEC-13.2.1 och SPEC-13.1.1 mäts på en riktig dator med
+GPU, den externa sandlådegranskningen återstår, och Windows och macOS är byggda och testade i
+CI men inte körda för hand i varje del.
 
 ```sh
 tools/build_modules.sh                 # modules/* -> target/wasm/*.wasm (före cargo test)
@@ -34,8 +37,8 @@ cargo run -p vy-publish -- build --manifest conformance/manifests/hello.json \
 cargo run -p vy-serve -- --dir . --public-key dev.key.pub           # vy://localhost:8080/hello
 ```
 
-Byggnoteringar (beroenden, approximationer, spec-frågor): `docs/BUILD-NOTES.md`;
-M3:s första del (manifest, publish, proto, serve): `docs/notes/m3-proto-serve.md`.
-SDK-dokumentation med exempel: `crates/vy-sdk/README.md`.
+Byggnoteringar (beroenden, approximationer, spec-frågor): `docs/BUILD-NOTES.md`; spårens
+noteringar under `docs/notes/`; granskningarna under `docs/reviews/`.
+SDK-dokumentation med exempel: `docs/SDK.md` och `crates/vy-sdk/README.md`.
 
 Licens: MIT.

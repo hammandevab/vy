@@ -70,9 +70,9 @@ aldrig koden. Skriv den för en läsare som har fem minuter.
 | M0 ✓ | numrerad spec, testskal, CI, `hello` bygger till wasm | spec granskad av ägaren |
 | M1 ✓ | `vy-runtime`, `vy-dl`, `vy-render`, `vy-cli render` till PNG | 20 guldbilder gröna på Linux + macOS |
 | M2 ✓ | Rust-SDK, tio referenssidor | ABI 1.0 fryst, inga öppna frågor i SPEC §15 |
-| M3 ✓ | `vy-shell`, `vy-proto`, processisolering | prestandabudget SPEC §13 hållen (SPEC-13.2.1 mäts på GPU (GL-vägen), CPU-vägen över budget) |
-| M4 ✓ | signering, semantiskt träd, devtools, fuzz, macOS + Windows | hotanalys klar, extern sandbox-granskning (extern sandlådegranskning kvar) |
-| M5 | reproducerbara byggen, publicerad svit, SDK-docs | utomstående agent publicerar en sida på < 1 h |
+| M3 | `vy-shell`, `vy-proto`, processisolering – levererat | prestandabudget SPEC §13 hållen: **öppen** tills SPEC-13.2.1 (GL-vägen) och SPEC-13.1.1 är mätta på ägarens dator |
+| M4 | signering, semantiskt träd, devtools, fuzz, macOS + Windows – levererat | hotanalys klar; extern sandbox-granskning: **öppen**, görs av någon utanför projektet |
+| M5 | reproducerbara byggen, publicerad svit, SDK-docs – levererat | utomstående agent publicerar en sida på < 1 h: prövas mot releasen v0.3.0 |
 
 ## Struktur
 
@@ -83,7 +83,7 @@ crates/vy-manifest   CBOR-schema, validering, capability-policy
 crates/vy-proto      vy://-adresser, hämtning, cache, signatur
 crates/vy-dl         display list-buffert och validering
 crates/vy-runtime    wasmtime-instans, ABI-importer, budget
-crates/vy-render     rasterisering (wgpu, mjukvarureserv), text
+crates/vy-render     rasterisering (mjukvara som referens, OpenGL i fönstret), text
 crates/vy-shell      fönster, flikar, adressfält (rörs ej före M3)
 crates/vy-cli        headless: render, check-abi, conformance, bench
 crates/vy-publish    keygen, build, inspect – utkast + modul + resurser till signerat paket
