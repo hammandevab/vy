@@ -93,6 +93,26 @@ impl RgbaImage {
     /// Decode a PNG, refusing one whose header declares a side above
     /// `max_side` before any pixel buffer is allocated (SPEC-6.5.1).
     fn decode_png_within(bytes: &[u8], max_side: Option<u32>) -> Result<Self, ImageError> {
+        check_png_chunks(bytes)?;
+        Self::decode_png_guarded(bytes, max_side)
+    }
+
+    /// The decoder itself, with a panic in it turned into a refusal: the
+    /// bytes are a page's, and they are decoded in the main process, where a
+    /// panic would take every tab with it (SPEC-11.2.2). [`check_png_chunks`]
+    /// refuses the input known to make `png` 0.18 panic; this catches what
+    /// is not known yet.
+    fn decode_png_guarded(bytes: &[u8], max_side: Option<u32>) -> Result<Self, ImageError> {
+        std::panic::catch_unwind(|| Self::decode_png_unguarded(bytes, max_side)).unwrap_or_else(
+            |_| {
+                Err(ImageError::Decode(
+                    "the PNG decoder failed on this file".to_string(),
+                ))
+            },
+        )
+    }
+
+    fn decode_png_unguarded(bytes: &[u8], max_side: Option<u32>) -> Result<Self, ImageError> {
         let decode_err = |e: png::DecodingError| ImageError::Decode(e.to_string());
         let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
         dec.set_transformations(png::Transformations::normalize_to_color8());
@@ -134,6 +154,51 @@ impl RgbaImage {
             data,
         })
     }
+}
+
+/// Refuse a PNG whose chunks before the image data are malformed in a way
+/// the decoder does not refuse itself. `png` 0.18.1 expands a palette three
+/// bytes at a time and panics on a `PLTE` chunk that is not whole RGB
+/// entries (found by the nightly fuzz run, `fuzz/artifacts/png/`). A
+/// truncated file is left to the decoder, which reports it.
+fn check_png_chunks(bytes: &[u8]) -> Result<(), ImageError> {
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    const INDEXED: u8 = 3;
+    let bad = |what: &str| ImageError::Decode(format!("PNG: {what}"));
+    let Some(mut rest) = bytes.strip_prefix(&SIGNATURE) else {
+        return Err(bad("not a PNG file"));
+    };
+    let mut colour_type = None;
+    let mut palette_entries = None;
+    while let Some(head) = rest.get(..8) {
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let Some(body) = rest.get(8..).and_then(|r| r.get(..len)) else {
+            break;
+        };
+        match &head[4..8] {
+            b"IHDR" => {
+                if len != 13 {
+                    return Err(bad("IHDR is not 13 bytes"));
+                }
+                colour_type = Some(body[9]);
+            }
+            b"PLTE" => {
+                if len == 0 || !len.is_multiple_of(3) || len > 256 * 3 {
+                    return Err(bad("PLTE is not 1 to 256 whole RGB entries"));
+                }
+                palette_entries = Some(len / 3);
+            }
+            b"tRNS" if colour_type == Some(INDEXED) => match palette_entries {
+                Some(entries) if len <= entries => {}
+                _ => return Err(bad("tRNS does not fit the palette")),
+            },
+            b"IDAT" | b"IEND" => break,
+            _ => {}
+        }
+        // Length, type, body and CRC.
+        rest = rest.get(len + 12..).unwrap_or(&[]);
+    }
+    Ok(())
 }
 
 /// One package resource as the host holds it before decoding: the bytes and,
@@ -435,4 +500,93 @@ pub fn diff_ratio(a: &RgbaImage, b: &RgbaImage) -> f64 {
         .filter(|(p, q)| p != q)
         .count();
     differing as f64 / total as f64
+}
+
+#[cfg(test)]
+mod png_guard_tests {
+    use super::*;
+
+    /// The file the nightly fuzz run found: an indexed PNG whose `PLTE`
+    /// chunk is 256 bytes, which is not whole RGB entries.
+    const CRASH: &[u8] = include_bytes!("../../../fuzz/artifacts/png/palette-not-whole-entries");
+
+    /// SPEC-6.5.1: a page's image that is not a well-formed PNG is refused,
+    /// not decoded. `png` 0.18.1 panics on this palette; the chunk check
+    /// refuses the file before the decoder sees it, by name.
+    #[test]
+    fn spec_6_5_1_a_palette_that_is_not_whole_entries_is_refused() {
+        let err = RgbaImage::decode_png(CRASH).unwrap_err();
+        assert!(err.to_string().contains("PLTE"), "{err}");
+        // The same through the cache a page's IMAGE op uses.
+        let mut cache = ImageCache::new(vec![Resource {
+            bytes: CRASH.to_vec(),
+            pixels: None,
+        }]);
+        assert!(matches!(cache.decode(1), Err(ImageError::Decode(_))));
+    }
+
+    /// An indexed 2 × 1 PNG with this palette and transparency, written by
+    /// the encoder (which does not check them), so its checksums are right.
+    fn indexed(palette: &[u8], trns: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, 2, 1);
+        enc.set_color(png::ColorType::Indexed);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_palette(palette.to_vec());
+        if !trns.is_empty() {
+            enc.set_trns(trns.to_vec());
+        }
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&[0, 1]).unwrap();
+        w.finish().unwrap();
+        out
+    }
+
+    /// SPEC-11.2.2: images are decoded in the main process, so a panic in
+    /// the decoder must not leave it. The fuzzer's file has a wrong
+    /// checksum, which only a fuzzing build of `png` ignores; a page would
+    /// send the same palette with the right one, as here. Past the chunk
+    /// check the decoder panics on it (if this first assertion fails, `png`
+    /// has fixed it: keep the guard and drop the assertion); the guard turns
+    /// the panic into a refusal.
+    #[test]
+    fn spec_11_2_2_a_panic_in_the_png_decoder_is_a_refusal() {
+        let bytes = indexed(&[255, 0, 0, 0], &[]);
+        let unguarded =
+            std::panic::catch_unwind(|| RgbaImage::decode_png_unguarded(&bytes, None).is_ok());
+        assert!(unguarded.is_err(), "png 0.18.1 panics on this palette");
+        let err = RgbaImage::decode_png_guarded(&bytes, None).unwrap_err();
+        assert!(matches!(err, ImageError::Decode(_)), "{err}");
+        // And the whole way in, the chunk check names the fault.
+        let err = RgbaImage::decode_png(&bytes).unwrap_err();
+        assert!(err.to_string().contains("PLTE"), "{err}");
+    }
+
+    /// SPEC-6.5.1: the chunk check refuses only what is malformed. What the
+    /// encoder writes and a valid indexed image with transparency decode as
+    /// before; a palette of the wrong length, an empty one, one over 256
+    /// entries and a `tRNS` longer than the palette are refused.
+    #[test]
+    fn spec_6_5_1_chunk_check_refuses_only_malformed_palettes() {
+        let mut plain = RgbaImage::new(3, 2);
+        plain.data[0..4].copy_from_slice(&[10, 20, 30, 255]);
+        let bytes = plain.encode_png().unwrap();
+        assert_eq!(RgbaImage::decode_png(&bytes).unwrap(), plain);
+
+        let good = indexed(&[255, 0, 0, 0, 255, 0], &[128]);
+        let image = RgbaImage::decode_png(&good).unwrap();
+        assert_eq!(image.pixel(0, 0), Some([255, 0, 0, 128]));
+        assert_eq!(image.pixel(1, 0), Some([0, 255, 0, 255]));
+
+        for (palette, trns, what) in [
+            (&[255u8, 0, 0, 0][..], &[][..], "PLTE"),
+            (&[][..], &[][..], "PLTE"),
+            (&[0u8; 257 * 3][..], &[][..], "PLTE"),
+            (&[255u8, 0, 0][..], &[1u8, 2][..], "tRNS"),
+        ] {
+            let err = check_png_chunks(&indexed(palette, trns)).unwrap_err();
+            assert!(err.to_string().contains(what), "{what}: {err}");
+        }
+        assert!(check_png_chunks(b"not a png").is_err());
+    }
 }
