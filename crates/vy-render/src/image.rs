@@ -98,10 +98,11 @@ impl RgbaImage {
     }
 
     /// The decoder itself, with a panic in it turned into a refusal: the
-    /// bytes are a page's, and they are decoded in the main process, where a
-    /// panic would take every tab with it (SPEC-11.2.2). [`check_png_chunks`]
-    /// refuses the input known to make `png` 0.18 panic; this catches what
-    /// is not known yet.
+    /// bytes are a page's, decoded where the page runs (its tab process in
+    /// the client, the process itself in `vy-cli`), and a panic there ends
+    /// the page over one bad image instead of refusing the image
+    /// (SPEC-6.5.1). [`check_png_chunks`] refuses the input known to make
+    /// `png` 0.18 panic; this catches what is not known yet.
     fn decode_png_guarded(bytes: &[u8], max_side: Option<u32>) -> Result<Self, ImageError> {
         std::panic::catch_unwind(|| Self::decode_png_unguarded(bytes, max_side)).unwrap_or_else(
             |_| {

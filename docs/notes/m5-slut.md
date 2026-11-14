@@ -17,23 +17,32 @@ fann, vad mätningarna säger om två grindar som inte går att lita på i dag, 
 ## Kraschen fuzzningen fann (`41399fd`)
 
 Nattens fuzzkörning 2026-11-12 fällde `png` 0.18.1: en PLTE-chunk vars längd inte är hela
-RGB-poster får avkodaren att indexera utanför paletten och paniken går rakt upp. Bilder avkodas i
-huvudprocessen (SPEC-9.1.1: den äger rasteriseringen), så en sida med en sådan resurs fällde hela
-klienten, inte bara sin flik. Felet finns i den släppta v0.2.0.
+RGB-poster får avkodaren att indexera utanför paletten och paniken går rakt upp.
 
-Rättningen har två lager. `check_png_chunks` går igenom chunkarna fram till IDAT och vägrar en
-palett som är tom, inte delbar med tre eller längre än 256 poster, och en tRNS som är längre än
-paletten i en indexerad bild; det är fel som formatet förbjuder, så inget giltigt går förlorat.
-Därefter körs avkodaren inom `catch_unwind`, så en panik vi inte känner till blir ett avkodningsfel
-(SPEC-11.2.2) i stället för en död klient. Tester: `spec_6_5_1_a_palette_that_is_not_whole_entries_is_refused`,
+**Rättelse (granskning 0016:1).** Commit-meddelandet för `41399fd`, kommentaren i `image.rs` och
+den första versionen av det här avsnittet sade att bilder avkodas i huvudprocessen och att felet
+därför fällde hela klienten. Det var fel. I fönsterklienten avkodas en sidas bilder där sidan
+körs, i flikprocessen (`vy-runtime/src/host.rs`, `host.images.ensure`), och huvudprocessen får
+färdiga pixlar som `ToShell::Image`. I den släppta v0.2.0 dog alltså fliken med en sådan bild,
+inte klienten: sandlådan höll som den skulle (SPEC-9.1.1, SPEC-11.2.2). `vy-cli render` och
+konformanssviten, som avkodar i sin egen process, dog helt.
+
+Rättningen är rätt ändå, men den lagar något mindre än det sades: en sida med en trasig bild
+förlorar bilden i stället för att stoppas. Den har två lager. `check_png_chunks` går igenom
+chunkarna fram till IDAT och vägrar en palett som är tom, inte delbar med tre eller längre än 256
+poster, och en tRNS som är längre än paletten i en indexerad bild. Därefter körs avkodaren inom
+`catch_unwind`, så en panik vi inte känner till blir ett avkodningsfel i stället för en stoppad
+sida. Tester: `spec_6_5_1_a_palette_that_is_not_whole_entries_is_refused`,
 `spec_11_2_2_a_panic_in_the_png_decoder_is_a_refusal` (bygger filen med giltiga kontrollsummor och
-visar att den oskyddade avkodaren verkligen får panik) och `spec_6_5_1_chunk_check_refuses_only_malformed_palettes`.
-Fuzzerns fil ligger i `fuzz/artifacts/png/` och spelas upp av `fuzz_corpora_replay`.
+visar att den oskyddade avkodaren verkligen får panik) och
+`spec_6_5_1_chunk_check_refuses_only_malformed_palettes`. Fuzzerns fil ligger i
+`fuzz/artifacts/png/` och spelas upp av `fuzz_corpora_replay`.
 
-Det som återstår av samma slag: text och banor rasteriseras också i huvudprocessen, med
-`cosmic-text`, `swash` och `tiny-skia`. De har fuzzmål för display listan men inte för varje väg in
-i typsnittskoden. Ett skydd per flik runt rasteriseringen (en panik stänger fliken, inte klienten)
-är nästa naturliga steg och är inte gjort.
+Det som däremot körs i huvudprocessen på en sidas data är rasteriseringen av display listan: text
+(`cosmic-text`, `swash`) och banor (`tiny-skia`). Den snabba vägen faller tillbaka på referensen
+om den får panik; referensvägen har inget sådant skydd, så en panik där fäller klienten. Display
+listan är fuzzad, men ett skydd per flik runt referensvägen (en panik stoppar sidan, inte
+klienten) är nästa naturliga steg och är inte gjort.
 
 ## Vad CI fann (`ff43e63`, `a148b67`)
 
