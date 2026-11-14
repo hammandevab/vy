@@ -19,8 +19,9 @@ att låta Claude Code bygga sidan (`docs/DEVELOPING.md`); `docs/SDK.md` är guid
 En release byggs reproducerbart med kontrollsummor och byggrecept (`docs/RELEASING.md`).
 
 Öppet (se `CLAUDE.md`, milstolparna): SPEC-13.2.1 och SPEC-13.1.1 mäts på en riktig dator med
-GPU, den externa sandlådegranskningen återstår, och Windows och macOS är byggda och testade i
-CI men inte körda för hand i varje del.
+GPU, första kompileringen av en sida tar längre än SPEC-13.1.4 ger (cachen gör återbesöken
+gratis; `docs/notes/m5-slut.md`), den externa sandlådegranskningen återstår, och Windows och
+macOS är byggda och testade i CI men inte körda för hand i varje del.
 
 ```sh
 tools/build_modules.sh                 # modules/* -> target/wasm/*.wasm (före cargo test)
