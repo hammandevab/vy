@@ -5,7 +5,8 @@ exempelsidorna granskas på 0017 och 0018 och ingår inte här.
 
 **Rekommendation.** **Släpp v0.3.0 efter fynd 1**: commiten som taggas ska ha en hel grön
 CI-körning, och det hade ingen när jag läste. Inget i koden stoppar releasen. Fynd 2 är en
-mening i README som bör med i samma commit.
+mening i README som bör med i samma commit. *Efter uppföljningen (sist på sidan): oförändrad;
+vänta på körningen 43561798758 på `6e09d5b`. Fynd 2 är rättat för sidans lista; fynd 9 är resten.*
 
 **Det som stoppar.** Bara fynd 1. Körningen 43557039351 (`b16edbf`) var inte klar kl. 05:01 UTC:
 `repro (windows)` pågick efter 30 minuter, de sju andra jobben var gröna. HEAD (`b7fb243`) har två
@@ -136,3 +137,85 @@ release (ingen `panic = "abort"`). 3 (cache där sajten signeras): `b7fb243` sva
 - `vy-proto`:s tolkning av paket och manifest rad för rad; bara att den körs bakom laddarens vakt.
 - Om sidans strängar (titel, logg, semantiskt träd) kan fälla chromens textkod.
 - Windows och macOS i någon del; signeringsstegen, som bara körs med hemligheter.
+
+## Uppföljning efter rättningarna (`0e3085d`, `88fda59`, `6e09d5b`)
+
+**Rekommendation efter uppföljningen.** Oförändrad: **släpp v0.3.0 när CI-körningen 43561798758
+på `6e09d5b` är grön.** Kl. 05:33 UTC pågick alla åtta jobben. Den förra körningen (43557039351,
+`b16edbf`) blev grön, också `repro (windows)`. Inget nedan stoppar releasen.
+
+**Kört av mig, allt grönt:** `cargo test -p vy-render --lib -- spec_9_1_2` (1 test),
+`cargo test -p vy-shell --lib -- gl::` (2), `cargo test -p vy-cli --test release` (5). Därmed är
+också `tests/release.rs` kört, som saknades ovan.
+
+**Täcker de två skydden det fynd 2 beskrev?**
+
+- *Sidans display list: ja.* På CPU-vägen går listan bara in genom `tab.raster.render`
+  (`shell.rs:2454`): snabb väg, sedan referensen, sedan `RenderError::Failed`. På GL-vägen står
+  `gl::guarded("drawing", …)` runt `shell.frame()`, `compose` och `swap` (`window.rs:719`).
+- *En avkodad bild: ja.* Den ritas bara inom de två vägarna och är prövad i `set_decoded`.
+- *Strängar sidan ger chromen: nej.* Se fynd 9.
+
+**Egna fynd, fortsättning.**
+
+9. **Medel – chromens ritning av sidans strängar står utanför båda skydden.** `Shell::compose`
+   rasteriserar chromen direkt med `vy_render::render`, inte genom `Renderer::render`
+   (`shell.rs:2423`; frågan `2598`, sökfältet `2609`, devtools `2635`, statusraden `2650`), och
+   `chrome::draw` mäter text med samma `chrome_text` (`shell.rs:2318`). Dit kommer flikens titel
+   (manifestets namn), manifestets reservtext, stoppskälet, länkmålet under pekaren och, med
+   devtools öppet, sidans loggrader och semantiska träd. På CPU-vägen anropas `shell.frame()`
+   ovaktat (`window.rs:186`): en panik där avslutar klienten. På GL-vägen ligger `shell.frame()`
+   inom GL-vakten (`window.rs:720`), så första paniken fångas, skylls på GL och lämnar GL-vägen;
+   `frame_dirty` är fortfarande satt, så CPU-vägen komponerar samma chrome igen, ovaktat. Det är
+   samma textkod (`cosmic-text`, `swash`) som skyddet runt sidans lista finns för. Inte framkallat
+   (jag har ingen sträng som fäller textkoden): slutsats ur läsning. Stoppar inte, av samma skäl
+   som fynd 2. Rättning: en vakt runt `Shell::compose` som vid panik ritar chromen utan flikarnas
+   egna strängar, och en mening i README tills dess.
+10. **Låg – en lista som inte gick att rita ritas om vid varje komposition.** Efter `Failed`
+    står `tab.rendered` kvar som `None` (`shell.rs:2452–2468`), så varje senare komposition (en
+    pekarrörelse över en länk, markören i adressfältet, en ny loggrad) rasteriserar samma lista
+    igen: en ny panik, en ny rad `[host] display list not rendered` och en ny rad på stderr.
+    Ingen slinga: `Tab::log` smutsar inte ramen, loggen har ett tak, och renderaren står kvar på
+    referensen. Så var det redan för en lista som inte avkodas. Läst. Rättning: kom ihåg att den
+    här listan föll i den här storleken och försök inte förrän en ny lista kommer, som
+    `gl::PageState` gör på GL-vägen.
+11. **Låg – inget test faller om skydden i skalet tas bort.** `spec_9_1_2_…` prövar `Renderer`
+    i `vy-render`, och `gl::tests` prövar `guarded` för sig med etiketten `drawing`. Ingenting
+    kör `window::gpu::present` med ett steg som panikar, eller skalets svar på `Failed` (loggrad,
+    tom sidyta, nästa lista ritad). Slutsats ur sökning i testerna, ingen mutation körd.
+
+**Vad en fångad panik lämnar efter sig.**
+
+- *Renderaren:* `last` och `runs` släpps; den gamla bilden står kvar men visas inte (skalet
+  ritar ingen sida). Skissdukarnas pott tål ett förgiftat lås (`renderer.rs:620–636`); en duk
+  som var utlånad går förlorad, inget mer. En panik i en bandtråd förs vidare till vakten.
+- *Flikens `TextEngine`:* nollställs inte efter en panik. Den är flikens egen och byts vid
+  laddning (`shell.rs:1165`), så andra flikar berörs inte; vad `cosmic-text` kan ha lämnat halvt
+  ändrat i sina cachar har jag inte läst. `chrome_text` delas av hela skalet (fynd 9).
+- *GL:* `leave_gpu` släpper kontexten, nollställer `gpu_page` och `presented` och skapar
+  CPU-ytan; ingen egen `Drop` rör GL-objekt. Men vägen är lämnad för gott: en panik medan en
+  sida ritas kostar alla flikar GL-vägen resten av körningen.
+
+**README:s lista över det öppna, mot 0016, 0017 och 0018.** De sex punkterna stämmer. Det som
+saknas: fynd 9 (står ingenstans), och roten till 0018:1, SDK:ts allokator, som bara står i
+`m5-slut.md` fast den rör varje sidförfattare. Att en tappad GL-kontext bara märks där
+drivrutinen aviserar står bara i `m5-fix-b.md`. Resten (0014:4, 0016:4, 5 och 7, 0017:5, IME)
+står under "Kvar" eller i tabellen i `m5-slut.md`, dit README pekar. Utanför min del, men sett:
+meningen i `docs/EXEMPEL.md` rad 25 som 0018:2 gällde är oförändrad.
+
+**Överdrivet i noteringarna (`m5-slut.md`).**
+
+- "Båda har nu skydd" och tabellraden "en panik i rasteriseringen är sidans fel, inte
+  klientens" gäller sidans lista, inte chromen med sidans strängar (fynd 9). På GL-vägen är det
+  dessutom klientens GL-väg som betalar, inte sidan.
+- Raden om 0016:4 säger att wasmtime vägrar kod från en annan konfiguration, "så följden är en
+  omkompilering". Det är inte fallet jag beskrev: två byggen med samma version och samma
+  wasmtime delar poster, och wasmtime vägrar ingenting. Följden är att kod som ett bygge sparat
+  körs av ett annat; ofarligt så länge posten är ärlig, och risken är en förgiftad post som
+  överlever en rättning som inte bytte version.
+- Resten jag läste stämmer: rättelsen om PNG-felet, vad `catch_unwind` inte fångar, och det som
+  står under "Kvar".
+
+**Inte kontrollerat i uppföljningen.** GL-testet under Xvfb, hela grindsviten på `6e09d5b`,
+`5d44c97` och `d4a27e1` (hör till 0017 och 0018), och om en panik i `chrome::draw` går att
+framkalla.
