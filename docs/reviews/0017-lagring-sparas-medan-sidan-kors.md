@@ -90,9 +90,9 @@ med 16 MB, macOS och Windows, strömavbrott, inspelning i fönster, hela grindar
 **Hotbild.** Två nya IPC-ramar, ingen ny ABI-import, fryst ABI orörd. Flikprocessen får ingen ny
 befogenhet; nytt är att en sida kan få huvudprocessen att skriva varje sekund (fynd 2).
 
-**Rekommendation.** **Merge efter** fynd 1: gjort i `5d44c97`. Efter uppföljningen nedan: rätta
-U1 före releasen (några rader och ett test); U2 är kod eller mening, ägarens val; fynd 2 (egen
-skrivtråd), 3 och 5 står kvar som uppföljningar.
+**Rekommendation.** **Merge efter** fynd 1: gjort i `5d44c97`. U1 och U2 är lösta i `58cf262`.
+Före releasen: rätta V1 i andra uppföljningen nedan (testet är ostadigt, tre rader i testet).
+V2, fynd 2 (egen skrivtråd), 3 och 5 står kvar som uppföljningar.
 
 ## Uppföljning efter rättningarna (`5d44c97`, bedömd på `6e09d5b`)
 
@@ -152,3 +152,51 @@ flik blir ofrågad. Meningen räknar "senast sparade" som senaste ögonblicksbil
 sparades när fliken gömdes. *SPEC-9.5.4 som skriven* är nu sann utom i U1, U2 och fynd 5.
 *Inte prövat:* hela grindarna, flikar som egna processer i mina prov, en sida som verkligen
 släpar (U1 är provat genom att inte läsa inkorgen emellan), macOS och Windows.
+
+## Andra uppföljningen (`58cf262`, bedömd på `9940b7c`)
+
+Läst `git show 58cf262` och provat som förut; tillfälliga ändringar återställda. De 17 riktade
+testerna var gröna i en körning efter `cargo build -p vy-shell`, men se V1.
+
+- **U1: löst.** Fliken besvarar varje fråga (`tab.rs:233`, `StorageUnchanged`, tagg 81) och skalet
+  håller en öppen i taget (`shell.rs:3861`). En ärlig flik kan då inte få ett svar kastat som
+  obegärt. Med villkoret i `:3861` borttaget faller testet: "the later change was never saved".
+- **U2: löst i meningen.** Den säger "en ögonblicksbild som ingen begärt", vilket är sant; ett
+  obett `Storage` från en levande flik tas emot som förut, och commit-meddelandet säger det.
+- **U3: två av tre bevisade.** Testet faller utan `sweep` vid start ("swept at start") och med
+  `snapshot_asked: false` i `retire_process`. Att väntan växer prövas av en rad som jag läst men
+  inte sett falla: körningen med `STORAGE_SAVE_MS` i stället föll först på raden i V1.
+- **Kan flaggan fastna?** Inte för en flik som lever och svarar (läst). Dör processen har fliken
+  ingen process att fråga, och `start_page` nollar flaggan vid nästa laddning. En stoppad sida har
+  kvar sin flikslinga, som svarar. En laddning som misslyckas har aldrig frågats. Vid omladdning
+  flyttas flaggan till posten för den släppta processen; dess `StorageUnchanged` kastas i
+  `retired_message` och når aldrig den nya processens flagga, eftersom generationen skiljer. En
+  uppspelning frågas inte; en inspelad flik frågas, svarar, och frågan spelas inte in. Kvar: en
+  process som lever men aldrig svarar frågas inte igen; dess lagring kommer då vid gömning eller
+  stängning, eller så dödas den vid tidsgränsen.
+- **`poll_in`.** Snurrar inte: en flik med öppen fråga räknas inte (`:3816`). Sover inte förbi:
+  svaret väcker slingan, `drain` nollar flaggan, `poll` skickar det som förfallit, och `poll_in`
+  räknar fliken igen.
+- **Komprometterad flik.** Ett andra svar på samma fråga kastas som obegärt. Ett obett
+  `StorageUnchanged` nollar bara flaggan, och nästa fråga går ändå i skalets takt. Från en
+  släppt process gör det ingenting.
+
+Nytt:
+
+- **V1. Medel – testet är ostadigt. Reproducerat.** `spec_9_5_4_storage_is_saved_while_the_page_runs`
+  föll i 2 av 8 körningar på oförändrad kod, på `lib.rs:1357` ("the snapshot asked for before
+  the process was let go of was saved"). Felet sitter i testet, inte i klienten: slingan
+  `while shell.retiring() > 0` (`:1349`) kan ta slut innan bilden hanterats, när flikens tråd
+  hunnit sluta, och `shell.drain()` hanterar sedan bilden och slutsvaret i ett svep utan att
+  titta emellan. Prov: med en titt efter varje meddelande också i det svepet var 10 av 10
+  körningar gröna, och i 4 av dem hade slingan tagit slut före bilden. Rättning: just den titten,
+  tre rader. Grinden "alla tester gröna" faller annars ungefär var fjärde gång på den här
+  maskinen.
+- **V2. Låg – inget test märker om `StorageUnchanged` inte öppnar för nästa fråga.** Med armen i
+  `shell.rs:1731` tömd är skalets test grönt: varje fråga i testet följer på en ändring, så varje
+  svar är en bild. Det är just felet "flaggan fastnar". Test: frågan efter laddningen besvaras
+  med "oförändrat", och en ändring därefter ska nå disken.
+
+*SPEC-9.5.4 som skriven* är sann, med två förbehåll: en skrivning som misslyckas görs inte om
+(fynd 5), och "den tidens ändringar" är väntan plus den tid en släpande flik tar på sig att svara.
+*Inte prövat:* hela grindarna, flikar som egna processer, macOS och Windows.
