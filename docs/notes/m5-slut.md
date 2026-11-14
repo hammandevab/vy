@@ -47,12 +47,20 @@ Det som däremot körs i huvudprocessen på en sidas data är rasteriseringen av
 (`cosmic-text`, `swash`) och banor (`tiny-skia`). Den snabba vägen föll tillbaka på referensen om
 den fick panik, men referensvägen, kedjans sista led, hade inget skydd, och inte heller GL-vägens
 ritning av en frame: en panik där hade fällt klienten och alla flikar (granskning 0016:2). Båda
-har nu skydd. En panik i referensvägen blir `RenderError::Failed` för den framen: skalet loggar
+har nu skydd, för sidans display list. En panik i referensvägen blir `RenderError::Failed` för den framen: skalet loggar
 att listan inte gick att rita, sidans yta lämnas tom och nästa lista ritas som vanligt
 (`spec_9_1_2_a_panic_in_the_rasterizer_is_the_pages_error`). En panik medan GL ritar lämnar
-GL-vägen för CPU-vägen, som ett GL-fel redan gjorde (`gl::guarded("drawing", …)`). Det som inte
-fångas är det `catch_unwind` inte fångar: minnesbrist, stacköverflöd och en avkodare som aldrig
-återvänder.
+GL-vägen för CPU-vägen, som ett GL-fel redan gjorde (`gl::guarded("drawing", …)`): där är det
+klientens GL-väg som betalar, för alla flikar och resten av sessionen. Det som inte fångas är det
+`catch_unwind` inte fångar: minnesbrist, stacköverflöd och en avkodare som aldrig återvänder.
+
+Uppföljningen av 0016 fann vad skydden inte täcker (fynd 9–11). Kromet ritar strängar som sidan
+bestämmer (flikens titel ur manifestet, reservtexten, skälet till ett stopp, målet för länken
+under pekaren och, med devtools öppet, loggrader och träd) med `vy_render::render` direkt, utanför
+båda skydden; på CPU-vägen fäller en panik där klienten. Ingen sträng som ger en sådan panik är
+känd. En lista som inte gick att rita ritas om vid varje komposition, med en loggrad var gång.
+Och inget test faller om skydden i skalet tas bort: testerna prövar `Renderer` och `guarded` var
+för sig. Alla tre är ogjorda och står i README.
 
 ## Vad CI fann (`ff43e63`, `a148b67`)
 
@@ -205,6 +213,18 @@ varje frame skrivs var sjuttonde sekund, alltså ungefär en megabyte i sekunden
 Två flikar med samma origin har var sin kopia av lagringen och sista skrivning vinner, som förut;
 skillnaden är att det nu växlar på disk medan båda körs.
 
+**Uppföljningen av 0017** prövade rättningarna och fann ett nytt fel i dem. Regeln "en
+ögonblicksbild per fråga" var en flagga: en flik som låg efter skalet fick fråga två innan den
+svarat på fråga ett, svarade på båda, och det andra svaret kastades som obegärt, fast fliken
+noterat det som skickat. Den senaste ändringen blev då liggande tills sidan ändrade något igen
+(U1, reproducerat). Nu besvarar fliken varje fråga, med `ToShell::StorageUnchanged` när inget
+ändrats, och skalet har en fråga öppen i taget: en fråga som förfaller medan den förra är
+obesvarad går ut när svaret kommit. Testet låter två ändringar gå med svaren olästa emellan och
+ser den senare på disk. Meningen i specen säger "en ögonblicksbild som ingen begärt", inte "ett
+svar": ett vanligt lagringssvar från en levande flik tas fortfarande emot obett, som förut (U2).
+Testet prövar nu också att väntan verkligen växer efter en megabyte, att tempfiler städas vid
+start och att en ögonblicksbild från en släppt process sparas (U3).
+
 ## Granskningarna 0016–0018 och det de ledde till
 
 Tre oberoende granskare gick igenom allt efter granskning 0015: klienten och releasen (0016),
@@ -221,6 +241,9 @@ plats innan den skrivs och en formels rymmer vilket värde som helst, tal skrivs
 som texterna, och omräkningens steg är mindre i fönster med fler än 580 celler i bild. Testet
 `spec_5_3_3_kalkyl_keeps_the_budget_when_values_grow` föll på den gamla modulen (9,1 M i framen
 efter Enter) och går på den nya: dyraste frame 5,4 M i 1600 × 1000 och 6,4 M i 2560 × 1440.
+Granskaren körde om sina 29 fall (alla går, de avstängda på 4,0–5,4 M) och 40 nya i samma klass:
+ingen frame över budgeten upp till 2560 × 1600 (som mest 7,3 M) och sidan aldrig stoppad. I
+3840 × 2160 i skala 1 finns ingen marginal: enstaka frames på 8,03–8,04 M, utan stopp.
 Roten, SDK:ts allokator (`crates/vy-sdk/src/heap.rs`: första passande block i en adressordnad
 lista, så varje frigörning kostar som antalet hål nedanför), är inte rörd. Den drabbar varje sida
 som låter många små block växa, och är det första att göra i SDK:t.
@@ -240,9 +263,10 @@ kan inte slå runt (0018:4), och två noteringar som sade mer än som var mätt 
   finns, och lämnar resultatet som artefakter (0016:7).
 - Röktestet körs efter att releasen publicerats; ett rött röktest lämnar en publicerad release
   (0016:5).
-- Kodcachens nyckel bär versionssträngen, inte bygget: två utvecklingsbyggen med samma version
-  delar poster. Wasmtime vägrar kod från en annan konfiguration, så följden är en omkompilering
-  (0016:4).
+- Kodcachens nyckel bär versionssträngen, inte bygget: två byggen med samma version och samma
+  wasmtime delar poster, och wasmtime vägrar ingenting, så kod som det ena sparat körs i det
+  andra. Risken är en felaktig post som överlever en rättning som inte ändrade versionen;
+  släppta versioner berörs inte, och "Rensa cache" tar bort den (0016:4).
 - Releasens Linux-bygge är inte pinnat på en containerdigest (0012:6).
 - `IME_COMPOSE` är oprövat med en riktig IME (0010:5), och en riktig GPU är okörd (0011:4, 0015:2).
 

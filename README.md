@@ -28,6 +28,12 @@ En release byggs reproducerbart med kontrollsummor och byggrecept (`docs/RELEASI
 - En sidas lagring skrivs utan `fsync` och på huvudtråden (SPEC-9.5.4): en avbruten process
   förlorar högst väntetiden, ett strömavbrott kan ta mer.
 - Releasens Linux-binärer byggs på GitHubs avbild, inte i en container pinnad på digest.
+- En panik när en sidas display list ritas stoppar sidan (CPU-vägen) eller lämnar GL-vägen, inte
+  klienten. Det gäller inte kromet: sidans titel, reservtext, länkmål och, med devtools öppet,
+  logg och träd ritas av klienten utan sådant skydd. En tappad GL-kontext märks bara där
+  drivrutinen säger till.
+- SDK:ts allokator letar igenom sina hål vid varje frigörning: en sida som låter många små
+  block växa i en frame kan gå över budgeten (`kalkyl` gjorde det, granskning 0018).
 - Den externa sandlådegranskningen återstår, och Windows och macOS är byggda och testade i CI
   men inte körda för hand i varje del.
 

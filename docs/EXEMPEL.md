@@ -79,7 +79,9 @@ gånger var medan de tappar decimaler; tal som inte hinner med ritas av nästa f
 etikett får sin plats innan den skrivs och en formels rymmer vilket värde som helst, så en
 omräkning flyttar inget på högen (granskning 0018: 2 599 formler som fick långa värden stoppade
 sidan för gott). I ett fönster med fler än 580 celler i bild är omräkningens steg så mycket
-mindre som det finns mer att rita; i 2560 × 1440 kostar den dyraste framen 6,4 M av 8.
+mindre som det finns mer att rita; i 2560 × 1440 kostar den dyraste uppmätta framen 7,1 M av 8
+(värden som byter längd fram och tillbaka). Över det, i 3840 × 2160 i skala 1, finns ingen
+marginal kvar: enstaka frames har mätts till 8,04 M.
 
 ## Ritbord (`rita`)
 
