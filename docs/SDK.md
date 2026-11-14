@@ -384,9 +384,10 @@ rensar lagringen. Läs därför tillbaka som du läser indata utifrån. Kontroll
 varje antal mot värdets slut; avvisa ett värde som har mer än sidan själv tar emot (fler kort, fler
 punkter, mer bläck, en cell två gånger) i stället för att visa det; och gör det som kostar
 (tolkning, radbrytning, omräkning) i steg över flera frames när värdet är stort, inte i `init` och
-inte i en enda frame. Mät sedan värsta fallet och inte exemplet: kör sidan på det största och det
-besvärligaste värde kvoten rymmer och läs den dyraste framen med `vy-cli conformance --stats`
-(bränsle och rasterisering mot budgeten, SPEC-5.3.3 och SPEC-12.2.4). Exempelsidornas prov av det
+inte i en enda frame. Mät sedan värsta fallet och inte exemplet: ge sidan det största och det
+besvärligaste värde kvoten rymmer i ett fall i `conformance/cases.toml` (`state = [{key = "…",
+hex = "…"}]`) och läs den dyraste framen med `vy-cli conformance --stats` (bränsle och
+rasterisering mot budgeten, SPEC-5.3.3 och SPEC-12.2.4). Exempelsidornas prov av det
 slaget, 300 slumpade värden, avklippta värden och hela kvoten för var och en, står i
 `crates/vy-cli/src/budget_tests.rs`.
 
