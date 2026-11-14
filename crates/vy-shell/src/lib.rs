@@ -1251,6 +1251,17 @@ mod tests {
         let tab = shell.open_tab_loaded(page.clone());
         settle(&mut shell, 1, TIMEOUT).unwrap();
         assert_eq!(shell.tab_badges(tab), vec![("storage", true)]);
+        // The ask the load itself caused is answered "unchanged", which
+        // is what lets the tab be asked again (granskning 0017:V2): were
+        // that answer lost, nothing below would ever reach the disk.
+        run_until(
+            &mut shell,
+            &|s| s.poll_in().is_some(),
+            "the load is not asked about",
+        );
+        std::thread::sleep(Duration::from_millis(STORAGE_SAVE_MS as u64 + 50));
+        run_until(&mut shell, &|s| s.poll_in().is_none(), "asks never end");
+        assert!(saved().is_empty(), "nothing stored, nothing saved");
         // A change, and then only the clock: the value reaches the disk.
         let asked = Instant::now();
         key(&mut shell, 0x04);
@@ -1344,16 +1355,21 @@ mod tests {
         shell.poll();
         std::thread::sleep(Duration::from_millis(100));
         shell.reload();
+        // One message at a time, looking at the disk after each: the
+        // snapshot and the last word may both be waiting when the process
+        // has ended (granskning 0017:V1).
         let mut snapshot_saved = saved() == vec![put_k(0x06)];
         let deadline = Instant::now() + TIMEOUT;
-        while shell.retiring() > 0 {
-            assert!(Instant::now() < deadline, "a process let go of never ended");
-            if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(10)) {
-                shell.handle(m);
+        loop {
+            match shell.inbox().recv_timeout(Duration::from_millis(50)) {
+                Ok(m) => {
+                    shell.handle(m);
+                    snapshot_saved |= saved() == vec![put_k(0x06)];
+                }
+                Err(_) if shell.retiring() == 0 => break,
+                Err(_) => assert!(Instant::now() < deadline, "a process let go of never ended"),
             }
-            snapshot_saved |= saved() == vec![put_k(0x06)];
         }
-        shell.drain();
         assert!(
             snapshot_saved,
             "the snapshot asked for before the process was let go of was saved"
