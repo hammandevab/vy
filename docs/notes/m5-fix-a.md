@@ -254,3 +254,35 @@ omgång i SDK:t (en gemensam lista för alla styckens rader). Se *Öppet*.
   återstår.
 - `studio`: `relayout` mäter varje post på nytt när loggens bredd ändras (högst 300 poster à högst
   60 KB). Inte samma mönster och inte uppmätt här.
+
+## Slutet av del A (koordinatorn tog över)
+
+Byggagenten för del A stannade utan svar efter `9fec9b7` (release.yml: generalrepetition). Det som
+återstod gjordes av koordinatorn i samma arbetskatalog:
+
+| Fynd | Commit | Test |
+| --- | --- | --- |
+| 0012:3 röktest sist i releasen (`smoke`) | `e22a9a1` | `spec_9_7_1_a_release_ends_with_a_new_project_built` |
+| 0012:4 minsta rättigheter; `VY_KEY` i ett steg som inte kompilerar (`VY_SITE_PREBUILT=1`) | `e22a9a1` | `spec_9_7_1_the_release_gives_rights_and_the_key_only_where_used` |
+| 0012:5 `SHA256SUMS` täcker varje tillgång, också `BUILD.md` | `e22a9a1` | `spec_9_7_1_sha256sums_covers_every_release_asset` |
+| 0013 (guiden): värsta fallet mäts med ett falls sparade värde | `31bead8` | – |
+| 0015:4–5 milstolparna säger vad som är öppet; README för v0.3.0 | `803d766` | – |
+
+De pinnade action-commiterna i arbetsflödena är kontrollerade mot respektive projekts taggar
+(`git ls-remote`): alla sju pekar på en riktig version.
+
+**Inte gjort, öppet:** 0012:6 (Linux-releasen i en digest-pinnad container), 0015:3 (en
+deterministisk 300 KB-modul för SPEC-13.1.4; `hello` står kvar som ersättare), bänkbaslinjen
+`conformance/bench/ubuntu.json` (tas ur första gröna CI-körningen i ett `bench:`-commit), och
+`Runtime::last_call()` för bränslet i `vy_init`/`vy_event` (se *Öppet* ovan).
+
+## Sammanslagningen med m5/fix-b
+
+`m5/fix-b` (klienten: kompileringscachen, laddaren, GL-vägen, "Rensa cache", "Rensa sidans
+lagring", felsidan för en stoppad sida) slogs ihop utan konflikter. Grindar på det sammanslagna
+trädet: fmt och clippy rena, `cargo test --workspace` 460 gröna, 0 röda, 2 ignorerade
+(`spec_13_2_1_raster_budget`, `spec_13_1_1_cold_start`), spec-spårning 142/142, 19 moduler med
+ABI 1.0 OK, konformans 101/101 à 0,000 % med varje frame inom budgeten (SPEC-12.2.4), GL-testet
+under Xvfb grönt (sidor: 195 frames, 0,069 % över 2 nivåer, största avvikelse 40; gränsen i
+SPEC-11.3.2 är 3 % och 64 nivåer), och `check-cross --workspace --all-targets` rent för Windows
+och macOS.

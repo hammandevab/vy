@@ -27,8 +27,9 @@ väg med fyra band räknat i instruktioner (≈ 4,4 ms på fyra kärnor som den 
 
 **Utfall, del 2** (spec-fråga 66 avgjord: OpenGL). GL-vägen ritar sidan på GPU:n (Linux och
 Windows; macOS stannar på CPU-vägen) inom SPEC-11.3.2:s nya tolerans – högst 3 % av en bilds
-pixlar mer än 2 nivåer från referensen; uppmätt 0,25 % i värsta referenssidan, 2,0 % i värsta
-slumplistan – och faller tillbaka på CPU-vägen vid varje fel. Per hel frame: 26 209 instanser, ett
+pixlar mer än 2 nivåer från referensen och ingen pixel mer än 64 nivåer; uppmätt (efter
+m5/fix-b) 0,32 % i värsta sidframen, 2,0 % i värsta slumplistan, största avvikelse 41 – och
+faller tillbaka på CPU-vägen vid varje fel. Per hel frame: 26 209 instanser, ett
 ritanrop, 1,3 MB, ≈ 1,6 ms CPU här. **SPEC-13.2.1 mäts på ägarens dator**; här finns bara
 llvmpipe. Storlek: GL +247 624 byte; **med `a11y-linux` är `vy-shell` 25 790 640 byte, 790 640 över
 taket**, som m5/release måste frigöra (main med `a11y-linux` är redan ≈ 480 000 över). Konformans
@@ -379,12 +380,29 @@ avrundning. `crates/vy-shell/tests/gl.rs` jämför pixel för pixel med Mesa llv
 | --- | --- | --- | --- | --- | --- |
 | `frame_2000`, 1280 × 800 @ 1 och 2 | 4 | 10,3 % | 0,13 % | 0,15 % | 41 |
 | 120 slumplistor (nästlade raka och rundade klipp, text, bilder, banor), tre skalor | 120 | 7,9 % | 0,69 % | 2,03 % | 37 |
-| tolv referenssidor, 800 × 600 @ 1 och 480 × 320 @ 2, manuset av hovring, klick, rullning, tangenter | 88 | 1,8 % | 0,04 % | 0,25 % | 40 |
+| 45 listor med tunna strykningar (spetsiga trianglar fyllda och strukna, polylinjer; bredd 0,25–2,2), tre skalor | 45 | 6,8 % | 0,18 % | 0,89 % | 41 |
+| alla nitton moduler i `target/wasm`, 800 × 600 @ 1 och 480 × 320 @ 2, manuset av hovring, klick, rullning, tangenter | 195 | 1,3 % | 0,07 % | 0,32 % (`block` 480 × 320 @ 2) | 40 |
+| fönstrets komposition (`GlContext::compose`), sidytan i åtta lägen | 8 | 1,3 % | 0,31 % | – | 22 |
+
+Talen är från `m5/fix-b` (granskning 0011:4). Vid `3fbcf36`, som granskningen mätte, var sidraden
+195 frames, 0,095 %, värsta frame 0,387 % (`rymd` 800 × 600) och **största avvikelse 133**. De
+133 nivåerna var inget kantbrus utan ett fel: GL-vägen fyllde konturen av en strykning där
+referensen ritar en linje på högst en pixels bredd som en hårlinje utan fogar, så geringsfogen
+stack ut en pixel bortom varje spetsigt hörn (`rymd` stryker sina trianglar med 1 px). En lista
+med många tunna linjer låg före rättningen på upp till 8,9 % pixlar över 2 nivåer, alltså utanför
+toleransen; ingen referenssida hade nog många. Rättat i `62ceaa5` (banor stryks med referensens
+eget anrop), se `notes/m5-fix-b.md`.
 
 Avvikelserna över 2 sitter i kantpixlar (rektanglar på bråkdelspositioner, rundade hörn); de små
-(±1) i blandningen. Toleransen i SPEC-11.3.2 (`spec:`-commit) är därför: **högst 3 % av en bilds
-pixlar får ha någon kanal som avviker mer än 2 nivåer från headless-bilden**, och testet hävdar den
-för varje frame. Konformanssviten använder alltid headless-vägen.
+(±1) i blandningen. Toleransen i SPEC-11.3.2 (två `spec:`-commits) är därför: **högst 3 % av en
+bilds pixlar får ha någon kanal som avviker mer än 2 nivåer från headless-bilden, och ingen pixel
+får avvika mer än 64 nivåer**, och testet hävdar båda för varje frame i varje klass. Den andra
+halvan finns för att andelen ensam släpper igenom ett grovt fel på några få pixlar (som de 133):
+en kant ritad med yta eller avstånd i stället för översampling avviker med en del av en pixels
+täckning, uppmätt högst 41 nivåer; mer än en fjärdedel av skalan är en form ritad där referensen
+inte ritar någon. Marginalen mot slumplistornas 2,03 % är 1,5 gånger och mot 41 nivåer 1,6
+gånger, allt på en enda mjukvarudrivrutin (llvmpipe): **kör testet på en riktig GPU** (punkt 1
+under *Vad ägaren ska kontrollera*). Konformanssviten använder alltid headless-vägen.
 
 ### Mätt: GL-vägen
 

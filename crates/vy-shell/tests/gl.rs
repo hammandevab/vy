@@ -3,7 +3,19 @@
 //! random display lists and every frame of every reference page through a
 //! script of hovers, clicks, scrolls and keys, each drawn by
 //! `Renderer::render_gl`, read back and compared pixel by pixel with
-//! `vy_render::render`. The tolerance asserted is SPEC-11.3.2's.
+//! `vy_render::render`. The tolerance asserted is SPEC-11.3.2's, both
+//! halves: at most 3 % of a frame's pixels more than 2 levels off, and no
+//! pixel more than 64 levels off.
+//!
+//! SPEC-9.6.1 in the GL window (granskning 0011:2): the composition the
+//! window shows, read back from the default framebuffer. `GlRaster::present`
+//! with a page larger than its area under a frame of known pixels, and
+//! `GlContext::compose` with a real shell (a page, the devtools panel, a
+//! zoomed page, a page that paints far outside its canvas): the chrome's
+//! pixels byte for byte the CPU composition's, and the page nowhere but
+//! inside the page area. And a page whose list does not decode shows no
+//! page, not the picture another tab left in the framebuffer (granskning
+//! 0011:3).
 //!
 //! Without a test harness (`harness = false`), so winit's event loop runs
 //! on the main thread. Where no GL context can be made (no display, no
@@ -15,9 +27,13 @@ mod imp {
     use std::path::{Path, PathBuf};
     use vy_abi::{button, event as kind, font, weight};
     use vy_dl::{DisplayList, Fit, PathCmd};
+    use vy_render::gl::PageAt;
     use vy_render::{ImageCache, RasterPath, Renderer, RgbaImage, TextEngine};
     use vy_runtime::{Options, Runtime};
-    use vy_shell::gl::GlContext;
+    use vy_shell::gl::{GlContext, PageState};
+    use vy_shell::headless::{headless_shell, settle};
+    use vy_shell::page::Source;
+    use vy_shell::shell::Shell;
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -25,12 +41,25 @@ mod imp {
 
     /// SPEC-11.3.2's tolerance: a pixel differs when a channel is more than
     /// [`CHANNEL_DELTA`] from the reference's; at most [`DIFFERING_SHARE`] of
-    /// the pixels of a frame may (measured with Mesa llvmpipe: the reference
-    /// pages at most 0.25 %, the frame of SPEC-13.2.1 0.15 %, random lists
-    /// 2.0 %; the differences are anti-aliased edges and blending rounding).
+    /// the pixels of a frame may (measured with Mesa llvmpipe: the pages
+    /// at most 0.32 %, the frame of SPEC-13.2.1 0.15 %, thin strokes
+    /// 0.89 %, random lists 2.03 %; the differences are anti-aliased edges
+    /// and blending rounding), and none by more than [`MAX_DELTA`].
     const CHANNEL_DELTA: u8 = 2;
     /// See [`CHANNEL_DELTA`].
     const DIFFERING_SHARE: f64 = 0.03;
+    /// SPEC-11.3.2's bound on any one pixel (granskning 0011:4): no
+    /// channel is more than this from the reference's, a quarter of the
+    /// range. An anti-aliased edge drawn by area or distance instead of
+    /// by sampling is off by a part of one pixel's coverage (measured
+    /// with Mesa llvmpipe: at most 41 levels in any class of input); more
+    /// than this is a shape drawn where the reference draws none, on
+    /// however few pixels, which the share of [`DIFFERING_SHARE`] alone
+    /// would let through.
+    const MAX_DELTA: u8 = 64;
+    /// The hidden window's size in physical pixels: at least the largest
+    /// window composited in the SPEC-9.6.1 checks.
+    const WINDOW: (u32, u32) = (960, 640);
 
     /// How far one frame is from the reference.
     #[derive(Clone, Copy, Default, Debug)]
@@ -40,7 +69,9 @@ mod imp {
         any: u64,
         /// Pixels with a channel off by more than [`CHANNEL_DELTA`].
         over: u64,
+        /// The largest difference of any channel, and the pixel it is at.
         max: u8,
+        max_at: (u32, u32),
     }
 
     impl Diff {
@@ -50,11 +81,19 @@ mod imp {
                 pixels: u64::from(a.width) * u64::from(a.height),
                 ..Diff::default()
             };
-            for (p, q) in a.data.chunks_exact(4).zip(b.data.chunks_exact(4)) {
+            for (i, (p, q)) in a
+                .data
+                .chunks_exact(4)
+                .zip(b.data.chunks_exact(4))
+                .enumerate()
+            {
                 let m = p.iter().zip(q).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
                 d.any += u64::from(m > 0);
                 d.over += u64::from(m > CHANNEL_DELTA);
-                d.max = d.max.max(m);
+                if m > d.max {
+                    d.max = m;
+                    d.max_at = (i as u32 % a.width, i as u32 / a.width);
+                }
             }
             d
         }
@@ -67,7 +106,10 @@ mod imp {
             self.pixels += o.pixels;
             self.any += o.any;
             self.over += o.over;
-            self.max = self.max.max(o.max);
+            if o.max > self.max {
+                self.max = o.max;
+                self.max_at = o.max_at;
+            }
         }
     }
 
@@ -77,6 +119,8 @@ mod imp {
         sum: Diff,
         worst: Diff,
         worst_what: String,
+        /// The frame the largest difference is in.
+        max_what: String,
         frames: usize,
         gpu_frames: usize,
         instances: usize,
@@ -85,6 +129,9 @@ mod imp {
 
     impl Class {
         fn add(&mut self, d: Diff, what: String, gpu: bool, stats: vy_render::gl::GlStats) {
+            if d.max > self.sum.max {
+                self.max_what = what.clone();
+            }
             self.sum.add(&d);
             if d.share() >= self.worst.share() {
                 self.worst = d;
@@ -99,12 +146,14 @@ mod imp {
         fn line(&self, name: &str) -> String {
             let pct = |n: u64, d: &Diff| n as f64 / d.pixels.max(1) as f64 * 100.0;
             format!(
-                "{name:<10} {:>4} frames ({} on GL): {:.3} % of pixels differ at all, {:.3} % by more than {CHANNEL_DELTA}, max {}; worst frame {:.3} % ({}); {} instances, {} draws in all",
+                "{name:<10} {:>4} frames ({} on GL): {:.3} % of pixels differ at all, {:.3} % by more than {CHANNEL_DELTA}, max {} at {:?} of {}; worst frame {:.3} % ({}); {} instances, {} draws in all",
                 self.frames,
                 self.gpu_frames,
                 pct(self.sum.any, &self.sum),
                 pct(self.sum.over, &self.sum),
                 self.sum.max,
+                self.sum.max_at,
+                self.max_what,
                 self.worst.share() * 100.0,
                 self.worst_what,
                 self.instances,
@@ -279,6 +328,45 @@ mod imp {
         dl.bytes().to_vec()
     }
 
+    /// Thin lines the way a page draws a mesh (`rymd`): triangles with
+    /// sharp corners, each filled and then stroked in its own colour, and
+    /// open polylines, all with one stroke width, on a dark ground.
+    fn stroke_list(g: &mut Gen, w: f32, h: f32, stroke: f32) -> Vec<u8> {
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.rect(0.0, 0.0, w, h, 0.0, 0x0609_13FF).unwrap();
+        for _ in 0..14 {
+            let color = g.color() | 0xFF;
+            let (ax, ay) = (g.coord(w), g.coord(h));
+            // A long thin triangle: its far corner is sharp.
+            let (bx, by) = (g.coord(w), g.coord(h));
+            let (cx, cy) = (bx + g.length(9.0) - 4.0, by + g.length(9.0) - 4.0);
+            let triangle = [
+                PathCmd::MoveTo(ax, ay),
+                PathCmd::LineTo(bx, by),
+                PathCmd::LineTo(cx, cy),
+                PathCmd::Close,
+            ];
+            dl.path(color, 0.0, &triangle).unwrap();
+            dl.path(color, stroke, &triangle).unwrap();
+        }
+        for _ in 0..6 {
+            let (x, y) = (g.coord(w), g.coord(h));
+            let line = [
+                PathCmd::MoveTo(x, y),
+                PathCmd::LineTo(x + g.length(60.0), y + g.length(3.0)),
+                PathCmd::LineTo(x + g.length(8.0), y + g.length(2.0)),
+                PathCmd::QuadTo {
+                    ctrl: (x + 20.0, y + 30.0),
+                    to: (x + g.length(40.0), y + g.length(40.0)),
+                },
+            ];
+            dl.path(g.color(), stroke, &line).unwrap();
+        }
+        dl.end().unwrap();
+        dl.bytes().to_vec()
+    }
+
     /// A 9 × 7 picture with every kind of alpha, decoded as resource 1.
     fn picture() -> ImageCache {
         let mut img = RgbaImage::new(9, 7);
@@ -314,14 +402,629 @@ mod imp {
         steps
     }
 
+    /// Physical pixels `(left, top, width, height)`.
+    type Area = (i64, i64, i64, i64);
+
+    fn inside(a: Area, x: u32, y: u32) -> bool {
+        let (x, y) = (i64::from(x), i64::from(y));
+        x >= a.0 && y >= a.1 && x < a.0 + a.2 && y < a.1 + a.3
+    }
+
+    fn pixel(img: &RgbaImage, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * img.width + x) * 4) as usize;
+        [
+            img.data[i],
+            img.data[i + 1],
+            img.data[i + 2],
+            img.data[i + 3],
+        ]
+    }
+
+    /// `area` of `img`, cut to the image.
+    fn crop(img: &RgbaImage, area: Area) -> RgbaImage {
+        let x0 = area.0.clamp(0, i64::from(img.width)) as u32;
+        let y0 = area.1.clamp(0, i64::from(img.height)) as u32;
+        let x1 = (area.0 + area.2).clamp(0, i64::from(img.width)) as u32;
+        let y1 = (area.1 + area.3).clamp(0, i64::from(img.height)) as u32;
+        let mut out = RgbaImage::new((x1 - x0).max(1), (y1 - y0).max(1));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let o = (((y - y0) * out.width + (x - x0)) * 4) as usize;
+                out.data[o..o + 4].copy_from_slice(&pixel(img, x, y));
+            }
+        }
+        out
+    }
+
+    /// The window as `present` left it. The window has no transparency:
+    /// its alpha is read as opaque.
+    fn window(ctx: &GlContext, w: u32, h: u32) -> RgbaImage {
+        let mut img = ctx.raster.read_window(&ctx.gl, w, h);
+        for p in img.data.chunks_exact_mut(4) {
+            p[3] = 255;
+        }
+        img
+    }
+
+    /// A premultiplied frame pixel over an opaque one, as the window blends.
+    fn over(top: [u8; 4], under: [u8; 4]) -> [u8; 3] {
+        let a = u32::from(top[3]);
+        let ch = |i: usize| {
+            ((u32::from(top[i]) * 255 + u32::from(under[i]) * (255 - a) + 127) / 255).min(255) as u8
+        };
+        [ch(0), ch(1), ch(2)]
+    }
+
+    /// SPEC-9.6.1 (granskning 0011:2): `GlRaster::present` itself. A page
+    /// canvas larger than the window, placed so that it reaches past the
+    /// page area on every side, under a frame whose every pixel is known:
+    /// opaque chrome around the page area, one translucent strip of chrome
+    /// (where a page that was not cut to its area would show through), a
+    /// transparent page area and a translucent overlay inside it. Read
+    /// back, the chrome is the frame's bytes, the translucent chrome is
+    /// over white and never over the page, the page area is the page's own
+    /// pixels, and the overlay is blended over them. Then the same with
+    /// only some rows of the frame sent again, and without a page.
+    fn presents_the_page_inside_its_area(
+        ctx: &mut GlContext,
+        failures: &mut Vec<String>,
+    ) -> Result<String, String> {
+        let (w, h) = (640u32, 480u32);
+        let clip: Area = (40, 60, 500, 300);
+        let at = (-20i64, -30i64);
+        let overlay: Area = (120, 140, 200, 60);
+        let strip: Area = (0, 400, 640, 16);
+        let chrome = |x: u32, y: u32, salt: u32| -> [u8; 4] {
+            if inside(overlay, x, y) {
+                [0, 20, 100, 128]
+            } else if inside(clip, x, y) {
+                [0, 0, 0, 0]
+            } else if inside(strip, x, y) {
+                [60, 30, 0, 128]
+            } else {
+                [
+                    (x * 7 + y * 3 + salt) as u8,
+                    (x ^ y) as u8,
+                    (x + y * 5) as u8,
+                    255,
+                ]
+            }
+        };
+        let frame = |salt: u32| {
+            let mut img = RgbaImage::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    img.data[i..i + 4].copy_from_slice(&chrome(x, y, salt));
+                }
+            }
+            img
+        };
+        // The page: magenta to every edge of a canvas larger than the
+        // window, with shapes and text on it.
+        let (pw, ph) = (700u32, 560u32);
+        let mut t = TextEngine::new();
+        let style = t
+            .style(font::SANS, 15.0, weight::NORMAL, 0x1020_30FF)
+            .unwrap();
+        let mut dl = DisplayList::new();
+        dl.begin().unwrap();
+        dl.rect(-50.0, -50.0, 900.0, 800.0, 0.0, 0xFF00_FFFF)
+            .unwrap();
+        dl.rect(30.5, 40.25, 300.0, 200.0, 12.0, 0x2060_A0C0)
+            .unwrap();
+        dl.rect(500.0, 300.0, 400.0, 400.0, 0.0, 0x00C0_40FF)
+            .unwrap();
+        dl.text(70.0, 110.0, 0.0, style, "sidan ritar hit".as_bytes())
+            .unwrap();
+        dl.end().unwrap();
+        let images = ImageCache::empty(0);
+        let mut r = Renderer::new(RasterPath::Fast);
+        r.render_gl(
+            &ctx.gl,
+            &mut ctx.raster,
+            dl.bytes(),
+            pw,
+            ph,
+            1.0,
+            &mut t,
+            &images,
+        )
+        .map_err(|e| e.to_string())?;
+        let page = ctx.raster.read_page(&ctx.gl).ok_or("no page")?;
+        let place = Some(PageAt {
+            x: at.0,
+            y: at.1,
+            clip,
+        });
+        let mut counts = [0u64; 4];
+        let mut check = |ctx: &mut GlContext,
+                         f: &RgbaImage,
+                         changed: Option<(u32, u32)>,
+                         place: Option<PageAt>,
+                         what: &str|
+         -> Result<(), String> {
+            ctx.raster
+                .present(&ctx.gl, f, changed, place)
+                .map_err(|e| e.to_string())?;
+            let got = window(ctx, w, h);
+            let mut bad = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let top = pixel(f, x, y);
+                    let g = pixel(&got, x, y);
+                    let in_area = place.is_some() && inside(clip, x, y);
+                    let under = if in_area {
+                        pixel(
+                            &page,
+                            (i64::from(x) - at.0) as u32,
+                            (i64::from(y) - at.1) as u32,
+                        )
+                    } else {
+                        [255, 255, 255, 255]
+                    };
+                    let want = over(top, under);
+                    // What is opaque, and what is fully transparent, is
+                    // exact; a blend may round one level either way.
+                    let slack = u8::from(top[3] != 0 && top[3] != 255);
+                    let ok = (0..3).all(|i| g[i].abs_diff(want[i]) <= slack);
+                    counts[match (in_area, top[3]) {
+                        (false, 255) => 0,
+                        (false, _) => 1,
+                        (true, 0) => 2,
+                        (true, _) => 3,
+                    }] += 1;
+                    if !ok {
+                        bad.push(format!("({x}, {y}): {g:?}, want {want:?}"));
+                    }
+                }
+            }
+            if !bad.is_empty() {
+                failures.push(format!(
+                    "present, {what}: {} pixels are not the composition's, the first {}",
+                    bad.len(),
+                    bad[0]
+                ));
+            }
+            Ok(())
+        };
+        let first = frame(0);
+        check(ctx, &first, None, place, "a page larger than its area")?;
+        // Only rows 8..24 and 150..170 of the frame change and are sent.
+        let mut second = first.clone();
+        let other = frame(91);
+        let row = w as usize * 4;
+        for (y0, y1) in [(8usize, 24usize), (150, 170)] {
+            second.data[y0 * row..y1 * row].copy_from_slice(&other.data[y0 * row..y1 * row]);
+        }
+        check(ctx, &second, Some((8, 170)), place, "changed rows only")?;
+        check(ctx, &second, None, None, "no page")?;
+        Ok(format!(
+            "present    {w}x{h}, page {pw}x{ph} at {at:?} cut to {clip:?}, three frames: {} chrome pixels byte for byte, {} of translucent chrome and of the area without a page over white, {} page pixels exact, {} overlay pixels within 1",
+            counts[0], counts[1], counts[2], counts[3]
+        ))
+    }
+
+    /// The page area of `shell` in physical pixels, as its layout has it.
+    fn page_area(shell: &Shell, scale: f32) -> Area {
+        let p = shell.layout().page;
+        (
+            (p.x * scale).round() as i64,
+            (p.y * scale).round() as i64,
+            (p.w * scale).round() as i64,
+            (p.h * scale).round() as i64,
+        )
+    }
+
+    /// Composite `shell`'s window with GL, as its window would with what
+    /// it knows of the page framebuffer in `page`, and read it back.
+    fn composed(
+        ctx: &mut GlContext,
+        shell: &mut Shell,
+        page: &mut PageState,
+        what: &str,
+    ) -> Result<RgbaImage, String> {
+        shell.set_page_layer(true);
+        let (w, h) = (shell.frame().width, shell.frame().height);
+        // Every row of the frame is sent: this is not the frame the
+        // context composited last.
+        ctx.compose(shell, Some((0, h)), page)
+            .map_err(|e| format!("{what}: {e}"))?;
+        Ok(window(ctx, w, h))
+    }
+
+    /// Composite `shell`'s window with GL and on the CPU and compare:
+    /// outside the page area the two are the same bytes; inside it they
+    /// are within the tolerance of SPEC-11.3.2.
+    fn compare_window(
+        ctx: &mut GlContext,
+        shell: &mut Shell,
+        page: &mut PageState,
+        scale: f32,
+        what: &str,
+        failures: &mut Vec<String>,
+    ) -> Result<(Diff, u64), String> {
+        let got = composed(ctx, shell, page, what)?;
+        let (w, h) = (got.width, got.height);
+        // The same state composited on the CPU, with the reference.
+        shell.set_page_layer(false);
+        let want = shell.frame().clone();
+        shell.set_page_layer(true);
+        let area = page_area(shell, scale);
+        let mut chrome = 0u64;
+        let mut bad = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                if inside(area, x, y) {
+                    continue;
+                }
+                chrome += 1;
+                let (g, c) = (pixel(&got, x, y), pixel(&want, x, y));
+                if g[..3] != c[..3] {
+                    bad.push(format!("({x}, {y}): {g:?}, the chrome's {c:?}"));
+                }
+            }
+        }
+        if !bad.is_empty() {
+            failures.push(format!(
+                "{what}: {} pixels outside the page area {area:?} are not the chrome's, the first {}",
+                bad.len(),
+                bad[0]
+            ));
+        }
+        let d = Diff::of(&crop(&got, area), &crop(&want, area));
+        if d.share() > DIFFERING_SHARE {
+            failures.push(format!(
+                "{what}: {:.3} % of the page area differs by more than {CHANNEL_DELTA} (max {})",
+                d.share() * 100.0,
+                d.max
+            ));
+        }
+        if d.max > MAX_DELTA {
+            failures.push(format!(
+                "{what}: a pixel of the page area is {} levels off, more than {MAX_DELTA}",
+                d.max
+            ));
+        }
+        Ok((d, chrome))
+    }
+
+    /// A module that paints one colour (`rgba`, opaque) from far outside
+    /// its canvas to far outside it, as `<name>.wasm` in `dir`.
+    fn solid_page(dir: &Path, name: &str, rgba: u32) -> Result<Source, String> {
+        let wasm = wat::parse_str(format!(
+            r#"(module
+                (import "vy" "dl_begin" (func $dl_begin (result i32)))
+                (import "vy" "dl_end" (func $dl_end (result i32)))
+                (import "vy" "dl_rect" (func $dl_rect (param f32 f32 f32 f32 f32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32)
+                    (drop (call $dl_begin))
+                    (drop (call $dl_rect (f32.const -10000) (f32.const -10000) (f32.const 20000) (f32.const 20000) (f32.const 0) (i32.const {})))
+                    (drop (call $dl_end))
+                    i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+            rgba as i32
+        ))
+        .map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{name}.wasm"));
+        std::fs::write(&path, wasm).map_err(|e| e.to_string())?;
+        Ok(Source::File { path, draft: None })
+    }
+
+    /// How many pixels of `area` in `img` are exactly `rgb`.
+    fn count(img: &RgbaImage, area: Area, rgb: [u8; 3]) -> u64 {
+        let mut n = 0;
+        for y in 0..img.height {
+            for x in 0..img.width {
+                n += u64::from(inside(area, x, y) && pixel(img, x, y)[..3] == rgb);
+            }
+        }
+        n
+    }
+
+    /// SPEC-9.6.1, SPEC-11.3.2 (granskning 0011:3): a page whose display
+    /// list the reference refuses shows no page in the GL window, as in
+    /// the CPU window, and never the picture the framebuffer still holds
+    /// of another tab. A red page and a blue page in two tabs; while the
+    /// red one is shown (and is what the page framebuffer holds), the
+    /// blue tab's process sends a list that does not decode; the blue tab
+    /// is switched to. Its area is then empty, twice in a row (the second
+    /// composition is of the same page version), nothing red is under
+    /// the blue tab's address, the window is the CPU composition's, and
+    /// the tab's log says why. Loaded again, the blue page is shown.
+    fn shows_no_page_for_a_refused_list(
+        ctx: &mut GlContext,
+        failures: &mut Vec<String>,
+    ) -> Result<String, String> {
+        use vy_shell::ipc::ToShell;
+        use vy_shell::process::Inbound;
+        use vy_shell::shell::Incoming;
+        const RED: [u8; 3] = [255, 0, 0];
+        const BLUE: [u8; 3] = [0, 0, 255];
+        const WHITE: [u8; 3] = [255, 255, 255];
+        let timeout = std::time::Duration::from_secs(60);
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_vy-shell"));
+        let dir = std::env::temp_dir().join(format!("vy-gl-refused-{}", std::process::id()));
+        let mut shell = headless_shell(Some(exe), 640.0, 480.0, 1.0).map_err(|e| e.to_string())?;
+        let mut page = PageState::default();
+        let red = shell.open_tab(Some(solid_page(&dir, "red", 0xFF00_00FF)?));
+        settle(&mut shell, 2, timeout)?;
+        let blue = shell.open_tab(Some(solid_page(&dir, "blue", 0x0000_FFFF)?));
+        settle(&mut shell, 2, timeout)?;
+        let area = page_area(&shell, 1.0);
+        let all = (area.2 * area.3) as u64;
+        let expect = |got: &RgbaImage, rgb: [u8; 3], what: &str, failures: &mut Vec<String>| {
+            let (r, b, w) = (
+                count(got, area, RED),
+                count(got, area, BLUE),
+                count(got, area, WHITE),
+            );
+            if count(got, area, rgb) != all {
+                failures.push(format!(
+                    "{what}: of {all} pixels in the page area {r} are red, {b} blue, {w} white"
+                ));
+            }
+        };
+        let got = composed(ctx, &mut shell, &mut page, "the blue tab")?;
+        expect(&got, BLUE, "the blue tab", failures);
+        shell.switch_tab(false);
+        settle(&mut shell, 2, timeout)?;
+        let got = composed(ctx, &mut shell, &mut page, "the red tab")?;
+        expect(&got, RED, "the red tab", failures);
+        if shell.active_tab() != Some(red) || page.shown().is_none() {
+            return Err("the red tab is not the one shown".into());
+        }
+
+        // The blue tab's process, in the background, sends a list that
+        // does not decode; then the user switches to the tab.
+        let generation = shell.tab_generation(blue);
+        shell.handle(Incoming::Tab(
+            blue,
+            generation,
+            Inbound::Message(ToShell::Frame {
+                // No opcode 0x7E (appendix C), and no END.
+                display_list: vec![0x7E, 0x01, 0x02, 0x03],
+                styles: Vec::new(),
+                wants_more: false,
+                over_budget: false,
+            }),
+        ));
+        shell.switch_tab(true);
+        if shell.active_tab() != Some(blue) {
+            return Err("the blue tab is not active".into());
+        }
+        for round in ["first", "second"] {
+            let what = format!("a refused list after a tab switch, {round} composition");
+            let got = composed(ctx, &mut shell, &mut page, &what)?;
+            expect(&got, WHITE, &what, failures);
+            if page.shown().is_some() {
+                failures.push(format!("{what}: the framebuffer's picture counts as shown"));
+            }
+        }
+        let (d, _) = compare_window(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "a refused list against the CPU window",
+            failures,
+        )?;
+        if d.any != 0 {
+            failures.push(format!(
+                "a refused list: the page area is not the CPU window's: {d:?}"
+            ));
+        }
+        if !shell
+            .tab_logs(blue)
+            .iter()
+            .any(|l| l.contains("display list not rendered"))
+        {
+            failures.push(format!(
+                "a refused list is not in the tab's log: {:?}",
+                shell.tab_logs(blue)
+            ));
+        }
+        // The page loaded again draws, and is shown.
+        shell.reload();
+        settle(&mut shell, 2, timeout)?;
+        let got = composed(ctx, &mut shell, &mut page, "the blue tab reloaded")?;
+        expect(&got, BLUE, "the blue tab reloaded", failures);
+        if page.shown().is_none() {
+            failures.push("the reloaded page does not count as shown".into());
+        }
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(format!(
+            "refused    a list that does not decode, after a tab switch: no page in the {all} pixels of the page area (not the other tab's), twice; shown again after a reload"
+        ))
+    }
+
+    /// SPEC-9.6.1, SPEC-11.3.2 (granskning 0011:2): the GL window of a
+    /// real shell, through `GlContext::compose` as `window.rs` calls it. A
+    /// reference page; the same with the devtools panel open, with an op
+    /// outlined, and zoomed (the canvas is then not the page area's
+    /// size); a second window at scale 1.5; and a page that paints red
+    /// from far outside its canvas to far outside it. Every time the
+    /// pixels outside the page area are the CPU composition's bytes, and
+    /// the page area is within the tolerance of it; the red page is red
+    /// to the edge of its area and nowhere past it.
+    fn composes_the_shell_window(
+        ctx: &mut GlContext,
+        failures: &mut Vec<String>,
+    ) -> Result<String, String> {
+        use vy_shell::devtools::Command;
+        let timeout = std::time::Duration::from_secs(60);
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_vy-shell"));
+        let local = |name: &str| Source::File {
+            path: root().join(format!("target/wasm/{name}.wasm")),
+            draft: Some(root().join(format!("conformance/manifests/{name}.json"))),
+        };
+        let mut sum = Diff::default();
+        let mut chrome = 0u64;
+        let mut cases = 0;
+        let mut step = |ctx: &mut GlContext,
+                        shell: &mut Shell,
+                        page: &mut PageState,
+                        scale: f32,
+                        what: &str,
+                        failures: &mut Vec<String>|
+         -> Result<Diff, String> {
+            settle(shell, 2, timeout)?;
+            let (d, c) = compare_window(ctx, shell, page, scale, what, failures)?;
+            if page.shown().is_none() {
+                failures.push(format!("{what}: no page was drawn"));
+            }
+            sum.add(&d);
+            chrome += c;
+            cases += 1;
+            Ok(d)
+        };
+
+        let mut shell =
+            headless_shell(Some(exe.clone()), 900.0, 600.0, 1.0).map_err(|e| e.to_string())?;
+        // What the window keeps of the page framebuffer, for this shell.
+        let mut page = PageState::default();
+        shell.open_tab(Some(local("shop")));
+        step(ctx, &mut shell, &mut page, 1.0, "shop 900x600@1", failures)?;
+        let whole = page_area(&shell, 1.0);
+        shell.toggle_devtools();
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "shop, devtools open",
+            failures,
+        )?;
+        let narrow = page_area(&shell, 1.0);
+        if narrow.2 >= whole.2 || narrow.0 + narrow.2 >= 900 {
+            failures.push(format!(
+                "the devtools panel did not narrow the page area: {whole:?}, then {narrow:?}"
+            ));
+        }
+        shell.devtools_run(Command::SelectOp(2));
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "shop, devtools, an op outlined",
+            failures,
+        )?;
+        shell.zoom_step(1);
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "shop, devtools, zoom 110 %",
+            failures,
+        )?;
+        shell.zoom_step(1);
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "shop, devtools, zoom 125 %",
+            failures,
+        )?;
+
+        // A page that paints everywhere it can name.
+        let dir = std::env::temp_dir().join(format!("vy-gl-compose-{}", std::process::id()));
+        let tab = shell.open_tab(Some(solid_page(&dir, "red", 0xFF00_00FF)?));
+        let d = step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.0,
+            "a page painting past its canvas",
+            failures,
+        )?;
+        if shell.tab_status(tab) != "running" {
+            failures.push(format!("the red page: {}", shell.tab_status(tab)));
+        }
+        if d.any != 0 {
+            failures.push(format!("the red page's area is not the reference's: {d:?}"));
+        }
+        let area = page_area(&shell, 1.0);
+        let got = window(ctx, 900, 600);
+        let mut red_inside = 0u64;
+        let mut red_outside = 0u64;
+        for y in 0..600 {
+            for x in 0..900 {
+                let is_red = pixel(&got, x, y)[..3] == [255, 0, 0];
+                red_inside += u64::from(is_red && inside(area, x, y));
+                red_outside += u64::from(is_red && !inside(area, x, y));
+            }
+        }
+        if red_inside != (area.2 * area.3) as u64 || red_outside != 0 {
+            failures.push(format!(
+                "the red page: {red_inside} red pixels in its area of {}, {red_outside} outside it",
+                area.2 * area.3
+            ));
+        }
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Another window, at scale 1.5.
+        let mut shell = headless_shell(Some(exe), 600.0, 400.0, 1.5).map_err(|e| e.to_string())?;
+        // What the window keeps of the page framebuffer, for this shell.
+        let mut page = PageState::default();
+        shell.open_tab(Some(local("text")));
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.5,
+            "text 600x400@1.5",
+            failures,
+        )?;
+        shell.toggle_devtools();
+        step(
+            ctx,
+            &mut shell,
+            &mut page,
+            1.5,
+            "text @1.5, devtools open",
+            failures,
+        )?;
+        shell.shutdown();
+        Ok(format!(
+            "window     {cases} compositions of a shell (devtools, zoom, scale 1.5, a page painting past its canvas): {chrome} chrome pixels byte for byte the CPU composition's; page area {:.3} % of pixels differ at all, {:.3} % by more than {CHANNEL_DELTA}, max {}",
+            sum.any as f64 / sum.pixels.max(1) as f64 * 100.0,
+            sum.share() * 100.0,
+            sum.max
+        ))
+    }
+
     struct Outcome {
         lines: Vec<String>,
         failures: Vec<String>,
     }
 
     fn run(ctx: &mut GlContext) -> Result<Outcome, String> {
-        let mut lines = vec![format!("GL: {}", ctx.raster.version())];
+        let mut lines = vec![format!(
+            "GL: {}; a context lost to a graphics reset is {}",
+            ctx.raster.version(),
+            if ctx.notices_loss() {
+                "noticed (reset notification)"
+            } else {
+                "not noticed unless GL reports an error"
+            }
+        )];
         let mut failures = Vec::new();
+        // Granskning 0011:5: the context this test draws on is whole, and
+        // asking says so.
+        if let Err(e) = ctx.alive() {
+            failures.push(format!("a live context is reported lost: {e}"));
+        }
         let mut budget = None;
         let mut check = |class: &str, d: &Diff, what: &str| {
             if d.share() > DIFFERING_SHARE {
@@ -329,6 +1032,12 @@ mod imp {
                     "{class} {what}: {:.3} % of pixels differ by more than {CHANNEL_DELTA} (max {})",
                     d.share() * 100.0,
                     d.max
+                ));
+            }
+            if d.max > MAX_DELTA {
+                failures.push(format!(
+                    "{class} {what}: the pixel at {:?} is {} levels off, more than {MAX_DELTA}",
+                    d.max_at, d.max
                 ));
             }
         };
@@ -419,6 +1128,26 @@ mod imp {
         }
         lines.push(random.line("random"));
 
+        // Thin strokes with sharp corners (granskning 0011:4): the
+        // reference draws a stroke at most a pixel wide as a hairline,
+        // without joins, and the GL path must draw the same line. Widths
+        // from a quarter of a pixel to a few, at three scales.
+        let mut strokes = Class::default();
+        let mut g = Gen(0x0BAD_5EED_1357_9BDF);
+        let none = ImageCache::empty(0);
+        let mut r = Renderer::new(RasterPath::Fast);
+        for case in 0..45 {
+            let scale = [1.0f32, 1.5, 2.0][case % 3];
+            let stroke = [1.0f32, 0.5, 0.25, 1.5, 2.2][(case / 3) % 5];
+            let (w, h) = (300u32, 220u32);
+            let list = stroke_list(&mut g, w as f32 / scale, h as f32 / scale, stroke);
+            let (d, gpu, stats) = compare(ctx, &mut r, &list, w, h, scale, &mut t, &none)?;
+            let what = format!("case {case} stroke {stroke}@{scale}");
+            check("strokes", &d, &what);
+            strokes.add(d, what, gpu, stats);
+        }
+        lines.push(strokes.line("strokes"));
+
         // Every reference page, frame by frame.
         let dir = root().join("target/wasm");
         let mut modules: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -463,6 +1192,14 @@ mod imp {
         }
         lines.push(pages.line("pages"));
         failures.extend(budget);
+
+        // The window's composition (SPEC-9.6.1).
+        lines.push(presents_the_page_inside_its_area(ctx, &mut failures)?);
+        lines.push(composes_the_shell_window(ctx, &mut failures)?);
+        lines.push(shows_no_page_for_a_refused_list(ctx, &mut failures)?);
+        if let Err(e) = ctx.alive() {
+            failures.push(format!("after all of it the context is reported lost: {e}"));
+        }
         Ok(Outcome { lines, failures })
     }
 
@@ -486,8 +1223,10 @@ mod imp {
             if self.outcome.is_some() {
                 return;
             }
+            // Large enough for every window composited here.
             let attrs = WindowAttributes::default()
                 .with_visible(false)
+                .with_inner_size(winit::dpi::PhysicalSize::new(WINDOW.0, WINDOW.1))
                 .with_title("vy gl test");
             self.outcome = Some(match vy_shell::gl::open(el, attrs) {
                 Ok((window, mut ctx)) => {

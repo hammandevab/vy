@@ -1141,6 +1141,509 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
+    /// A page as a signed package on a loopback server of its own, with
+    /// its key at `/.well-known/vy-key`: fetched, it is trusted (loopback
+    /// needs no DNS record, SPEC-7.4.5), so it gets the `storage` it asks
+    /// for, and it can be loaded again. Returns its address and origin.
+    fn signed_site(wasm: Vec<u8>, name: &str) -> (String, String) {
+        use std::io::{BufRead, BufReader, Write};
+        let draft = Draft::from_json(&format!(
+            r##"{{"abi": "1.0", "name": "{name}", "summary": "En testsida som sparar.",
+                "lang": "sv", "memory_max": 16, "published": "2026-11-13",
+                "capabilities": {{"storage": {{"quota_kb": 64}}}},
+                "fallback": "# {name}\n\nReservtexten."}}"##
+        ))
+        .unwrap();
+        let key = SigningKey::from_seed(&[11; 32]);
+        let mut manifest = draft.finish(&wasm, &[]);
+        manifest.sign(&key);
+        let package = vy_manifest::Package {
+            manifest,
+            module: wasm,
+            resources: Vec::new(),
+        }
+        .pack()
+        .unwrap();
+        let key_file = vy_manifest::key_file(&[key.public()]);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream);
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let path = first.split(' ').nth(1).unwrap_or("").to_string();
+                let (status, media, body) = match path.as_str() {
+                    "/" => ("200 OK", "application/vy-package+zstd", package.clone()),
+                    "/.well-known/vy-key" => {
+                        ("200 OK", "text/plain", key_file.clone().into_bytes())
+                    }
+                    _ => ("404 Not Found", "text/plain", Vec::new()),
+                };
+                let mut out = reader.into_inner();
+                let _ = out.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {media}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = out.write_all(&body);
+            }
+        });
+        (
+            format!("vy://127.0.0.1:{port}/"),
+            format!("vy://127.0.0.1:{port}"),
+        )
+    }
+
+    /// A shell that persists as in a window (not headless) to `data`, its
+    /// tabs on threads, without a window.
+    fn persisting_shell(data: &Path) -> crate::shell::Shell {
+        use crate::clipboard::MemoryClipboard;
+        use crate::external::RecordingOpener;
+        use crate::shell::{Config, Shell, Waker};
+        Shell::new(
+            Config {
+                exe: None,
+                data_dir: data.to_path_buf(),
+                headless: false,
+                opener: Box::new(RecordingOpener::default()),
+                clipboard: Box::new(MemoryClipboard::new()),
+                waker: Waker::none(),
+                code_cache: None,
+            },
+            900.0,
+            600.0,
+            1.0,
+        )
+        .unwrap()
+    }
+
+    /// Handle what arrives until every process let go of has ended and
+    /// `done` holds.
+    fn until(shell: &mut crate::shell::Shell, done: impl Fn(&crate::shell::Shell) -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while shell.retiring() > 0 || !done(shell) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out: {} processes still let go of, the active tab {}",
+                shell.retiring(),
+                shell
+                    .active_tab()
+                    .map(|t| shell.tab_status(t))
+                    .unwrap_or_default()
+            );
+            if shell.wants_tick() && !shell.tick_pending() {
+                shell.tick();
+            }
+            if let Ok(m) = shell.inbox().recv_timeout(Duration::from_millis(10)) {
+                shell.handle(m);
+            }
+        }
+        shell.drain();
+    }
+
+    /// SPEC-5.2.9, SPEC-9.5.2 (granskning 0013): the user can clear what a
+    /// page's origin has saved. "Rensa sidans lagring" in the devtools
+    /// panel asks first, with the question capabilities are asked with:
+    /// "Avbryt" leaves everything, "Rensa" counts only once the question
+    /// has been up for `DIALOG_ARM_MS`. Then the origin's file is gone,
+    /// every tab of that origin is loaded again, what their old processes
+    /// answer with on the way out is not saved, and another origin's
+    /// storage and tab are untouched. The page starts from nothing and
+    /// saves again as before. A local file has nothing to clear.
+    #[test]
+    fn spec_5_2_9_the_user_can_clear_a_pages_storage() {
+        use crate::devtools::{Command, Pane};
+        // On every key: `state_put("k", [keycode])`.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "k")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then
+                            (i32.store8 (i32.const 32) (local.get 1))
+                            (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        let data = std::env::temp_dir().join(format!("vy-storage-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let (address_a, origin_a) = signed_site(wasm.clone(), "Sparar A");
+        let (address_b, origin_b) = signed_site(wasm, "Sparar B");
+        let saved = |origin: &str| crate::storage::load(&data.join("storage"), origin);
+        let k = |v: u8| vec![(b"k".to_vec(), vec![v])];
+        let mut shell = persisting_shell(&data);
+        let key = |shell: &mut crate::shell::Shell, code: i32| {
+            shell.key(code, true, 0, false);
+            shell.key(code, false, 0, false);
+        };
+        let click = |shell: &mut crate::shell::Shell, r: crate::chrome::Rect| {
+            shell.pointer_move(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            shell.pointer_button(button::PRIMARY, true);
+            shell.pointer_button(button::PRIMARY, false);
+        };
+        let open = |shell: &mut crate::shell::Shell, address: &str| {
+            let tab = shell.open_tab(Some(Source::parse(address).unwrap()));
+            settle(shell, 1, TIMEOUT).unwrap();
+            assert_eq!(shell.tab_status(tab), "running");
+            assert_eq!(shell.tab_badges(tab), vec![("storage", true)], "trusted");
+            tab
+        };
+
+        // Origin A saves 4, origin B saves 5; a second tab of A holds 6.
+        let a = open(&mut shell, &address_a);
+        key(&mut shell, 0x04);
+        shell.reload();
+        until(&mut shell, |s| s.tab_status(a) == "running");
+        assert_eq!(saved(&origin_a), k(0x04));
+        let b = open(&mut shell, &address_b);
+        key(&mut shell, 0x05);
+        shell.reload();
+        until(&mut shell, |s| s.tab_status(b) == "running");
+        assert_eq!(saved(&origin_b), k(0x05));
+        let a2 = open(&mut shell, &address_a);
+        key(&mut shell, 0x06);
+        assert_eq!(
+            saved(&origin_a),
+            k(0x04),
+            "the second tab's is in its process"
+        );
+
+        // "Rensa sidans lagring" in the panel: a question, nothing done.
+        shell.toggle_devtools();
+        shell.set_devtools_pane(Pane::Studio);
+        let line = shell
+            .devtools_lines()
+            .into_iter()
+            .find(|l| l.command == Some(Command::ClearStorage))
+            .expect("Rensa sidans lagring");
+        assert_eq!(line.text, format!("Rensa sidans lagring ({origin_a})"));
+        assert_eq!(shell.question(), None);
+        shell.devtools_run(Command::ClearStorage);
+        let asked = format!("Rensa allt som {origin_a} har sparat? Det går inte att ångra.");
+        assert_eq!(shell.question().as_deref(), Some(asked.as_str()));
+        shell.frame();
+        let generations = |shell: &crate::shell::Shell| [a, b, a2].map(|t| shell.tab_generation(t));
+        let before = generations(&shell);
+        // "Avbryt": as it was.
+        let at = shell.layout().deny.expect("Avbryt");
+        click(&mut shell, at);
+        assert_eq!(shell.question(), None);
+        assert!(shell.layout().dialog.is_none());
+        assert_eq!((saved(&origin_a), saved(&origin_b)), (k(0x04), k(0x05)));
+        assert_eq!(generations(&shell), before);
+        // "Rensa" at once: too soon to count.
+        shell.devtools_run(Command::ClearStorage);
+        shell.frame();
+        let at = shell.layout().allow.expect("Rensa");
+        click(&mut shell, at);
+        assert_eq!(
+            shell.question().as_deref(),
+            Some(asked.as_str()),
+            "still asked"
+        );
+        assert!(shell
+            .tab_logs(a2)
+            .iter()
+            .any(|l| l.contains("click on Rensa ignored")));
+        assert_eq!(saved(&origin_a), k(0x04));
+        // Once the question has been up for a moment it counts.
+        std::thread::sleep(Duration::from_millis(
+            crate::shell::DIALOG_ARM_MS as u64 + 60,
+        ));
+        let at = shell.layout().allow.expect("Rensa");
+        click(&mut shell, at);
+        assert_eq!(shell.question(), None);
+        assert!(saved(&origin_a).is_empty(), "gone at once");
+        assert_eq!(saved(&origin_b), k(0x05), "another origin's is untouched");
+        let after = generations(&shell);
+        assert_eq!(
+            (after[0], after[1], after[2]),
+            (before[0] + 1, before[1], before[2] + 1),
+            "every tab of the origin is loaded again, and no other"
+        );
+        // Their old processes answer with 4 and 6 on the way out: not saved.
+        until(&mut shell, |s| {
+            s.tab_status(a) == "running" && s.tab_status(a2) == "running"
+        });
+        assert!(saved(&origin_a).is_empty(), "nothing comes back");
+        assert_eq!(saved(&origin_b), k(0x05));
+        assert_eq!(shell.tab_status(b), "running");
+        assert!(shell
+            .devtools_lines()
+            .iter()
+            .any(|l| l.text == format!("Lagringen för {origin_a} rensad; 2 flikar laddas om.")));
+        assert!(shell
+            .tab_logs(a2)
+            .iter()
+            .any(|l| l.contains("cleared at the user's request")));
+
+        // The page starts from nothing and saves again as before.
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        key(&mut shell, 0x07);
+        shell.reload();
+        until(&mut shell, |s| s.tab_status(a2) == "running");
+        assert_eq!(saved(&origin_a), k(0x07));
+
+        // A local file has no origin and nothing saved: nothing to clear.
+        shell.open_tab(Some(local("hello")));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert!(shell
+            .devtools_lines()
+            .iter()
+            .all(|l| l.command != Some(Command::ClearStorage)));
+        shell.ask_clear_storage();
+        assert_eq!(shell.question(), None);
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A page that saves a byte under "k" on every key, and that cannot
+    /// get through `vy_init` once something is saved: it spins there until
+    /// the hard limit (SPEC-5.3.3). What `skriv` and `kalkyl` did on their
+    /// own saved data (granskning 0013).
+    fn page_stuck_on_its_storage() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+                (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+                (import "vy" "state_get" (func $get (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "k")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
+                    (if (i32.gt_s
+                            (call $get (i32.const 16) (i32.const 1) (i32.const 64) (i32.const 16))
+                            (i32.const 0))
+                        (then (loop $spin (br $spin))))
+                    i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32)
+                    (if (i32.eq (local.get 0) (i32.const 5))
+                        (then
+                            (i32.store8 (i32.const 32) (local.get 1))
+                            (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 1)))))
+                    i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap()
+    }
+
+    /// SPEC-5.2.9, SPEC-9.5.2: a tab process whose page never started has
+    /// none of the origin's storage, and what it says of storage on its
+    /// way out does not erase what the origin has saved. A page saves,
+    /// and when loaded again cannot get through `vy_init` (the call is
+    /// aborted at the hard limit). Its process, let go of by a reload and
+    /// then by closing the tab, answers its shutdown with an empty
+    /// storage, as a process without a page does: the saved data is still
+    /// there, so the page fails the same way again instead of starting
+    /// from nothing behind the user's back.
+    #[test]
+    fn spec_5_2_9_a_page_that_never_started_does_not_erase_its_storage() {
+        let data = std::env::temp_dir().join(format!("vy-storage-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let (address, origin) = signed_site(page_stuck_on_its_storage(), "Fastnar");
+        let saved = || crate::storage::load(&data.join("storage"), &origin);
+        let kept = vec![(b"k".to_vec(), vec![0x04])];
+        let mut shell = persisting_shell(&data);
+        let answered = |s: &crate::shell::Shell, tab| s.tab_status(tab) != "loading";
+        let tab = shell.open_tab(Some(Source::parse(&address).unwrap()));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        shell.key(0x04, true, 0, false);
+        shell.key(0x04, false, 0, false);
+        // Loaded again, three times over: it never starts, and what it
+        // saved stays.
+        for round in 0..3 {
+            shell.reload();
+            until(&mut shell, |s| answered(s, tab));
+            let status = shell.tab_status(tab);
+            assert!(
+                status.contains("call aborted after"),
+                "round {round}: the page starts from what it saved and fails: {status}"
+            );
+            assert_eq!(saved(), kept, "round {round}");
+        }
+        // The tab closed while its page is down: the same.
+        shell.open_tab(None);
+        shell.close_tab(tab);
+        until(&mut shell, |_| true);
+        assert_eq!(saved(), kept, "after closing the tab");
+        shell.shutdown();
+        assert_eq!(saved(), kept, "after closing the window");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SPEC-5.3.3, SPEC-5.2.9 (granskning 0013, 0015): a page stopped by
+    /// the client's hard limit is told to the user in plain words, with
+    /// the two ways out. A page that cannot get through `vy_init` once it
+    /// has saved something (as `skriv` and `kalkyl` could not) is loaded,
+    /// saves, and is loaded again: its init is aborted at the hard limit.
+    /// The tab then shows that the page stopped, what that means and what
+    /// the runtime said, with "Ladda om" and "Rensa sidans lagring", not
+    /// the manifest's fallback as for a rejected module. "Ladda om" loads
+    /// it again (and it stops again); "Rensa sidans lagring" asks, and
+    /// once answered the page runs. A frame that never returns gets the
+    /// same view; a local file is offered only "Ladda om"; a trap is
+    /// shown with its reason and no talk of time.
+    #[test]
+    fn spec_5_3_3_a_page_stopped_at_the_hard_limit_says_so_and_offers_ways_out() {
+        let sticks = page_stuck_on_its_storage();
+        let data = std::env::temp_dir().join(format!("vy-stopped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let (address, origin) = signed_site(sticks, "Fastnar");
+        let saved = || crate::storage::load(&data.join("storage"), &origin);
+        let mut shell = persisting_shell(&data);
+        let shown = |shell: &mut crate::shell::Shell| texts(&shell.chrome_display_list());
+        let has = |texts: &[String], part: &str| texts.iter().any(|t| t.contains(part));
+        let click = |shell: &mut crate::shell::Shell, r: crate::chrome::Rect| {
+            shell.pointer_move(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            shell.pointer_button(button::PRIMARY, true);
+            shell.pointer_button(button::PRIMARY, false);
+        };
+        let stopped = |s: &crate::shell::Shell, tab| s.tab_status(tab).starts_with("stopped");
+
+        let tab = shell.open_tab(Some(Source::parse(&address).unwrap()));
+        settle(&mut shell, 1, TIMEOUT).unwrap();
+        assert_eq!(shell.tab_status(tab), "running");
+        assert!(!has(&shown(&mut shell), "Sidan stannade"));
+        shell.key(0x04, true, 0, false);
+        shell.key(0x04, false, 0, false);
+        shell.reload();
+        until(&mut shell, |s| stopped(s, tab));
+        assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])]);
+        assert!(
+            shell.tab_status(tab).contains("call aborted after"),
+            "{}",
+            shell.tab_status(tab)
+        );
+
+        // What the user sees: what happened, what it means, two ways out.
+        let view = shown(&mut shell);
+        for part in [
+            "Sidan stannade",
+            "Sidan tog för lång tid på sig och avbröts",
+            "call aborted after",
+            "Ladda om",
+            "Rensa sidans lagring",
+            "Andra flikar påverkas inte.",
+        ] {
+            assert!(has(&view, part), "{part}: {view:?}");
+        }
+        for not in ["Reservtexten", "Modulen avvisades"] {
+            assert!(!has(&view, not), "{not}: {view:?}");
+        }
+        shell.frame();
+        let page = shell.layout().page;
+        let (reload, clear) = (
+            shell.layout().reload_page.expect("Ladda om"),
+            shell.layout().clear_storage.expect("Rensa sidans lagring"),
+        );
+        for r in [reload, clear] {
+            assert!(
+                r.x >= page.x && r.right() <= page.right() && r.y > page.y,
+                "{r:?}"
+            );
+        }
+        assert!(clear.x > reload.right());
+
+        // "Ladda om": loaded again, and stuck again on what it saved.
+        let generation = shell.tab_generation(tab);
+        click(&mut shell, reload);
+        assert_eq!(shell.tab_generation(tab), generation + 1);
+        until(&mut shell, |s| stopped(s, tab));
+        assert_eq!(saved(), vec![(b"k".to_vec(), vec![0x04])]);
+
+        // "Rensa sidans lagring": asked, answered, and the page runs.
+        shell.frame();
+        let clear = shell.layout().clear_storage.expect("still offered");
+        click(&mut shell, clear);
+        assert_eq!(
+            shell.question(),
+            Some(format!(
+                "Rensa allt som {origin} har sparat? Det går inte att ångra."
+            ))
+        );
+        std::thread::sleep(Duration::from_millis(
+            crate::shell::DIALOG_ARM_MS as u64 + 60,
+        ));
+        shell.frame();
+        let yes = shell.layout().allow.expect("Rensa");
+        click(&mut shell, yes);
+        until(&mut shell, |s| s.tab_status(tab) == "running");
+        assert!(saved().is_empty());
+        let view = shown(&mut shell);
+        assert!(!has(&view, "Sidan stannade"), "{view:?}");
+        shell.frame();
+        assert!(shell.layout().reload_page.is_none() && shell.layout().clear_storage.is_none());
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&data);
+
+        // A frame that never returns, and a trap, in local files.
+        let module = |frame: &str| {
+            wat::parse_str(format!(
+                r#"(module
+                    (memory (export "memory") 1)
+                    (func (export "vy_init") (param i32 i32 i32 f32) (result i32) i32.const 0)
+                    (func (export "vy_frame") (param i32) (result i32) {frame} i32.const 0)
+                    (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+                    (func (export "vy_resize") (param i32 i32 f32))
+                    (func (export "vy_suspend") (result i32) i32.const 0)
+                    (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#
+            ))
+            .unwrap()
+        };
+        let dir = std::env::temp_dir().join(format!("vy-stopped-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut shell = headless_shell(None, 800.0, 600.0, 1.0).unwrap();
+        for (name, frame, slow) in [
+            ("spins", "(loop $spin (br $spin))", true),
+            ("traps", "unreachable", false),
+        ] {
+            let path = dir.join(format!("{name}.wasm"));
+            std::fs::write(&path, module(frame)).unwrap();
+            let tab = shell.open_tab(Some(Source::File { path, draft: None }));
+            settle(&mut shell, 2, TIMEOUT).unwrap();
+            assert!(stopped(&shell, tab), "{name}: {}", shell.tab_status(tab));
+            let view = shown(&mut shell);
+            assert!(
+                has(&view, "Sidan stannade") && has(&view, "Ladda om"),
+                "{view:?}"
+            );
+            assert_eq!(has(&view, "tog för lång tid"), slow, "{name}: {view:?}");
+            assert_eq!(has(&view, "module trapped"), !slow, "{name}: {view:?}");
+            assert!(!has(&view, "Rensa sidans lagring"), "no origin: {view:?}");
+            shell.frame();
+            assert!(shell.layout().clear_storage.is_none());
+            let generation = shell.tab_generation(tab);
+            let reload = shell.layout().reload_page.expect("Ladda om");
+            click(&mut shell, reload);
+            assert_eq!(shell.tab_generation(tab), generation + 1, "{name}");
+            settle(&mut shell, 2, TIMEOUT).unwrap();
+            assert!(stopped(&shell, tab));
+        }
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// SPEC-5.2.9, SPEC-9.1.1 (granskning 0006:1): letting tab processes go
     /// never waits on the UI thread, and many let go of together share one
     /// grace period instead of waiting one each. Six tabs whose processes
@@ -2182,7 +2685,11 @@ mod tests {
         let frame = shell.frame().clone();
         assert_eq!((frame.width, frame.height), (800, 600));
         assert!(texts(&chrome_for(
-            crate::chrome::PageView::Stopped("Flikprocessen avslutades."),
+            crate::chrome::PageView::Stopped {
+                reason: "Flikprocessen avslutades.",
+                explanation: None,
+                can_clear: false,
+            },
             "game.wasm"
         ))
         .contains(&"Sidan stannade".to_string()));

@@ -38,7 +38,7 @@ use crate::renderer::Resolved;
 use cosmic_text::{CacheKey, SwashContent, SwashImage};
 use glow::HasContext;
 use std::collections::HashMap;
-use tiny_skia::{FillRule, Mask, PathBuilder, Stroke, Transform};
+use tiny_skia::{Color, FillRule, Mask, Paint, PathBuilder, Pixmap, Stroke, Transform};
 use vy_dl::{Op, PathCmd};
 
 /// Why the GL path did not draw.
@@ -1151,6 +1151,41 @@ impl GlRaster {
         })
     }
 
+    /// The window as composited: the `width` × `height` pixels of the
+    /// default framebuffer that [`GlRaster::present`] draws a frame of
+    /// that size on, read back before they are shown (for the tests of
+    /// `present`; after a swap the content is not defined). The alpha
+    /// read is the framebuffer's own, 255 where it has none.
+    pub fn read_window(&self, gl: &glow::Context, width: u32, height: u32) -> RgbaImage {
+        let (w, h) = (width as usize, height as usize);
+        let mut data = vec![0u8; w * h * 4];
+        // SAFETY: `gl` is current; `data` holds w × h RGBA texels.
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            gl.read_pixels(
+                0,
+                0,
+                w as i32,
+                h as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut data)),
+            );
+        }
+        // GL rows run bottom up; the window's top down.
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            out[y * w * 4..(y + 1) * w * 4]
+                .copy_from_slice(&data[(h - 1 - y) * w * 4..(h - y) * w * 4]);
+        }
+        RgbaImage {
+            width,
+            height,
+            data: out,
+        }
+    }
+
     /// Put a frame drawn on the CPU into the page framebuffer (a frame
     /// the pipeline does not draw, [`GlError::Unsupported`]).
     pub fn upload_page(&mut self, gl: &glow::Context, img: &RgbaImage) -> Result<(), GlError> {
@@ -1321,8 +1356,9 @@ impl PathAtlas {
     }
 
     /// Rasterize a path's coverage over its footprint `fp` with tiny-skia,
-    /// as the reference builds it (a fill, or the stroke's outline
-    /// filled), and place it; `None` when nothing is covered.
+    /// by the call the reference draws it with (`fill_path` for a fill,
+    /// `stroke_path` for a stroke), and place it; `None` when nothing is
+    /// covered.
     fn add(
         &mut self,
         cmds: &[PathCmd],
@@ -1347,22 +1383,38 @@ impl PathAtlas {
             return Ok(None);
         };
         let to_mask = Transform::from_scale(s, s).post_translate(-fp.x0 as f32, -fp.y0 as f32);
-        let outline = if stroke_w > 0.0 {
+        let coverage: Vec<u8> = if stroke_w > 0.0 {
+            // The reference strokes with `Pixmap::stroke_path`, and that
+            // draws a stroke at most a pixel wide as a hairline, without
+            // joins, not as its outline filled: the outline's miter
+            // joins put coverage past a sharp corner where the reference
+            // has none (granskning 0011:4: 133 levels off at the corners
+            // of the triangles of `rymd`, which are filled and then
+            // stroked one pixel wide). So the same call here, in opaque
+            // white on a transparent scratch of the footprint's size: its
+            // alpha is the stroke's coverage, hairline or not.
             let stroke = Stroke {
                 width: stroke_w,
                 ..Stroke::default()
             };
-            path.stroke(&stroke, s)
+            let Some(mut scratch) = Pixmap::new(w as u32, h as u32) else {
+                return Ok(None);
+            };
+            let mut white = Paint::default();
+            white.set_color(Color::WHITE);
+            white.anti_alias = true;
+            scratch.stroke_path(&path, &white, &stroke, to_mask, None);
+            scratch.data().chunks_exact(4).map(|p| p[3]).collect()
         } else {
-            Some(path)
+            let Some(outline) = path.transform(to_mask) else {
+                return Ok(None);
+            };
+            let Some(mut mask) = Mask::new(w as u32, h as u32) else {
+                return Ok(None);
+            };
+            mask.fill_path(&outline, FillRule::Winding, true, Transform::identity());
+            mask.data().to_vec()
         };
-        let Some(outline) = outline.and_then(|p| p.transform(to_mask)) else {
-            return Ok(None);
-        };
-        let Some(mut mask) = Mask::new(w as u32, h as u32) else {
-            return Ok(None);
-        };
-        mask.fill_path(&outline, FillRule::Winding, true, Transform::identity());
         let Some((x, y)) = self.shelves.place(w, h) else {
             return Err(GlError::Unsupported("too many paths"));
         };
@@ -1371,7 +1423,7 @@ impl PathAtlas {
             self.data.resize(need, 0);
         }
         for row in 0..h {
-            let src = &mask.data()[(row * w) as usize..((row + 1) * w) as usize];
+            let src = &coverage[(row * w) as usize..((row + 1) * w) as usize];
             let at = ((y + row) * self.w + x) as usize;
             self.data[at..at + w as usize].copy_from_slice(src);
         }

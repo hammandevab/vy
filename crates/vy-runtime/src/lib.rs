@@ -16,8 +16,8 @@ mod rng;
 
 pub use abi_check::{check_abi_bytes, AbiReport};
 pub use compile_cache::{
-    CodeKey, CodeStore, CompileCache, CompileSource, LoadStats, PutError, COMPILE_CACHE_CAP_BYTES,
-    MAX_CODE_BYTES, MAX_CODE_PER_MODULE_BYTE,
+    CodeKey, CodeStore, CompileCache, CompileSource, LoadStats, PutError, CLIENT_VERSION,
+    COMPILE_CACHE_CAP_BYTES, MAX_CODE_BYTES, MAX_CODE_PER_MODULE_BYTE, STAMP_FILE,
 };
 pub use host::{
     origin_of, plain_http_allowed, CannedResponse, Capabilities, FetchRequest, Link, LogEntry,
@@ -103,6 +103,19 @@ pub enum Error {
     /// A frame was asked for while the tab is hidden and `persist_frame`
     /// is not granted (SPEC-6.2.1, SPEC-9.3.1).
     Hidden,
+}
+
+impl Error {
+    /// True when `text` is how [`Error::OverBudget`] reads: a call into
+    /// the module that was aborted at the hard limit of logical time
+    /// (SPEC-5.3.3). A tab process reports why its page stopped as the
+    /// error's text, and the shell, the same build, tells the user what a
+    /// stop of this kind means.
+    pub fn is_over_budget(text: &str) -> bool {
+        text.strip_prefix("call aborted after ")
+            .and_then(|rest| rest.split_once(" ms of logical time"))
+            .is_some_and(|(ms, _)| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()))
+    }
 }
 
 impl fmt::Display for Error {

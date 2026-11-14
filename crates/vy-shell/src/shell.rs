@@ -90,7 +90,8 @@ pub enum Incoming {
 /// How the shell is set up.
 pub struct Config {
     /// The executable started as a tab process; `None` runs tabs on
-    /// threads of this process (tests only; no isolation).
+    /// threads of this process (tests only; no isolation, and then no
+    /// compilation cache either, whatever `code_cache` says).
     pub exe: Option<PathBuf>,
     /// Grants, page storage, caches and keys live here.
     pub data_dir: PathBuf,
@@ -106,6 +107,8 @@ pub struct Config {
     /// Where compiled code of modules is kept between loads (SPEC-13.1.4,
     /// SPEC-9.4.2): a directory of the user's own. `None` is no cache:
     /// every load compiles, as a screenshot and the conformance suite do.
+    /// Used only when `exe` is set: kept code runs in a tab process and
+    /// nowhere else.
     pub code_cache: Option<PathBuf>,
 }
 
@@ -176,6 +179,11 @@ struct Tab {
     sem: Vec<SemNode>,
     has_tree: Option<bool>,
     loaded: bool,
+    /// The page of the tab's process was loaded and its `vy_init`
+    /// returned: only then is the storage the process answers with the
+    /// page's. A process whose load failed, or was let go of before it
+    /// answered, has none, and says "empty" (SPEC-5.2.9).
+    started: bool,
     tick_pending: bool,
     wants_more: bool,
     tick_due: bool,
@@ -192,9 +200,12 @@ struct Tab {
     /// Clock reading of the last user gesture delivered to the page (a
     /// pointer release or a key press) that no external open has used.
     gesture_ms: Option<i64>,
-    /// Clock reading at which the capability question now shown for this
-    /// tab appeared, for arming "Tillåt" (`DIALOG_ARM_MS`).
+    /// Clock reading at which the question now shown for this tab
+    /// appeared, for arming its "Tillåt" or "Rensa" (`DIALOG_ARM_MS`).
     ask_since: Option<i64>,
+    /// The user chose "Rensa sidans lagring" for this tab and has not
+    /// answered the question yet; it is asked before any capability is.
+    clear_ask: bool,
     /// Clock reading of the last copy gesture (Ctrl+C or Ctrl+X) delivered
     /// to the page that no `clipboard_write` has used yet (SPEC-8.2.4).
     copy_gesture_ms: Option<i64>,
@@ -272,6 +283,7 @@ impl Tab {
             sem: Vec::new(),
             has_tree: None,
             loaded: false,
+            started: false,
             tick_pending: false,
             wants_more: false,
             tick_due: false,
@@ -286,6 +298,7 @@ impl Tab {
             under_min: false,
             gesture_ms: None,
             ask_since: None,
+            clear_ask: false,
             copy_gesture_ms: None,
             clipboard_sent: None,
             focus: None,
@@ -319,7 +332,17 @@ impl Tab {
 
     /// The question now shown appeared at `now`, if there is one.
     fn ask_shown(&mut self, now: i64) {
-        self.ask_since = (!self.asks.is_empty()).then_some(now);
+        self.ask_since = self.question().is_some().then_some(now);
+    }
+
+    /// What the user is asked about this tab now: whether to clear its
+    /// page's storage, when they chose that, else the first capability
+    /// the page waits for an answer on.
+    fn question(&self) -> Option<chrome::Ask<'_>> {
+        match (&self.origin, self.clear_ask) {
+            (Some(origin), true) => Some(chrome::Ask::ClearStorage(origin)),
+            _ => self.asks.front().map(|cap| chrome::Ask::Capability(cap)),
+        }
     }
 
     /// Whether a request the page wants made may be made (SPEC-5.2.8,
@@ -405,6 +428,12 @@ struct Retired {
     origin: String,
     storage_granted: bool,
     quota: u64,
+    /// What the process answers with is not saved: the user cleared the
+    /// origin's storage after the process was let go of (the answer is
+    /// what was cleared), or the process's page never started (the answer
+    /// is the empty storage of a process without a page, and saving it
+    /// would erase what the origin has).
+    discard: bool,
 }
 
 /// The find bar (Ctrl+F) and its search of the active page's tree.
@@ -433,6 +462,8 @@ struct Devtools {
     selected_op: Option<usize>,
     /// What the last recording command did.
     status: String,
+    /// What the last action of the "Studio" pane did ("Rensa cache").
+    note: String,
     /// Hit rectangles from the last draw, in window coordinates.
     hits: Vec<(Rect, chrome::DevHit)>,
     /// The panel as last rasterized: its list and pixels.
@@ -536,7 +567,14 @@ impl Shell {
         };
         let mut chrome_text = TextEngine::new();
         let styles = Styles::register(&mut chrome_text);
-        let code_cache = config.code_cache.as_deref().and_then(CodeCache::open);
+        // Kept code is native code for whoever deserializes it, and only
+        // a sandboxed tab process may (SPEC-9.4.2, granskning 0014:2): a
+        // shell whose tabs are threads of this process has no cache.
+        let code_cache = config
+            .exe
+            .as_ref()
+            .and(config.code_cache.as_deref())
+            .and_then(CodeCache::open);
         let mut shell = Self {
             config,
             inbox_rx,
@@ -740,6 +778,16 @@ impl Shell {
         self.tabs
             .get(self.active)
             .and_then(|t| t.asks.front().copied())
+    }
+
+    /// The question laid over the active tab's page now, as the user
+    /// reads it: about a capability, or whether to clear the page's
+    /// storage.
+    pub fn question(&self) -> Option<String> {
+        self.tabs
+            .get(self.active)
+            .and_then(Tab::question)
+            .map(|q| q.question())
     }
 
     /// The active tab's log lines.
@@ -1077,6 +1125,7 @@ impl Shell {
             tab.sem.clear();
             tab.has_tree = None;
             tab.loaded = false;
+            tab.started = false;
             tab.tick_pending = false;
             tab.wants_more = false;
             tab.tick_due = false;
@@ -1088,6 +1137,7 @@ impl Shell {
             tab.pressed_link = None;
             tab.gesture_ms = None;
             tab.ask_since = None;
+            tab.clear_ask = false;
             tab.copy_gesture_ms = None;
             tab.clipboard_sent = None;
             tab.focus = None;
@@ -1386,14 +1436,17 @@ impl Shell {
         };
         let generation = self.tab(id).map_or(0, |t| t.generation);
         let record = self.tab(id).and_then(|t| t.record.clone());
+        let conn = self.spawn_tab(id, generation, record.as_deref());
         // The compilation cache (SPEC-13.1.4): the key is made here, from
         // the bytes about to be sent. Not under a recording, whose file
-        // must hold no machine code and replay the same anywhere.
-        let offer = match (&self.code_cache, &record) {
-            (Some(cache), None) => Some(cache.offer(&page.wasm)),
+        // must hold no machine code and replay the same anywhere; and
+        // only for a tab that is a process of its own, since kept code is
+        // deserialized where the tab runs (SPEC-9.4.2): a tab on a thread
+        // of this process is offered nothing and hands over nothing.
+        let offer = match (&self.code_cache, &record, &conn) {
+            (Some(cache), None, Ok(c)) if c.is_process() => Some(cache.offer(&page.wasm)),
             _ => None,
         };
-        let conn = self.spawn_tab(id, generation, record.as_deref());
         // The Windows job's commit limit follows the page's memory_max
         // (SPEC-9.3.1); elsewhere this does nothing.
         if let Ok(c) = &conn {
@@ -1481,6 +1534,10 @@ impl Shell {
         match m {
             ToShell::Sandbox(report) => self.sandbox_reported(id, Some(report)),
             ToShell::Loaded { ok, error, .. } => {
+                // From here on the process holds the page's storage.
+                if let Some(tab) = self.tab_mut(id).filter(|_| ok) {
+                    tab.started = true;
+                }
                 // A load answered without a report leaves none to come.
                 self.sandbox_reported(id, None);
                 if let Some(tab) = self.tab_mut(id) {
@@ -1488,6 +1545,14 @@ impl Shell {
                         tab.loaded = true;
                         tab.state = State::Running;
                         tab.tick_due = true;
+                    } else if vy_runtime::Error::is_over_budget(&error) {
+                        // The module was not rejected: it was loaded and
+                        // its `vy_init` ran into the hard limit (granskning
+                        // 0013: a page stuck on what it saved itself). That
+                        // is a page that stopped, with the ways out the
+                        // stopped view offers, not the manifest's fallback.
+                        tab.state = State::Stopped(error);
+                        tab.loaded = false;
                     } else {
                         // A rejected module shows the fallback when the
                         // manifest has one (SPEC-8.3.1), else the reason.
@@ -1610,6 +1675,10 @@ impl Shell {
                 let Some(tab) = self.tab(id) else {
                     return;
                 };
+                // A process without a page has nothing of the origin's.
+                if !tab.started {
+                    return;
+                }
                 let origin = tab.origin.clone();
                 let granted = tab.capabilities().has(cap::STORAGE);
                 let quota = tab.storage_quota_bytes;
@@ -1693,7 +1762,8 @@ impl Shell {
     /// (SPEC-13.1.4): from the code the cache offered, or compiled, with
     /// the code to keep. It counts once per load, while the load is
     /// unanswered (no code of the page has run in the process yet), and
-    /// only when the main process turned the cache on for that load; the
+    /// only when the main process turned the cache on for that load,
+    /// which it does only for a tab in a process of its own; the
     /// key the code is kept under is the one made in [`Shell::start_page`]
     /// from the module bytes sent, never anything in the report
     /// (SPEC-9.4.2).
@@ -1701,8 +1771,11 @@ impl Shell {
         let Some(tab) = find_tab(&mut self.tabs, id) else {
             return;
         };
+        let process = tab.conn.as_ref().is_some_and(TabConnection::is_process);
         let pending = match (&self.code_cache, &mut tab.code) {
-            (Some(_), Some(load)) if tab.state == State::Loading && load.reported.is_none() => {
+            (Some(_), Some(load))
+                if process && tab.state == State::Loading && load.reported.is_none() =>
+            {
                 load.reported = Some((cached, micros));
                 load.pending.clone()
             }
@@ -1815,9 +1888,12 @@ impl Shell {
         match inbound {
             Inbound::Message(ToShell::Storage(entries)) => {
                 let r = self.retired.remove(at).expect("found");
-                if let Err(e) =
+                let saved = if r.discard {
+                    Ok(())
+                } else {
                     self.save_storage(Some(&r.origin), r.storage_granted, r.quota, &entries)
-                {
+                };
+                if let Err(e) = saved {
                     if let Some(tab) = self.tab_mut(id) {
                         tab.log(format!("{e} (the previous page)"));
                     }
@@ -1943,6 +2019,23 @@ impl Shell {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
+        if tab
+            .question()
+            .is_some_and(|q| matches!(q, chrome::Ask::ClearStorage(_)))
+        {
+            // The question about the page's storage: "Rensa" or "Avbryt".
+            tab.clear_ask = false;
+            tab.ask_shown(now);
+            let id = tab.id;
+            if allow {
+                self.clear_storage(id);
+            } else if let Some(d) = self.devtools.as_mut() {
+                d.note = "Sidans lagring lämnades orörd.".into();
+            }
+            self.relayout();
+            self.frame_dirty = true;
+            return;
+        }
         let Some(name) = tab.asks.pop_front() else {
             return;
         };
@@ -2092,7 +2185,11 @@ impl Shell {
                         }
                     }
                 }
-                State::Stopped(reason) | State::Gone(reason) => PageView::Stopped(reason),
+                State::Stopped(reason) | State::Gone(reason) => PageView::Stopped {
+                    reason,
+                    explanation: stop_explanation(reason, t.origin.is_some()),
+                    can_clear: t.origin.is_some(),
+                },
             },
         };
         let badges = tab.map(Tab::badges).unwrap_or_default();
@@ -2115,7 +2212,7 @@ impl Shell {
                 .is_some_and(|t| t.state == State::Running && t.has_tree == Some(false)),
             loading: tab.is_some_and(|t| t.state == State::Loading),
             badges: &badges,
-            ask: tab.and_then(|t| t.asks.front().copied()),
+            ask: tab.and_then(Tab::question),
             page: page_view,
             zoom: tab.map_or(1.0, |t| t.zoom),
             find: self.find.is_some(),
@@ -2185,6 +2282,15 @@ impl Shell {
                 units: report.units,
                 budget: report.budget,
             });
+        }
+    }
+
+    /// The page of [`Shell::page_layer`] could not be drawn: its display
+    /// list is refused, as the reference refuses it. Logged in the tab as
+    /// when the shell draws the page itself; the window shows no page.
+    pub fn page_not_drawn(&mut self, tab: TabId, why: &str) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab) {
+            tab.log(format!("[host] display list not rendered: {why}"));
         }
     }
 
@@ -2388,12 +2494,9 @@ impl Shell {
         }
         // The capability question over the top of the page area, after
         // the page: the page is where it would be without the question.
-        let ask = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.asks.front().copied());
-        if let Some((cap, r)) = ask.zip(self.layout.dialog) {
-            let (dl, w, h) = chrome::draw_dialog(&mut self.chrome_text, &self.styles, cap, r.w);
+        let ask = self.tabs.get(self.active).and_then(Tab::question);
+        if let Some((ask, r)) = ask.zip(self.layout.dialog) {
+            let (dl, w, h) = chrome::draw_dialog(&mut self.chrome_text, &self.styles, &ask, r.w);
             let (dw, dh) = physical(w, h, scale);
             if let Ok(res) = vy_render::render(&dl, dw, dh, scale, &mut self.chrome_text, &none) {
                 let x = (r.x * scale).round() as i64;
@@ -2733,8 +2836,9 @@ impl Shell {
             if self.dialog_armed() {
                 self.answer_ask(true);
             } else if let Some(tab) = self.tabs.get_mut(self.active) {
+                let yes = tab.question().map_or("Tillåt", |q| q.answers().0);
                 tab.log(format!(
-                    "[host info] click on Tillåt ignored: the question has been up for less than {DIALOG_ARM_MS} ms"
+                    "[host info] click on {yes} ignored: the question has been up for less than {DIALOG_ARM_MS} ms"
                 ));
             }
             return;
@@ -2782,6 +2886,15 @@ impl Shell {
                 }
                 self.frame_dirty = true;
             }
+            return;
+        }
+        // The ways out of a page that stopped.
+        if layout.reload_page.is_some_and(|r| r.contains(x, y)) {
+            self.reload();
+            return;
+        }
+        if layout.clear_storage.is_some_and(|r| r.contains(x, y)) {
+            self.ask_clear_storage();
             return;
         }
         if let Some(r) = layout.external {
@@ -3247,6 +3360,7 @@ impl Shell {
                 scroll: 0,
                 selected_op: None,
                 status: String::new(),
+                note: String::new(),
                 hits: Vec::new(),
                 cache: None,
             }),
@@ -3312,7 +3426,12 @@ impl Shell {
                 &devtools::list_recordings(&self.recordings_dir()),
                 &d.status,
             ),
-            Pane::Studio => devtools::studio_lines(self.live_reload),
+            Pane::Studio => devtools::studio_lines(
+                self.live_reload,
+                self.code_cache.is_some(),
+                tab.and_then(|t| t.origin.as_deref()),
+                &d.note,
+            ),
         }
     }
 
@@ -3338,8 +3457,114 @@ impl Shell {
                     self.open_tab(Some(source));
                 }
             }
+            Command::ClearStorage => self.ask_clear_storage(),
+            Command::ClearCache => {
+                let note = match self.clear_code_cache() {
+                    Some(1) => "Kompileringscachen rensad: 1 post borttagen.".into(),
+                    Some(n) => format!("Kompileringscachen rensad: {n} poster borttagna."),
+                    None => "Ingen kompileringscache i den här körningen.".into(),
+                };
+                if let Some(d) = self.devtools.as_mut() {
+                    d.note = note;
+                }
+            }
         }
         self.frame_dirty = true;
+    }
+
+    /// The user chose "Rensa sidans lagring" for the active tab: ask
+    /// before doing it, with the question over the top of the page area
+    /// that capabilities are asked with, armed the same way
+    /// (`DIALOG_ARM_MS`). Nothing for a page without an origin, which
+    /// has nothing saved.
+    pub fn ask_clear_storage(&mut self) {
+        let now = self.now_ms();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if tab.origin.is_none() || tab.clear_ask {
+            return;
+        }
+        tab.clear_ask = true;
+        tab.ask_shown(now);
+        self.relayout();
+        self.frame_dirty = true;
+    }
+
+    /// Remove everything the origin of tab `id`'s page has saved with the
+    /// client (SPEC-5.2.9) and load its pages again (granskning 0013: a
+    /// page that cannot get past what it saved itself has no other way
+    /// out). Done here, in the main process, on the origin's file
+    /// (SPEC-9.5.2); no tab process is asked. Every tab of the origin
+    /// starts over, since a page still running would save its own copy
+    /// again when it is let go of, and what the processes let go of
+    /// answer with is not saved: it is what is being cleared.
+    fn clear_storage(&mut self, id: TabId) {
+        let Some(origin) = self.tab(id).and_then(|t| t.origin.clone()) else {
+            return;
+        };
+        let pages: Vec<(TabId, Source)> = self
+            .tabs
+            .iter()
+            .filter(|t| t.origin.as_deref() == Some(origin.as_str()))
+            .filter_map(|t| Some((t.id, t.source.clone()?)))
+            .collect();
+        for (tab, source) in &pages {
+            self.navigate_tab(*tab, source.clone(), false);
+        }
+        for r in &mut self.retired {
+            if r.origin == origin {
+                r.discard = true;
+            }
+        }
+        // Nothing is persisted headless: there is no file to remove.
+        let removed = if self.config.headless {
+            Ok(())
+        } else {
+            storage::save(&self.config.data_dir.join("storage"), &origin, &[])
+        };
+        let note = match &removed {
+            Ok(()) if pages.len() == 1 => {
+                format!("Lagringen för {origin} rensad; sidan laddas om.")
+            }
+            Ok(()) => format!(
+                "Lagringen för {origin} rensad; {} flikar laddas om.",
+                pages.len()
+            ),
+            Err(e) => format!("Lagringen för {origin} kunde inte rensas: {e}"),
+        };
+        for (tab, _) in &pages {
+            if let Some(tab) = self.tab_mut(*tab) {
+                tab.log(match &removed {
+                    Ok(()) => {
+                        format!("[host info] storage of {origin} cleared at the user's request")
+                    }
+                    Err(e) => format!("[host] storage of {origin} not cleared: {e}"),
+                });
+            }
+        }
+        if let Some(d) = self.devtools.as_mut() {
+            d.note = note;
+        }
+        self.frame_dirty = true;
+    }
+
+    /// Empty the compilation cache (devtools, "Rensa cache"; granskning
+    /// 0014:1): every kept entry is removed, so every module compiles at
+    /// its next load, and the entries removed are counted. A load that is
+    /// still unanswered was started with the cache as it was: what its
+    /// process reports is no longer counted, so nothing from before the
+    /// clearing comes back. `None` when the shell has no cache. The
+    /// content caches of `vy-proto` (packages, HTTP) and the pinned keys
+    /// are not touched.
+    pub fn clear_code_cache(&mut self) -> Option<usize> {
+        let cache = self.code_cache.as_ref()?;
+        for tab in &mut self.tabs {
+            if tab.code.as_ref().is_some_and(|c| c.reported.is_none()) {
+                tab.code = None;
+            }
+        }
+        Some(cache.clear())
     }
 
     fn set_devtools_status(&mut self, status: String) {
@@ -3831,6 +4056,7 @@ impl Shell {
         tab.conn = Some(conn);
         tab.state = State::Running;
         tab.loaded = true;
+        tab.started = true;
         (id, killed)
     }
 }
@@ -3887,6 +4113,7 @@ fn retire_process(
             origin,
             storage_granted: tab.capabilities().has(cap::STORAGE),
             quota: tab.storage_quota_bytes,
+            discard: !tab.started,
         });
     }
     reaper.retire(conn, deadline);
@@ -3931,6 +4158,30 @@ pub struct PageLayer<'a> {
     pub raster: &'a mut Renderer,
     /// Where it goes.
     pub place: LayerPlace,
+}
+
+/// What a stop means, in plain Swedish, when its reason is one of the
+/// client's own time limits (SPEC-5.3.3): the hard limit on a single
+/// call, or the suspension after repeated breaches of the frame budget.
+/// These are the stops a page can run into on what it saved itself
+/// (granskning 0013), so the user is told what happened and what to do,
+/// not only the runtime's words; `saves` is whether the page has an
+/// origin, and so may have something saved to clear. `None` for any
+/// other stop, whose reason is shown as it is.
+fn stop_explanation(reason: &str, saves: bool) -> Option<&'static str> {
+    if vy_runtime::Error::is_over_budget(reason) {
+        Some(if saves {
+            "Sidan tog för lång tid på sig och avbröts: ett enda anrop gick över klientens hårda tidsgräns. Det händer när sidan fastnar i en beräkning, ofta på något den själv har sparat. Ladda om sidan; fastnar den igen kan du rensa det den har sparat."
+        } else {
+            "Sidan tog för lång tid på sig och avbröts: ett enda anrop gick över klientens hårda tidsgräns. Det händer när sidan fastnar i en beräkning. Ladda om sidan för att försöka igen."
+        })
+    } else if reason.contains("suspended after repeated budget breaches") {
+        Some(
+            "Sidan gick över sin tidsbudget flera frames i rad och stoppades av klienten. Ladda om sidan för att börja om.",
+        )
+    } else {
+        None
+    }
 }
 
 /// Log a change of the tab's raster path (the fast path gave up).
@@ -4015,6 +4266,37 @@ pub mod hid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPEC-5.3.3 (granskning 0013): the stops the client's own time
+    /// limits cause are explained in plain Swedish; the texts are the
+    /// runtime's and the tab loop's own. Any other stop is shown by its
+    /// reason alone.
+    #[test]
+    fn spec_5_3_3_stops_by_the_budget_are_explained() {
+        let aborted = vy_runtime::Error::OverBudget { used_ms: 64 }.to_string();
+        let hard = stop_explanation(&aborted, true).expect("the hard limit");
+        assert!(hard.starts_with("Sidan tog för lång tid på sig och avbröts"));
+        assert!(hard.contains("rensa det den har sparat"));
+        // A page without an origin saves nothing: no talk of clearing.
+        let local = stop_explanation(&aborted, false).expect("the hard limit");
+        assert!(local.starts_with("Sidan tog för lång tid på sig och avbröts"));
+        assert!(!local.contains("sparat"), "{local}");
+        for suspended in [
+            vy_runtime::Error::Suspended.to_string(),
+            "module suspended after repeated budget breaches (SPEC-5.3.3)".to_string(),
+        ] {
+            let soft = stop_explanation(&suspended, true).expect("the suspension");
+            assert!(soft.contains("tidsbudget") && soft != hard, "{suspended}");
+        }
+        for other in [
+            vy_runtime::Error::Trap("unreachable".into()).to_string(),
+            vy_runtime::Error::Exited(0).to_string(),
+            "Flikprocessen avslutades.".to_string(),
+            String::new(),
+        ] {
+            assert_eq!(stop_explanation(&other, true), None, "{other}");
+        }
+    }
 
     /// SPEC-5.2.8, SPEC-7.1.3, SPEC-2.1.4: a plain-http request goes only
     /// to the page's own loopback origin, by the runtime's one rule

@@ -355,6 +355,27 @@ pub enum Job {
     },
 }
 
+impl Job {
+    /// True for a page load or a live-reload check of `tab` made for a
+    /// navigation before `generation`: one whose result the shell would
+    /// drop.
+    fn is_older(&self, tab: u32, generation: u64) -> bool {
+        match self {
+            Job::Page {
+                tab: t,
+                generation: g,
+                ..
+            }
+            | Job::Check(Check {
+                tab: t,
+                generation: g,
+                ..
+            }) => *t == tab && *g < generation,
+            Job::Request { .. } => false,
+        }
+    }
+}
+
 /// Live reload (devtools, SPEC-7.3.2): ask a page's server whether the
 /// page changed, with a conditional GET whatever the HTTP cache's
 /// freshness says.
@@ -501,9 +522,24 @@ impl Loader {
     pub fn send(&mut self, job: Job) {
         let tab = match &job {
             Job::Request { tab, .. } => *tab,
-            Job::Page { source, .. } => {
+            Job::Page {
+                tab,
+                generation,
+                source,
+            } => {
                 let origin = source.origin();
-                lock(&self.queue.state).jobs.push_back((origin, job));
+                let (tab, generation) = (*tab, *generation);
+                let mut state = lock(&self.queue.state);
+                // What still waits for an earlier navigation of this tab
+                // is for nothing: the shell drops its result (granskning
+                // 0014:6). Five reloads of a page whose server hangs are
+                // then the fetch under way and the last one, not five in
+                // a row. The job a worker is on runs to its end.
+                state
+                    .jobs
+                    .retain(|(_, queued)| !queued.is_older(tab, generation));
+                state.jobs.push_back((origin, job));
+                drop(state);
                 self.queue.changed.notify_all();
                 return;
             }
@@ -548,9 +584,13 @@ impl Loader {
         }
     }
 
-    /// The tab is gone: its worker ends once its queued requests are done.
+    /// The tab is gone: its worker ends once its queued requests are
+    /// done, and its page loads and checks that still wait are dropped.
     pub fn close_tab(&mut self, tab: u32) {
         self.workers.remove(&tab);
+        lock(&self.queue.state)
+            .jobs
+            .retain(|(_, queued)| !queued.is_older(tab, u64::MAX));
     }
 
     /// Tabs with a request worker, for tests.
@@ -616,36 +656,119 @@ fn spawn_request_worker(
     Ok(tx)
 }
 
+/// What a loader worker does with a job: the work, and what it found.
+type Work = Arc<dyn Fn(Job) -> Option<Done> + Send + Sync>;
+
+/// A job a worker is on (granskning 0014:5). Dropped, it reports the job
+/// as failed unless the job was finished, and then frees the job's origin
+/// for its next job: a job whose code panics still answers its tab, with
+/// an error instead of a page that loads for ever, and holds up no later
+/// page of its origin.
+struct Running<'a> {
+    queue: &'a Queue,
+    origin: Option<String>,
+    /// What the tab is told when the job does not finish; `None` once it
+    /// has.
+    failed: Option<Done>,
+    report: &'a Report,
+}
+
+impl Running<'_> {
+    /// The job is done: report what it found. Its origin is freed after
+    /// the report, so one origin's answers come in the order asked for.
+    fn finish(mut self, done: Option<Done>) {
+        self.failed = None;
+        if let Some(done) = done {
+            (self.report)(done);
+        }
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if let Some(failed) = self.failed.take() {
+            // Mid-unwind already: a report that panics too must not take
+            // the process down, nor keep the origin.
+            let report = self.report;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| report(failed)));
+        }
+        self.queue.done(self.origin.as_ref());
+    }
+}
+
+/// What a tab is told about a job that did not finish.
+fn failure(job: &Job) -> Option<Done> {
+    const WHY: &str = "internal error: the loader failed on this page; loading it again may work";
+    match job {
+        Job::Page {
+            tab,
+            generation,
+            source,
+        } => Some(Done::Page {
+            tab: *tab,
+            generation: *generation,
+            result: Box::new(Err(match source {
+                Source::Address(_) => LoadError::Fetch(WHY.into()),
+                Source::File { .. } => LoadError::File(WHY.into()),
+            })),
+        }),
+        Job::Check(check) => Some(Done::Check {
+            tab: check.tab,
+            generation: check.generation,
+            result: Err(WHY.into()),
+        }),
+        Job::Request { .. } => None,
+    }
+}
+
 /// Start the loader over the caches under `cache_dir`, reporting through
 /// `report` (which also wakes the UI), from whichever thread did the job.
 pub fn start_loader(
     cache_dir: PathBuf,
     report: impl Fn(Done) + Send + Sync + 'static,
 ) -> std::io::Result<Loader> {
-    let report: Report = Arc::new(report);
+    let work = loader_work(&cache_dir);
+    start_loader_with(cache_dir, Arc::new(report), work)
+}
+
+/// The loader's work on a page load or a live-reload check, over the
+/// caches under `cache_dir`.
+fn loader_work(cache_dir: &Path) -> Work {
+    // Opened by the first job that fetches, and again by the next one if
+    // the cache directory could not be used: a file needs no caches and
+    // loads all the same.
+    let fetcher: Mutex<Option<Arc<Fetcher>>> = Mutex::new(None);
+    let cache_dir = cache_dir.to_path_buf();
+    Arc::new(move |job| run_job(job, &fetcher, &cache_dir))
+}
+
+/// [`start_loader`] with the workers doing `work` on each job (tests: a
+/// job whose work panics).
+fn start_loader_with(cache_dir: PathBuf, report: Report, work: Work) -> std::io::Result<Loader> {
     let requester = Requester::new(&FetchOptions::new(&cache_dir));
     let queue = Arc::new(Queue {
         state: Mutex::new(QueueState::default()),
         changed: Condvar::new(),
     });
-    // Opened by the first job that fetches, and again by the next one if
-    // the cache directory could not be used: a file needs no caches and
-    // loads all the same.
-    let fetcher: Arc<Mutex<Option<Arc<Fetcher>>>> = Arc::new(Mutex::new(None));
-    let cache_dir = Arc::new(cache_dir);
     for n in 0..LOADER_WORKERS {
-        let (queue, fetcher, cache_dir, report) = (
-            queue.clone(),
-            fetcher.clone(),
-            cache_dir.clone(),
-            report.clone(),
-        );
+        let (queue, report, work) = (queue.clone(), report.clone(), work.clone());
         let started = thread::Builder::new()
             .name(format!("vy-loader-{n}"))
             .spawn(move || {
                 while let Some((origin, job)) = queue.take() {
-                    run_job(job, &fetcher, &cache_dir, &report);
-                    queue.done(origin.as_ref());
+                    // A job that panics ends neither the worker nor its
+                    // origin's turn: the guard answers for it, and the
+                    // worker takes the next job.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let running = Running {
+                            queue: &queue,
+                            origin,
+                            failed: failure(&job),
+                            report: &report,
+                        };
+                        let done = work(job);
+                        running.finish(done);
+                    }));
                 }
             });
         // One worker is a loader; fewer than asked for is a slower one.
@@ -675,8 +798,8 @@ fn open_fetcher(
     Ok(fetcher)
 }
 
-/// Do one page load or live-reload check and report it.
-fn run_job(job: Job, fetcher: &Mutex<Option<Arc<Fetcher>>>, cache_dir: &Path, report: &Report) {
+/// Do one page load or live-reload check; what it found is for the tab.
+fn run_job(job: Job, fetcher: &Mutex<Option<Arc<Fetcher>>>, cache_dir: &Path) -> Option<Done> {
     match job {
         Job::Page {
             tab,
@@ -692,11 +815,11 @@ fn run_job(job: Job, fetcher: &Mutex<Option<Arc<Fetcher>>>, cache_dir: &Path, re
                     Err(e) => Err(LoadError::Fetch(format!("cache: {e}"))),
                 },
             };
-            report(Done::Page {
+            Some(Done::Page {
                 tab,
                 generation,
                 result: Box::new(result),
-            });
+            })
         }
         Job::Check(Check {
             tab,
@@ -709,14 +832,14 @@ fn run_job(job: Job, fetcher: &Mutex<Option<Arc<Fetcher>>>, cache_dir: &Path, re
                     .map(|h| h.0)
                     .map_err(|e| e.to_string())
             });
-            report(Done::Check {
+            Some(Done::Check {
                 tab,
                 generation,
                 result,
-            });
+            })
         }
         // Requests go to their tab's worker (`Loader::send`).
-        Job::Request { .. } => {}
+        Job::Request { .. } => None,
     }
 }
 
@@ -741,14 +864,24 @@ mod tests {
     /// A loopback server that answers every path with its own name, and
     /// holds a path starting with `/slow` until the test releases it.
     fn held_server() -> (u16, std::sync::mpsc::Sender<()>) {
+        let (port, release, _) = held_server_logged();
+        (port, release)
+    }
+
+    /// [`held_server`], and the paths it was asked for, in the order the
+    /// requests arrived (a held one is listed when it arrives).
+    fn held_server_logged() -> (u16, std::sync::mpsc::Sender<()>, Arc<Mutex<Vec<String>>>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (release, held) = std::sync::mpsc::channel::<()>();
         let held = Arc::new(std::sync::Mutex::new(held));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let held = held.clone();
+                let log = log.clone();
                 thread::spawn(move || {
                     let mut reader = BufReader::new(stream);
                     let mut first = String::new();
@@ -760,6 +893,7 @@ mod tests {
                         }
                     }
                     let path = first.split(' ').nth(1).unwrap_or("").to_string();
+                    lock(&log).push(path.clone());
                     if path.starts_with("/slow") {
                         let _ = held
                             .lock()
@@ -776,7 +910,7 @@ mod tests {
                 });
             }
         });
-        (port, release)
+        (port, release, seen)
     }
 
     /// SPEC-5.2.7, SPEC-7.4.5: a page's requests run on its tab's own
@@ -938,6 +1072,206 @@ mod tests {
             ["page 1", "page 2", "page 3", "page 4", "page 5", "page 6"],
             "one origin's pages in the order they were asked for"
         );
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// SPEC-7.4.5 (granskning 0014:6): a page load that still waits when
+    /// its tab navigates again is dropped, not fetched. While origin A's
+    /// server holds a tab's first load, the tab is reloaded four times,
+    /// another tab asks for a page of A, and a third asks and is closed;
+    /// what waited for the tab's earlier navigations and for the closed
+    /// tab is never asked of the server. Once the server answers: the
+    /// load that was under way, the other tab's page and the tab's last
+    /// navigation, in that order, and nothing else.
+    #[test]
+    fn spec_7_4_5_stale_page_loads_are_dropped_from_the_queue() {
+        let (port, release, seen) = held_server_logged();
+        let (tx, rx) = std::sync::mpsc::channel::<Done>();
+        let tx = std::sync::Mutex::new(tx);
+        let dir = std::env::temp_dir().join(format!("vy-loader-stale-{}", std::process::id()));
+        let mut loader = start_loader(dir.clone(), move |d| {
+            let _ = tx.lock().unwrap().send(d);
+        })
+        .unwrap();
+        let address = |path: &str| Address::parse(&format!("vy://127.0.0.1:{port}{path}")).unwrap();
+        let page = |tab: u32, generation: u64, path: &str| Job::Page {
+            tab,
+            generation,
+            source: Source::Address(address(path)),
+        };
+        let wait = std::time::Duration::from_secs(20);
+        let asked = || -> Vec<String> { lock(&seen).clone() };
+
+        loader.send(page(1, 1, "/slow-first"));
+        let deadline = std::time::Instant::now() + wait;
+        while asked().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first load never started"
+            );
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Four reloads, a check for the first navigation, another tab's
+        // page in between, and a tab that is closed while it waits.
+        loader.send(page(1, 2, "/reload-2"));
+        loader.send(page(1, 3, "/reload-3"));
+        loader.send(Job::Check(Check {
+            tab: 1,
+            generation: 3,
+            address: address("/check-3"),
+        }));
+        loader.send(page(2, 1, "/other-tab"));
+        loader.send(page(3, 1, "/closed-tab"));
+        loader.send(page(1, 4, "/reload-4"));
+        loader.close_tab(3);
+        loader.send(page(1, 5, "/reload-5"));
+        assert!(rx.try_recv().is_err(), "all of it waits for origin A");
+        assert_eq!(asked(), ["/slow-first"]);
+
+        release.send(()).unwrap();
+        let done: Vec<(u32, u64)> = (0..3)
+            .map(|_| match rx.recv_timeout(wait).expect("a page") {
+                Done::Page {
+                    tab, generation, ..
+                } => (tab, generation),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(done, [(1, 1), (2, 1), (1, 5)]);
+        // A page asked for now comes next: nothing else was waiting.
+        loader.send(page(4, 1, "/last"));
+        match rx.recv_timeout(wait).expect("the last page") {
+            Done::Page { tab: 4, .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            asked(),
+            ["/slow-first", "/other-tab", "/reload-5", "/last"],
+            "what waited for an earlier navigation was never fetched"
+        );
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// SPEC-7.4.5, SPEC-9.5.1 (granskning 0014:5): a loader worker whose
+    /// job panics answers for it and goes on. The tab of the job is told
+    /// its page failed, a later page of the same origin is loaded (the
+    /// origin is not left marked as being worked on), a live-reload check
+    /// that panics is answered too, and after more panics than there are
+    /// workers the loader still loads.
+    #[test]
+    fn spec_7_4_5_a_loader_panic_fails_the_page_and_frees_its_origin() {
+        const BAD: u32 = 13;
+        let (port, _held) = held_server();
+        let (tx, rx) = std::sync::mpsc::channel::<Done>();
+        let tx = std::sync::Mutex::new(tx);
+        let dir = std::env::temp_dir().join(format!("vy-loader-panic-{}", std::process::id()));
+        let real = loader_work(&dir);
+        // The jobs of tab 13 and up panic.
+        let work: Work = Arc::new(move |job| match &job {
+            Job::Page { tab, .. } | Job::Check(Check { tab, .. }) if *tab >= BAD => {
+                panic!("a fault in the loader's code (this test's)")
+            }
+            _ => real(job),
+        });
+        let report: Report = Arc::new(move |d| {
+            let _ = tx.lock().unwrap().send(d);
+        });
+        let mut loader = start_loader_with(dir.clone(), report, work).unwrap();
+        let address = |path: &str| Address::parse(&format!("vy://127.0.0.1:{port}{path}")).unwrap();
+        let page = |tab: u32, generation: u64, path: &str| Job::Page {
+            tab,
+            generation,
+            source: Source::Address(address(path)),
+        };
+        let wait = std::time::Duration::from_secs(20);
+
+        // The job panics: its tab is told, with the navigation it was for.
+        loader.send(page(BAD, 7, "/page"));
+        match rx.recv_timeout(wait).expect("the panicked job is answered") {
+            Done::Page {
+                tab: BAD,
+                generation: 7,
+                result,
+            } => match *result {
+                Err(LoadError::Fetch(why)) => assert!(why.contains("internal error"), "{why}"),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+        // The origin is free: its next page is loaded (not a Vy page, but
+        // answered by the server).
+        loader.send(page(1, 1, "/after"));
+        match rx.recv_timeout(wait).expect("the origin is not held") {
+            Done::Page { tab: 1, result, .. } => {
+                assert!(
+                    matches!(*result, Err(LoadError::NotVy { .. })),
+                    "{result:?}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        // A check that panics is answered, so live reload asks again.
+        loader.send(Job::Check(Check {
+            tab: BAD,
+            generation: 8,
+            address: address("/page"),
+        }));
+        match rx
+            .recv_timeout(wait)
+            .expect("the panicked check is answered")
+        {
+            Done::Check {
+                tab: BAD,
+                generation: 8,
+                result,
+            } => assert!(result.is_err()),
+            other => panic!("{other:?}"),
+        }
+        // More panics than workers (a tab each, a local file among
+        // them), then a page.
+        let hello = root().join("target/wasm/hello.wasm");
+        for n in 0..2 * LOADER_WORKERS as u32 {
+            loader.send(page(100 + n, 1, "/again"));
+        }
+        loader.send(Job::Page {
+            tab: 200,
+            generation: 1,
+            source: Source::File {
+                path: hello.clone(),
+                draft: None,
+            },
+        });
+        let mut failed = Vec::new();
+        for _ in 0..2 * LOADER_WORKERS + 1 {
+            match rx
+                .recv_timeout(wait)
+                .expect("every panicked job is answered")
+            {
+                Done::Page { tab, result, .. } => {
+                    assert!(result.is_err());
+                    failed.push(tab);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        failed.sort();
+        let mut want: Vec<u32> = (100..100 + 2 * LOADER_WORKERS as u32).collect();
+        want.push(200);
+        assert_eq!(failed, want);
+        loader.send(Job::Page {
+            tab: 2,
+            generation: 1,
+            source: Source::File {
+                path: hello,
+                draft: None,
+            },
+        });
+        match rx.recv_timeout(wait).expect("the workers are still there") {
+            Done::Page { tab: 2, result, .. } => assert!(result.is_ok()),
+            other => panic!("{other:?}"),
+        }
         drop(loader);
         let _ = std::fs::remove_dir_all(dir);
     }
