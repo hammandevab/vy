@@ -390,6 +390,13 @@ fn write_from_shell(
             Out::Frame(body) if record.is_some() && ToTab::is_code_cache(&body) => {}
             Out::Frame(body) => {
                 write_frame(w, &body)?;
+                // The ask for the page's storage reaches the tab and is
+                // left out of the recording: it runs no page code, so the
+                // session is the same without it, and a recording stays
+                // free of the shell's housekeeping (granskning 0017:4).
+                if ToTab::is_save_storage(&body) {
+                    continue;
+                }
                 if let Some(rec) = &mut record {
                     if let Err(e) = write_frame(rec, &body) {
                         eprintln!("vy-shell: recording stopped: {e}");
@@ -434,6 +441,9 @@ fn connect(id: TabId, sink: impl Sink, pipes: Pipes, source: Source) -> io::Resu
                             // user was handed (SPEC-9.4.2): the tab
                             // compiles the recording's module.
                             Ok(Some(body)) if ToTab::is_code_cache(&body) => {}
+                            // Nor is a replay asked for storage it has
+                            // nowhere to save.
+                            Ok(Some(body)) if ToTab::is_save_storage(&body) => {}
                             Ok(Some(body)) => {
                                 if write_frame(&mut w, &body).is_err() {
                                     break;

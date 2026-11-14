@@ -63,6 +63,18 @@ pub const DIALOG_ARM_MS: i64 = 700;
 /// closed, so a client that is ended abruptly loses a second's changes.
 pub const STORAGE_SAVE_MS: i64 = 1000;
 
+/// How long after a touch a tab is asked for its page's storage, given
+/// what its last answer held (SPEC-9.5.4): [`STORAGE_SAVE_MS`], and as
+/// much again for every whole megabyte. The whole storage is sent and
+/// written each time, on the thread that serves every tab, so a page
+/// that keeps changing a large storage is written at about a megabyte a
+/// second whatever its quota (granskning 0017:2); up to a megabyte, which
+/// is what a page gets without the user being asked (SPEC-8.2.3), the
+/// wait is the second.
+pub fn storage_save_delay_ms(saved_bytes: u64) -> i64 {
+    STORAGE_SAVE_MS * (1 + (saved_bytes >> 20) as i64)
+}
+
 /// Something that wakes the UI thread after a message was put in the inbox.
 #[derive(Clone)]
 pub struct Waker(Arc<dyn Fn() + Send + Sync>);
@@ -255,6 +267,13 @@ struct Tab {
     /// Clock reading at which the tab is next asked for its page's
     /// storage; `None` when nothing was sent to it since the last ask.
     save_at: Option<i64>,
+    /// The bytes (keys and values) of the last storage the tab's process
+    /// answered an ask with: what sets the wait before the next ask
+    /// ([`storage_save_delay_ms`]).
+    saved_bytes: u64,
+    /// The tab's process was asked for its page's storage and has not
+    /// answered: the one snapshot that is taken from it.
+    snapshot_asked: bool,
 }
 
 /// A load the compilation cache is on for.
@@ -326,6 +345,8 @@ impl Tab {
             code: None,
             touched: std::cell::Cell::new(false),
             save_at: None,
+            saved_bytes: 0,
+            snapshot_asked: false,
         }
     }
 
@@ -453,6 +474,10 @@ struct Retired {
     /// is the empty storage of a process without a page, and saving it
     /// would erase what the origin has).
     discard: bool,
+    /// The process was asked for a snapshot of its page's storage before
+    /// it was let go of and had not answered: one may still come, ahead
+    /// of its last word, and is saved (SPEC-9.5.4).
+    snapshot_asked: bool,
 }
 
 /// The find bar (Ctrl+F) and its search of the active page's tree.
@@ -582,6 +607,7 @@ impl Shell {
         let grants = if config.headless {
             GrantStore::in_memory()
         } else {
+            storage::sweep(&config.data_dir.join("storage"));
             GrantStore::open(&config.data_dir.join("grants.txt"))
         };
         let mut chrome_text = TextEngine::new();
@@ -1536,6 +1562,13 @@ impl Shell {
                 conn.send(&ToTab::Load(Box::new(request)));
                 tab.conn = Some(conn);
                 tab.state = State::Loading;
+                // `vy_init` may store: the load counts as something sent
+                // (it goes past `Tab::send`), so a tab that is never
+                // ticked, one loaded in the background, is asked too
+                // (granskning 0017:1).
+                tab.touched.set(true);
+                tab.saved_bytes = 0;
+                tab.snapshot_asked = false;
             }
             Err(e) => {
                 tab.state = State::Gone(format!("Flikprocessen kunde inte startas: {e}"));
@@ -1691,24 +1724,9 @@ impl Shell {
                 body,
             } => self.fetch_for(id, req, method, url, body),
             // The answer to a suspend, and what the page had stored when
-            // the shell asked while it runs (SPEC-9.5.4): saved alike.
-            ToShell::Storage(entries) | ToShell::StorageSnapshot(entries) => {
-                let Some(tab) = self.tab(id) else {
-                    return;
-                };
-                // A process without a page has nothing of the origin's.
-                if !tab.started {
-                    return;
-                }
-                let origin = tab.origin.clone();
-                let granted = tab.capabilities().has(cap::STORAGE);
-                let quota = tab.storage_quota_bytes;
-                if let Err(e) = self.save_storage(origin.as_deref(), granted, quota, &entries) {
-                    if let Some(tab) = self.tab_mut(id) {
-                        tab.log(e);
-                    }
-                }
-            }
+            // the shell asked while it runs (SPEC-9.5.4).
+            ToShell::Storage(entries) => self.storage_answer(id, entries, false),
+            ToShell::StorageSnapshot(entries) => self.storage_answer(id, entries, true),
             ToShell::Clipboard(bytes) => {
                 // The clipboard is written through `clipboard_write`, which
                 // needs the capability (SPEC-5.2.12, SPEC-5.3.1) or the
@@ -1866,6 +1884,43 @@ impl Shell {
         }
     }
 
+    /// A live tab's process sent its page's storage: after a suspend
+    /// ([`ToShell::Storage`]) or, `snapshot`, in answer to the shell's ask
+    /// while the page runs ([`ToShell::StorageSnapshot`], SPEC-9.5.4).
+    /// Both are saved the same way. A snapshot is taken once per ask: the
+    /// pace of those writes is the shell's ([`storage_save_delay_ms`]),
+    /// and a tab process, which runs page code, is not trusted to keep it.
+    fn storage_answer(&mut self, id: TabId, entries: Vec<crate::ipc::Entry>, snapshot: bool) {
+        let size: u64 = entries
+            .iter()
+            .map(|(k, v)| (k.len() + v.len()) as u64)
+            .sum();
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        // A process without a page has nothing of the origin's.
+        if !tab.started {
+            return;
+        }
+        if snapshot {
+            if !std::mem::take(&mut tab.snapshot_asked) {
+                tab.log("[host] storage snapshot not saved: none was asked for".into());
+                return;
+            }
+            // What sets the wait before the next ask; the quota is the
+            // most that is believed of a tab process.
+            tab.saved_bytes = size.min(tab.storage_quota_bytes);
+        }
+        let origin = tab.origin.clone();
+        let granted = tab.capabilities().has(cap::STORAGE);
+        let quota = tab.storage_quota_bytes;
+        if let Err(e) = self.save_storage(origin.as_deref(), granted, quota, &entries) {
+            if let Some(tab) = self.tab_mut(id) {
+                tab.log(e);
+            }
+        }
+    }
+
     /// Save a page's storage for `origin` (SPEC-5.2.9): only a page granted
     /// `storage` has anything to save, and only within its quota
     /// (SPEC-9.3.1); the tab process is not trusted to have kept either.
@@ -1926,6 +1981,10 @@ impl Shell {
             // newer. Not its last word, which comes after this and is
             // what a page of the same origin waits for.
             Inbound::Message(ToShell::StorageSnapshot(entries)) => {
+                // One per ask, as from a live tab.
+                if !std::mem::take(&mut self.retired[at].snapshot_asked) {
+                    return;
+                }
                 let r = &self.retired[at];
                 let saved = if r.discard {
                     Ok(())
@@ -3779,10 +3838,11 @@ impl Shell {
                 continue;
             }
             if tab.touched.replace(false) && tab.save_at.is_none() {
-                tab.save_at = Some(now + STORAGE_SAVE_MS);
+                tab.save_at = Some(now + storage_save_delay_ms(tab.saved_bytes));
             }
             if tab.save_at.is_some_and(|at| now >= at) {
                 tab.save_at = None;
+                tab.snapshot_asked = true;
                 tab.send(&ToTab::SaveStorage);
             }
         }
@@ -4195,6 +4255,7 @@ fn retire_process(
             storage_granted: tab.capabilities().has(cap::STORAGE),
             quota: tab.storage_quota_bytes,
             discard: !tab.started,
+            snapshot_asked: std::mem::take(&mut tab.snapshot_asked),
         });
     }
     reaper.retire(conn, deadline);

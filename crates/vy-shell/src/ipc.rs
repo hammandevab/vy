@@ -525,6 +525,13 @@ impl ToTab {
     pub fn is_code_cache(body: &[u8]) -> bool {
         body.first() == Some(&T_CODE_CACHE)
     }
+
+    /// True when `body` is the frame of a [`ToTab::SaveStorage`]: the
+    /// shell's own housekeeping, which runs no page code and is no part
+    /// of the session a recording holds.
+    pub fn is_save_storage(body: &[u8]) -> bool {
+        body.first() == Some(&T_SAVE_STORAGE)
+    }
 }
 
 /// Messages from a tab process to the main process.
@@ -1600,6 +1607,15 @@ mod tests {
             );
         }
         assert!(!ToTab::is_code_cache(&[]));
+        // So is the ask for the storage.
+        for m in to_tab_messages() {
+            assert_eq!(
+                ToTab::is_save_storage(&m.encode()),
+                matches!(m, ToTab::SaveStorage),
+                "{m:?}"
+            );
+        }
+        assert!(!ToTab::is_save_storage(&[]));
         // Frame lengths: zero, over the cap, and cut mid-frame.
         let mut zero = std::io::Cursor::new(0u32.to_le_bytes().to_vec());
         assert!(read_frame(&mut zero).is_err());

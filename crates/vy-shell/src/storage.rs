@@ -83,9 +83,68 @@ pub fn save(dir: &Path, origin: &str, entries: &[Entry]) -> std::io::Result<()> 
     std::fs::rename(&tmp, &path)
 }
 
+/// Remove what a client that was ended in the middle of [`save`] left in
+/// `dir`: its temporary files, which nothing else would ever remove
+/// (granskning 0017:6). Only files at least a minute old, so that a
+/// second client started now does not take the file another is writing.
+pub fn sweep(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let old = std::time::Duration::from_secs(60);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let temporary = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.starts_with("tmp"));
+        let aged = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age >= old);
+        if temporary && aged {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPEC-9.5.4 (granskning 0017:6): a save is a temporary file renamed
+    /// over the origin's, and a client ended between the two leaves the
+    /// temporary one. The next client removes those that are old, and
+    /// nothing else: not an origin's file, not a temporary file another
+    /// client may be writing right now.
+    #[test]
+    fn spec_9_5_4_left_over_temporary_files_are_swept() {
+        let dir = std::env::temp_dir().join(format!("vy-storage-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let origin = "vy://sweep.example";
+        save(&dir, origin, &[(b"k".to_vec(), b"v".to_vec())]).unwrap();
+        let kept = storage_path(&dir, origin);
+        let left = kept.with_extension("tmp4711");
+        let fresh = kept.with_extension("tmp4712");
+        std::fs::write(&left, b"half").unwrap();
+        std::fs::write(&fresh, b"half").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&left)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        sweep(&dir);
+        assert!(!left.exists(), "an old temporary file is removed");
+        assert!(fresh.exists(), "one that may be in use is not");
+        assert_eq!(load(&dir, origin), vec![(b"k".to_vec(), b"v".to_vec())]);
+        sweep(&dir.join("no-such-directory"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// SPEC-9.5.1, SPEC-9.5.2, SPEC-5.2.9: storage round-trips through
     /// the file, each origin has its own file and reads nothing of

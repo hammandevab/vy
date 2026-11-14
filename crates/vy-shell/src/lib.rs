@@ -1250,6 +1250,37 @@ mod tests {
         shell.poll();
         shell.drain();
         assert!(shell.poll_in().is_none(), "a resting page is not asked");
+        // A snapshot nobody asked for is not written: the pace of these
+        // writes is the shell's, not a tab process's.
+        let generation = shell.tab_generation(tab);
+        shell.handle(Incoming::Tab(
+            tab,
+            generation,
+            Inbound::Message(ToShell::StorageSnapshot(vec![(
+                b"unasked".to_vec(),
+                b"x".to_vec(),
+            )])),
+        ));
+        assert_eq!(saved(), vec![put_k(0x04)]);
+        assert!(shell
+            .tab_logs(tab)
+            .iter()
+            .any(|l| l.contains("storage snapshot not saved: none was asked for")));
+        // The wait before an ask is a second, and a second more for every
+        // megabyte the last answer held: a megabyte a second at most.
+        assert_eq!(crate::shell::storage_save_delay_ms(0), STORAGE_SAVE_MS);
+        assert_eq!(
+            crate::shell::storage_save_delay_ms((1 << 20) - 1),
+            STORAGE_SAVE_MS
+        );
+        assert_eq!(
+            crate::shell::storage_save_delay_ms(1 << 20),
+            2 * STORAGE_SAVE_MS
+        );
+        assert_eq!(
+            crate::shell::storage_save_delay_ms(16 << 20),
+            17 * STORAGE_SAVE_MS
+        );
         // A second change is saved the same way.
         key(&mut shell, 0x05);
         assert!(shell.poll_in().is_none(), "armed by the loop, not the key");
@@ -1283,6 +1314,45 @@ mod tests {
             vec![put_k(0x06), put_s(0x06)],
             "the shutdown's answer, not the snapshot before it"
         );
+        shell.shutdown();
+        let _ = std::fs::remove_dir_all(&data);
+
+        // A page that stores in `vy_init`, in a tab that is in the
+        // background when its load is answered and so is never ticked:
+        // the load itself counts as something sent (granskning 0017:1).
+        std::fs::create_dir_all(&data).unwrap();
+        let stores_at_start = wat::parse_str(
+            r#"(module
+                (import "vy" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "i")
+                (func (export "vy_init") (param i32 i32 i32 f32) (result i32)
+                    (drop (call $put (i32.const 16) (i32.const 1) (i32.const 16) (i32.const 1)))
+                    i32.const 0)
+                (func (export "vy_frame") (param i32) (result i32) i32.const 0)
+                (func (export "vy_event") (param i32 i32 i32 i32 i32) (result i32) i32.const 0)
+                (func (export "vy_resize") (param i32 i32 f32))
+                (func (export "vy_suspend") (result i32) i32.const 0)
+                (func (export "vy_alloc") (param i32) (result i32) i32.const 0))"#,
+        )
+        .unwrap();
+        let visits = "vy://visits.example";
+        let mut counted = page.clone();
+        counted.display = format!("{visits}/");
+        counted.origin = Some(visits.into());
+        counted.sha256 = vy_runtime::sha256(&stores_at_start);
+        counted.wasm = stores_at_start;
+        let mut shell = Shell::new(config(false), 800.0, 600.0, 1.0).unwrap();
+        let behind = shell.open_tab_loaded(counted);
+        let front = shell.open_tab_loaded(page.clone());
+        assert_eq!(shell.active_tab(), Some(front));
+        let stored_at_start = || crate::storage::load(&data.join("storage"), visits);
+        run_until(
+            &mut shell,
+            &|_| stored_at_start() == vec![(b"i".to_vec(), b"i".to_vec())],
+            "what vy_init stored in a background tab is never saved",
+        );
+        assert_eq!(shell.tab_frames(behind), 0, "it was never ticked");
         shell.shutdown();
         let _ = std::fs::remove_dir_all(&data);
 
@@ -2942,6 +3012,9 @@ mod tests {
             clock += 17;
             script.push(ToTab::Tick { clock_ms: clock });
         }
+        // The shell's ask for the page's storage (SPEC-9.5.4) reaches the
+        // tab and stays out of the recording.
+        script.push(ToTab::SaveStorage);
         script.push(ToTab::Event {
             kind: event::KEY_DOWN,
             a: key::ESCAPE,
@@ -2966,6 +3039,13 @@ mod tests {
         let first = frames(&recorded);
         assert!(first.len() >= 10, "{} frames", first.len());
         assert!(first.windows(2).any(|w| w[0] != w[1]), "the game moves");
+        let mut file = std::fs::File::open(&record).unwrap();
+        let mut kept = 0;
+        while let Some(body) = crate::ipc::read_frame(&mut file).unwrap() {
+            assert!(!ToTab::is_save_storage(&body), "the ask is not recorded");
+            kept += 1;
+        }
+        assert_eq!(kept, script.len() - 1, "everything else is");
         let replayed = drive_tab(&exe, None, Some(&record), &[]);
         assert_eq!(frames(&replayed), first, "replay reproduces every frame");
         assert_eq!(
