@@ -13,7 +13,7 @@ en GitHub Release:
 | `vy-<version>-<mål>.zip` | `vy-cli`, `vy-dev`, `vy-publish`, `vy-serve`, `vy-shell`, `studio.vyp` och `LICENSE`, för `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` och `x86_64-pc-windows-msvc` |
 | `vy-site-<version>.zip` | den publika sajtens arton paket (ett per utkast i `conformance/manifests/` utom Studio, som bara körs lokalt), `dev.key.pub` och `previews/` (`tools/publish_site.sh`) |
 | `vy-conformance-<version>.zip` | konformanssviten för andra klienter (`tools/package_conformance.sh`, SPEC-12.1.2) |
-| `SHA256SUMS` | SHA-256 för varje zip och varje fil i dem, i den form `sha256sum -c` läser |
+| `SHA256SUMS` | SHA-256 för varje tillgång, i den form `sha256sum -c` läser: plattformszipparna och varje fil i dem, sajt- och konformanszippen (innehållet täcks av zippens egen summa) och `BUILD.md` |
 | `BUILD.md` | byggreceptet: commit, `SOURCE_DATE_EPOCH`, maskinerna och verktygskedjan per mål, kommandona, och `studio.vyp`:s paketidentitet per mål (ur `tools/BUILD.md.in`) |
 
 ## Reproducerbart bygge (SPEC-9.7.1)

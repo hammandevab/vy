@@ -163,3 +163,115 @@ fn spec_12_3_1_a_release_can_be_rehearsed() {
         assert!(steps[1].contains(file), "{file}");
     }
 }
+
+/// SPEC-9.7.1 (granskning 0012:3): `vy-dev new` pins a new project's SDK
+/// to the tag of the release that `vy-dev` came with, which does not
+/// exist until the release does; the test of that pin tests a string.
+/// The last job of the workflow does what someone outside does with the
+/// released `vy-dev`: a new project in an empty directory, built. After
+/// a release, without `--sdk`, so it fails when the tag cannot be fetched
+/// or the page does not build; in a dry run, on the checkout.
+#[test]
+fn spec_9_7_1_a_release_ends_with_a_new_project_built() {
+    let release = workflow("release.yml");
+    let text = code(&release);
+    assert_eq!(jobs(&text).last(), Some(&"smoke"));
+    let smoke = job(&text, "smoke");
+    // After the release exists; and in a dry run, where that job is
+    // skipped, all the same.
+    assert!(smoke.contains("needs: [version, sums, release]"));
+    assert!(smoke.contains(
+        "if: ${{ !cancelled() && needs.sums.result == 'success' && (inputs.dry_run || needs.release.result == 'success') }}"
+    ));
+    assert!(smoke.contains("DRY_RUN: ${{ inputs.dry_run }}"));
+    // The released binary, not one built here.
+    assert!(smoke.contains("name: vy-x86_64-unknown-linux-gnu"));
+    assert!(!smoke.contains("cargo build") && !smoke.contains("cargo run"));
+    let steps = steps(smoke);
+    let run = steps.last().unwrap();
+    let (rehearsal, rest) = run
+        .split_once("if [ \"$DRY_RUN\" = true ]; then\n")
+        .and_then(|(_, after)| after.split_once("else\n"))
+        .expect("a branch for the dry run");
+    let (released, after) = rest.split_once("\n          fi\n").unwrap();
+    assert!(rehearsal.contains("\"$vy_dev\" new \"$project\" --sdk \"$GITHUB_WORKSPACE\""));
+    assert!(released.contains("\"$vy_dev\" new \"$project\"\n"));
+    assert!(!released.contains("--sdk"), "the tag is what is tried");
+    assert!(
+        released.contains("tag = \\\"$TAG\\\""),
+        "and it is this release's"
+    );
+    assert!(after.contains("\"$vy_dev\" build \"$project\""));
+    // The pin the released `vy-dev` writes is the workspace's version,
+    // which the first job requires the tag to be.
+    let scaffold = std::fs::read_to_string(root().join("crates/vy-dev/src/scaffold.rs")).unwrap();
+    assert!(scaffold.contains("tag = \\\"{SDK_TAG}\\\""));
+    assert!(job(&text, "version").contains("[workspace.package] version in Cargo.toml"));
+}
+
+/// SPEC-9.7.1 (granskning 0012:4): the workflows hold no more rights than
+/// they use. Every job reads the repository and only `release` writes to
+/// it; and the package signing key is in the environment of one step,
+/// which compiles nothing: the tools and the modules are built by the
+/// step before it, so no dependency's build script runs with the key.
+#[test]
+fn spec_9_7_1_the_release_gives_rights_and_the_key_only_where_used() {
+    let release = workflow("release.yml");
+    let text = code(&release);
+    let (head, _) = text.split_once("\njobs:\n").unwrap();
+    assert!(head.contains("\npermissions:\n  contents: read\n"));
+    for name in jobs(&text) {
+        let writes = job(&text, name).contains("contents: write");
+        assert_eq!(writes, name == "release", "{name}");
+    }
+    let ci = code(&workflow("ci.yml"));
+    let (head, _) = ci.split_once("\njobs:\n").unwrap();
+    assert!(head.contains("\npermissions:\n  contents: read\n"));
+    assert!(!ci.contains("contents: write") && !ci.contains("secrets."));
+
+    let site = job(&text, "site");
+    let steps = steps(site);
+    let with_key: Vec<usize> = (0..steps.len())
+        .filter(|i| steps[*i].contains("secrets.VY_KEY"))
+        .collect();
+    assert_eq!(with_key.len(), 1, "one step holds the key");
+    let sign = steps[with_key[0]];
+    assert!(sign.contains("VY_SITE_PREBUILT: 1"));
+    assert!(!sign.contains("cargo ") && !sign.contains("build_modules"));
+    let build = steps[with_key[0] - 1];
+    assert!(build.contains("cargo build --release --locked -p vy-publish -p vy-cli"));
+    assert!(build.contains("tools/build_modules.sh"));
+    assert!(!build.contains("VY_KEY"));
+    // The script compiles nothing when told that everything is built.
+    let script = std::fs::read_to_string(root().join("tools/publish_site.sh")).unwrap();
+    let (_, prebuilt) = script
+        .split_once("if [ \"${VY_SITE_PREBUILT:-}\" = 1 ]; then\n")
+        .expect("a prebuilt branch");
+    let (prebuilt, rest) = prebuilt.split_once("\nelse\n").unwrap();
+    assert!(!prebuilt.contains("cargo") && !prebuilt.contains("build_modules"));
+    let (built_here, _) = rest.split_once("\nfi\n").unwrap();
+    assert!(built_here.contains("cargo build") && built_here.contains("tools/build_modules.sh"));
+}
+
+/// SPEC-9.7.1 (granskning 0012:5): `SHA256SUMS` has a line for every
+/// file a release attaches. `BUILD.md` is written first and summed with
+/// the site and conformance zips; the platform zips and the files in
+/// them come from each build's own sums.
+#[test]
+fn spec_9_7_1_sha256sums_covers_every_release_asset() {
+    let release = workflow("release.yml");
+    let text = code(&release);
+    let sums = job(&text, "sums");
+    let recipe = sums.find("build-md ../tools/BUILD.md.in").unwrap();
+    let summed = sums
+        .find("sums \"\" vy-site-*.zip vy-conformance-*.zip BUILD.md")
+        .expect("BUILD.md is summed with the zips");
+    assert!(recipe < summed, "the recipe exists before it is summed");
+    assert!(sums.contains("cat vy-*.sha256"));
+    // What the release attaches is what was summed, and nothing else.
+    let attached = job(&text, "release");
+    for file in ["dist/*.zip", "dist/SHA256SUMS", "dist/BUILD.md"] {
+        assert!(attached.contains(file), "{file}");
+    }
+    assert_eq!(attached.matches("dist/").count(), 3);
+}

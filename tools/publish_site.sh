@@ -81,9 +81,19 @@ if [ -n "$key" ] && [ "$(wc -c < "$key" | tr -d ' ')" -ne 32 ]; then
   key=$tmp/dev.key
 fi
 
-cargo build --release -p vy-publish -p vy-cli
+# VY_SITE_PREBUILT=1: the tools and the modules are already built (by a step
+# that never saw the key), and this run only signs, renders and packs. The
+# release workflow uses it so that no build script runs with the signing key
+# in its environment (granskning 0012:4).
 bin=target/release
-tools/build_modules.sh
+if [ "${VY_SITE_PREBUILT:-}" = 1 ]; then
+  for f in "$bin/vy-publish" "$bin/vy-cli" target/wasm/hello.wasm; do
+    [ -e "$f" ] || { echo "error: VY_SITE_PREBUILT=1 but $f is not built" >&2; exit 1; }
+  done
+else
+  cargo build --release -p vy-publish -p vy-cli
+  tools/build_modules.sh
+fi
 
 if [ -z "$key" ]; then
   "$bin/vy-publish" keygen --out "$tmp/dev.key" > /dev/null

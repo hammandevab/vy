@@ -9,13 +9,20 @@
 #                               och previews/
 #   vy-conformance-<version>.zip  konformanssviten för andra klienter (SPEC-12.1.2,
 #                               tools/package_conformance.sh)
-#   SHA256SUMS                  SHA-256 för varje zip och varje fil i dem (SPEC-9.7.1)
+#   SHA256SUMS                  SHA-256 för varje tillgång: plattformszipparna och varje fil i
+#                               dem, sajt- och konformanszippen (deras innehåll täcks av
+#                               zippens egen summa) och BUILD.md (SPEC-9.7.1)
 #   BUILD.md                    byggreceptet: commit, SOURCE_DATE_EPOCH, maskiner,
 #                               verktygskedja, kommandon (ur tools/BUILD.md.in)
 #
 # En manuell körning med `dry_run` är en generalrepetition: allt byggs, mäts mot SPEC-12.3.1,
 # signeras och summeras som i en release, och SHA256SUMS och BUILD.md blir en artefakt, men
 # jobbet `release` hoppas över: ingen tagg och ingen release skapas.
+#
+# Sist kör jobbet `smoke` releasens egen `vy-dev` som en utomstående gör: `vy-dev new` i en tom
+# katalog och `vy-dev build`. Projektet pinnar SDK:t på taggen, så körningen faller om taggen
+# inte går att hämta eller sidan inte bygger. I en repetition finns ingen tagg; då pekas
+# projektet på arbetskopian med `--sdk`.
 #
 # Bygget är reproducerbart (SPEC-9.7.1): samma commit på samma klass av maskin ger samma
 # binärer, oavsett katalog, användare och tid (tools/repro_env.sh), och zip-filerna skrivs
@@ -49,8 +56,10 @@ on:
         type: boolean
         default: false
 
+# Least privilege (granskning 0012:4): every job reads the repository; only
+# `release` may write to it (the tag and the release).
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -332,9 +341,18 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Publish the reference site
+      # Everything that compiles (the tools, their dependencies' build scripts,
+      # the modules) runs here, without the signing key (granskning 0012:4).
+      - name: Build the tools and the modules
+        run: |
+          cargo build --release --locked -p vy-publish -p vy-cli
+          tools/build_modules.sh
+      # The key is in the environment of this one step, which runs only what
+      # the step above built: vy-publish signs, vy-cli renders the previews.
+      - name: Sign and publish the reference site
         env:
           VY_KEY: ${{ secrets.VY_KEY }}
+          VY_SITE_PREBUILT: 1
         run: |
           key=""
           if [ -n "$VY_KEY" ]; then
@@ -378,11 +396,14 @@ jobs:
       - name: SHA256SUMS and BUILD.md (SPEC-9.7.1)
         run: |
           cd dist
+          # Every file a release attaches has a line (granskning 0012:5): the
+          # platform zips and the files in them, the site and conformance zips
+          # (their contents are covered by the zip's own hash) and BUILD.md.
+          python3 ../tools/release_files.py build-md ../tools/BUILD.md.in vy-*.build > BUILD.md
           {
             cat vy-*.sha256
-            python3 ../tools/release_files.py sums "" vy-site-*.zip vy-conformance-*.zip
+            python3 ../tools/release_files.py sums "" vy-site-*.zip vy-conformance-*.zip BUILD.md
           } > SHA256SUMS
-          python3 ../tools/release_files.py build-md ../tools/BUILD.md.in vy-*.build > BUILD.md
           cat SHA256SUMS BUILD.md
           ls -l
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -399,6 +420,8 @@ jobs:
     needs: [version, sums]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -415,3 +438,44 @@ jobs:
             dist/SHA256SUMS
             dist/BUILD.md
           fail_on_unmatched_files: true
+
+  # The release as someone outside gets it (granskning 0012:3): a project
+  # that the released `vy-dev new` writes pins the SDK to this release's
+  # tag, so nothing shows that it can be fetched and built until the tag
+  # exists. After the release, without `--sdk`: the run fails when the
+  # tag cannot be fetched or the page does not build. In a dry run there
+  # is no tag, and the project is pointed at the checkout instead.
+  smoke:
+    needs: [version, sums, release]
+    if: ${{ !cancelled() && needs.sums.result == 'success' && (inputs.dry_run || needs.release.result == 'success') }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: vy-x86_64-unknown-linux-gnu
+          path: dist
+      - name: A new project builds
+        run: |
+          mkdir "$RUNNER_TEMP/vy"
+          unzip -q "dist/vy-$VERSION-x86_64-unknown-linux-gnu.zip" -d "$RUNNER_TEMP/vy"
+          vy_dev=$RUNNER_TEMP/vy/vy-dev
+          project=$RUNNER_TEMP/smoke
+          if [ "$DRY_RUN" = true ]; then
+            "$vy_dev" new "$project" --sdk "$GITHUB_WORKSPACE"
+          else
+            "$vy_dev" new "$project"
+            if ! grep -q "tag = \"$TAG\"" "$project/Cargo.toml"; then
+              echo "::error::the new project does not pin vy-sdk to $TAG"
+              cat "$project/Cargo.toml"
+              exit 1
+            fi
+          fi
+          "$vy_dev" build "$project"

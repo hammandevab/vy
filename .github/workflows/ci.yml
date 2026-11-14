@@ -15,6 +15,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# Least privilege (granskning 0012:4): no job writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   gates:
     runs-on: ubuntu-latest
