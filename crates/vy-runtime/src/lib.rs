@@ -1202,6 +1202,14 @@ impl Runtime {
         &self.host().state
     }
 
+    /// How many times the module has changed its storage: a `state_put`
+    /// that stored a value or a `state_delete` that removed one. A host
+    /// that keeps the storage somewhere else saves it again when this has
+    /// moved since the last time (SPEC-9.5.4).
+    pub fn storage_revision(&self) -> u64 {
+        self.host().state_revision
+    }
+
     /// Take the storage out of the instance, to start the next instance of
     /// the same origin with it (`Options::storage`, SPEC-5.1.5).
     pub fn take_storage(&mut self) -> Storage {

@@ -2382,6 +2382,47 @@ fn spec_5_2_9_headless_storage() {
     assert_eq!(denied.storage().len(), 2, "untouched");
 }
 
+/// SPEC-9.5.4: the runtime counts the changes to a page's storage, so a
+/// host that keeps the storage elsewhere knows when to save it again: a
+/// `state_put` that stored a value and a `state_delete` that removed one
+/// move the count; a read, a delete of a missing key, a put the quota
+/// refused and a call without the capability do not.
+#[test]
+fn spec_9_5_4_storage_revision_counts_changes() {
+    let bytes = storage_module();
+    let opts = Options {
+        capabilities: Capabilities::from_names(["storage"]).unwrap(),
+        storage_quota_bytes: 40,
+        ..Options::default()
+    };
+    let mut rt = Runtime::load(&bytes, &sha256(&bytes), opts).unwrap();
+    rt.init(10, 10, 1.0).unwrap();
+    let call = |rt: &mut Runtime, kind: i32, a: i32| {
+        rt.event(kind, a, 0, 0, 0).unwrap();
+        rt.last_event_result()
+    };
+    assert_eq!(rt.storage_revision(), 0, "a new instance");
+    assert_eq!(call(&mut rt, 201, 64), err::E_RESOURCE);
+    assert_eq!(rt.storage_revision(), 0, "a read of a missing key");
+    assert_eq!(call(&mut rt, 200, 10), err::OK);
+    assert_eq!(rt.storage_revision(), 1, "a put");
+    assert_eq!(call(&mut rt, 201, 64), 10);
+    assert_eq!(rt.storage_revision(), 1, "a read");
+    assert_eq!(call(&mut rt, 200, 10), err::OK);
+    assert_eq!(rt.storage_revision(), 2, "a put of the same value is a put");
+    assert_eq!(call(&mut rt, 202, 0), err::OK);
+    assert_eq!(rt.storage_revision(), 3, "a delete");
+    assert_eq!(call(&mut rt, 202, 0), err::OK);
+    assert_eq!(rt.storage_revision(), 3, "a delete of a missing key");
+    assert_eq!(call(&mut rt, 203, 39), err::E_QUOTA, "big + 39 = 42 bytes");
+    assert_eq!(rt.storage_revision(), 3, "a put the quota refused");
+
+    let mut denied = Runtime::load(&bytes, &sha256(&bytes), Options::default()).unwrap();
+    denied.init(10, 10, 1.0).unwrap();
+    assert_eq!(call(&mut denied, 200, 1), err::E_DENIED);
+    assert_eq!(denied.storage_revision(), 0, "without the capability");
+}
+
 /// A module with a fixed tree (main 1; button 2 at y 0, textbox 3 at y 20,
 /// text 4 at y 30, link 5 at y 40, all 50 wide and 10 tall) that records
 /// every event it receives as `kind * 1e6 + (a % 1000) * 1000 + (b % 10) *

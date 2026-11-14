@@ -341,6 +341,10 @@ pub struct Host {
     pub(crate) state: Storage,
     /// Most bytes (keys and values together) `state` may hold (SPEC-9.3.1).
     pub(crate) state_quota: u64,
+    /// Counts the changes to `state`: every `state_put` that stored a
+    /// value and every `state_delete` that removed one. A host that saves
+    /// the storage elsewhere compares it with the count it last saved at.
+    pub(crate) state_revision: u64,
     /// Responses `fetch_begin` can be answered with (SPEC-5.2.7).
     pub(crate) canned: Vec<CannedResponse>,
     /// Origins the manifest lists under `net`, normalised with
@@ -429,6 +433,7 @@ impl Host {
             sem_full_logged: false,
             state,
             state_quota,
+            state_revision: 0,
             canned,
             net_origins: net_origins.iter().filter_map(|o| origin_of(o)).collect(),
             fetches: Vec::new(),
@@ -1294,6 +1299,7 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                         }
                         host.charge(key.len() + val.len());
                         host.state.insert(key, val);
+                        host.state_revision += 1;
                         err::OK
                     }
                 }
@@ -1361,7 +1367,9 @@ pub(crate) fn link_imports(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     Err(fault) => host.refuse("state_delete", &fault),
                     Ok(key) => {
                         let key = key.to_vec();
-                        host.state.remove(&key);
+                        if host.state.remove(&key).is_some() {
+                            host.state_revision += 1;
+                        }
                         err::OK
                     }
                 }
