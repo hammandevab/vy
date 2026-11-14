@@ -251,6 +251,43 @@ fn spec_9_7_1_the_release_gives_rights_and_the_key_only_where_used() {
     assert!(!prebuilt.contains("cargo") && !prebuilt.contains("build_modules"));
     let (built_here, _) = rest.split_once("\nfi\n").unwrap();
     assert!(built_here.contains("cargo build") && built_here.contains("tools/build_modules.sh"));
+
+    // What is signed is built from the checkout alone: the jobs that
+    // build the binaries and the site restore no cache, which a run on
+    // `main` could have left. And every action, in every workflow, is the
+    // commit it was read at, not a tag that can be moved (granskning
+    // 0016:3).
+    for name in ["binaries", "site"] {
+        assert!(!job(&text, name).contains("rust-cache"), "{name}");
+    }
+    let mut files = vec![
+        ".github/workflows/ci.yml".to_owned(),
+        ".github/workflows/fuzz.yml".to_owned(),
+        ".github/workflows/release.yml".to_owned(),
+    ];
+    for entry in std::fs::read_dir(root().join(".github/actions")).unwrap() {
+        let action = entry.unwrap().path().join("action.yml");
+        let action = action.strip_prefix(root()).unwrap().to_owned();
+        files.push(action.to_string_lossy().into_owned());
+    }
+    let mut checked = 0;
+    for file in &files {
+        let text = code(&std::fs::read_to_string(root().join(file)).unwrap());
+        for line in text.lines() {
+            let Some((_, what)) = line.split_once("uses: ") else {
+                continue;
+            };
+            let what = what.trim();
+            let pinned = what.starts_with("./")
+                || what.split_once('@').is_some_and(|(_, at)| {
+                    let commit = at.split_whitespace().next().unwrap_or("");
+                    commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit())
+                });
+            assert!(pinned, "{file}: {what}");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 25, "{checked} actions checked");
 }
 
 /// SPEC-9.7.1 (granskning 0012:5): `SHA256SUMS` has a line for every

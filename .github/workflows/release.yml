@@ -340,7 +340,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # No build cache, as in `binaries`: what signs the site is built here
+      # from the checkout alone, never from what another run left behind
+      # (granskning 0016:3).
       # Everything that compiles (the tools, their dependencies' build scripts,
       # the modules) runs here, without the signing key (granskning 0012:4).
       - name: Build the tools and the modules
