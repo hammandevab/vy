@@ -50,14 +50,15 @@ någon annanstans än på byggmaskinen.
    testet grönt på Windows: modulerna blir samma byte i två kataloger också där.
 3. **`repro (windows)`.** `/Brepro` exporterades i `tools/build_release.sh` och följde med till
    wasm-länkningen av Studio, där `rust-lld` tog det för en fil. Flaggan ges nu bara till de två
-   nativa byggena.
+   nativa byggena. Därefter gick jobbet igenom: de fem Windows-binärerna får samma SHA-256 i två
+   arbetskopior med två `CARGO_HOME` och två tidszoner, så Windows är grind från och med nu.
 4. **`repro (macos)`.** Binärerna från två arbetskopior skilde sig i 48 byte: LC_UUID (16) och
    signaturens hash över den sidan (32). Allt annat var lika. `a148b67` länkar utan
    felsökningskarta (`-Wl,-S`) och sätter `ZERO_AR_DATE`; om det räcker visar nästa körning.
    Jobbet skriver numera ut var `vy-serve` skiljer sig när byggena inte är lika.
 
-Linux är grind för `repro` och håller. macOS och Windows rapporterar tills de gått igenom en gång
-(`docs/RELEASING.md`).
+Linux och Windows är grind för `repro` och håller. macOS rapporterar tills det gått igenom en
+gång (`docs/RELEASING.md`).
 
 ## Baslinjen för prestanda går inte att lita på mellan maskiner (`e89b198`)
 
