@@ -5,14 +5,16 @@ till granskning 0010 och 0013, `docs/notes/m5-fix-a.md` och 0013-delen av `docs/
 Granskaren skrev ingen av koden. Klienten, releaseverktygen och lagringsändringen (0016, 0017)
 ingår inte.
 
-**Rekommendation.** **Släpp v0.3.0 efter att fynd 1 är rättat.** Skäl i en mening: exempelsidan
-`kalkyl` kan fortfarande stängas av för gott av ett blad den själv sparat, efter en enda vanlig
-inmatning, och det är just den klass av fel (0013:2) som releasen och `docs/EXEMPEL.md` säger är
-borta. Rättningen är liten (en reservation och ett test); fynd 2–5 hindrar inte releasen.
+**Rekommendation.** **Släpp v0.3.0 nu.** Ändrad efter uppföljningen sist på sidan: fynd 1 är
+rättat i `d4a27e1`, alla mina tidigare fall går, och av 40 nya försök att stoppa `kalkyl` har
+inget en frame över budgeten i fönster upp till 2560 × 1600 (32 fall) och inget stängde av sidan.
+Det som återstår (fynd 6: ingen marginal i ett fönster på 3840 × 2160) är en känd gräns och hindrar
+inte releasen.
 
-**Det som blockerar.** Bara fynd 1. Det kräver ett stort blad: avstängningen är visad med 2 599
-formler, en frame över budgeten med 999 och ingen med 599 (värden längre än omkring tio tecken).
-Användaren har en väg ut i klienten ("Rensa sidans lagring"), men den kastar bladet.
+**Det som blockerade.** Bara fynd 1; den första rekommendationen var "släpp efter att fynd 1 är
+rättat", eftersom `kalkyl` kunde stängas av för gott av ett blad den själv sparat efter en enda
+vanlig inmatning (samma klass som 0013:2). Avstängningen visades med 2 599 formler, en frame över
+budgeten med 999 och ingen med 599.
 
 **Vad ändrades.** Rättningar av fynden i 0010 (SDK:ts `ui::TextBox`, konformanssviten, paketet)
 och 0013 (`skriv`, `kalkyl`, `rita` och sparad data i alla sex exempelsidorna), plus guidetext i
@@ -57,7 +59,8 @@ robusthet och inte intrång: en sida kan bara låsa sig själv.
 
 1. **Hög – `kalkyl` kan fortfarande stoppas för gott av ett blad den själv sparat: formler med långa
    värden.** *Var:* `modules/kalkyl/src/sheet.rs` rad 898 (`Sheet::set`: etiketten får 16 byte, "any value it
-   usually gets") och rad 205 (`Cell::relabel`); roten är av allt att döma SDK:ts allokator
+   usually gets") och rad 205 (`Cell::relabel`); roten är av allt att döma SDK:ts
+   allokator
    (`crates/vy-sdk/src/heap.rs`), som noteringen själv listar som öppen. *Scenario:* ett blad med A1 = `7` och `=A1/7` i övriga
    celler öppnas utan problem (dyraste frame 4,05 M). Användaren skriver `1234567,891234` i A1 och
    trycker Enter. Bladet sparas i händelsen; omräkningen ger sedan några hundra formler per frame
@@ -130,3 +133,82 @@ och exempelfallet i "Händelser utan fönster" är giltigt i fallformatet.
   nyckel skulle dela brytpunkter. Koden är äldre än rättningarna och saken är inte prövad.
 - `md.rs` (0013:1), `96c70f6` (paketet), fynden om klienten i `m5-fix-b.md`, riktig IME, macOS och
   Windows.
+
+## Uppföljning efter rättningen (`d4a27e1`)
+
+**Läst.** `git show d4a27e1 -- modules/kalkyl` och det nya testet
+`spec_5_3_3_kalkyl_keeps_the_budget_when_values_grow`. En formels etikett har 32 byte från början
+(längsta värdet är `Z100: -92233720368,547758`, 25 byte) och `relabel` reserverar innan den
+skriver; tal formateras i `NumText` på stacken (24 byte, längsta talet 19); breda tal mäts ur
+`MEASURE_POOL` och en cell som inte hinner med ritas av en senare frame, som begärs; steget är
+`RECALC_STEP * 580 / max(celler i bild, 580)`. Testet kör mitt scenario (klick, långt tal, Enter,
+omstart på det sparade) i fyra fönsterstorlekar och 2 600 breda tal.
+
+**Mina tidigare fall, körda om** mot den ombyggda modulen (`kalkyl.wasm`, SHA-256 `8f8babd4…`,
+kopierad till skrotroten). Alla 29 går nu, och åtta varianter som kör tills sidan slutar begära
+frames:
+
+| Fall | Före | Nu (dyraste frame) |
+| --- | --- | --- |
+| A1 = `7`, 2 599 × `=A1/7`; klick, `1234567,891234`, Enter – 800 × 600 / 1024 × 720 / 1600 × 1000 | avstängd i alla tre | 4,01 M / 4,26 M / 5,31 M, 21 frames |
+| samma blad som det sparades, öppnat på nytt – 800 × 600 / 1024 × 720 | avstängd | 4,00 M / 4,26 M |
+| … 1600 × 1000 | 14,4 M | 5,38 M |
+| A1 långt och 999 × `=A1/7` – 1024 × 720 / 1600 × 1000 | 10,7 M / 12,8 M | 3,48 M / 4,41 M |
+| … 599 × `=A1/7` | 5,7 M / 6,6 M | 3,14 M / 3,52 M |
+| 1 560 formler bara under bild, långt värde (1024 × 720) | 11,8 M | 3,13 M (kort värde: 3,12 M) |
+| 2 600 tal `12345678901,123456`, första framen – 1024 × 720 / 1600 × 1000 / 2560 × 1440 | 7,25 M / 12,8 M / 25,6 M | 4,13 M / 4,23 M / 4,42 M |
+| … tills alla tal är inpassade | – | 4,13 M (4 frames) / 4,53 M (8) / 5,53 M (17) |
+| A1 långt, 2 599 × `=A1+0,000001`, A1 ändrad – 1600 × 1000 / 2560 × 1440 | avstängd | 5,44 M / 5,94 M (74 %) |
+
+**Nya försök i samma klass** (40 fall, alla på sparade blad med 2 600 celler; "en frame emellan"
+betyder att nästa händelse kommer mitt i omräkningen):
+
+| Försök | Fönster | Dyraste frame |
+| --- | --- | --- |
+| värdena byter längd fram och tillbaka (A1 `7` ↔ `1234567,891234`), 8–16 gånger; omräkningen klar emellan, eller 1 eller 3 frames emellan | 1024 × 720 / 1600 × 1000 / 2560 × 1440 | 5,11 M / 5,91 M / **7,06 M** (88 %) |
+| formlerna går till fel och tillbaka (`#DIV/0`, `#FEL`, `#CIRKEL`, långa negativa tal), 9–18 ändringar | 1024 × 720 / 2560 × 1440 | 4,16 M / 6,03 M |
+| längsta talet `-92233720368,547758` i varje cell, och som värde i 2 599 formler som ändras | 1024 × 720 / 1600 × 1000 / 2560 × 1440 | 4,75 M / 5,55 M / 5,94 M |
+| 100 talceller skrivs om till texter på 200 byte och tillbaka, cell för cell | 1024 × 720 / 1600 × 1000 | 4,13 M / 4,53 M |
+| 100 celler skrivs en efter en, var och en ändrar 2 500 formler (omkring 4 000 frames) | 1024 × 720 / 1600 × 1000 | 4,82 M / 5,69 M |
+| markera allt, Ctrl+C, Delete, skriv igen | 1024 × 720 | 4,26 M |
+| högre fönster: breda tal, längsta talet, kvotbladet med en ändring | 2560 × 1600 | 5,76 M / 5,81 M / **7,32 M** (91 %) |
+| samma, och vanlig användning (markering som växer, skrivande, hjul, pekare) | 3840 × 2160 | 6,62 M / 6,61 M / **8,04 M** (101 %); vilande frame 7,5 M |
+
+Ingen frame över budgeten i något fönster upp till 2560 × 1600, och sidan stängdes inte av i något
+fall, inte heller i 3840 × 2160 (åtta fall där; i fyra av dem är den dyraste framen 8,03–8,04 M,
+men aldrig två i rad, alltså en varning och inget stopp). Det sparade bladet öppnades igen i
+800 × 600, 1024 × 720, 1600 × 1000 och 3840 × 2160; 2560 × 1440 prövas av det nya testet, som jag
+läst men inte kört. Ett enskilt `vy_event` avbröts aldrig vid den hårda gränsen.
+
+**Ritar sidan samma sak?** Ja. Svitens sex `kalkyl`-fall går mot oförändrade guldbilder och träd
+(0,000 %, körda här). Av mina fall från före rättningen som gick då är elva bilder byte för byte
+desamma nu; den tolfte är en enda frame av 2 600 breda tal, och den färdiga bilden av samma fall
+(fyra frames) är byte för byte den som den gamla modulen ritade i en frame. Det nya beteendet
+syns så här: i första framen av 2 600 tal som måste tappa decimaler (1600 × 1000) har rad 1–8
+sina tal och rad 9–33 är tomma, och de fylls uppifrån under de fyra följande (åtta frames för `12345678901,123456` i samma
+fönster, 17 i 2560 × 1440 och 26 i 3840 × 2160). Under en omräkning kan en cell i bild på samma sätt stå tom några
+frames mellan sitt gamla och sitt nya värde. En färdig frame saknar inga tal: sidan begär frames
+tills allt är inpassat. Inget blinkande utöver det.
+
+**Bedömning.** Fynd 1 är **rättat**: scenariot går inte längre att återskapa, testet skulle falla
+utan rättningen (det föll på den gamla modulen enligt commiten, och mina fall visar samma sak), och
+jag lyckades inte stoppa sidan med något den sparat. Fynd 3 (räknaren, sett i körningen: "9 golden
+image(s) written" för tio fall varav ett föll), fynd 4 (medelvärdet, läst) och fynd 5 (rättelse i
+`m5-examples.md`) är också rättade. Nytt:
+
+6. **Låg – ingen marginal i mycket höga fönster.** `modules/kalkyl/src/lib.rs`, `frame` och
+   `STEP_VIEW`. I 3840 × 2160 (skala 1, 2 000 celler i bild) kostar en vilande frame av ett fullt
+   blad med långa värden 7,5 M, och en frame under omräkningen 8,04 M; i 2560 × 1600 är den dyraste
+   7,32 M. Steget krymper med antalet celler i bild men ritningen växer med det. *Verifierat:*
+   reproducerat; sidan stängdes inte av, men jag kan inte utesluta två frames i rad över budgeten
+   med ett annat blad i den storleken. Testet går till 2560 × 1440 (2860 × 1640 för de breda talen). *Förslag:* ett tak för antalet celler som ritas och registreras per frame, eller
+   en gräns för trädet som för texter; lägg 3840 × 2160 i testet. Kan vänta till efter releasen.
+7. **Låg – `docs/EXEMPEL.md` säger 6,4 M som dyraste frame i 2560 × 1440.** Med värden som byter
+   längd fram och tillbaka mätte jag 7,06 M i samma fönster. *Förslag:* skriv talet som "omkring
+   7 M" eller hänvisa till testet.
+
+**Inte kontrollerat i uppföljningen.** `budget_tests` är inte kört här (bara läst). Blad som
+skrivs in i annan ordning än celler ligger i (allokatorns hål i oordning) går inte att ge som
+sparat värde och är inte prövade. Allokatorn i SDK:t är orörd: nästa sida som låter strängar växa
+i en frame kan få samma fel. Fönster mellan 1600 och 2160 px höjd med blandade texter och tal,
+skala 2, och bränslet i ett enskilt `vy_event` är inte mätta.
