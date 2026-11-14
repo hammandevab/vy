@@ -260,22 +260,27 @@ fn pick_or_unwind(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
     pick(configs).unwrap_or_else(|| std::panic::resume_unwind(Box::new(NoConfig)))
 }
 
-/// Run a step of the GL setup. A panic in it is a reason there is no GL,
-/// as an error is: the client goes on with the CPU path instead of ending
-/// where the fallback is needed.
-fn guarded<T>(step: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+/// Run a step of the GL path: of its `setup`, or of its `drawing` of a
+/// frame, where what is drawn is a page's display list
+/// (`window::gpu::present`). A panic in it is a reason there is no GL, as
+/// an error is: the client goes on with the CPU path instead of ending
+/// where the fallback is needed (granskning 0011:1, 0016:2).
+pub(crate) fn guarded<T>(
+    what: &str,
+    step: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)) {
         Ok(result) => result,
         Err(payload) if payload.is::<NoConfig>() => {
             Err("the GL display offers no configuration".into())
         }
         Err(payload) => {
-            let what = payload
+            let said = payload
                 .downcast_ref::<&str>()
                 .map(|s| (*s).to_owned())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "no message".into());
-            Err(format!("the GL setup panicked: {what}"))
+            Err(format!("the GL {what} panicked: {said}"))
         }
     }
 }
@@ -303,7 +308,7 @@ pub fn open(
         return Err(no(None, "VY_NO_GL is set".into()));
     }
     let template = ConfigTemplateBuilder::new().with_transparency(false);
-    let built = guarded(|| {
+    let built = guarded("setup", || {
         DisplayBuilder::new()
             .with_window_attributes(Some(attributes))
             .build(el, template, pick_or_unwind)
@@ -313,7 +318,7 @@ pub fn open(
     let Some(window) = window else {
         return Err(no(None, "no window from the GL display".into()));
     };
-    match guarded(|| context(&window, &config)) {
+    match guarded("setup", || context(&window, &config)) {
         Ok(c) => Ok((window, c)),
         Err(e) => Err(no(Some(window), e)),
     }
@@ -417,20 +422,34 @@ mod tests {
     fn spec_11_3_2_no_gl_configuration_is_a_fallback() {
         let none = || -> Box<dyn Iterator<Item = Config>> { Box::new(std::iter::empty()) };
         assert!(pick(none()).is_none());
-        let why = guarded(|| Ok(pick_or_unwind(none()))).err();
+        let why = guarded("setup", || Ok(pick_or_unwind(none()))).err();
         assert_eq!(
             why.as_deref(),
             Some("the GL display offers no configuration")
         );
-        let why = guarded(|| -> Result<(), String> { panic!("driver fault {}", 7) }).unwrap_err();
+        let why = guarded("setup", || -> Result<(), String> {
+            panic!("driver fault {}", 7)
+        })
+        .unwrap_err();
         assert_eq!(why, "the GL setup panicked: driver fault 7");
-        let why = guarded(|| -> Result<(), String> { std::panic::panic_any(7u8) }).unwrap_err();
+        let why = guarded("setup", || -> Result<(), String> {
+            std::panic::panic_any(7u8)
+        })
+        .unwrap_err();
         assert_eq!(why, "the GL setup panicked: no message");
-        assert_eq!(guarded(|| Ok::<_, String>(3)), Ok(3));
+        assert_eq!(guarded("setup", || Ok::<_, String>(3)), Ok(3));
         assert_eq!(
-            guarded(|| Err::<(), _>("no GL display: x".to_string())),
+            guarded("setup", || Err::<(), _>("no GL display: x".to_string())),
             Err("no GL display: x".into())
         );
+        // The same guard stands around the drawing of every frame
+        // (granskning 0016:2): a panic there, on a page's display list,
+        // is a reason to leave the GL path, not the client's end.
+        let why = guarded("drawing", || -> Result<(), String> {
+            panic!("index out of bounds")
+        })
+        .unwrap_err();
+        assert_eq!(why, "the GL drawing panicked: index out of bounds");
     }
 
     /// SPEC-11.3.2 (granskning 0011:5): the GPU path hands over to the

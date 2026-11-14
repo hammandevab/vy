@@ -706,15 +706,21 @@ mod gpu {
 
     /// Composite the shell's frame (transparent where the page shows),
     /// draw the page when it changed, present. `Err`: leave the GL path.
+    /// A panic on the way is such an error (`gl::guarded`): what is drawn
+    /// is a page's display list, in the main process (SPEC-9.1.2), and
+    /// the CPU path, whose own last link is guarded the same way, draws
+    /// it from then on.
     pub fn present(
         g: &mut Gpu,
         shell: &mut Shell,
         presented: &mut Presented,
         page: &mut Page,
     ) -> Result<(), String> {
-        let changed = presented.update(shell.frame()).map(|a| (a.y0, a.y1));
-        g.compose(shell, changed, page).map_err(|e| e.to_string())?;
-        g.swap().map_err(|e| e.to_string())
+        crate::gl::guarded("drawing", || {
+            let changed = presented.update(shell.frame()).map(|a| (a.y0, a.y1));
+            g.compose(shell, changed, page).map_err(|e| e.to_string())?;
+            g.swap().map_err(|e| e.to_string())
+        })
     }
 }
 
