@@ -25,6 +25,9 @@ Allt i uppdraget är klart: sex sidor, `docs/EXEMPEL.md` och den här filen.
 
 Sämsta uppmätta frame i hela spåret är 4,1 M (`rita`, full ritning, fönstret ändrat), alltså
 49 % marginal; med förvalen ligger varje sida under 0,5 M. Alla sidor är under 64 KB.
+(Rättelse efter granskning 0013:5 och 0018: talet gällde de fall spåret själv mätte. Sparad data
+och inmatning som spåret inte prövade gick över budgeten i `skriv` och `kalkyl`; det som mäts nu
+står i `crates/vy-cli/src/budget_tests.rs`, där dyraste frame är 6,4 M, `kalkyl` i 2560 × 1440.)
 `vy-publish build` godtar alla sex paketen (SPEC-13.4.1).
 
 Sviten har 27 nya fall (91 totalt, alla 0,000 %) och 19 nya träd i `conformance/semantic/`. Inga

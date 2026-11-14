@@ -311,7 +311,8 @@ fn conformance(args: &[String]) -> Result<ExitCode> {
         }
     }
     if a.has("update") {
-        println!("{} golden image(s) written", results.len());
+        // A case that failed wrote nothing (granskning 0018:3).
+        println!("{} golden image(s) written", results.len() - failed);
     }
     Ok(if failed == 0 {
         ExitCode::SUCCESS

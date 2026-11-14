@@ -8,11 +8,16 @@ fann, vad mätningarna säger om två grindar som inte går att lita på i dag, 
 
 | Commit | Vad |
 | --- | --- |
-| `41399fd` | `vy-render`: en PNG med trasig palett vägras i stället för att fälla klienten |
+| `41399fd` | `vy-render`: en PNG med trasig palett vägras (se rättelsen nedan om vad felet fällde) |
 | `ff43e63` | CI: tre fel från första körningen efter M5 |
 | `e89b198` | `bench:` ny baslinje för byggmaskinen |
 | `c93731b` | `vy-cli`: SPEC-13.1.4:s kalla halva som ignorerat test; `CLAUDE.md` räknar den till M3:s öppna grind |
 | `a148b67` | release: macOS-bygget länkas utan felsökningskarta |
+| `1501fc3`, `da1544b`, `b16edbf`, `5d44c97` | SPEC-9.5.4: en sidas lagring sparas medan sidan körs |
+| `b05e3d0` | guiderna efter förpasset av grindprovet |
+| `b7fb243` | ingen byggcache där sajten signeras; alla actions pinnade |
+| `0e3085d`, `88fda59` | en panik i rasteriseringen är sidans fel, inte klientens |
+| (nästa) | `kalkyl` håller budgeten när värden växer; smårättningar ur 0016 och 0018 |
 
 ## Kraschen fuzzningen fann (`41399fd`)
 
@@ -39,10 +44,15 @@ visar att den oskyddade avkodaren verkligen får panik) och
 `fuzz/artifacts/png/` och spelas upp av `fuzz_corpora_replay`.
 
 Det som däremot körs i huvudprocessen på en sidas data är rasteriseringen av display listan: text
-(`cosmic-text`, `swash`) och banor (`tiny-skia`). Den snabba vägen faller tillbaka på referensen
-om den får panik; referensvägen har inget sådant skydd, så en panik där fäller klienten. Display
-listan är fuzzad, men ett skydd per flik runt referensvägen (en panik stoppar sidan, inte
-klienten) är nästa naturliga steg och är inte gjort.
+(`cosmic-text`, `swash`) och banor (`tiny-skia`). Den snabba vägen föll tillbaka på referensen om
+den fick panik, men referensvägen, kedjans sista led, hade inget skydd, och inte heller GL-vägens
+ritning av en frame: en panik där hade fällt klienten och alla flikar (granskning 0016:2). Båda
+har nu skydd. En panik i referensvägen blir `RenderError::Failed` för den framen: skalet loggar
+att listan inte gick att rita, sidans yta lämnas tom och nästa lista ritas som vanligt
+(`spec_9_1_2_a_panic_in_the_rasterizer_is_the_pages_error`). En panik medan GL ritar lämnar
+GL-vägen för CPU-vägen, som ett GL-fel redan gjorde (`gl::guarded("drawing", …)`). Det som inte
+fångas är det `catch_unwind` inte fångar: minnesbrist, stacköverflöd och en avkodare som aldrig
+återvänder.
 
 ## Vad CI fann (`ff43e63`, `a148b67`)
 
@@ -174,10 +184,67 @@ att den finns kvar efter omladdningen.
 `spec_9_5_4_storage_is_saved_while_the_page_runs` (skalet: värdet på disk utan omladdning, ingen
 fråga till en vilande sida, loppet mot en omladdning, inget headless).
 
-**Kostnad.** Hela lagringen skickas och skrivs om, högst en gång per sekund och bara när den
-ändrats. Exempelsidornas kvoter är 1–256 KB. En sida med 16 MB som ändrar sin lagring varje
-sekund ger en skrivning på 16 MB per sekund på huvudtråden; det är inte mätt och är det första
-att flytta till en egen tråd om det märks.
+**Kostnad.** Hela lagringen skickas och skrivs om, och bara när den ändrats. Granskaren mätte
+skrivningen (debugbygge, ext4 på virtuell disk): 1,1 ms för 1 MB, 15,6 ms för 16 MB, på tråden
+som bär alla flikars inmatning. Väntan före nästa fråga växer därför med det som senast sparades:
+en sekund, och en sekund till per hel megabyte (`storage_save_delay_ms`). Upp till 1 MB, det en
+sida får utan att användaren tillfrågas, är det sekunden; en sida med 16 MB som ändrar något i
+varje frame skrivs var sjuttonde sekund, alltså ungefär en megabyte i sekunden oavsett kvot.
+
+**Efter granskning 0017.** Sex fynd, fyra rättade i `5d44c97`:
+
+| Fynd | Åtgärd |
+| --- | --- |
+| 1. Laddningen satte inget märke: det `vy_init` lagrar i en flik som ligger i bakgrunden frågades aldrig efter (reproducerat) | laddningen räknas som något skickat; testet öppnar en sådan flik och ser värdet på disk utan att fliken fått en tick |
+| 2. Sidan styr skrivtakten på huvudtråden | väntan växer med storleken (ovan), och en ögonblicksbild tas emot en gång per fråga, också från en släppt process, så en flikprocess kan inte sätta takten |
+| 3. Ingen `fsync`: "beständigt minne" gällde en avbruten process, inte ett strömavbrott | meningen i specen säger nu just det; `fsync` hör hemma på en skrivtråd och är inte gjord |
+| 4. En inspelning fick frågan i sig | frågan når fliken men spelas inte in, och en uppspelning får den inte |
+| 5. Skickat är inte sparat: misslyckas skrivningen tiger fliken tills något ändras igen | inte gjort; hör också till skrivtråden |
+| 6. Tempfiler blev kvar efter en avbruten skrivning | `storage::sweep` tar bort dem som är äldre än en minut när klienten startar |
+
+Två flikar med samma origin har var sin kopia av lagringen och sista skrivning vinner, som förut;
+skillnaden är att det nu växlar på disk medan båda körs.
+
+## Granskningarna 0016–0018 och det de ledde till
+
+Tre oberoende granskare gick igenom allt efter granskning 0015: klienten och releasen (0016),
+lagringen (0017, ovan) och SDK:t med exempelsidorna (0018). Den första granskaren tystnade två
+gånger och stoppades; dess utkast med fem fynd togs över av 0016, som prövade vart och ett.
+
+**0018:1, det allvarligaste: `kalkyl` kunde stoppas för gott av sitt eget blad.** Ett blad med
+ett tal och 2 599 formler av det öppnades och fungerade. En vanlig inmatning som gav alla formler
+långa värden flyttade varje formels etikett ur de 16 byte den hade, på en hög vars allokator
+letar igenom sina hål vid varje frigörning: två frames över budgeten, sidan stoppad, och eftersom
+bladet sparades i händelsen stoppad igen vid varje besök. Rättat i `kalkyl`: en etikett får sin
+plats innan den skrivs och en formels rymmer vilket värde som helst, tal skrivs på stacken
+(`NumText`) i stället för i ett block på högen, tal som är för breda mäts ur samma pott per frame
+som texterna, och omräkningens steg är mindre i fönster med fler än 580 celler i bild. Testet
+`spec_5_3_3_kalkyl_keeps_the_budget_when_values_grow` föll på den gamla modulen (9,1 M i framen
+efter Enter) och går på den nya: dyraste frame 5,4 M i 1600 × 1000 och 6,4 M i 2560 × 1440.
+Roten, SDK:ts allokator (`crates/vy-sdk/src/heap.rs`: första passande block i en adressordnad
+lista, så varje frigörning kostar som antalet hål nedanför), är inte rörd. Den drabbar varje sida
+som låter många små block växa, och är det första att göra i SDK:t.
+
+**Övrigt som rättades:** skyddet runt rasteriseringen (0016:2, ovan), README om macOS och om det
+som är öppet (0016:2, 0016:8), grindtabellen i `CLAUDE.md` säger att prestandagrinden bara håller
+på en maskin (0016:3), testet för arbetsflödena prövar också `fuzz.yml` (0016:6), `vy-cli
+conformance --update` räknar bara de bilder som skrevs (0018:3), medelvärdet i `kalkyl`s statusrad
+kan inte slå runt (0018:4), och två noteringar som sade mer än som var mätt är rättade (0013:5,
+0015:5).
+
+**Kvar, och ägarens att avgöra:**
+
+- Kompileringscachen är på också på Windows; granskning 0014:4 bad om ägarens beslut och fick
+  koordinatorns (`cbe7d6f` säger varför).
+- En generalrepetition (`dry_run`) signerar på riktigt, med `VY_KEY` och kodsigneringen när de
+  finns, och lämnar resultatet som artefakter (0016:7).
+- Röktestet körs efter att releasen publicerats; ett rött röktest lämnar en publicerad release
+  (0016:5).
+- Kodcachens nyckel bär versionssträngen, inte bygget: två utvecklingsbyggen med samma version
+  delar poster. Wasmtime vägrar kod från en annan konfiguration, så följden är en omkompilering
+  (0016:4).
+- Releasens Linux-bygge är inte pinnat på en containerdigest (0012:6).
+- `IME_COMPOSE` är oprövat med en riktig IME (0010:5), och en riktig GPU är okörd (0011:4, 0015:2).
 
 ## Releasen v0.3.0 och grindprovet
 

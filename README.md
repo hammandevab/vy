@@ -11,17 +11,25 @@ CSS, ingen JavaScript-motor.
 ## Status: v0.3.0
 
 Klienten (`vy-shell`) hämtar signerade sidor över `vy://`, kör varje flik i en egen sandlådad
-process och ritar med OpenGL i fönstret (mjukvara som referens och reserv). ABI 1.0 är fryst.
+process och ritar med OpenGL i fönstret på Windows och Linux (mjukvara på macOS, och som
+referens och reserv överallt). ABI 1.0 är fryst.
 Under `modules/` finns nitton sidor på `vy-sdk`: tolv referenssidor, Studio och sex större
 exempel (`docs/EXEMPEL.md`); `conformance` jämför över hundra fall mot guldbilderna och håller
 varje frame till budgeten. `vy-dev` skapar, bygger och serverar ett sidprojekt, med Studio för
 att låta Claude Code bygga sidan (`docs/DEVELOPING.md`); `docs/SDK.md` är guiden till SDK:t.
 En release byggs reproducerbart med kontrollsummor och byggrecept (`docs/RELEASING.md`).
 
-Öppet (se `CLAUDE.md`, milstolparna): SPEC-13.2.1 och SPEC-13.1.1 mäts på en riktig dator med
-GPU, första kompileringen av en sida tar längre än SPEC-13.1.4 ger (cachen gör återbesöken
-gratis; `docs/notes/m5-slut.md`), den externa sandlådegranskningen återstår, och Windows och
-macOS är byggda och testade i CI men inte körda för hand i varje del.
+Öppet (se `CLAUDE.md`, milstolparna, och `docs/notes/m5-slut.md`):
+
+- SPEC-13.2.1 och SPEC-13.1.1 mäts på en riktig dator med GPU.
+- Första kompileringen av en sida tar längre än SPEC-13.1.4 ger; cachen gör återbesöken gratis.
+- Prestandagrinden (5 %, SPEC-12.2.3) håller bara på en och samma maskin; CI rapporterar utan
+  att fälla.
+- En sidas lagring skrivs utan `fsync` och på huvudtråden (SPEC-9.5.4): en avbruten process
+  förlorar högst väntetiden, ett strömavbrott kan ta mer.
+- Releasens Linux-binärer byggs på GitHubs avbild, inte i en container pinnad på digest.
+- Den externa sandlådegranskningen återstår, och Windows och macOS är byggda och testade i CI
+  men inte körda för hand i varje del.
 
 ```sh
 tools/build_modules.sh                 # modules/* -> target/wasm/*.wasm (före cargo test)

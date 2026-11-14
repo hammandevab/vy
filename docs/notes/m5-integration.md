@@ -180,6 +180,9 @@ Kontrollerat:
   macOS rena, också parallella laddningar och kodcachen.
 - **GL-testet** täcker nu 195 sidframes (alla 19 sidor); värsta frame `rymd` 800 × 600 med 0,387 % över
   2 nivåer, största avvikelse 133 (en kantpixel), inom SPEC-11.3.2:s 3 %.
+  (Rättelse, granskning 0011:4 och 0015:5: det var ingen kantpixel utan hårlinjer som GL-vägen
+  strök för brett. Rättat i `62ceaa5`; största avvikelse är därefter 40, och SPEC-11.3.2 har
+  sedan `456ec32` gränsen 64 nivåer för en enskild pixel.)
 - **8 ms-kontrollen** (`vy-publish build` för alla arton publicerade utkast, debug, bränslet är
   oberoende av profilen): dyraste frame `skriv` 463 457, `rymd` 440 830, `document` 354 674, `kalkyl`
   352 719, `list` 294 947, `widgets` 263 175 … `hello` 19 346 av 8 000 000; ingen över, ingen behövde

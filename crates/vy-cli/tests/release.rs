@@ -228,6 +228,11 @@ fn spec_9_7_1_the_release_gives_rights_and_the_key_only_where_used() {
     let (head, _) = ci.split_once("\njobs:\n").unwrap();
     assert!(head.contains("\npermissions:\n  contents: read\n"));
     assert!(!ci.contains("contents: write") && !ci.contains("secrets."));
+    // The nightly fuzzing reads the repository and nothing more
+    // (granskning 0016:6).
+    let fuzz = code(&workflow("fuzz.yml"));
+    assert!(fuzz.contains("\npermissions:\n  contents: read\n"));
+    assert!(!fuzz.contains("contents: write") && !fuzz.contains("secrets."));
 
     let site = job(&text, "site");
     let steps = steps(site);

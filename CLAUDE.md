@@ -55,7 +55,7 @@ en ändrad signatur är 2.0. Allt annat (SDK, verktyg, klient, server) får änd
 | Modul | `modules/*` bygger till wasm och passerar ABI-kontroll; varje moduls fmt, nativa tester och wasm32-clippy | `tools/build_modules.sh && cargo run -p vy-cli -- check-abi target/wasm/hello.wasm && tools/test_modules.sh` |
 | Pixeldiff (från M1) | max 0,1 % avvikande pixlar mot `conformance/golden/` | `cargo run -p vy-cli -- conformance` |
 | Frame-budget (från M5) | ingen frame i ett konformansfall över 8 ms-budgeten (SPEC-12.2.4) | samma kommando; `--stats` visar vad varje fall kostar |
-| Prestanda (från M3) | ingen regression över 5 % mot SPEC §13 | `cargo run -p vy-cli -- bench` |
+| Prestanda (från M3) | ingen regression över 5 % mot SPEC §13, mätt före och efter på samma maskin i samma session; CI rapporterar bara (maskinerna skiljer sig 1,5 gånger) | `cargo run --release -p vy-cli -- bench --compare <rapporten före>` |
 
 ## Granskning
 
