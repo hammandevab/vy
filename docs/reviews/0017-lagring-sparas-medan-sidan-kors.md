@@ -90,5 +90,65 @@ med 16 MB, macOS och Windows, strömavbrott, inspelning i fönster, hela grindar
 **Hotbild.** Två nya IPC-ramar, ingen ny ABI-import, fryst ABI orörd. Flikprocessen får ingen ny
 befogenhet; nytt är att en sida kan få huvudprocessen att skriva varje sekund (fynd 2).
 
-**Rekommendation.** **Merge efter** fynd 1 (en rad och ett test). Fynd 2 och 3 avgör ägaren, före
-eller efter releasen; 4–6 som uppföljningar.
+**Rekommendation.** **Merge efter** fynd 1: gjort i `5d44c97`. Efter uppföljningen nedan: rätta
+U1 före releasen (några rader och ett test); U2 är kod eller mening, ägarens val; fynd 2 (egen
+skrivtråd), 3 och 5 står kvar som uppföljningar.
+
+## Uppföljning efter rättningarna (`5d44c97`, bedömd på `6e09d5b`)
+
+Läst `git show 5d44c97` och provat som förut: flikar på tråd, tillfälliga ändringar återställda.
+De 17 riktade testerna (`spec_9_5_4`, `spec_5_2_9`, `spec_11_4_1`, `ipc::`) är gröna efter
+`cargo build -p vy-shell`. "Faller utan" betyder att jag tog bort raden, körde testet och
+återställde filen.
+
+- **Fynd 1: löst.** `shell.rs:1569` sätter märket vid laddningen. Testet faller utan raden, vid
+  sin tidsgräns: "what vy_init stored in a background tab is never saved".
+- **Fynd 2: lindrat.** Väntan växer med storleken (`:74`, `:3841`). Prov: en sida med 1 MB är på
+  disk efter 1,01 s första gången och 2,01 s de två följande. Det ger högst omkring 1 MB per
+  sekund oavsett kvot (16 MB var sjuttonde sekund). Skrivningen på huvudtråden är kvar, 15 ms vid
+  16 MB. Se U1–U3.
+- **Fynd 3: meningen ändrad, koden densamma.** Meningen säger nu lagringsfil, avbruten process
+  och att ett strömavbrott kan ta mer: sann på den punkten.
+- **Fynd 4: löst.** `process.rs:397` skriver frågan till fliken men inte till inspelningen, och
+  `:446` hoppar över den vid uppspelning. `spec_11_4_1_record_replay` faller utan `:397` ("the
+  ask is not recorded"). `:446` prövade jag inte.
+- **Fynd 5: öppet**, som commit-meddelandet säger.
+- **Fynd 6: löst.** `storage::sweep` (`storage.rs:90`) tar bara namn i `storage/` vars ändelse
+  börjar på `tmp` och som är minst en minut gamla; en länk följs inte, en katalog tas inte, en
+  tid i framtiden sparar filen. Fel fil kan den ta bara från en annan klient som stått stilla
+  mer än en minut mitt i en skrivning: den skrivningen går då förlorad och loggas.
+
+Nytt, efter allvar:
+
+- **U1. Medel – av två obesvarade frågor sparas bara det första svaret. Reproducerat.**
+  `snapshot_asked` är en flagga (`shell.rs:3845` sätter, `:1906` tar). En flik som ligger mer än
+  väntetiden efter skalet, med en kö av händelser att arbeta av, får fråga två innan den svarat på
+  fråga ett. Den svarar ärligt på båda; det andra svaret kastas med loggraden "none was asked
+  for", och fliken har noterat det som skickat (`tab.rs:535`), så inget mer kommer förrän sidan
+  ändrar något igen eller fliken göms. Prov: tangent 4, fråga, tangent 5, fråga, och svaren lästa
+  först därefter (det som står i stället för en flik som släpar): på disk `k=4`, tre sekunder
+  senare fortfarande `k=4` och `poll_in() == None`, fast sidan har `k=5`. Då är varken "svaret
+  skrivs när det kommer" eller "högst den tidens ändringar" sant. Rättning: räkna öppna frågor
+  med ett tak (till exempel fyra) i stället för flaggan, och bär talet i `Retired`; eller låt
+  fliken svara på varje fråga, också med "oförändrat", så att skalet aldrig har två öppna. Provet
+  är testet som saknas. Före `5d44c97` sparades varje bild, så detta är nytt med rättningen.
+- **U2. Låg – "ett svar som ingen begärt sparas inte" gäller bara ögonblicksbilden.
+  Reproducerat.** `shell.rs:1728` ger `Storage` till `storage_answer(.., false)`, som inte prövar
+  något: tre obedda `Storage` från en levande flik gav tre skrivningar. En komprometterad
+  flikprocess skickar alltså `Storage` i stället och sätter takten som förut. Det nya är att en
+  normativ mening och commit-meddelandet säger motsatsen. Rättning: ta emot `Storage` från en
+  levande flik bara efter en skickad `Visibility { visible: false }`, eller skriv "en
+  ögonblicksbild som ingen begärt" i meningen.
+- **U3. Låg – tre saker som inget test märker.** Testerna är gröna med `:3841` tillbaka på
+  `STORAGE_SAVE_MS` (bara funktionen prövas, inte att väntan används; mitt prov ovan är ett
+  sådant test), med `snapshot_asked: false` i `retire_process` (`:4258`) och utan anropet av
+  `sweep` vid start (`:610`).
+
+*Frågorna i uppdraget.* Flaggan nollas i `start_page` och flyttas i `retire_process` rätt: fråga,
+omladdning och ny fråga till den nya processen går igenom, också när processen dött eller sidan
+saknar origin. Förlusten sitter i U1, inte där. `saved_bytes` kan inte ge mer än 17 sekunders
+väntan (bilden är högst 16 MB och räknas högst till kvoten) och nollas vid varje laddning; ingen
+flik blir ofrågad. Meningen räknar "senast sparade" som senaste ögonblicksbild, inte det som
+sparades när fliken gömdes. *SPEC-9.5.4 som skriven* är nu sann utom i U1, U2 och fynd 5.
+*Inte prövat:* hela grindarna, flikar som egna processer i mina prov, en sida som verkligen
+släpar (U1 är provat genom att inte läsa inkorgen emellan), macOS och Windows.
