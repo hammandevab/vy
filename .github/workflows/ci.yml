@@ -44,8 +44,10 @@ jobs:
       # software GL (llvmpipe) under Xvfb. `cargo test` above skips it for
       # want of a display; here it must run (VY_GL_REQUIRED). Its timing
       # line is not a GPU's (docs/notes/m5-gpu.md).
+      # libxkbcommon-x11 is what winit loads for the keyboard of an X11 window;
+      # a desktop has it, the runner image does not.
       - name: Install Mesa and Xvfb
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1-mesa-dri libegl1 libegl-mesa0 xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1-mesa-dri libegl1 libegl-mesa0 libxkbcommon0 libxkbcommon-x11-0 xvfb
       - name: GL path against the reference (llvmpipe)
         run: xvfb-run -a -s "-screen 0 1600x1200x24" env VY_GL_REQUIRED=1 cargo test -p vy-shell --test gl
       - name: Backlog (informational)
@@ -219,6 +221,16 @@ jobs:
           done
           cat "$tmp/stage-a.sums"
           if ! diff "$tmp/stage-a.sums" "$tmp/stage-b.sums"; then
+            # Where the smallest binary differs, for whoever has to find out why.
+            a="$tmp/stage-a/vy-serve$ext"; b="$tmp/stage-b/vy-serve$ext"
+            echo "vy-serve: $(cmp -l "$a" "$b" | wc -l) bytes differ, the first of them:"
+            cmp -l "$a" "$b" | head -n 40 || true
+            if command -v strings > /dev/null; then
+              diff <(strings -a "$a") <(strings -a "$b") | head -n 60 || true
+            fi
+            if command -v otool > /dev/null; then
+              diff <(otool -l "$a") <(otool -l "$b") | head -n 60 || true
+            fi
             echo "::error::the two release builds differ (SPEC-9.7.1)"
             exit 1
           fi

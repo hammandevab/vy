@@ -27,12 +27,16 @@ fi
 ext=""
 case "$target" in *windows*) ext=.exe ;; esac
 # MSVC's linker stamps the PE header with the time; /Brepro puts a hash of the
-# image there instead.
+# image there instead. Only the two native builds get the flag: exported, it would
+# reach the wasm link of studio below, and rust-lld takes /Brepro for a file.
+native_flags=$CARGO_ENCODED_RUSTFLAGS
 case "$target" in
-  *-windows-msvc) export CARGO_ENCODED_RUSTFLAGS="$CARGO_ENCODED_RUSTFLAGS$repro_sep-Clink-arg=/Brepro" ;;
+  *-windows-msvc) native_flags="$native_flags$repro_sep-Clink-arg=/Brepro" ;;
 esac
-cargo build --release --locked --target "$target" -p vy-cli -p vy-dev -p vy-publish -p vy-serve
-cargo build --release --locked --target "$target" -p vy-shell
+CARGO_ENCODED_RUSTFLAGS=$native_flags \
+  cargo build --release --locked --target "$target" -p vy-cli -p vy-dev -p vy-publish -p vy-serve
+CARGO_ENCODED_RUSTFLAGS=$native_flags \
+  cargo build --release --locked --target "$target" -p vy-shell
 out=${CARGO_TARGET_DIR:-target}/$target/release
 for bin in vy-cli vy-dev vy-publish vy-serve vy-shell; do
   cp "$out/$bin$ext" "$stage/"

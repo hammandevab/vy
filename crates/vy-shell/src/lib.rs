@@ -2840,6 +2840,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The bash that runs the tools. On Windows `Command::new("bash")` looks
+    /// in the system directory before PATH and finds the launcher of the
+    /// Windows Subsystem for Linux, which has no distribution to start on a
+    /// build machine; Git's bash is on PATH, or where Git installs it.
+    fn bash() -> PathBuf {
+        if !cfg!(windows) {
+            return PathBuf::from("bash");
+        }
+        let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+        let system = std::env::var_os("SystemRoot").map(|root| lower(Path::new(&root)));
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let installed = std::env::var_os("ProgramFiles")
+            .map(|programs| Path::new(&programs).join("Git").join("bin"));
+        std::env::split_paths(&path)
+            .filter(|dir| {
+                system
+                    .as_ref()
+                    .is_none_or(|system| !lower(dir).starts_with(system))
+            })
+            .chain(installed)
+            .map(|dir| dir.join("bash.exe"))
+            .find(|bash| bash.is_file())
+            .expect("bash: the tools are bash scripts (Git for Windows has one)")
+    }
+
     /// SPEC-9.7.1: the same commit, target, toolchain and kind of machine
     /// give the same bytes for every module whatever the checkout's path,
     /// user and time, and the same identity for every package. The working
@@ -2885,7 +2910,7 @@ mod tests {
                 std::fs::create_dir_all(to.parent().unwrap()).unwrap();
                 std::fs::copy(&from, &to).unwrap();
             }
-            let built = std::process::Command::new("bash")
+            let built = std::process::Command::new(bash())
                 .arg("tools/build_modules.sh")
                 .current_dir(copy)
                 .env("TZ", tz)
@@ -2895,8 +2920,10 @@ mod tests {
                 .unwrap();
             assert!(
                 built.status.success(),
-                "{}: {}",
+                "{}: {}\n{}\n{}",
                 copy.display(),
+                built.status,
+                String::from_utf8_lossy(&built.stdout),
                 String::from_utf8_lossy(&built.stderr)
             );
         }
