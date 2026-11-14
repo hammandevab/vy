@@ -3766,17 +3766,19 @@ impl Shell {
         }
         let now = self.now_ms();
         for tab in &mut self.tabs {
-            let touched = tab.touched.replace(false);
             let saves = tab.started
                 && tab.conn.is_some()
                 && tab.replay.is_none()
                 && tab.capabilities().has(cap::STORAGE)
                 && tab.origin.as_ref().is_some_and(|o| !o.starts_with("file:"));
             if !saves {
+                // `touched` stays: what was sent to a process before its
+                // page started (the load, and `vy_init` may store) is
+                // asked about once the page has.
                 tab.save_at = None;
                 continue;
             }
-            if touched && tab.save_at.is_none() {
+            if tab.touched.replace(false) && tab.save_at.is_none() {
                 tab.save_at = Some(now + STORAGE_SAVE_MS);
             }
             if tab.save_at.is_some_and(|at| now >= at) {
