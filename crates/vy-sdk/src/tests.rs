@@ -3,7 +3,7 @@
 //! `vy-runtime` and `vy-dl`.
 
 use crate::event::{button, key};
-use crate::heap::{Grow, Heap, ALIGN, HEADER, PAGE};
+use crate::heap::{Grow, Heap, ALIGN, HEADER, PAGE, SMALL_MAX};
 use crate::mock::{self, Op};
 use crate::prelude::*;
 use crate::{api, arena, math};
@@ -901,17 +901,23 @@ impl Grow for ArenaGrow {
     }
 }
 
+/// A heap over `pages` pages of `backing`, which the caller keeps alive.
+fn heap_over(backing: &[u8], pages: usize) -> Heap<ArenaGrow> {
+    assert!(backing.len() >= pages * PAGE + ALIGN);
+    Heap::new(ArenaGrow {
+        base: (backing.as_ptr() as usize).div_ceil(ALIGN) * ALIGN,
+        pages: 0,
+        cap: pages,
+    })
+}
+
 /// SPEC-4.2.4: the module heap grows page by page, reuses and merges freed
 /// blocks, and fails cleanly (null, never a wild write) at the memory cap.
+/// The last [`HEADER`] bytes of the heap are its end marker.
 #[test]
 fn spec_4_2_4_heap_within_cap() {
     let backing: Vec<u8> = alloc::vec![0; 4 * PAGE + ALIGN];
-    let base = (backing.as_ptr() as usize).div_ceil(ALIGN) * ALIGN;
-    let mut heap = Heap::new(ArenaGrow {
-        base,
-        pages: 0,
-        cap: 4,
-    });
+    let mut heap = heap_over(&backing, 4);
     let small = Layout::from_size_align(24, 8).unwrap();
     // SAFETY: single-threaded test over memory `backing` owns.
     unsafe {
@@ -923,11 +929,12 @@ fn spec_4_2_4_heap_within_cap() {
             b as usize - a as usize,
             (24 + HEADER).div_ceil(ALIGN) * ALIGN
         );
-        assert_eq!(heap.free_bytes(), PAGE - 2 * 48);
+        assert_eq!(heap.free_bytes(), PAGE - HEADER - 2 * 48);
+        assert_eq!(heap.check(), 2 * 48);
         heap.dealloc(a);
         heap.dealloc(b);
         assert_eq!(heap.free_blocks(), 1, "neighbours merged");
-        assert_eq!(heap.free_bytes(), PAGE);
+        assert_eq!(heap.free_bytes(), PAGE - HEADER);
         let c = heap.alloc(small);
         assert_eq!(c, a, "freed memory is reused first");
         heap.dealloc(c);
@@ -935,14 +942,251 @@ fn spec_4_2_4_heap_within_cap() {
         let big = Layout::from_size_align(2 * PAGE, 16).unwrap();
         let d = heap.alloc(big);
         assert!(!d.is_null(), "grew by three pages");
+        assert_eq!(d, a, "the new pages continue the free block before them");
         assert!(heap.alloc(big).is_null(), "cap reached: 4 pages total");
         assert!(
             heap.alloc(Layout::from_size_align(8, 64).unwrap())
                 .is_null(),
             "alignment above 16"
         );
+        assert_eq!(heap.check(), 2 * PAGE + HEADER);
         heap.dealloc(d);
-        assert_eq!(heap.free_bytes(), 4 * PAGE);
+        assert_eq!(heap.free_bytes(), 4 * PAGE - HEADER);
+        assert_eq!(heap.free_blocks(), 1);
+        assert_eq!(heap.check(), 0);
+    }
+    drop(backing);
+}
+
+/// SPEC-5.3.3: in a heap without holes an allocation moves a pointer and a
+/// free moves it back; no list is touched. 2 000 blocks are cut from the
+/// current block one after the other, and freed last to first they go
+/// back into it one by one. Freed first to last, each joins the free
+/// block before it, which stays where it is on its list once it is a
+/// large one. This is what a frame of a page does thousands of times, and
+/// what the frame budget of the heaviest pages rests on.
+#[test]
+fn spec_5_3_3_heap_without_holes_touches_no_list() {
+    const PAGES: usize = 8;
+    let backing: Vec<u8> = alloc::vec![0; PAGES * PAGE + ALIGN];
+    let mut heap = heap_over(&backing, PAGES);
+    let layout = |i: usize| Layout::from_size_align(8 + i % 7 * 24, 8).unwrap();
+    // SAFETY: single-threaded test over memory `backing` owns.
+    unsafe {
+        // The heap at its full size first: new pages come by way of a list.
+        let all = heap.alloc(Layout::from_size_align(7 * PAGE, 8).unwrap());
+        heap.dealloc(all);
+        let first = heap.alloc(layout(0));
+        heap.listed = 0;
+        let mut blocks: Vec<*mut u8> = (1..2000).map(|i| heap.alloc(layout(i))).collect();
+        assert!(blocks.iter().all(|p| !p.is_null()));
+        assert_eq!(heap.listed, 0, "cut from the current block");
+        while let Some(p) = blocks.pop() {
+            heap.dealloc(p);
+        }
+        assert_eq!(heap.listed, 0, "back into the current block");
+        assert_eq!(heap.free_blocks(), 1);
+
+        // A block that grows at the end of the heap grows where it is.
+        let mut grown = heap.alloc(layout(0));
+        for bytes in (64..40_000).step_by(64) {
+            let to = heap.realloc(grown, bytes - 64, bytes);
+            assert_eq!(to, grown);
+        }
+        assert_eq!(heap.listed, 0, "grown into the current block");
+        heap.dealloc(grown);
+        grown = core::ptr::null_mut();
+        assert!(grown.is_null() && heap.free_blocks() == 1);
+
+        blocks.extend((1..2000).map(|i| heap.alloc(layout(i))));
+        heap.listed = 0;
+        for p in blocks.drain(..) {
+            heap.dealloc(p);
+        }
+        // Until the free block the first ones merge to is a large one, it
+        // changes list at each: twice a step, for some tens of steps.
+        assert!(heap.listed < 100, "{} list changes", heap.listed);
+        heap.dealloc(first);
+        assert_eq!(heap.check(), 0);
+        assert_eq!(heap.free_blocks(), 1);
+    }
+    drop(backing);
+}
+
+/// A small generator for the heap tests: the same numbers at every run.
+struct Dice(u64);
+
+impl Dice {
+    fn roll(&mut self, sides: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 11) as usize % sides
+    }
+}
+
+/// SPEC-4.2.4: whatever a page allocates, frees and grows, in whatever
+/// order, every block keeps the bytes written to it and no two blocks
+/// share a byte, the heap's own bookkeeping holds after every step
+/// (`Heap::check`: sizes, neighbours, merged free blocks, the lists and
+/// their bits), and when everything is freed the heap is one free block
+/// again. 60 000 steps over sizes from one byte to several pages, with the
+/// memory cap reached on the way: at the cap an allocation is null and
+/// what there is stays as it was.
+#[test]
+fn spec_4_2_4_heap_keeps_every_block_whole() {
+    const PAGES: usize = 24;
+    let backing: Vec<u8> = alloc::vec![0; PAGES * PAGE + ALIGN];
+    let mut heap = heap_over(&backing, PAGES);
+    let mut dice = Dice(0x9E37_79B9_7F4A_7C15);
+    // Live blocks: where, how many bytes, and the byte they are filled with.
+    let mut live: Vec<(*mut u8, usize, u8)> = Vec::new();
+    let size = |dice: &mut Dice| match dice.roll(100) {
+        0..=59 => 1 + dice.roll(64),
+        60..=89 => 1 + dice.roll(SMALL_MAX + 200),
+        90..=98 => 1 + dice.roll(20_000),
+        _ => 1 + dice.roll(3 * PAGE),
+    };
+    let filled = |p: *mut u8, bytes: usize, with: u8| {
+        // SAFETY: `p` is a live block of at least `bytes` bytes.
+        unsafe { core::slice::from_raw_parts(p, bytes) }
+            .iter()
+            .all(|b| *b == with)
+    };
+    let (mut refused, mut in_place, mut moved) = (0, 0, 0);
+    // SAFETY: single-threaded test over memory `backing` owns; every
+    // pointer freed or grown came from this heap and is live.
+    unsafe {
+        for step in 0..60_000u32 {
+            let tag = step as u8 | 1;
+            match dice.roll(10) {
+                0..=3 => {
+                    let bytes = size(&mut dice);
+                    let align = 1 << dice.roll(5);
+                    let p = heap.alloc(Layout::from_size_align(bytes, align).unwrap());
+                    if p.is_null() {
+                        refused += 1;
+                    } else {
+                        assert_eq!(p as usize % ALIGN, 0);
+                        core::ptr::write_bytes(p, tag, bytes);
+                        live.push((p, bytes, tag));
+                    }
+                }
+                4..=6 if !live.is_empty() => {
+                    let (p, bytes, with) = live.swap_remove(dice.roll(live.len()));
+                    assert!(filled(p, bytes, with), "step {step}: a block changed");
+                    heap.dealloc(p);
+                }
+                7..=9 if !live.is_empty() => {
+                    let at = dice.roll(live.len());
+                    let (p, bytes, with) = live[at];
+                    let to = size(&mut dice);
+                    let q = heap.realloc(p, bytes, to);
+                    if q.is_null() {
+                        refused += 1;
+                        assert!(filled(p, bytes, with), "step {step}: refused, changed");
+                    } else {
+                        assert!(filled(q, bytes.min(to), with), "step {step}: moved wrong");
+                        if q == p {
+                            in_place += 1;
+                        } else {
+                            moved += 1;
+                        }
+                        core::ptr::write_bytes(q, tag, to);
+                        live[at] = (q, to, tag);
+                    }
+                }
+                _ => {}
+            }
+            if step % 64 == 0 {
+                let used = heap.check();
+                assert!(used >= live.iter().map(|l| l.1 + HEADER).sum::<usize>());
+            }
+        }
+        assert!(refused > 0, "the cap was reached");
+        assert!(
+            in_place > 1000 && moved > 1000,
+            "{in_place} in place, {moved} moved"
+        );
+        for (p, bytes, with) in live.drain(..) {
+            assert!(filled(p, bytes, with));
+            heap.dealloc(p);
+        }
+        assert_eq!(heap.check(), 0);
+        assert_eq!(heap.free_blocks(), 1, "everything merged");
+        assert_eq!(heap.free_bytes(), PAGES * PAGE - HEADER);
+    }
+    drop(backing);
+}
+
+/// SPEC-5.3.3 (granskning 0018:1): what an allocation and a free cost does
+/// not grow with the number of holes in the heap. With 20 000 small blocks
+/// of which every other is freed, 10 000 holes that cannot merge, blocks
+/// of every small size are allocated, grown and freed without one block
+/// being looked at and passed over, and with at most a handful of list
+/// changes each: a block is found by its size. The
+/// allocator before this one kept its free blocks in one list by address
+/// and walked the holes at every free and every allocation, which is what
+/// put `kalkyl` over the frame budget. Only a request above `SMALL_MAX`
+/// searches, and only among the large free blocks.
+#[test]
+fn spec_5_3_3_heap_cost_does_not_grow_with_the_holes() {
+    const PAGES: usize = 48;
+    let backing: Vec<u8> = alloc::vec![0; PAGES * PAGE + ALIGN];
+    let mut heap = heap_over(&backing, PAGES);
+    let mut dice = Dice(0x2545_F491_4F6C_DD1D);
+    let layout = |bytes: usize| Layout::from_size_align(bytes, 8).unwrap();
+    // SAFETY: as above.
+    unsafe {
+        let mut blocks: Vec<*mut u8> = (0..20_000)
+            .map(|i| heap.alloc(layout(16 + (i % 5) * 16)))
+            .collect();
+        assert!(blocks.iter().all(|p| !p.is_null()));
+        for p in blocks.iter_mut().step_by(2) {
+            heap.dealloc(*p);
+            *p = core::ptr::null_mut();
+        }
+        assert!(heap.free_blocks() >= 10_000, "holes that cannot merge");
+        heap.passed = 0;
+        heap.listed = 0;
+        let mut held: Vec<(*mut u8, usize)> = Vec::new();
+        for _ in 0..50_000 {
+            if held.len() < 200 && dice.roll(2) == 0 {
+                let bytes = 1 + dice.roll(SMALL_MAX - HEADER);
+                let p = heap.alloc(layout(bytes));
+                assert!(!p.is_null());
+                held.push((p, bytes));
+            } else if let Some((p, bytes)) = held.pop() {
+                if dice.roll(2) == 0 {
+                    let to = 1 + dice.roll(SMALL_MAX - HEADER);
+                    let q = heap.realloc(p, bytes, to);
+                    assert!(!q.is_null());
+                    held.push((q, to));
+                } else {
+                    heap.dealloc(p);
+                }
+            }
+        }
+        assert_eq!(heap.passed, 0, "no small block is searched for");
+        assert!(
+            heap.listed <= 4 * 50_000,
+            "{} list changes in 50 000 steps",
+            heap.listed
+        );
+        // A large request looks through the large free blocks only: here
+        // the one that is the rest of the heap.
+        let large = heap.alloc(layout(4 * SMALL_MAX));
+        assert!(!large.is_null());
+        assert!(heap.passed <= 1, "{} passed over", heap.passed);
+        heap.check();
+        heap.dealloc(large);
+        for (p, _) in held {
+            heap.dealloc(p);
+        }
+        for p in blocks.into_iter().filter(|p| !p.is_null()) {
+            heap.dealloc(p);
+        }
+        assert_eq!(heap.check(), 0);
         assert_eq!(heap.free_blocks(), 1);
     }
     drop(backing);

@@ -247,6 +247,7 @@ ingen frame över budgeten upp till 2560 × 1600 (som mest 7,3 M) och sidan aldr
 Roten, SDK:ts allokator (`crates/vy-sdk/src/heap.rs`: första passande block i en adressordnad
 lista, så varje frigörning kostar som antalet hål nedanför), är inte rörd. Den drabbar varje sida
 som låter många små block växa, och är det första att göra i SDK:t.
+(Gjort efter M5, 2026-11-19: `docs/notes/sdk-heap.md`.)
 
 **Övrigt som rättades:** skyddet runt rasteriseringen (0016:2, ovan), README om macOS och om det
 som är öppet (0016:2, 0016:8), grindtabellen i `CLAUDE.md` säger att prestandagrinden bara håller

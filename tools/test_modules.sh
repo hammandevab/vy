@@ -5,7 +5,7 @@
 # CI runs this on every platform next to tools/build_modules.sh.
 #
 # Last, a size ceiling for a page that has one-line text fields only (granskning 0014:7):
-# target/wasm/form.wasm, as tools/build_modules.sh built it, is at most 32 000 bytes.
+# target/wasm/form.wasm, as tools/build_modules.sh built it, is at most 33 300 bytes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 status=0
@@ -26,7 +26,7 @@ done
 # compiler folds it and drops the multi-line half (wrapping, the vertical keys, the wheel, the
 # scroll bar). Nothing else says that it does, so the size of such a page is the check.
 form=target/wasm/form.wasm
-form_max=32000
+form_max=33300
 if [ ! -f "$form" ]; then
   printf 'error: %s is missing; run tools/build_modules.sh first\n' "$form" >&2
   status=1
@@ -37,7 +37,7 @@ else
 form.wasm: $form_size bytes, over its ceiling of $form_max: FAILED
   form has one-line text fields only, so the multi-line half of ui::TextBox (wrap_with,
   fit_prefix, the vertical keys, the wheel, the scroll bar) must not be in the module.
-  About 6 500 bytes over what it was (31 088) means the compiler no longer folds the line
+  About 6 500 bytes over what it was (32 409) means the compiler no longer folds the line
   mode away: look for a change that made it a field, a function pointer or a value read at
   run time in crates/vy-sdk/src/ui/textbox.rs, or for changed build settings (opt-level,
   lto, codegen-units, the toolchain); docs/notes/m5-polish.md, punkt 4, has the background.

@@ -533,8 +533,12 @@ SDK-glue, allokator och den 64 KB stora `vy_alloc`-arenan (i bss, kostar inte by
 - **`vy_alloc`** är en 64 KB bump-arena som börjar om när den är full; en buffert lever tills
   arenan slagit runt, vilket aldrig sker inom den händelse som bär den. Nativt är "pekaren" ett
   offset + 65 536 så ett lyckat anrop aldrig returnerar 0 (SPEC-5.1.6).
-- **Global allokator** (`heap`): första passning i en adresssorterad frilista över sidor från
-  `memory.grow`, sammanslagning vid frigöring, högst 16 bytes justering. Modulens initiala
+- **Global allokator** (`heap`): fria block i listor efter storlek över sidor från `memory.grow`
+  (en lista per storlek upp till 1 024 byte, en för större, en bit per lista som inte är tom),
+  varje block med sin storlek och blocket föres storlek i huvudet, så att grannar slås ihop vid
+  frigöring utan sökning; ett aktuellt block utanför listorna som små block skärs ur; ett block
+  växer på plats när blocket efter är fritt. Högst 16 bytes justering. Kostnaden beror inte på
+  antalet hål (`docs/notes/sdk-heap.md`). Modulens initiala
   minne rörs aldrig; vid `memory_max` (SPEC-4.2.4) returneras null och sidan trappar i stället
   för att skriva vilt. Testad nativt över en arena.
 - **Mocken** formar text med fast modell (tecken = storlek × 0,6, rad = storlek × 1,25) och

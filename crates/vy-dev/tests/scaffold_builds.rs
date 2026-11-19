@@ -115,9 +115,9 @@ fn native_tests_pass(project: &Path) {
     );
 }
 
-/// Most bytes the starter page's module may be: it was 28 848 when the
+/// Most bytes the starter page's module may be: it was 30 194 when the
 /// ceiling was set.
-const STARTER_MAX_BYTES: usize = 30_000;
+const STARTER_MAX_BYTES: usize = 31_100;
 
 #[test]
 fn scaffold_builds_to_wasm_and_passes_check_abi() {
@@ -133,7 +133,7 @@ fn scaffold_builds_to_wasm_and_passes_check_abi() {
          It has a one-line text field only, so the multi-line half of ui::TextBox (wrapping, \
          the vertical keys, the wheel, the scroll bar) must not be in the module: TextBox \
          hands its line mode to the shared Field as an argument that is the same constant \
-         at every call, and the compiler folds it away. About 6 500 bytes over 28 848 means \
+         at every call, and the compiler folds it away. About 6 500 bytes over 30 194 means \
          the folding stopped (the mode became a field, a function pointer or a run-time \
          value in crates/vy-sdk/src/ui/textbox.rs, or the template's build settings \
          changed). A smaller growth means the starter or the SDK really grew: raise \
