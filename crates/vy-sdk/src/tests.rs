@@ -888,6 +888,10 @@ struct ArenaGrow {
     base: usize,
     pages: usize,
     cap: usize,
+    /// Pages left unused after each growth, as if something else had
+    /// grown the memory between: the next pages do not continue the heap.
+    gap: usize,
+    skipped: usize,
 }
 
 impl Grow for ArenaGrow {
@@ -895,19 +899,28 @@ impl Grow for ArenaGrow {
         if self.pages + pages > self.cap {
             return None;
         }
-        let addr = self.base + self.pages * PAGE;
+        let addr = self.base + (self.pages + self.skipped) * PAGE;
         self.pages += pages;
+        self.skipped += self.gap;
         Some(addr)
     }
 }
 
 /// A heap over `pages` pages of `backing`, which the caller keeps alive.
 fn heap_over(backing: &[u8], pages: usize) -> Heap<ArenaGrow> {
-    assert!(backing.len() >= pages * PAGE + ALIGN);
+    heap_with_gaps(backing, pages, 0)
+}
+
+/// As [`heap_over`], with `gap` pages of `backing` left unused after each
+/// growth: `backing` holds the pages and a gap for each.
+fn heap_with_gaps(backing: &[u8], pages: usize, gap: usize) -> Heap<ArenaGrow> {
+    assert!(backing.len() >= pages * (1 + gap) * PAGE + ALIGN);
     Heap::new(ArenaGrow {
         base: (backing.as_ptr() as usize).div_ceil(ALIGN) * ALIGN,
         pages: 0,
         cap: pages,
+        gap,
+        skipped: 0,
     })
 }
 
@@ -941,9 +954,14 @@ fn spec_4_2_4_heap_within_cap() {
 
         let big = Layout::from_size_align(2 * PAGE, 16).unwrap();
         let d = heap.alloc(big);
-        assert!(!d.is_null(), "grew by three pages");
+        assert!(!d.is_null(), "grew by two pages: the free page counts");
+        assert_eq!(heap.source().pages, 3);
         assert_eq!(d, a, "the new pages continue the free block before them");
-        assert!(heap.alloc(big).is_null(), "cap reached: 4 pages total");
+        assert!(
+            heap.alloc(big).is_null(),
+            "two more pages: over the cap of 4"
+        );
+        assert_eq!(heap.source().pages, 3, "a refused request grows nothing");
         assert!(
             heap.alloc(Layout::from_size_align(8, 64).unwrap())
                 .is_null(),
@@ -951,7 +969,7 @@ fn spec_4_2_4_heap_within_cap() {
         );
         assert_eq!(heap.check(), 2 * PAGE + HEADER);
         heap.dealloc(d);
-        assert_eq!(heap.free_bytes(), 4 * PAGE - HEADER);
+        assert_eq!(heap.free_bytes(), 3 * PAGE - HEADER);
         assert_eq!(heap.free_blocks(), 1);
         assert_eq!(heap.check(), 0);
     }
@@ -1027,17 +1045,34 @@ impl Dice {
 
 /// SPEC-4.2.4: whatever a page allocates, frees and grows, in whatever
 /// order, every block keeps the bytes written to it and no two blocks
-/// share a byte, the heap's own bookkeeping holds after every step
-/// (`Heap::check`: sizes, neighbours, merged free blocks, the lists and
-/// their bits), and when everything is freed the heap is one free block
-/// again. 60 000 steps over sizes from one byte to several pages, with the
-/// memory cap reached on the way: at the cap an allocation is null and
-/// what there is stays as it was.
+/// share a byte, the heap's own bookkeeping holds (`Heap::check` at every
+/// 64th step: sizes, neighbours, merged free blocks, the lists and their
+/// bits, the current block), and when everything is freed the heap is one
+/// free block again. 60 000 steps over sizes from one byte to several
+/// pages, with the memory cap reached on the way. An allocation is null
+/// only when no free block and no pages that are left can serve it
+/// (granskning 0019:3), and then what there is stays as it was.
 #[test]
 fn spec_4_2_4_heap_keeps_every_block_whole() {
+    heap_keeps_every_block_whole(0);
+}
+
+/// SPEC-4.2.4: the same when something else grows the memory between the
+/// heap's own growths, so that its pages come in parts that do not
+/// continue each other (granskning 0019:3). No page or SDK code does that
+/// today. When everything is freed each part is one free block.
+#[test]
+fn spec_4_2_4_heap_in_parts_keeps_every_block_whole() {
+    heap_keeps_every_block_whole(1);
+}
+
+fn heap_keeps_every_block_whole(gap: usize) {
     const PAGES: usize = 24;
-    let backing: Vec<u8> = alloc::vec![0; PAGES * PAGE + ALIGN];
-    let mut heap = heap_over(&backing, PAGES);
+    let backing: Vec<u8> = alloc::vec![0; PAGES * (1 + gap) * PAGE + ALIGN];
+    let mut heap = heap_with_gaps(&backing, PAGES, gap);
+    // Whether the heap can serve `bytes`; in parts, the pages a growth
+    // needs depend on where it lands, and a null is not judged.
+    let left = |heap: &Heap<ArenaGrow>| heap.source().cap - heap.source().pages;
     let mut dice = Dice(0x9E37_79B9_7F4A_7C15);
     // Live blocks: where, how many bytes, and the byte they are filled with.
     let mut live: Vec<(*mut u8, usize, u8)> = Vec::new();
@@ -1066,6 +1101,10 @@ fn spec_4_2_4_heap_keeps_every_block_whole() {
                     let p = heap.alloc(Layout::from_size_align(bytes, align).unwrap());
                     if p.is_null() {
                         refused += 1;
+                        assert!(
+                            gap != 0 || !heap.can_serve(bytes, left(&heap)),
+                            "step {step}: {bytes} bytes refused that fit"
+                        );
                     } else {
                         assert_eq!(p as usize % ALIGN, 0);
                         core::ptr::write_bytes(p, tag, bytes);
@@ -1085,6 +1124,10 @@ fn spec_4_2_4_heap_keeps_every_block_whole() {
                     if q.is_null() {
                         refused += 1;
                         assert!(filled(p, bytes, with), "step {step}: refused, changed");
+                        assert!(
+                            gap != 0 || !heap.can_serve(to, left(&heap)),
+                            "step {step}: {to} bytes refused that fit"
+                        );
                     } else {
                         assert!(filled(q, bytes.min(to), with), "step {step}: moved wrong");
                         if q == p {
@@ -1113,8 +1156,114 @@ fn spec_4_2_4_heap_keeps_every_block_whole() {
             heap.dealloc(p);
         }
         assert_eq!(heap.check(), 0);
-        assert_eq!(heap.free_blocks(), 1, "everything merged");
-        assert_eq!(heap.free_bytes(), PAGES * PAGE - HEADER);
+        let parts = heap.parts();
+        assert_eq!(parts == 1, gap == 0);
+        assert_eq!(heap.free_blocks(), parts, "everything merged");
+        assert_eq!(
+            heap.free_bytes(),
+            heap.source().pages * PAGE - parts * HEADER
+        );
+    }
+    drop(backing);
+}
+
+/// SPEC-4.2.4 (granskning 0019:2, 0019:4): the heap grows by the pages a
+/// request is short of. With a small block in a heap of two pages at
+/// most, a block that with its header is a page is served, and so is one
+/// of 100 000 bytes: what is free at the heap's end counts, and the end
+/// marker is used again. A buffer that doubles from 64 bytes to 4 MiB
+/// where the heap ends never moves, and the heap is then the 64 pages of
+/// its bytes and one for its header and the end marker.
+#[test]
+fn spec_4_2_4_heap_grows_by_what_is_missing() {
+    let backing: Vec<u8> = alloc::vec![0; 66 * PAGE + ALIGN];
+    let layout = |bytes: usize| Layout::from_size_align(bytes, 8).unwrap();
+    // SAFETY: single-threaded test over memory `backing` owns, one heap
+    // at a time.
+    unsafe {
+        for bytes in [PAGE - HEADER, 100_000] {
+            let mut heap = heap_over(&backing, 2);
+            let small = heap.alloc(layout(8));
+            let large = heap.alloc(layout(bytes));
+            assert!(!small.is_null() && !large.is_null(), "{bytes} bytes");
+            heap.check();
+        }
+        let mut heap = heap_over(&backing, 66);
+        let mut bytes = 64;
+        let buffer = heap.alloc(layout(bytes));
+        while bytes < 64 * PAGE {
+            let to = heap.realloc(buffer, bytes, 2 * bytes);
+            assert_eq!(to, buffer, "moved at {bytes} bytes");
+            bytes *= 2;
+        }
+        assert_eq!(heap.source().pages, 65);
+        heap.dealloc(buffer);
+        assert_eq!(heap.check(), 0);
+        assert_eq!(heap.free_blocks(), 1);
+    }
+    drop(backing);
+}
+
+/// SPEC-4.2.4 (granskning 0019:3): when pages for once do not continue
+/// the heap, a request they are then short for is asked for again, whole,
+/// and the heap no longer counts on its pages continuing it. Here, after
+/// a small block, a block that is what is free at the heap's end and one
+/// page: the page comes apart and is 16 bytes short, and the block is
+/// served by two more.
+#[test]
+fn spec_4_2_4_heap_asks_again_when_pages_do_not_continue() {
+    let backing: Vec<u8> = alloc::vec![0; 8 * PAGE + ALIGN];
+    let mut heap = heap_with_gaps(&backing, 4, 1);
+    let layout = |bytes: usize| Layout::from_size_align(bytes, 8).unwrap();
+    // SAFETY: single-threaded test over memory `backing` owns.
+    unsafe {
+        let small = heap.alloc(layout(8));
+        let large = heap.alloc(layout(heap.free_bytes() + PAGE - HEADER));
+        assert!(!small.is_null() && !large.is_null());
+        assert_eq!((heap.source().pages, heap.parts()), (4, 3));
+        heap.check();
+        // What was learnt: the next request is asked for whole at once,
+        // which the cap refuses, and nothing grows.
+        assert!(heap.alloc(layout(PAGE)).is_null());
+        heap.dealloc(large);
+        heap.dealloc(small);
+        assert_eq!(heap.check(), 0);
+        assert_eq!(heap.free_blocks(), 3);
+    }
+    drop(backing);
+}
+
+/// SPEC-4.2.4 (granskning 0019:3): memory that is free is used. A hole of
+/// exactly the size asked for is taken before the current block is cut,
+/// a block grows into a free block after it that is on a list, and a
+/// block made smaller gives back what it no longer holds, which the next
+/// request of that size gets.
+#[test]
+fn spec_4_2_4_heap_gives_back_and_reuses() {
+    let backing: Vec<u8> = alloc::vec![0; 2 * PAGE + ALIGN];
+    let mut heap = heap_over(&backing, 2);
+    let layout = |bytes: usize| Layout::from_size_align(bytes, 8).unwrap();
+    // SAFETY: single-threaded test over memory `backing` owns.
+    unsafe {
+        let a = heap.alloc(layout(100));
+        let _guard = heap.alloc(layout(100));
+        heap.dealloc(a);
+        assert_eq!(heap.alloc(layout(100)), a, "the hole of that size");
+
+        let x = heap.alloc(layout(100));
+        let y = heap.alloc(layout(100));
+        let _guard = heap.alloc(layout(100));
+        heap.dealloc(y);
+        assert_eq!(heap.realloc(x, 100, 200), x, "into the hole after it");
+
+        let w = heap.alloc(layout(1000));
+        let _guard = heap.alloc(layout(100));
+        let free = heap.free_bytes();
+        assert_eq!(heap.realloc(w, 1000, 100), w);
+        assert_eq!(heap.free_bytes(), free + 1024 - 128, "given back");
+        let v = heap.alloc(layout(1024 - 128 - HEADER));
+        assert_eq!(v as usize, w as usize + 128, "and used");
+        heap.check();
     }
     drop(backing);
 }

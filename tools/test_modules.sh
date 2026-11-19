@@ -37,7 +37,7 @@ else
 form.wasm: $form_size bytes, over its ceiling of $form_max: FAILED
   form has one-line text fields only, so the multi-line half of ui::TextBox (wrap_with,
   fit_prefix, the vertical keys, the wheel, the scroll bar) must not be in the module.
-  About 6 500 bytes over what it was (32 409) means the compiler no longer folds the line
+  About 6 500 bytes over what it was (32 636) means the compiler no longer folds the line
   mode away: look for a change that made it a field, a function pointer or a value read at
   run time in crates/vy-sdk/src/ui/textbox.rs, or for changed build settings (opt-level,
   lto, codegen-units, the toolchain); docs/notes/m5-polish.md, punkt 4, has the background.

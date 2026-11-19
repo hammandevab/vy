@@ -27,9 +27,11 @@
 //!   and frees in a heap without holes pays for moving a pointer and not
 //!   for a list. When it is too small the smallest free block that fits is
 //!   used, and a large one of those becomes the current block.
-//! - A block grows in place when the block after it is free
-//!   ([`Heap::realloc`]), so a `Vec` pushed to at the end of the heap does
-//!   not move.
+//! - A block grows in place when the block after it is free, and the
+//!   heap's last block grows into new pages ([`Heap::realloc`]), so a `Vec`
+//!   pushed to at the end of the heap does not move.
+//! - The heap grows by the pages a request is short of: what is free at
+//!   its end already counts.
 //!
 //! Sizes are multiples of `ALIGN`. Only alignments up to `ALIGN` are
 //! served, which covers every type a page uses.
@@ -98,6 +100,9 @@ pub struct Heap<G> {
     /// continue it; zero before the first.
     end: usize,
     grow: G,
+    /// Set when pages once did not continue the heap: something else grows
+    /// the memory too, and new pages are not counted on to continue it.
+    apart: bool,
     /// Blocks looked at and passed over, for the tests: only the list of
     /// large blocks is ever searched.
     #[cfg(test)]
@@ -105,9 +110,10 @@ pub struct Heap<G> {
     /// Blocks put on a list or taken off one, for the tests.
     #[cfg(test)]
     pub listed: usize,
-    /// Where the heap begins, for the tests' walk over it.
+    /// Where each part of the heap begins, for the tests' walk over it:
+    /// one part unless pages did not continue it.
     #[cfg(test)]
-    start: usize,
+    parts: alloc::vec::Vec<usize>,
 }
 
 /// A block's size without the free bit.
@@ -146,12 +152,13 @@ impl<G: Grow> Heap<G> {
             current: ptr::null_mut(),
             end: 0,
             grow,
+            apart: false,
             #[cfg(test)]
             passed: 0,
             #[cfg(test)]
             listed: 0,
             #[cfg(test)]
-            start: 0,
+            parts: alloc::vec::Vec::new(),
         }
     }
 
@@ -220,8 +227,8 @@ impl<G: Grow> Heap<G> {
     /// it can be one: the current block when `current` says that the bytes
     /// were the current block's or are to be it, otherwise on its list.
     ///
-    /// Kept out of line: it is used in five places, and every page carries
-    /// the allocator.
+    /// Kept out of line: it is used in several places, and every page
+    /// carries the allocator.
     #[inline(never)]
     unsafe fn carve(&mut self, b: *mut Block, have: usize, size: usize, current: bool) -> *mut u8 {
         let rest = have - size;
@@ -299,24 +306,48 @@ impl<G: Grow> Heap<G> {
         self.carve(b, size_of(b), size, true)
     }
 
-    /// Grow the heap by the pages a block of `size` bytes needs; false at
-    /// the memory cap.
+    /// The bytes of the free block the heap ends with; 0 when a block in
+    /// use ends it.
+    ///
+    /// # Safety
+    /// The heap has pages.
+    unsafe fn tail(&self) -> usize {
+        let marker = (self.end - HEADER) as *mut Block;
+        let last = (marker as *mut u8).sub((*marker).before) as *mut Block;
+        if is_free(last) {
+            size_of(last)
+        } else {
+            0
+        }
+    }
+
+    /// Grow the heap by the pages a free block of `size` bytes at its end
+    /// is short of; false at the memory cap. New pages continue the heap:
+    /// what is free at its end already counts, and its end marker becomes
+    /// the header of the new block. `size` is more than what is free there.
+    ///
+    /// If the pages do not continue the heap (something else grew the
+    /// memory between), the block they make can be short of `size`; the
+    /// caller asks again, and from then on pages are asked for as if they
+    /// never continued it.
     unsafe fn extend(&mut self, size: usize) -> bool {
-        let pages = (size + HEADER).div_ceil(PAGE);
+        let need = if self.end == 0 || self.apart {
+            size + HEADER
+        } else {
+            size - self.tail()
+        };
+        let pages = need.div_ceil(PAGE);
         let Some(addr) = self.grow.grow(pages) else {
             return false;
         };
         let bytes = pages * PAGE;
-        // Pages that continue the heap take over its end marker as the
-        // header of the new block; others begin a part of their own.
         let (b, before, size) = if self.end != 0 && addr == self.end {
             let marker = (addr - HEADER) as *mut Block;
             (marker, (*marker).before, bytes)
         } else {
+            self.apart = self.end != 0;
             #[cfg(test)]
-            if self.start == 0 {
-                self.start = addr;
-            }
+            self.parts.push(addr);
             (addr as *mut Block, 0, bytes - HEADER)
         };
         self.end = addr + bytes;
@@ -338,11 +369,13 @@ impl<G: Grow> Heap<G> {
             return ptr::null_mut();
         }
         let size = Self::block_size(layout.size());
-        let p = self.take(size);
-        if !p.is_null() || !self.extend(size) {
-            return p;
+        // Once more only after pages that did not continue the heap.
+        loop {
+            let p = self.take(size);
+            if !p.is_null() || !self.extend(size) {
+                return p;
+            }
         }
-        self.take(size)
     }
 
     /// Free a block from [`Heap::alloc`], merging it with a free block on
@@ -419,13 +452,29 @@ impl<G: Grow> Heap<G> {
     }
 
     /// Give the block at `p`, which holds `old` bytes, room for `bytes`:
-    /// in place when it can be, otherwise in a new block the old bytes are
-    /// copied to. Null, with the block untouched, at the memory cap.
+    /// in place when it can be, which the heap's last block can as long as
+    /// there are pages, otherwise in a new block the old bytes are copied
+    /// to. Null, with the block untouched, at the memory cap.
     ///
     /// # Safety
     /// As [`Heap::dealloc`]; `old` is the size the block was asked for.
     pub unsafe fn realloc(&mut self, p: *mut u8, old: usize, bytes: usize) -> *mut u8 {
         if self.resize(p, bytes) {
+            return p;
+        }
+        // The heap's last block, with what is free after it, grows into
+        // new pages where it is.
+        let b = p.sub(HEADER) as *mut Block;
+        let have = (*b).size;
+        let mut next = after(b, have);
+        if is_free(next) {
+            next = after(next, size_of(next));
+        }
+        if !self.apart
+            && next as usize + HEADER == self.end
+            && self.extend(Self::block_size(bytes) - have)
+            && self.resize(p, bytes)
+        {
             return p;
         }
         let q = self.alloc(Layout::from_size_align_unchecked(bytes, ALIGN));
@@ -482,33 +531,35 @@ impl<G: Grow> Heap<G> {
         // SAFETY: the walk follows the sizes the heap wrote into memory it
         // owns; a wrong one is what the asserts are for.
         unsafe {
-            let mut b = self.start as *mut Block;
-            let mut before = 0;
-            let mut after_free = false;
-            while self.start != 0 && (*b).size != 0 {
-                let size = size_of(b);
-                assert!(size >= MIN && size.is_multiple_of(ALIGN), "block of {size}");
-                assert_eq!((*b).before, before, "the block before");
-                assert!(!(after_free && is_free(b)), "two free blocks");
-                after_free = is_free(b);
-                if after_free {
-                    free_bytes += size;
-                    free_blocks += 1;
-                    current |= b == self.current;
-                    let mut on = self.lists[list_of(size)];
-                    while on != b && b != self.current {
-                        assert!(!on.is_null(), "a free block on no list");
-                        on = (*links(on)).next;
+            for (part, start) in self.parts.iter().enumerate() {
+                let mut b = *start as *mut Block;
+                let mut before = 0;
+                let mut after_free = false;
+                while (*b).size != 0 {
+                    let size = size_of(b);
+                    assert!(size >= MIN && size.is_multiple_of(ALIGN), "block of {size}");
+                    assert_eq!((*b).before, before, "the block before");
+                    assert!(!(after_free && is_free(b)), "two free blocks");
+                    after_free = is_free(b);
+                    if after_free {
+                        free_bytes += size;
+                        free_blocks += 1;
+                        current |= b == self.current;
+                        let mut on = self.lists[list_of(size)];
+                        while on != b && b != self.current {
+                            assert!(!on.is_null(), "a free block on no list");
+                            on = (*links(on)).next;
+                        }
+                    } else {
+                        used += size;
                     }
-                } else {
-                    used += size;
+                    before = size;
+                    b = after(b, size);
                 }
-                before = size;
-                b = after(b, size);
-            }
-            if self.start != 0 {
-                assert_eq!(b as usize + HEADER, self.end, "the end marker");
-                assert_eq!((*b).before, before);
+                assert_eq!((*b).before, before, "the end marker");
+                if part + 1 == self.parts.len() {
+                    assert_eq!(b as usize + HEADER, self.end, "the heap's end");
+                }
             }
             for (i, head) in self.lists.iter().enumerate() {
                 assert_eq!(self.filled >> i & 1 == 1, !head.is_null(), "bit {i}");
@@ -526,6 +577,46 @@ impl<G: Grow> Heap<G> {
         assert!(current, "the current block is not a free block");
         assert_eq!(self.free(), (free_bytes, free_blocks), "the lists");
         used
+    }
+
+    /// Whether a request for `bytes` can be served with `pages` more pages
+    /// that continue the heap: a free block is large enough, or what is
+    /// free at the heap's end and the pages are together. For the tests.
+    #[cfg(test)]
+    pub fn can_serve(&self, bytes: usize, pages: usize) -> bool {
+        let size = Self::block_size(bytes);
+        // SAFETY: the lists and the current block are this heap's.
+        unsafe {
+            let mut largest = 0;
+            if !self.current.is_null() {
+                largest = size_of(self.current);
+            }
+            for head in self.lists {
+                let mut b = head;
+                while !b.is_null() {
+                    largest = largest.max(size_of(b));
+                    b = (*links(b)).next;
+                }
+            }
+            let grown = if self.end == 0 {
+                (pages * PAGE).saturating_sub(HEADER)
+            } else {
+                self.tail() + pages * PAGE
+            };
+            largest >= size || grown >= size
+        }
+    }
+
+    /// The memory source, for the tests.
+    #[cfg(test)]
+    pub fn source(&self) -> &G {
+        &self.grow
+    }
+
+    /// The parts the heap is in, for the tests.
+    #[cfg(test)]
+    pub fn parts(&self) -> usize {
+        self.parts.len()
     }
 }
 
