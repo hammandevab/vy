@@ -4,13 +4,15 @@ Gren `m5/integration`, commit `8bd1517`. Granskat: `crates/vy-sdk/src/heap.rs` (
 hög-testerna i `crates/vy-sdk/src/tests.rs`, de två höjda taken, `docs/notes/sdk-heap.md` och
 commit-meddelandet. Granskaren skrev ingen av koden.
 
-**Rekommendation.** **Klar efter att texten i fynd 1 är rättad.** Jag hittade inget
+**Rekommendation.** **Klar.** Ändrad efter uppföljningen sist på sidan: texten i fynd 1 är
+rättad i `76cb66e`, liksom fynd 2–5, och den nya logiken där höll för 2,4 miljoner egna steg.
+Den första rekommendationen var "klar efter att texten i fynd 1 är rättad". Jag hittade inget
 korrekthetsfel i allokatorn, trots 860 000 egna slumpade steg mot den. Roten till 0018:1 är
 borta för block upp till 1 024 byte, vilket enligt noteringen är fallet som stoppade `kalkyl`.
-För större block är den kvar, och det säger README inte längre.
+För större block är den kvar, och sedan `76cb66e` säger README det igen.
 
-**Det som blockerar.** Bara textdelen av fynd 1: README och `docs/BUILD-NOTES.md` lovar mer än
-koden håller. Fynd 2–4 är låga och kan tas efteråt.
+**Det som blockerade.** Bara textdelen av fynd 1: README och `docs/BUILD-NOTES.md` lovade mer
+än koden höll. Fynd 2–4 var låga.
 
 **Vad ändrades.** SDK:ts globala allokator, som varje sida bär, är utbytt: varje block känner
 sina grannar, fria block ligger i listor efter storlek med en bitkarta, ett "aktuellt" block
@@ -168,3 +170,97 @@ godo, och taken släpper inte igenom mer än förut.
 - Allokatorn körd på wasm32, och bränslekostnaden för sökningen i fynd 1.
 - Talen för den första versionen utan aktuellt block, och de 364 byten för `carve`.
 - Om konformanssviten fäller ett fall på minnesåtgång.
+
+## Uppföljning (76cb66e)
+
+**Bedömning.** **Klar.** Inget fel hittat i den nya logiken, varken vid läsning eller i 2,4
+miljoner egna slumpade steg mot den. Alla fem fynden är bemötta som commit och notering säger.
+Tre nya fynd (U1 låg, U2 och U3 noteringar), inget blockerar. U1 är ett val ägaren bör känna
+till: sista blocket växer nu in i nya sidor också när ett hål som räcker redan finns.
+
+**Läst.** `git diff 8bd1517 76cb66e` för `heap.rs` i sin helhet, testerna, README,
+`docs/BUILD-NOTES.md` och `docs/notes/sdk-heap.md`. Det jag försökte fälla:
+
+- **`tail()` och `size - self.tail()`.** Kan inte gå under noll. `extend` anropas bara direkt
+  efter en `take` eller `resize` som misslyckats, och ett fritt block sist i högen som räckte
+  hade de hittat. Slutmarkeringens `before` är aldrig noll när högen har sidor, och vore den
+  det läser `tail()` markeringen själv, som inte är fri, och svarar 0.
+- **`apart`.** Sätts bara där sidor inte fortsatte högen och kan inte släckas, eftersom `end`
+  aldrig blir noll igen. Att sätta den från början ändrar ingenting: första tillväxten
+  skriver över den.
+- **Slingan i `alloc`.** Slutar efter högst två lyckade tillväxter. När sidorna fortsätter
+  högen räcker blocket alltid; gör de det inte begärs nästa gång hela blocket med plats för
+  slutmarkeringen, och det räcker vart sidorna än hamnar.
+- **Grenen i `realloc`.** Rätt block: villkoret kräver att blocket, med det fria efter sig,
+  slutar vid högens slutmarkering, och med `apart` släckt finns bara en del. Lyckas `extend`
+  men inte `resize` (sidorna hamnade isär) är de nya sidorna ett vanligt fritt block och
+  `alloc` tar över. Vid taket misslyckas `extend` utan att ha ändrat något, och blocket är
+  orört.
+
+**Kört** mot en kopia av `heap.rs` som är byte för byte lika med `76cb66e`, med `Heap::check`
+(som nu går del för del) och alla levande blocks innehåll och överlapp:
+
+| Prov | Steg | Utfall |
+| --- | ---: | --- |
+| en del, som förut; varje null dömt med `can_serve` (35 578 null) | 320 000 | inget fel |
+| luckor vid varje, varannan, var tredje tillväxt (109 delar) | 540 000 | inget fel |
+| **en** främmande tillväxt, vid högens 1:a–12:e (72 körningar) | 864 000 | inget fel |
+| högst 8 block som mest ändrar storlek, en del (24 875 null dömda) | 480 000 | inget fel |
+| samma med luckor | 240 000 | inget fel |
+
+70 gånger kom högen i delar mitt i en `realloc`. Fallet där `extend` lyckas och `resize` inte
+gör det är dessutom kört för sig: sista blocket växer från 64 till 200 000 byte och sidorna
+hamnar isär. Blocket flyttas då med innehållet kvar och `check` går; med ett tak som inte
+räcker ges null och blocket är orört. Ett larm i mitt eget prov var provets fel (det dömde ett
+null medan en främmande sida stod på tur) och är rättat där.
+
+Sju avsiktliga fel i den nya logiken fälldes alla av repots tester: `apart` sätts aldrig,
+`tail()` räknar ett block i bruk, `realloc` växer block som inte ligger sist, `alloc` frågar
+inte om, `realloc` begär hela blocket, `extend` räknar inte det fria sist, `realloc` hoppar
+inte över det fria blocket efter. Ett åttonde (`apart` satt från början) är inget fel, se ovan.
+
+| Fynd | Bedömning |
+| --- | --- |
+| 0019:1 texten lovade mer | **Rättat** (textdelen, som var kravet). README har en öppen punkt, BUILD-NOTES och noteringen har förbehållet. Koden för stora block är orörd, som ägarens val; mina tal från då gäller oförändrade (omkört). Småsak: README säger "begär mer än 1 024 byte", gränsen är 1 008 byte begärda (1 024 med huvud). |
+| 0019:2 nekade vid taket | **Rättat**, också det ärvda fallet. Omkört: tak 2 sidor, litet block och sedan 65 520 byte går på 2 sidor; 100 000 byte likaså (den gamla nekade). Se U2 för en rest i en hög i delar. |
+| 0019:3 luckor i testerna | **Rättat** för (a), (b) och (c). Av mina sju fel fälls nu fem; två överlever, som noteringen säger. Det är rättvist sagt, med ett tillägg: se U3. (d), att räknaren `passed` bara finns i den enda slingan, står kvar och behöver ingen åtgärd. |
+| 0019:4 bufferten flyttades | **Rättat.** Omkört: en buffert som dubblas från 8 byte till 4 MiB flyttas 0 gånger och högen blir 65 sidor (förut 6 och 132). Se U1 för vad det kostar. |
+| 0019:5 småsaker | **Rättat.** Testets kommentar, `carve`, marginalerna (nu 664 och 679 byte, utskrivna) och förbehållet om minnet. |
+
+Storlekarna stämmer: `hello` 6 534, `form` 32 636, `kalkyl` 66 287, `widgets` 57 863 i
+`target/wasm/`, startsidan 30 421 (byggd om här). Taken är inte höjda igen, så de är strängare
+än förut och vaktar fortfarande vikningen på omkring 6 500 byte. Repots åtta hög-tester går,
+`scaffold_builds` går (2 av 2).
+
+### Nya fynd
+
+U1. **Låg – sista blocket växer in i nya sidor också när ett hål som räcker finns.** Nytt i
+    `76cb66e`. Fall: ett block på 1 MiB, efter det ett på 64 byte sist i högen; det stora
+    frigörs, det lilla växer till 500 000 byte. `8bd1517` flyttade det in i hålet och högen
+    stod kvar på 17 sidor. Nu växer det på plats och högen blir 24 sidor, med hålet oanvänt.
+    Vinsten är att inget kopieras; priset är minne som en sida med tak når fortare. Inget
+    nekas: vid taket misslyckas tillväxten och blocket flyttas in i hålet som förut, och hålet
+    är kvar för senare begäran. Sviten ser det inte, eftersom den enligt noteringen saknar fall
+    där minnet växer. **Åtgärd:** ägarens val. Antingen står det så och skrivs in i noteringen,
+    eller så växer högen bara när inget fritt block räcker.
+
+U2. **Notering – första gången sidorna inte fortsätter högen kan en begäran nekas som
+    `8bd1517` tjänade.** Den begärs först som om sidorna fortsatte, sedan hel. I repots eget
+    test går det åt 4 sidor där 3 hade räckt. Kört med rum för just 3: `76cb66e` ger null efter
+    2 sidor, `8bd1517` tjänar begäran på 3. Det händer en gång per hög, och bara på den vilande
+    vägen där något annat växer minnet. Ingen åtgärd utom en rad i noteringen.
+
+U3. **Notering – felet som överlever är värre i en hög i delar än "kan kosta sidor".** Med
+    `extend` utan plats för slutmarkeringen, i en hög där sidorna aldrig fortsätter: ett litet
+    block och sedan två block på exakt en sida var. Rätt kod: båda tjänas, 6 sidor. Med felet:
+    båda nekas, efter att högen ätit alla 8 sidor upp till taket. Noteringen säger ärligt att
+    inget test ser det. **Åtgärd:** tre rader i `..._asks_again_when_pages_do_not_continue`:
+    ett block på exakt en sida efter att högen kommit i delar, och kravet att det tjänas.
+
+### Inte kontrollerat i uppföljningen
+
+- `cargo test --workspace`, konformanssviten och budgettesterna i `vy-cli`: talen −0,2 %,
+  +1,7 %, −7,0 %, −10,5 % och +1,1 % är författarens.
+- Format, clippy (också wasm32), spec-spårning och `tools/test_modules.sh`.
+- Allokatorn körd på wasm32, och bränsle; allt eget är nativt.
+- Författarens "fem egna fel kring tillväxten".
