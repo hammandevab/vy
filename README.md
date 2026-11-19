@@ -32,9 +32,9 @@ En release byggs reproducerbart med kontrollsummor och byggrecept (`docs/RELEASI
   klienten. Det gäller inte kromet: sidans titel, reservtext, länkmål och, med devtools öppet,
   logg och träd ritas av klienten utan sådant skydd. En tappad GL-kontext märks bara där
   drivrutinen säger till.
-- SDK:ts allokator letar bland de stora fria blocken när en sida begär mer än 1 024 byte: en
-  sida med tusentals stora hål av olika storlek betalar för det (granskning 0019:1). Block upp
-  till 1 024 byte kostar lika mycket hur många hål högen än har.
+- SDK:ts allokator letar bland de stora fria blocken när en sida begär mer än 1 008 byte: en
+  sida med tusentals stora hål av olika storlek betalar för det (granskning 0019:1). Mindre
+  block kostar lika mycket hur många hål högen än har.
 - Den externa sandlådegranskningen återstår, och Windows och macOS är byggda och testade i CI
   men inte körda för hand i varje del.
 

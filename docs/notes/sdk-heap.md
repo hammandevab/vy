@@ -118,10 +118,13 @@ En kall start kompilerar alltså drygt 1 KB mer kod per sida; med dagens 2–3 m
 Tio avsiktliga fel i allokatorn (en glömd storlek, en utebliven sammanslagning, en bit som inte
 släcks, de två snabba vägarna borttagna eller fel, ett tappat aktuellt block) fälldes alla av
 de fyra första testerna. Granskaren prövade sju andra, och sex gick igenom (0019:3). Efter de
-fyra nya testerna fälls fem av de sju, och fem egna fel kring tillväxten. Två överlever: att en
-stor begäran tar det aktuella blocket före ett stort hål, som är ett val och inget fel, och
-`extend` utan plats för slutmarkeringen, som döljs av att en begäran som sidorna inte räckte
-till görs om (i en hög i delar kan det felet kosta sidor, och inget test ser det).
+fyra nya testerna fälls fem av de sju, och fem egna fel kring tillväxten. Två överlevde då: att
+en stor begäran tar det aktuella blocket före ett stort hål, som är ett val och inget fel, och
+`extend` utan plats för slutmarkeringen, som i en sammanhängande hög döljs av att en begäran
+som sidorna inte räckte till görs om. Granskaren visade i uppföljningen (0019:U3) att det
+felet i en hög i delar äter alla sidor och nekar; testet
+`..._asks_again_when_pages_do_not_continue` begär därför nu också ett block på exakt en sida,
+och fäller det. Kvar är valet.
 
 ## Granskning 0019
 
@@ -135,6 +138,19 @@ Granskaren fann inget korrekthetsfel. Det som ändrades efter den:
 - **0019:3** (luckor i testerna): fyra nya tester och ett skärpt, ovan.
 - **0019:4** (bufferten flyttades när högen måste växa): högens sista block växer in i nya sidor.
 - **0019:5** (småsaker i texten): rättade här och i testets kommentar.
+
+## Val som ägaren bör känna till
+
+- **Sista blocket växer in i nya sidor också när ett hål som räcker finns** (0019:U1). Det
+  sparar en kopiering men tar minne: granskarens fall (ett fritt hål på 1 MiB, och ett block
+  sist i högen som växer till 500 000 byte) ger 24 sidor där `8bd1517` stod kvar på 17. Inget
+  nekas för det: vid minnestaket misslyckas tillväxten och blocket flyttas in i hålet som
+  förut. Bränsle är det som stoppar en sida mitt i en frame, och minnet spelar roll först vid
+  taket, så det står så. Det andra valet är att högen bara växer när inget fritt block räcker.
+- **Första gången sidorna inte fortsätter högen kan en begäran nekas som `8bd1517` tjänade**
+  (0019:U2): den begärs först som om sidorna fortsatte, sedan hel, och det kan gå åt en sida
+  mer än nödvändigt. Det sker en gång per hög och bara om något annat än allokatorn växer
+  minnet, vilket ingen sida och ingen SDK-kod gör.
 
 ## Inte gjort
 

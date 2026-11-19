@@ -1209,11 +1209,13 @@ fn spec_4_2_4_heap_grows_by_what_is_missing() {
 /// and the heap no longer counts on its pages continuing it. Here, after
 /// a small block, a block that is what is free at the heap's end and one
 /// page: the page comes apart and is 16 bytes short, and the block is
-/// served by two more.
+/// served by two more. A block that with its header is a page then gets
+/// two pages at once, which have room for the end marker of their part
+/// (granskning 0019:U3).
 #[test]
 fn spec_4_2_4_heap_asks_again_when_pages_do_not_continue() {
-    let backing: Vec<u8> = alloc::vec![0; 8 * PAGE + ALIGN];
-    let mut heap = heap_with_gaps(&backing, 4, 1);
+    let backing: Vec<u8> = alloc::vec![0; 16 * PAGE + ALIGN];
+    let mut heap = heap_with_gaps(&backing, 8, 1);
     let layout = |bytes: usize| Layout::from_size_align(bytes, 8).unwrap();
     // SAFETY: single-threaded test over memory `backing` owns.
     unsafe {
@@ -1221,14 +1223,19 @@ fn spec_4_2_4_heap_asks_again_when_pages_do_not_continue() {
         let large = heap.alloc(layout(heap.free_bytes() + PAGE - HEADER));
         assert!(!small.is_null() && !large.is_null());
         assert_eq!((heap.source().pages, heap.parts()), (4, 3));
+        let page = heap.alloc(layout(PAGE - HEADER));
+        assert!(!page.is_null(), "a page and its end marker");
+        assert_eq!((heap.source().pages, heap.parts()), (6, 4));
         heap.check();
-        // What was learnt: the next request is asked for whole at once,
-        // which the cap refuses, and nothing grows.
-        assert!(heap.alloc(layout(PAGE)).is_null());
+        // Four pages are more than the two that are left: refused, and
+        // nothing grows.
+        assert!(heap.alloc(layout(3 * PAGE)).is_null());
+        assert_eq!(heap.source().pages, 6);
+        heap.dealloc(page);
         heap.dealloc(large);
         heap.dealloc(small);
         assert_eq!(heap.check(), 0);
-        assert_eq!(heap.free_blocks(), 3);
+        assert_eq!(heap.free_blocks(), 4);
     }
     drop(backing);
 }
